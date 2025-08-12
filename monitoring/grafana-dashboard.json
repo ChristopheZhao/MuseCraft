@@ -1,0 +1,340 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Short Video Maker - System Monitoring",
+    "tags": ["short-video-maker", "production", "monitoring"],
+    "style": "dark",
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "System Overview",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "up{job=\"short-video-maker-api\"}",
+            "legendFormat": "API Service Status"
+          },
+          {
+            "expr": "up{job=\"postgresql\"}",
+            "legendFormat": "Database Status"
+          },
+          {
+            "expr": "up{job=\"redis\"}",
+            "legendFormat": "Redis Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            },
+            "mappings": [
+              {"options": {"0": {"text": "DOWN"}}, "type": "value"},
+              {"options": {"1": {"text": "UP"}}, "type": "value"}
+            ]
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "API Response Time",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"short-video-maker-api\"}[5m]))",
+            "legendFormat": "50th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"short-video-maker-api\"}[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"short-video-maker-api\"}[5m]))",
+            "legendFormat": "99th percentile"
+          }
+        ],
+        "yAxes": [{
+          "label": "Response Time (seconds)",
+          "min": 0
+        }],
+        "thresholds": [
+          {"value": 2.0, "colorMode": "critical", "op": "gt"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Request Rate",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"short-video-maker-api\"}[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ],
+        "yAxes": [{
+          "label": "Requests per second",
+          "min": 0
+        }]
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 17},
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"short-video-maker-api\",status_code=~\"4..|5..\"}[5m]) / rate(http_requests_total{job=\"short-video-maker-api\"}[5m]) * 100",
+            "legendFormat": "Error Rate %"
+          }
+        ],
+        "yAxes": [{
+          "label": "Error Rate (%)",
+          "min": 0,
+          "max": 100
+        }],
+        "thresholds": [
+          {"value": 5.0, "colorMode": "critical", "op": "gt"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "System Resources",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 17},
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU Usage %"
+          },
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "Memory Usage %"
+          },
+          {
+            "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/\"} * 100) / node_filesystem_size_bytes{mountpoint=\"/\"})",
+            "legendFormat": "Disk Usage %"
+          }
+        ],
+        "yAxes": [{
+          "label": "Usage (%)",
+          "min": 0,
+          "max": 100
+        }],
+        "thresholds": [
+          {"value": 80.0, "colorMode": "critical", "op": "gt"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Database Performance",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 26},
+        "targets": [
+          {
+            "expr": "rate(pg_stat_database_tup_fetched{datname=\"short_video_maker\"}[5m])",
+            "legendFormat": "Rows Fetched/sec"
+          },
+          {
+            "expr": "rate(pg_stat_database_tup_inserted{datname=\"short_video_maker\"}[5m])",
+            "legendFormat": "Rows Inserted/sec"
+          },
+          {
+            "expr": "rate(pg_stat_database_tup_updated{datname=\"short_video_maker\"}[5m])",
+            "legendFormat": "Rows Updated/sec"
+          }
+        ],
+        "yAxes": [{
+          "label": "Operations per second",
+          "min": 0
+        }]
+      },
+      {
+        "id": 7,
+        "title": "Redis Performance",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 26},
+        "targets": [
+          {
+            "expr": "rate(redis_commands_processed_total[5m])",
+            "legendFormat": "Commands/sec"
+          },
+          {
+            "expr": "redis_connected_clients",
+            "legendFormat": "Connected Clients"
+          },
+          {
+            "expr": "redis_memory_used_bytes / 1024 / 1024",
+            "legendFormat": "Memory Usage (MB)"
+          }
+        ],
+        "yAxes": [{
+          "label": "Operations/Connections/MB",
+          "min": 0
+        }]
+      },
+      {
+        "id": 8,
+        "title": "Video Generation Metrics",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 35},
+        "targets": [
+          {
+            "expr": "rate(video_generation_requests_total[5m])",
+            "legendFormat": "Video Requests/sec"
+          },
+          {
+            "expr": "rate(video_generation_completed_total[5m])",
+            "legendFormat": "Videos Completed/sec"
+          },
+          {
+            "expr": "rate(video_generation_failed_total[5m])",
+            "legendFormat": "Videos Failed/sec"
+          }
+        ],
+        "yAxes": [{
+          "label": "Videos per second",
+          "min": 0
+        }]
+      },
+      {
+        "id": 9,
+        "title": "AI Agent Performance",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 35},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(agent_execution_duration_seconds_bucket[5m]))",
+            "legendFormat": "{{agent_type}} - 95th percentile"
+          }
+        ],
+        "yAxes": [{
+          "label": "Execution Time (seconds)",
+          "min": 0
+        }],
+        "thresholds": [
+          {"value": 60.0, "colorMode": "critical", "op": "gt"}
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Celery Queue Status",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+        "targets": [
+          {
+            "expr": "celery_tasks_active",
+            "legendFormat": "Active Tasks"
+          },
+          {
+            "expr": "celery_tasks_waiting",
+            "legendFormat": "Waiting Tasks"
+          },
+          {
+            "expr": "celery_workers_online",
+            "legendFormat": "Online Workers"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 10},
+                {"color": "red", "value": 50}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "WebSocket Connections",
+        "type": "graph",
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 52},
+        "targets": [
+          {
+            "expr": "websocket_connections_active",
+            "legendFormat": "Active Connections"
+          },
+          {
+            "expr": "rate(websocket_messages_sent_total[5m])",
+            "legendFormat": "Messages Sent/sec"
+          },
+          {
+            "expr": "rate(websocket_messages_received_total[5m])",
+            "legendFormat": "Messages Received/sec"
+          }
+        ],
+        "yAxes": [{
+          "label": "Connections/Messages per second",
+          "min": 0
+        }]
+      },
+      {
+        "id": 12,
+        "title": "AI Service API Usage",
+        "type": "graph", 
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 52},
+        "targets": [
+          {
+            "expr": "rate(ai_api_requests_total[5m])",
+            "legendFormat": "{{service}} - Requests/sec"
+          },
+          {
+            "expr": "rate(ai_api_errors_total[5m])",
+            "legendFormat": "{{service}} - Errors/sec"
+          }
+        ],
+        "yAxes": [{
+          "label": "API Requests per second",
+          "min": 0
+        }]
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "instance",
+          "type": "query",
+          "query": "label_values(up, instance)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true
+        },
+        {
+          "name": "job",
+          "type": "query", 
+          "query": "label_values(up, job)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "prometheus",
+          "expr": "changes(up[1h]) > 0",
+          "iconColor": "green",
+          "textFormat": "Service restart detected"
+        }
+      ]
+    }
+  }
+}

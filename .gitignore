@@ -1,0 +1,191 @@
+# AI短视频生成系统 - Git忽略配置
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+backend/.venv/
+backend/venv/
+backend/env/
+.env
+.venv
+venv/
+env/
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Python包管理
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 日志文件
+*.log
+logs/
+backend/*.log
+backend/logs/
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+backend/*.db
+
+# Celery相关
+celerybeat-schedule.db
+celerybeat.pid
+
+# 生成的文件和媒体内容
+backend/storage/generated/*.mp4
+backend/storage/generated/*.mp3
+backend/storage/generated/*.jpg
+backend/storage/generated/*.jpeg
+backend/storage/generated/*.png
+backend/storage/generated/*.wav
+backend/storage/temp/*
+backend/storage/uploads/*
+backend/storage/generated/legacy/*
+
+# 保留legacy文件作为示例
+!backend/storage/generated/legacy/
+
+# 环境变量和敏感配置
+.env
+.env.local
+.env.*.local
+backend/.env
+backend/.env.local
+
+# uv Python环境管理
+.python-version
+uv.lock
+
+# 前端 Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# 前端构建输出
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+
+# 前端环境和缓存
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.vercel
+.turbo
+
+# TypeScript
+*.tsbuildinfo
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Docker
+.dockerignore
+
+# 系统文件
+*.tmp
+*.bak
+*~
+
+# 开发过程中的临时文件
+debug_*.py
+temp_*.py
+test_temp_*.py
+
+# Alembic
+backend/alembic/versions/*.py
+!backend/alembic/versions/__init__.py
+
+# Redis dump
+dump.rdb
+
+# 备份文件
+*.backup
+*.bak
+
+# 监控和性能分析
+*.prof
+*.pstats
+
+# AI服务API密钥（注意：应在环境变量中配置）
+# 这些密钥绝对不能提交到版本控制
+*api_key*
+*secret*
+*token*
+
+# 项目特定的忽略规则
+multi_agent_verification_report.json
+
+# 开发过程中的临时和调试文件
+debug_*.json
+temp_*.json
+test_results_*.json
+
+# 性能和监控数据
+*.perf
+*.profile
+
+# 项目生成的报告
+verification_report_*.json
+
+# claude
+.claude/
+CLAUDE.md
+
+* text=auto eol=lf
+.env.example text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf

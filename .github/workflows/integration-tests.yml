@@ -1,0 +1,463 @@
+name: Integration Tests and Deployment Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run comprehensive tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test Level'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+        - standard
+        - comprehensive
+        - deployment-ready
+      parallel_execution:
+        description: 'Run tests in parallel'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "18"
+  DATABASE_URL: "postgresql://test:test@localhost:5432/test_db"
+  REDIS_URL: "redis://localhost:6379/0"
+  SECRET_KEY: "test-secret-key-for-github-actions-only-not-production"
+
+jobs:
+  setup-and-validate:
+    name: Setup and Environment Validation
+    runs-on: ubuntu-latest
+    
+    outputs:
+      test-matrix: ${{ steps.test-matrix.outputs.matrix }}
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: package-lock.json
+    
+    - name: Generate cache key
+      id: cache-key
+      run: |
+        echo "key=${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('backend/requirements.txt') }}-${{ hashFiles('package-lock.json') }}" >> $GITHUB_OUTPUT
+    
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.npm
+          backend/.pytest_cache
+          node_modules
+        key: ${{ steps.cache-key.outputs.key }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+    
+    - name: Install backend dependencies
+      working-directory: backend
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest-json-report pytest-html pytest-xdist pytest-timeout
+    
+    - name: Install frontend dependencies
+      run: npm ci
+    
+    - name: Validate environment
+      working-directory: backend
+      run: |
+        python -c "import sys; print(f'Python version: {sys.version}')"
+        python -c "import pytest; print(f'Pytest version: {pytest.__version__}')"
+        python -c "import fastapi; print(f'FastAPI version: {fastapi.__version__}')"
+        python -c "import sqlalchemy; print(f'SQLAlchemy version: {sqlalchemy.__version__}')"
+    
+    - name: Determine test matrix
+      id: test-matrix
+      run: |
+        if [ "${{ github.event.inputs.test_level }}" = "comprehensive" ]; then
+          MATRIX='{"test-suite": ["e2e", "integration", "performance", "error-scenarios", "deployment", "monitoring", "ci-cd"]}'
+        elif [ "${{ github.event.inputs.test_level }}" = "deployment-ready" ]; then
+          MATRIX='{"test-suite": ["deployment", "integration", "monitoring"]}'
+        else
+          MATRIX='{"test-suite": ["e2e", "integration", "deployment"]}'
+        fi
+        echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  services-setup:
+    name: Setup Services
+    runs-on: ubuntu-latest
+    needs: setup-and-validate
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Verify PostgreSQL connection
+      run: |
+        pg_isready -h localhost -p 5432 -U test
+        PGPASSWORD=test psql -h localhost -p 5432 -U test -d test_db -c "SELECT version();"
+    
+    - name: Verify Redis connection
+      run: |
+        redis-cli -h localhost -p 6379 ping
+
+  integration-tests:
+    name: ${{ matrix.test-suite }} Tests
+    runs-on: ubuntu-latest
+    needs: [setup-and-validate, services-setup]
+    
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup-and-validate.outputs.test-matrix) }}
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Restore cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.npm
+          backend/.pytest_cache
+          node_modules
+        key: ${{ needs.setup-and-validate.outputs.cache-key }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+    
+    - name: Install dependencies
+      working-directory: backend
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest-json-report pytest-html pytest-xdist pytest-timeout
+    
+    - name: Create storage directories
+      run: |
+        mkdir -p backend/storage/{uploads,generated,temp}
+        chmod 755 backend/storage/{uploads,generated,temp}
+    
+    - name: Set up test environment
+      working-directory: backend
+      run: |
+        export PYTHONPATH=$PWD:$PYTHONPATH
+        python -c "from app.core.database import Base, get_db; print('Database models loaded')" || true
+    
+    - name: Run database migrations
+      working-directory: backend
+      run: |
+        # If you have Alembic migrations
+        # alembic upgrade head
+        # Or create tables directly for testing
+        python -c "
+        import asyncio
+        from app.core.database import engine, Base
+        async def create_tables():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        asyncio.run(create_tables())
+        print('Test database tables created')
+        " || echo "Database setup skipped"
+    
+    - name: Run ${{ matrix.test-suite }} tests
+      working-directory: backend
+      env:
+        PYTEST_CURRENT_TEST: "true"
+        CI: "true"
+      run: |
+        case "${{ matrix.test-suite }}" in
+          "e2e")
+            python -m pytest tests/test_comprehensive_e2e_workflow.py -v --tb=short --json-report --json-report-file=../test_reports/e2e_report.json
+            ;;
+          "integration")
+            python -m pytest tests/test_system_integration_validation.py -v --tb=short --json-report --json-report-file=../test_reports/integration_report.json
+            ;;
+          "performance")
+            python -m pytest tests/test_performance_benchmarks.py -v --tb=short --json-report --json-report-file=../test_reports/performance_report.json
+            ;;
+          "error-scenarios")
+            python -m pytest tests/test_error_scenarios_and_recovery.py -v --tb=short --json-report --json-report-file=../test_reports/error_scenarios_report.json
+            ;;
+          "deployment")
+            python -m pytest tests/test_deployment_validation.py -v --tb=short --json-report --json-report-file=../test_reports/deployment_report.json
+            ;;
+          "monitoring")
+            python -m pytest tests/test_monitoring_and_health_checks.py -v --tb=short --json-report --json-report-file=../test_reports/monitoring_report.json
+            ;;
+          "ci-cd")
+            python -m pytest tests/test_ci_cd_integration.py -v --tb=short --json-report --json-report-file=../test_reports/ci_cd_report.json
+            ;;
+        esac
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.test-suite }}
+        path: |
+          test_reports/
+          backend/integration_tests.log
+        retention-days: 30
+    
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-${{ matrix.test-suite }}
+        path: backend/htmlcov/
+        retention-days: 7
+
+  comprehensive-report:
+    name: Generate Comprehensive Report
+    runs-on: ubuntu-latest
+    needs: [setup-and-validate, integration-tests]
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Download all test results
+      uses: actions/download-artifact@v3
+      with:
+        path: test_results/
+    
+    - name: Install report dependencies
+      run: |
+        pip install jinja2 markdown
+    
+    - name: Generate comprehensive report
+      run: |
+        python -c "
+        import json
+        import os
+        from datetime import datetime
+        
+        # Collect all test results
+        test_results = {}
+        for root, dirs, files in os.walk('test_results'):
+            for file in files:
+                if file.endswith('_report.json'):
+                    suite_name = file.replace('_report.json', '')
+                    with open(os.path.join(root, file), 'r') as f:
+                        try:
+                            test_results[suite_name] = json.load(f)
+                        except:
+                            pass
+        
+        # Generate summary
+        total_tests = sum(r.get('summary', {}).get('total', 0) for r in test_results.values())
+        passed_tests = sum(r.get('summary', {}).get('passed', 0) for r in test_results.values())
+        failed_tests = sum(r.get('summary', {}).get('failed', 0) for r in test_results.values())
+        
+        success_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
+        
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'total_tests': total_tests,
+            'passed_tests': passed_tests,
+            'failed_tests': failed_tests,
+            'success_rate': success_rate,
+            'deployment_ready': success_rate >= 80,
+            'test_results': test_results
+        }
+        
+        with open('comprehensive_test_report.json', 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        print(f'=== INTEGRATION TEST SUMMARY ===')
+        print(f'Total Tests: {total_tests}')
+        print(f'Passed: {passed_tests}')
+        print(f'Failed: {failed_tests}')
+        print(f'Success Rate: {success_rate:.1f}%')
+        print(f'Deployment Ready: {\"Yes\" if report[\"deployment_ready\"] else \"No\"}')
+        "
+    
+    - name: Upload comprehensive report
+      uses: actions/upload-artifact@v3
+      with:
+        name: comprehensive-test-report
+        path: comprehensive_test_report.json
+        retention-days: 90
+    
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = JSON.parse(fs.readFileSync('comprehensive_test_report.json', 'utf8'));
+          
+          const comment = `
+          ## 🧪 Integration Test Results
+          
+          **Overall Success Rate:** ${report.success_rate.toFixed(1)}%
+          **Deployment Ready:** ${report.deployment_ready ? '✅ Yes' : '❌ No'}
+          
+          | Metric | Value |
+          |--------|-------|
+          | Total Tests | ${report.total_tests} |
+          | Passed Tests | ${report.passed_tests} |
+          | Failed Tests | ${report.failed_tests} |
+          
+          ${report.deployment_ready ? 
+            '🚀 **This PR is ready for deployment!**' : 
+            '⚠️ **This PR needs attention before deployment.**'
+          }
+          
+          <details>
+          <summary>View detailed results</summary>
+          
+          Test suite breakdown will be available in the Actions artifacts.
+          
+          </details>
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  deployment-readiness:
+    name: Deployment Readiness Check
+    runs-on: ubuntu-latest
+    needs: [comprehensive-report]
+    if: always()
+    
+    steps:
+    - name: Download comprehensive report
+      uses: actions/download-artifact@v3
+      with:
+        name: comprehensive-test-report
+    
+    - name: Check deployment readiness
+      run: |
+        if [ -f comprehensive_test_report.json ]; then
+          DEPLOYMENT_READY=$(python -c "
+          import json
+          with open('comprehensive_test_report.json', 'r') as f:
+              report = json.load(f)
+          print('true' if report.get('deployment_ready', False) else 'false')
+          ")
+          
+          if [ "$DEPLOYMENT_READY" = "true" ]; then
+            echo "✅ System is ready for deployment"
+            exit 0
+          else
+            echo "❌ System is NOT ready for deployment"
+            exit 1
+          fi
+        else
+          echo "❌ No test report found"
+          exit 1
+        fi
+
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    needs: [deployment-readiness]
+    if: always() && (github.ref == 'refs/heads/main' || github.event_name == 'schedule')
+    
+    steps:
+    - name: Notify Slack
+      if: env.SLACK_WEBHOOK_URL != ''
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        STATUS="${{ needs.deployment-readiness.result }}"
+        if [ "$STATUS" = "success" ]; then
+          COLOR="good"
+          MESSAGE="✅ Integration tests passed - System ready for deployment"
+        else
+          COLOR="danger"
+          MESSAGE="❌ Integration tests failed - System not ready for deployment"
+        fi
+        
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$MESSAGE\",\"fields\":[{\"title\":\"Branch\",\"value\":\"${{ github.ref_name }}\",\"short\":true},{\"title\":\"Commit\",\"value\":\"${{ github.sha }}\",\"short\":true}]}]}" \
+          $SLACK_WEBHOOK_URL
