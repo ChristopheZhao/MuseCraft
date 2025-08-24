@@ -98,6 +98,15 @@ class SceneData:
     quality_score: float = 0.0
     quality_issues: List[str] = field(default_factory=list)
     quality_suggestions: List[str] = field(default_factory=list)
+    
+    # 场景连续性相关
+    requires_continuity_from: Optional[int] = None  # 需要从哪个场景号继续
+    continuity_reason: str = ""  # 连续性原因
+    continuity_confidence: float = 0.0  # 连续性置信度
+    
+    # 图像生成策略（新增）
+    image_generation_strategy: str = "new"  # "new" | "continue_from_previous"
+    depends_on_scene: Optional[int] = None  # 依赖的场景号
 
 
 @dataclass
@@ -106,8 +115,9 @@ class WorkflowState:
     
     # 基本信息
     task_id: str
-    user_prompt: str
-    video_style: str = "professional"
+    user_prompt: str  # 保留用户原始需求 - 视频生成Agent需要完整内容理解
+    style_preference: str = ""  # 可选的用户风格偏好提示
+    intelligent_style_design: Dict[str, Any] = field(default_factory=dict)  # MAS智能风格设计结果
     duration: int = 30
     aspect_ratio: str = "16:9"
     
@@ -283,7 +293,8 @@ class WorkflowState:
         return {
             "task_id": self.task_id,
             "user_prompt": self.user_prompt,
-            "video_style": self.video_style,
+            "style_preference": self.style_preference,
+            "intelligent_style_design": self.intelligent_style_design,
             "duration": self.duration,
             "aspect_ratio": self.aspect_ratio,
             "status": self.status.value,
@@ -309,17 +320,20 @@ class WorkflowStateManager:
     def __init__(self):
         self._states: Dict[str, WorkflowState] = {}
     
-    def create_workflow(self, user_prompt: str, video_style: str = "professional", 
+    def create_workflow(self, user_prompt: str, style_preference: str = None,
                        duration: int = 30, aspect_ratio: str = "16:9") -> WorkflowState:
-        """创建新的工作流状态"""
+        """创建新的工作流状态 - MAS智能风格决策"""
         task_id = str(uuid.uuid4())
         workflow_state = WorkflowState(
             task_id=task_id,
             user_prompt=user_prompt,
-            video_style=video_style,
+            intelligent_style_design={},  # 将由ConceptGenerationTool智能填充
             duration=duration,
             aspect_ratio=aspect_ratio
         )
+        # 如果用户提供了风格偏好，暂存起来
+        if style_preference:
+            workflow_state.style_preference = style_preference
         self._states[task_id] = workflow_state
         return workflow_state
     

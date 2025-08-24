@@ -159,8 +159,9 @@ class Settings(BaseSettings):
     VIDEO_AMPLIFICATION_RATIO: int = config("VIDEO_AMPLIFICATION_RATIO", default=4, cast=int)  # 4x to create 20-40s videos
     SYSTEM_DURATION_CAPABILITY_MIN: int = config("SYSTEM_DURATION_CAPABILITY_MIN", default=20, cast=int)  # seconds
     SYSTEM_DURATION_CAPABILITY_MAX: int = config("SYSTEM_DURATION_CAPABILITY_MAX", default=60, cast=int)  # seconds
-    SCENE_COUNT_RANGE_MIN: int = config("SCENE_COUNT_RANGE_MIN", default=4, cast=int)
-    SCENE_COUNT_RANGE_MAX: int = config("SCENE_COUNT_RANGE_MAX", default=6, cast=int)
+    # Scene Planning Configuration - MAS系统场景数量约束
+    SCENE_COUNT_RANGE_MIN: int = config("SCENE_COUNT_RANGE_MIN", default=3, cast=int)  # MAS最小价值体现
+    SCENE_COUNT_RANGE_MAX: int = config("SCENE_COUNT_RANGE_MAX", default=7, cast=int)  # 成本控制考虑
     
     # Frame Generation Configuration
     FIRST_FRAME_GENERATION_MODE: str = config("FIRST_FRAME_GENERATION_MODE", default="static_snapshot")
@@ -169,9 +170,12 @@ class Settings(BaseSettings):
     FRAME_DIFFERENCE_THRESHOLD: float = config("FRAME_DIFFERENCE_THRESHOLD", default=0.3, cast=float)  # Minimum difference between first/last frames
     
     # Scene Duration Configuration - 替换所有硬编码duration
-    DEFAULT_SCENE_DURATION: float = config("DEFAULT_SCENE_DURATION", default=5.0, cast=float)  # 默认场景时长
-    MIN_SCENE_DURATION: float = config("MIN_SCENE_DURATION", default=2.0, cast=float)  # 最小场景时长
-    MAX_SCENE_DURATION: float = config("MAX_SCENE_DURATION", default=15.0, cast=float)  # 最大场景时长
+    # Scene Duration Configuration - 基于当前视频生成API能力
+    AVAILABLE_SCENE_DURATIONS: List[int] = [5, 10]  # CogVideoX-3支持的离散时长选项
+    DEFAULT_SCENE_DURATION: int = config("DEFAULT_SCENE_DURATION", default=5, cast=int)  # 默认场景时长
+    # 废弃连续范围配置，改为离散选项约束
+    # MIN_SCENE_DURATION: float = config("MIN_SCENE_DURATION", default=2.0, cast=float)  # 已废弃
+    # MAX_SCENE_DURATION: float = config("MAX_SCENE_DURATION", default=15.0, cast=float)  # 已废弃
     TRANSITION_DURATION: float = config("TRANSITION_DURATION", default=0.5, cast=float)  # 过渡时长
     
     # Audio Configuration - 替换硬编码音频参数

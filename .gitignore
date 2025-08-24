@@ -71,6 +71,9 @@ backend/storage/generated/*.wav
 backend/storage/temp/*
 backend/storage/uploads/*
 backend/storage/generated/legacy/*
+backend/storage/continuity_frames/*
+
+
 
 # 保留legacy文件作为示例
 !backend/storage/generated/legacy/

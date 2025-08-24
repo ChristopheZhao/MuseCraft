@@ -24,7 +24,7 @@ class ImageGeneratorAgent(BaseAgent):
             agent_name="image_generator",
             timeout_seconds=600,  # 10 minutes for multiple image generations
             max_retries=2,
-            tools=["zhipu_client", "openai_client", "image_generation_client"]  # 注册所需的AI工具
+            tools=["image_generation"]  # 🚀 MAS - 使用单一业务逻辑工具
         )
         self.file_storage = FileStorageService()
     
@@ -42,6 +42,18 @@ class ImageGeneratorAgent(BaseAgent):
         
         concept_plan = input_data["concept_plan"]
         workflow_state_id = input_data["workflow_state_id"]
+        
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：ImageGenerator检索创意指导
+        try:
+            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
+            if retrieved_guidance:
+                # 使用检索到的创意指导增强概念计划
+                self.logger.info(f"🧠 ImageGenerator: 成功检索到创意指导，增强视觉理解")
+                concept_plan.update(retrieved_guidance)
+            else:
+                self.logger.warning(f"⚠️ ImageGenerator: 未找到创意指导记忆，使用原始概念计划")
+        except Exception as e:
+            self.logger.warning(f"⚠️ ImageGenerator: 记忆检索失败 - {e}")
         
         # 通过 workflow_manager 获取 WorkflowState
         from ..core.workflow_state import workflow_manager
@@ -97,7 +109,11 @@ class ImageGeneratorAgent(BaseAgent):
                 result_summary["scene_number"] = scene_data.scene_number
                 generated_images.append(result_summary)
                 
-                self.logger.info(f"Generated image for scene {scene_data.scene_number}")
+                # 根据是否跳过显示不同的日志
+                if result.get("skipped"):
+                    self.logger.info(f"Skipped image generation for scene {scene_data.scene_number} (continuity required)")
+                else:
+                    self.logger.info(f"Generated image for scene {scene_data.scene_number}")
                 
             except Exception as e:
                 self.logger.error(f"Failed to generate image for scene {scene_data.scene_number}: {str(e)}")
@@ -139,8 +155,24 @@ class ImageGeneratorAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Generate image for a single scene using SceneData and memory guidance"""
         
-        # 从上下文数据中获取创意指导（由Orchestrator提供）
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：ImageGenerator检索场景引用数据
+        scene_references = {}
+        try:
+            scene_references = await self.retrieve_scene_references(
+                workflow_state_id, 
+                scene_data.scene_number
+            )
+            if scene_references:
+                self.logger.info(f"🧠 ImageGenerator: 成功检索到场景{scene_data.scene_number}引用数据")
+            else:
+                self.logger.warning(f"⚠️ ImageGenerator: 未找到场景{scene_data.scene_number}引用数据")
+        except Exception as e:
+            self.logger.warning(f"⚠️ ImageGenerator: 场景引用检索失败 - {e}")
+        
+        # 从上下文数据中获取创意指导（由Orchestrator提供）+ 增强场景引用
         creative_guidance = self._extract_creative_guidance_from_context(context_data, scene_data.scene_number)
+        if scene_references:
+            creative_guidance.update(scene_references)
         
         # 初始化增强跳过标志
         skip_enhancement = False
@@ -204,7 +236,7 @@ class ImageGeneratorAgent(BaseAgent):
                     image_model = ai_config_manager.get_model_for_agent("image_generator")
                     
                     result = await self.use_tool(
-                        tool_name="zhipu_client",
+                        tool_name="image_generation",
                         action="generate_image",
                         parameters={
                             "prompt": enhanced_prompt,
@@ -383,47 +415,23 @@ CRITICAL: This is the LAST FRAME of a scene. Generate a prompt for the ENDING PO
 - Example: "fruit cut in half, knife resting beside" NOT "knife cutting through fruit"
 """
         
-        prompt_generation_request = f"""
-You are a professional AI image generation prompt engineer with expertise in CogView-4 and similar models. Your task is to enhance a basic scene description into a detailed, professional prompt that will generate high-quality STATIC images.
-
-{frame_specific_instruction}
-
-Base Scene Description: {base_prompt}
-
-Scene Context:
-- Scene Number: {scene_data.scene_number}
-- Title: {getattr(scene_data, 'title', '')}
-- Duration: {getattr(scene_data, 'duration', 0)} seconds
-- Mood/Atmosphere: {getattr(scene_data, 'mood_and_atmosphere', '')}
-- Camera Angle: {getattr(scene_data, 'camera_angle', '')}
-- Props/Objects: {getattr(scene_data, 'props_and_objects', [])}
-- Character Descriptions: {getattr(scene_data, 'character_descriptions', [])}
-- Visual Description: {getattr(scene_data, 'visual_description', '')}
-
-Creative Context:
-- Overall Video Concept: {creative_guidance.get('overall_guidance', {}).get('concept', '')}
-- Visual Style Requirements: {creative_guidance.get('overall_guidance', {}).get('visual_style', '')}
-- Target Mood: {creative_guidance.get('overall_guidance', {}).get('mood_target', '')}
-
-Professional Image Generation Requirements:
-1. STATELESS DESIGN: Each prompt must be completely self-contained for stateless APIs
-2. SPECIFIC VISUAL DETAILS: Include exact colors, materials, textures, lighting
-3. COMPOSITION CONTROL: Specify camera angles, framing, depth of field
-4. TECHNICAL QUALITY: Add professional photography/cinematography terms
-5. CONSISTENCY ELEMENTS: Ensure repeatable visual characteristics
-6. COGVIEW-4 OPTIMIZATION: Use terms known to work well with AI image generation
-
-Generate an enhanced prompt following this structure:
-[CORE_SCENE] + [SPECIFIC_DETAILS] + [COMPOSITION] + [LIGHTING_MOOD] + [TECHNICAL_QUALITY] + [STYLE_MODIFIERS]
-
-Example Enhancement Patterns:
-- Instead of "apple" → "fresh red Gala apple with natural skin texture"
-- Instead of "car" → "sleek white BMW M3 sedan with metallic paint finish"
-- Instead of "person" → "young professional wearing navy blue business suit"
-- Instead of "kitchen" → "modern kitchen with white marble countertops and stainless steel appliances"
-
-Return ONLY the enhanced prompt text, no explanations or additional formatting.
-"""
+        # 使用新的提示词模板系统替换硬编码提示词
+        prompt_generation_request = self.render_prompt(
+            "professional_image_prompt_generation",
+            frame_specific_instruction=frame_specific_instruction,
+            base_prompt=base_prompt,
+            scene_number=scene_data.scene_number,
+            scene_title=getattr(scene_data, 'title', ''),
+            scene_duration=getattr(scene_data, 'duration', 0),
+            mood_and_atmosphere=getattr(scene_data, 'mood_and_atmosphere', ''),
+            camera_angle=getattr(scene_data, 'camera_angle', ''),
+            props_and_objects=getattr(scene_data, 'props_and_objects', []),
+            character_descriptions=getattr(scene_data, 'character_descriptions', []),
+            visual_description=getattr(scene_data, 'visual_description', ''),
+            overall_concept=creative_guidance.get('overall_guidance', {}).get('concept', ''),
+            visual_style_requirements=creative_guidance.get('overall_guidance', {}).get('visual_style', ''),
+            target_mood=creative_guidance.get('overall_guidance', {}).get('mood_target', '')
+        )
         
         try:
             # 使用AI配置管理器
@@ -811,84 +819,14 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
         return recommendations
     
     async def analyze_and_generate_frames(self, scene_data, creative_guidance: Dict[str, Any]) -> Dict[str, Any]:
-        """生成完整的首尾帧提示词，返回结构化JSON数据"""
+        """生成完整的首尾帧提示词, 返回结构化JSON数据"""
         
-        frame_generation_prompt = f"""
-        你是专业的静态图像设计师，为视频生成创建首尾帧图像提示词。
-
-        ## 关键要求
-        ⚠️ **理解动态定格**: 首尾帧是动态视频中的定格瞬间，可以包含运动状态，但不描述运动过程
-        ✅ **只允许**: 描述某个瞬间的画面状态（可以是动态中的定格）
-
-        ## 场景信息
-        场景时长：{scene_data.duration}秒
-        场景描述：{scene_data.visual_description or scene_data.description}
-
-        ## 动态定格描述原则
-
-        ### 首帧 - 起始瞬间定格
-        - 可描述动态状态：is running, is cutting, is flying (正在进行的动作瞬间)
-        - 描述位置和姿态：leaning forward, positioned above, tilted at angle
-        - 描述状态和外观：intact apple, sharp blade, focused expression
-        - 禁用过程描述：从A变为B, 逐渐改变, 开始转向, 即将完成
-
-        ### 尾帧 - 结束瞬间定格  
-        - 可描述动态结果：already cut, currently separated, now visible
-        - 描述最终位置：scattered pieces, blade resting beside, juice droplets suspended
-        - 描述完成状态：revealed interior, divided halves, completed action
-        - 禁用过程描述：切割过程中, 正在分离, 变化进行时
-
-        ## 严格的验证检查
-
-        ### 允许的动态定格描述
-        ✅ **瞬间状态**：
-        - 正在进行的动作：is cutting (刀正在切的瞬间)
-        - 运动中的姿态：car speeding on track (赛车疾驰的瞬间)
-        - 动态结果状态：apple split in half (苹果已分离的瞬间)
-
-        ❌ **禁止的过程描述**：
-        - 变化过程：changing from A to B, gradually becoming
-        - 时间序列：then, next, followed by, after that
-        - 趋势描述：about to, going to, starting to, beginning to
-
-        ### 差异度要求
-        首尾帧必须有明显的视觉差异：
-        - 动态进展：从准备动作到动作完成的不同瞬间
-        - 状态变化：从完整到分离，从静止到运动中
-        - 位置变化：元素在不同时刻的不同位置
-        - 视觉对比：足以支撑{scene_data.duration}秒的视频内容发展
-
-        ## 输出格式
-
-        请严格按照以下JSON格式输出：
-        {{
-            "first_frame_image_prompt": {{
-                "description": "完整的首帧静态画面描述",
-                "prohibited_words_check": true,
-                "visual_elements": ["静态元素1", "静态元素2", "静态元素3"],
-                "composition": "构图描述（景别、角度）",
-                "style_tags": ["photorealistic", "studio lighting", "high detail"]
-            }},
-            "last_frame_image_prompt": {{
-                "description": "完整的尾帧静态画面描述",
-                "prohibited_words_check": true,
-                "visual_elements": ["变化后的元素1", "新元素2", "修改的元素3"],
-                "composition": "构图变化（如果有）",
-                "style_tags": ["与首帧保持一致的风格"]
-            }},
-            "static_verification": {{
-                "first_frame_is_static": true,
-                "last_frame_is_static": true,
-                "difference_score": 0.8,
-                "key_differences": [
-                    "具体差异1：从X状态到Y状态",
-                    "具体差异2：元素A消失，元素B出现"
-                ]
-            }}
-        }}
-
-        请按照动态定格原则生成提示词。
-        """
+        # 使用提示词模板系统替代75行硬编码提示词
+        frame_generation_prompt = self.render_prompt(
+            "complete_frame_analysis",
+            scene_duration=scene_data.duration,
+            scene_description=scene_data.visual_description or scene_data.description
+        )
         
         try:
             from ..core.ai_config import get_ai_config
@@ -940,7 +878,7 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
             return await self._fallback_frame_generation(scene_data, creative_guidance)
 
     async def _fallback_frame_generation(self, scene_data, creative_guidance: Dict[str, Any]) -> Dict[str, Any]:
-        """降级处理：生成基础的首尾帧数据结构"""
+        """降级处理: 生成基础的首尾帧数据结构"""
         
         description = scene_data.visual_description or scene_data.description or ""
         
@@ -992,17 +930,20 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
         
         # 通过LLM生成符合物理规律的首帧提示词
         llm_result = await self.use_tool(
-            "zhipu_client",
-            "generate_text", 
+            "image_generation",
+            "enhance_prompt", 
             {
                 "prompt": first_frame_template,
-                "temperature": 0.7
+                "target_style": "realistic",
+                "focus": "quality"
             }
         )
         
         # 处理ToolOutput对象
         if hasattr(llm_result, 'result') and isinstance(llm_result.result, dict):
-            enhanced_prompt = llm_result.result.get("content", "").strip()
+            enhanced_prompt = llm_result.result.get("enhanced_prompt", "").strip()
+            if not enhanced_prompt:
+                enhanced_prompt = llm_result.result.get("content", "").strip()
         elif hasattr(llm_result, 'content'):
             enhanced_prompt = llm_result.content.strip()
         elif isinstance(llm_result, dict):
@@ -1179,48 +1120,39 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
     ) -> str:
         """通过LLM智能构建增强的帧提示词 - 针对新生成的frame_prompts"""
         
-        # 构建LLM整合提示词
-        integration_prompt = f"""
-作为专业的AI图像提示词工程师，请将以下结构化的帧描述信息智能整合为一个流畅、完整的图像生成提示词：
-
-核心描述：{frame_prompt_data.get('description', '')}
-
-详细元素：
-- 物体：{frame_prompt_data.get('detailed_elements', {}).get('objects', [])}
-- 角色：{frame_prompt_data.get('detailed_elements', {}).get('characters', [])}
-- 环境：{frame_prompt_data.get('detailed_elements', {}).get('environment', '')}
-
-构图布局：{frame_prompt_data.get('composition_layout', '')}
-光影氛围：{frame_prompt_data.get('lighting_and_mood', '')}
-{f'场景变化：{frame_prompt_data.get("result_changes", "")}' if frame_type == "last" and frame_prompt_data.get('result_changes') else ''}
-
-场景背景：
-- 场景编号：{scene_data.scene_number}
-- 帧类型：{frame_type}
-- 整体氛围：{getattr(scene_data, 'mood_and_atmosphere', '')}
-- 艺术风格：{getattr(scene_data, 'art_style', 'realistic')}
-
-要求：
-1. 将结构化信息自然融合成流畅的描述
-2. 突出关键视觉元素
-3. 保持专业的图像生成语言
-4. 确保描述清晰、具体
-5. 适合AI图像生成使用
-
-请直接返回整合后的完整提示词：
-"""
+        # 使用提示词模板系统替代硬编码整合提示词
+        integration_prompt = self.render_prompt(
+            "prompt_integration",
+            core_description=frame_prompt_data.get('description', ''),
+            detailed_objects=frame_prompt_data.get('detailed_elements', {}).get('objects', []),
+            detailed_characters=frame_prompt_data.get('detailed_elements', {}).get('characters', []),
+            detailed_environment=frame_prompt_data.get('detailed_elements', {}).get('environment', ''),
+            composition_layout=frame_prompt_data.get('composition_layout', ''),
+            lighting_and_mood=frame_prompt_data.get('lighting_and_mood', ''),
+            result_changes=frame_prompt_data.get('result_changes', '') if frame_type == "last" else None,
+            scene_number=scene_data.scene_number,
+            frame_type=frame_type,
+            scene_mood=getattr(scene_data, 'mood_and_atmosphere', ''),
+            art_style=getattr(scene_data, 'art_style', 'realistic')
+        )
         
         try:
             result = await self.use_tool(
-                "zhipu_client", "generate_text",
-                {"prompt": integration_prompt, "temperature": 0.6}
+                "image_generation", "enhance_prompt",
+                {"prompt": integration_prompt, "target_style": "realistic", "focus": "quality"}
             )
             
             # 处理结果
-            if hasattr(result, 'content'):
+            if hasattr(result, 'result') and isinstance(result.result, dict):
+                enhanced_prompt = result.result.get("enhanced_prompt", "").strip()
+                if not enhanced_prompt:
+                    enhanced_prompt = result.result.get("content", "").strip()
+            elif hasattr(result, 'content'):
                 enhanced_prompt = result.content.strip()
             elif isinstance(result, dict):
-                enhanced_prompt = result.get("content", "").strip()
+                enhanced_prompt = result.get("enhanced_prompt", "").strip()
+                if not enhanced_prompt:
+                    enhanced_prompt = result.get("content", "").strip()
             else:
                 enhanced_prompt = str(result).strip()
             
@@ -1241,7 +1173,7 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
         scene_data, 
         creative_guidance: Dict[str, Any]
     ) -> str:
-        """为fallback情况生成专业的首帧提示词（符合新方案）"""
+        """为fallback情况生成专业的首帧提示词(符合新方案)"""
         
         # 从creative_guidance中提取全局信息
         overall_guidance = creative_guidance.get("overall_guidance", {})
@@ -1261,82 +1193,27 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
         scene_context = overall_guidance.get("scene_context", {})
         narrative_flow = overall_guidance.get("narrative_flow_strategy", {})
         
-        # 构建专业的首帧提示词生成请求
-        prompt_template = f"""
-你是一位专业的视频导演和视觉设计师，需要为场景 {scene_data.scene_number} 设计首帧图像。首帧是视频的开场画面，为整个场景的发展奠定基础。
-
-## 全局项目信息
-项目总时长：{total_duration}秒
-项目风格：{video_style}
-用户原始需求：{user_prompt}
-总场景数：{total_scenes}个
-
-## 当前场景信息 (场景 {scene_data.scene_number}/{total_scenes} - {scene_position}场景)
-标题：{scene_data.title}
-时长：{scene_data.duration}秒 (占总时长的 {scene_percentage:.1f}%)
-场景描述：{scene_data.description}
-视觉描述：{getattr(scene_data, 'visual_description', '')}
-叙事描述：{getattr(scene_data, 'narrative_description', '')}
-氛围风格：{getattr(scene_data, 'mood_and_atmosphere', '')}
-艺术风格：{getattr(scene_data, 'art_style', 'realistic')}
-光影风格：{getattr(scene_data, 'lighting_style', 'natural')}
-
-## 叙事流动策略
-整体节奏：{narrative_flow.get('pacing_strategy', '标准节奏')}
-情绪基调：{narrative_flow.get('mood_and_tone', '中性基调')}
-过渡理念：{narrative_flow.get('transition_philosophy', '自然过渡')}
-
-## 场景定位分析
-场景在项目中的作用：{scene_position}场景 ({scene_percentage:.1f}%占比)
-{f'承接功能：需要与前序场景自然衔接' if scene_data.scene_number > 1 else '开场功能：需要吸引注意力并建立背景'}
-{f'发展功能：需要为后续场景做好铺垫' if scene_data.scene_number < total_scenes else '收尾功能：需要完成整体叙事闭环'}
-
-## 创意总监完整指导
-{creative_guidance}
-
-## 专业首帧设计原则
-
-### 1. 叙事功能精准定位
-- **静态起点状态**：只展现动作开始前的完全静态状态，所有元素处于准备位置
-- **准备状态设计**：画面要显示即将发生动作的准备阶段，但不展现动作本身
-- **节奏协调**：作为{scene_position}场景，需要与整体{total_duration}秒节奏保持协调
-
-### 2. 专业构图策略
-- **焦点引导**：主体位置安排要引导观众视线，为动态发展做准备
-- **空间预留**：为关键动作和变化预留足够的视觉发展空间
-- **层次构建**：前中后景的安排要服务于叙事需求
-
-### 3. 技术标准匹配
-- **CogVideoX单图模式优化**：确保首帧适合作为视频生成的起始图像
-- **动态潜能体现**：虽是静止画面，但要蕴含动态发展的视觉暗示
-- **质量标准**：达到专业{video_style}风格的制作水准
-
-### 4. 整体项目融合
-- **风格统一**：与{video_style}项目风格完美契合
-- **色彩协调**：考虑与其他场景的视觉连续性
-- **品质保证**：符合{total_duration}秒短视频的专业标准
-
-## 输出任务
-基于以上分析，生成一个**CogView-4优化的首帧图像生成提示词**，要求：
-
-1. **自然语言描述**：使用流畅的自然语言，而非标签式枚举
-2. **详细具体**：包含主体特征、环境细节、光影氛围、构图安排
-3. **首帧特性**：只描述动作开始前的初始状态，不包含任何动作过程或结果
-
-**首帧状态要求**：
-- 主体元素：必须是完整、未改变的原始形态，不包含任何本场景将要发生的变化特征
-- 环境设置：展现适合动作发生的基础环境，但环境本身未被动作影响
-- 相关道具：处于静置或常规位置，不暗示即将使用
-- 整体氛围：静态、稳定，不含动态元素
-
-**输出要求**：
-直接描述符合上述状态的画面，无需解释或推理为什么这样设计。专注于视觉呈现，避免任何动作逻辑的体现。
-
-请按以下格式生成完整的自然语言描述：
-"在[环境背景描述]中，[主体元素的原始完整状态]。[相关元素的初始位置和状态]。[光影和氛围描述]，[构图和视觉细节]，呈现出[整体风格和质感]的专业画面效果。"
-
-直接返回完整的提示词描述： 
-"""
+        # 使用提示词模板系统替代75行硬编码提示词
+        prompt_template = self.render_prompt(
+            "professional_first_frame_design",
+            scene_number=scene_data.scene_number,
+            total_duration=total_duration,
+            video_style=video_style,
+            user_prompt=user_prompt,
+            total_scenes=total_scenes,
+            scene_title=scene_data.title,
+            scene_duration=scene_data.duration,
+            scene_percentage=f"{scene_percentage:.1f}",
+            scene_description=scene_data.description,
+            visual_description=getattr(scene_data, 'visual_description', ''),
+            narrative_description=getattr(scene_data, 'narrative_description', ''),
+            mood_and_atmosphere=getattr(scene_data, 'mood_and_atmosphere', ''),
+            art_style=getattr(scene_data, 'art_style', 'realistic'),
+            lighting_style=getattr(scene_data, 'lighting_style', 'natural'),
+            scene_position=scene_position,
+            narrative_flow=narrative_flow,
+            creative_guidance=creative_guidance
+        )
         
         try:
             from ..core.ai_config import get_ai_config
@@ -1344,19 +1221,23 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
             model = ai_config_manager.get_model_for_agent("image_generator")
             
             result = await self.use_tool(
-                "zhipu_client", "generate_text",
-                {"prompt": prompt_template, "temperature": 0.7}
+                "image_generation", "enhance_prompt",
+                {"prompt": prompt_template, "target_style": "realistic", "focus": "quality"}
             )
             
             # 提取生成的内容
             content = ""
             if hasattr(result, 'result') and isinstance(result.result, dict):
-                # ToolOutput对象，从result.result中获取content
-                content = result.result.get("content", "")
+                # ToolOutput对象，从result.result中获取enhanced_prompt
+                content = result.result.get("enhanced_prompt", "")
+                if not content:
+                    content = result.result.get("content", "")
             elif hasattr(result, 'content'):
                 content = result.content or ""
             elif isinstance(result, dict):
-                content = result.get("content", "")
+                content = result.get("enhanced_prompt", "")
+                if not content:
+                    content = result.get("content", "")
             
             content = content.strip()
             
@@ -1374,203 +1255,36 @@ Return ONLY the enhanced prompt text, no explanations or additional formatting.
 
     
     
-    async def _get_technical_specifications(
-        self, 
-        scene_data, 
-        creative_guidance: Dict[str, Any], 
-        frame_type: str
-    ) -> List[str]:
-        """通过LLM智能生成技术规格和质量控制参数"""
-        
-        # 收集上下文信息
-        visual_style_guidance = creative_guidance.get("overall_guidance", {}).get("visual_style_guidance", {})
-        
-        context = {
-            "scene_type": getattr(scene_data, 'scene_type', ''),
-            "frame_type": frame_type,
-            "visual_description": getattr(scene_data, 'visual_description', ''),
-            "mood_and_atmosphere": getattr(scene_data, 'mood_and_atmosphere', ''),
-            "art_style": getattr(scene_data, 'art_style', 'realistic'),
-            "lighting_style": getattr(scene_data, 'lighting_style', 'natural'),
-            "primary_style": visual_style_guidance.get("primary_style", ""),
-            "scene_setting": creative_guidance.get("overall_guidance", {}).get("scene_setting", "")
-        }
-        
-        # 通过LLM生成技术规格
-        try:
-            prompt = f"""
-作为专业的图像技术总监，基于以下场景信息，为AI图像生成提供专业的技术规格建议：
-
-场景信息：
-- 场景类型：{context['scene_type']}
-- 帧类型：{context['frame_type']}
-- 视觉描述：{context['visual_description']}
-- 氛围风格：{context['mood_and_atmosphere']}
-- 艺术风格：{context['art_style']}
-- 光影风格：{context['lighting_style']}
-- 主体风格：{context['primary_style']}
-
-请提供4-6个精准的技术质量参数，用于优化CogView-4的生成效果。
-要求：
-1. 基于场景特点选择最合适的质量参数
-2. 避免通用词汇，提供具体的技术指导
-3. 考虑AI生成的特点和局限性
-
-请以简洁的短语列表形式返回，一行一个参数：
-"""
-            
-            result = await self.use_tool(
-                "zhipu_client", "generate_text",
-                {"prompt": prompt, "temperature": 0.5}
-            )
-            
-            # 处理结果
-            if hasattr(result, 'content'):
-                specs_text = result.content.strip()
-            elif isinstance(result, dict):
-                specs_text = result.get("content", "").strip()
-            else:
-                specs_text = str(result).strip()
-            
-            # 解析为列表
-            specs = [spec.strip() for spec in specs_text.split('\n') if spec.strip()]
-            
-            # 确保最少有基础质量参数
-            if not specs:
-                specs = ['high resolution', 'sharp focus', 'professional quality']
-                
-            return specs[:6]  # 限制最多6个
-            
-        except Exception as e:
-            self.logger.error(f"技术规格生成失败: {e}")
-            # 返回基础规格作为后备
-            return ['high resolution', 'sharp focus', 'professional quality']
-    
     async def _generate_correlated_frame_prompts(
         self, 
         scene_data,  # SceneData from WorkflowState
         concept_plan: Dict[str, Any],
         execution: AgentExecution
     ) -> Dict[str, Any]:
-        """生成关联的首尾帧提示词 - 在同一个模板中考虑场景关联和duration推理"""
+        """
+        [LEGACY/COMPATIBILITY] 生成关联的首尾帧提示词
+        
+        ⚠️ 此方法仅用于向下兼容旧的首尾帧方案
+        新的技术方案使用 single_image_with_description (仅首帧)
+        """
         
         # 获取ScriptWriter提供的场景设计元素
         scene_design = getattr(scene_data, 'scene_design_elements', {})
         narrative_structure = getattr(scene_data, 'narrative_structure', {})
         
-        # 构建关联的首尾帧生成请求 - 通过先验知识注入
-        prompt = f"""
-You are a professional visual sequence designer with deep expertise in AI image generation, specifically CogView-4 and similar stateless APIs. Your task is to create CORRELATED first and last frame prompts that maintain perfect consistency.
-
-PRIOR KNOWLEDGE for High-Quality Image Generation:
-- Stateless APIs like CogView-4 have no memory between calls, so each prompt must be completely self-contained
-- Specific details prevent variation: "red apple" can vary, but "fresh Gala apple with red-yellow gradient skin" is consistent
-- Professional photography terms improve quality: "shallow depth of field", "studio lighting", "50mm lens"
-- Temporal indicators must be static: use "positioned above" not "moving towards", "resting beside" not "falling"
-- Consistency requires identical phrasing: if first frame has "Wüsthof chef's knife", last frame must use exact same phrase
-
-IMPORTANT: Generate BOTH frames in ONE request using your expertise to ensure perfect visual consistency.
-
-Scene Information:
-- Scene Number: {scene_data.scene_number}
-- Title: {scene_data.title}
-- Duration: {scene_data.duration} seconds
-- Narrative Description: {scene_data.narrative_description}
-
-Scene Design Elements from Script Writer:
-- Key Subjects: {scene_design.get('key_subjects', [])}
-- Scene Setting: {scene_design.get('scene_setting', '')}
-- Visual Style Notes: {scene_design.get('visual_style_notes', '')}
-- Composition Requirements: {scene_design.get('composition_requirements', '')}
-- Continuity Elements: {scene_design.get('continuity_elements', [])}
-
-Narrative Structure:
-- Opening State: {narrative_structure.get('opening_state', '')}
-- Main Action: {narrative_structure.get('main_action', '')}
-- Closing State: {narrative_structure.get('closing_state', '')}
-- Story Function: {narrative_structure.get('story_function', '')}
-
-Video Context:
-- Overall Concept: {concept_plan.get('overview', '')}
-- Visual Style: {concept_plan.get('visual_style', '')}
-- Mood and Tone: {concept_plan.get('mood_and_tone', '')}
-
-DURATION-AWARE PROGRESSION ANALYSIS:
-- Short Duration (1-3s): Minimal change, subtle progression
-- Medium Duration (4-7s): Moderate change, clear progression  
-- Long Duration (8+s): Significant change, dramatic progression
-
-For this {scene_data.duration}-second scene, design the appropriate level of visual change.
-
-Generate CORRELATED frame descriptions in JSON format:
-
-{{
-    "visual_progression_analysis": {{
-        "duration_category": "short/medium/long based on {scene_data.duration} seconds",
-        "change_intensity": "minimal/moderate/significant change level",
-        "progression_type": "describe the type of visual progression (positional, transformational, environmental)",
-        "key_continuity_elements": ["elements that must remain identical"],
-        "evolving_elements": ["elements that change between frames"]
-    }},
-    "first_frame_prompt": {{
-        "description": "[COMPLETE PROFESSIONAL PROMPT] Generate a comprehensive, production-ready prompt that includes: (1) Main subject with exact colors, materials, textures (e.g., 'fresh green Granny Smith apple with waxy skin'); (2) Precise positioning and composition (e.g., 'centered on polished oak cutting board'); (3) Professional lighting setup (e.g., 'soft natural light from 45-degree angle'); (4) Camera specifications (e.g., 'medium shot, shallow depth of field'); (5) Technical quality (e.g., 'high resolution, sharp focus, professional photography'); (6) Environmental context. This must be the INITIAL STATE before any action occurs.",
-        "detailed_elements": {{
-            "consistent_objects": ["objects with EXACT color/material/characteristics that MUST remain identical"],
-            "consistent_characters": ["characters with EXACT clothing/appearance that MUST remain identical"],
-            "consistent_environment": "environment description with EXACT materials/colors/lighting",
-            "starting_positions": "precise spatial arrangement of all elements at scene start"
-        }},
-        "composition_and_technical": {{
-            "camera_angle": "specific camera perspective and framing",
-            "lighting_setup": "detailed lighting conditions and mood",
-            "depth_and_focus": "depth of field and focus specifications"
-        }}
-    }},
-    "last_frame_prompt": {{
-        "description": "[COMPLETE PROFESSIONAL PROMPT] Generate a comprehensive, production-ready prompt with IDENTICAL subjects as first frame but showing RESULT state. Include: (1) SAME subjects with EXACT SAME colors/materials but in final state (e.g., 'same green Granny Smith apple now cut in half'); (2) SAME environment and lighting; (3) Visible changes from action (e.g., 'juice droplets on board'); (4) SAME camera angle and technical specifications; (5) All continuity elements must use IDENTICAL descriptions. This must be the FINAL STATE after action is complete.",
-        "detailed_elements": {{
-            "consistent_objects": ["SAME objects with IDENTICAL color/material/characteristics as first frame"],
-            "consistent_characters": ["SAME characters with IDENTICAL clothing/appearance as first frame"],
-            "consistent_environment": "SAME environment with identical materials/colors but showing changes",
-            "final_positions": "precise spatial arrangement showing progression from first frame"
-        }},
-        "progression_changes": {{
-            "position_changes": "how elements moved/repositioned during scene",
-            "state_changes": "what transformations occurred (cut fruit, opened door, etc.)",
-            "environmental_effects": "visible results of the scene action"
-        }},
-        "composition_and_technical": {{
-            "camera_angle": "same or logically evolved camera perspective",
-            "lighting_setup": "same or naturally evolved lighting conditions",
-            "depth_and_focus": "same or appropriately adjusted focus"
-        }}
-    }},
-    "consistency_verification": {{
-        "identical_descriptions": ["exact phrases that appear in BOTH frame descriptions"],
-        "progression_logic": "explanation of how the frames connect logically",
-        "duration_appropriateness": "why this level of change fits the {scene_data.duration}s duration"
-    }}
-}}
-
-BEST PRACTICES from Professional Image Generation Experience:
-
-Example of GOOD correlated prompts:
-First: "Fresh Gala apple with red-yellow gradient skin positioned on bamboo cutting board, Wüsthof chef's knife with black handle poised 2 inches above apple center, soft studio lighting from left, 50mm lens, shallow depth of field"
-Last: "Same Gala apple now cleanly halved showing white flesh and brown seeds on same bamboo cutting board, same Wüsthof chef's knife resting beside apple halves, same soft studio lighting, same 50mm lens perspective"
-
-Example of BAD prompts (lacking consistency):
-First: "Apple on board with knife"
-Last: "Cut fruit with blade nearby"
-
-Key insights from thousands of generations:
-- Specificity creates consistency: exact brands, materials, measurements
-- Static descriptions prevent motion blur: "positioned at" vs "moving to"
-- Identical phrasing maintains continuity: copy exact descriptions
-- Professional terms enhance quality: proper photography vocabulary
-- Complete information enables independence: full scene in each prompt
-
-Return only the JSON object, no additional text.
-"""
+        # 使用提示词模板系统替代112行硬编码提示词
+        prompt = self.render_prompt(
+            "correlated_frame_generation",
+            scene_number=scene_data.scene_number,
+            scene_title=scene_data.title,
+            scene_duration=scene_data.duration,
+            narrative_description=scene_data.narrative_description,
+            scene_design=scene_design,
+            narrative_structure=narrative_structure,
+            concept_overview=concept_plan.get('overview', ''),
+            visual_style=concept_plan.get('visual_style', ''),
+            mood_and_tone=concept_plan.get('mood_and_tone', '')
+        )
         
         try:
             # 使用AI配置管理器
@@ -1621,99 +1335,30 @@ Return only the JSON object, no additional text.
         concept_plan: Dict[str, Any],
         execution: AgentExecution
     ) -> Dict[str, Any]:
-        """基于ScriptWriter的场景设计生成首尾帧提示词"""
+        """
+        [LEGACY/COMPATIBILITY] 基于ScriptWriter的场景设计生成首尾帧提示词
+        
+        ⚠️ 此方法仅用于向下兼容旧的首尾帧方案
+        新的技术方案使用 single_image_with_description (仅首帧)
+        """
         
         # 获取ScriptWriter提供的场景设计元素
         scene_design = getattr(scene_data, 'scene_design_elements', {})
         narrative_structure = getattr(scene_data, 'narrative_structure', {})
         
-        # 构建首尾帧提示词生成的AI请求
-        prompt = f"""
-You are a professional visual prompt generator for AI image generation. Based on the scene design from the Script Writer, create detailed static frame descriptions for video generation.
-
-Scene Information:
-- Scene Number: {scene_data.scene_number}
-- Title: {scene_data.title}
-- Duration: {scene_data.duration} seconds
-- Narrative Description: {scene_data.narrative_description}
-
-Scene Design Elements from Script Writer:
-- Key Subjects: {scene_design.get('key_subjects', [])}
-- Scene Setting: {scene_design.get('scene_setting', '')}
-- Visual Style Notes: {scene_design.get('visual_style_notes', '')}
-- Composition Requirements: {scene_design.get('composition_requirements', '')}
-- Continuity Elements: {scene_design.get('continuity_elements', [])}
-
-Narrative Structure:
-- Opening State: {narrative_structure.get('opening_state', '')}
-- Main Action: {narrative_structure.get('main_action', '')}
-- Closing State: {narrative_structure.get('closing_state', '')}
-- Story Function: {narrative_structure.get('story_function', '')}
-
-Video Context:
-- Overall Concept: {concept_plan.get('overview', '')}
-- Visual Style: {concept_plan.get('visual_style', '')}
-- Mood and Tone: {concept_plan.get('mood_and_tone', '')}
-
-IMPORTANT: CogView-4 API is STATELESS - each prompt must fully describe all visual elements independently. 
-For elements that appear in both frames, use IDENTICAL descriptive language to ensure visual consistency.
-
-Example Consistency Requirements:
-- If first frame has "red Ferrari sports car", last frame must also specify "red Ferrari sports car"
-- If first frame has "person wearing blue denim jacket", last frame must specify "person wearing blue denim jacket"
-- If first frame has "green Granny Smith apple", last frame must specify "green Granny Smith apple (now cut in half)"
-- If first frame has "stainless steel kitchen knife", last frame must specify "stainless steel kitchen knife"
-
-Please generate detailed static frame descriptions in JSON format:
-
-{{
-    "first_frame_prompt": {{
-        "description": "Complete self-contained static image description with EXACT characteristics of all elements",
-        "detailed_elements": {{
-            "objects": ["specific object with exact colors, materials, and characteristics"],
-            "characters": ["character with specific clothing, appearance details"],
-            "environment": "detailed setting with specific materials, colors, lighting"
-        }},
-        "composition_layout": "Precise spatial arrangement of all elements",
-        "lighting_and_mood": "Specific lighting style and atmospheric details"
-    }},
-    "last_frame_prompt": {{
-        "description": "Complete self-contained static image description maintaining IDENTICAL characteristics for continuing elements",
-        "detailed_elements": {{
-            "objects": ["same objects with identical colors/materials but showing result changes"],
-            "characters": ["same character with identical clothing/appearance in final position"],
-            "environment": "same environment with identical materials/colors plus visible changes"
-        }},
-        "composition_layout": "Precise spatial arrangement showing final positions",
-        "lighting_and_mood": "Lighting description (identical or logically evolved)",
-        "result_changes": "Specific visible changes while maintaining element consistency"
-    }},
-        "element_consistency_map": {{
-        "identical_characteristics": ["list of exact descriptions that must be identical in both frames"],
-        "evolving_states": ["list of what changes between frames while keeping core characteristics"]
-    }}
-}}
-
-CRITICAL Guidelines for Stateless Image Generation API:
-1. Create STATIC SNAPSHOT descriptions - NO motion or action words
-2. Each frame prompt must be COMPLETELY SELF-CONTAINED with full element descriptions
-3. SPECIFY EXACT VISUAL CHARACTERISTICS for consistent elements:
-   - Colors: "green apple" (not just "apple") 
-   - Objects: "white GTR sports car" (not just "car")
-   - Materials: "wooden cutting board" (not just "cutting board")
-   - People: "person wearing blue shirt" (not just "person")
-4. For CONTINUITY ELEMENTS that appear in both frames, use IDENTICAL descriptions:
-   - First frame: "sharp silver kitchen knife with black handle"
-   - Last frame: "sharp silver kitchen knife with black handle" (same exact description)
-5. Only describe RESULT CHANGES, keep object characteristics identical:
-   - First frame: "whole green apple on wooden cutting board"
-   - Last frame: "green apple cut in half on wooden cutting board" (apple stays green, board stays wooden)
-6. Use precise positional language: "character stands beside table" NOT "character approaches table"
-7. Each prompt must work independently - API has no memory of previous generations
-8. Environmental changes should be visible but core element properties stay consistent
-
-Return only the JSON object, no additional text.
-"""
+        # 使用提示词模板系统替代85行硬编码提示词
+        prompt = self.render_prompt(
+            "scene_design_frame_generation",
+            scene_number=scene_data.scene_number,
+            scene_title=scene_data.title,
+            scene_duration=scene_data.duration,
+            narrative_description=scene_data.narrative_description,
+            scene_design=scene_design,
+            narrative_structure=narrative_structure,
+            concept_overview=concept_plan.get('overview', ''),
+            visual_style=concept_plan.get('visual_style', ''),
+            mood_and_tone=concept_plan.get('mood_and_tone', '')
+        )
         
         try:
             # 使用AI配置管理器
@@ -1827,20 +1472,62 @@ Return only the JSON object, no additional text.
     async def _generate_single_image_with_action_description(
         self, scene_data, concept_plan, execution, workflow_state_id, input_data
     ) -> Dict[str, Any]:
-        """新方案：生成首帧图像 + 完整的视频动作描述"""
+        """新方案: 生成首帧图像 + 完整的视频动作描述
         
-        # 1. 生成首帧图像（复用现有逻辑）
+        ⚠️ 架构修正：Image Generator 只负责生成图像，不处理连续性逻辑
+        连续性处理由 Video Generator 负责，因为它可以访问前一场景的视频
+        """
+        
+        # 📝 读取Script Writer设置的连续性策略
+        strategy = getattr(scene_data, 'image_generation_strategy', 'new')
+        depends_on_scene = getattr(scene_data, 'depends_on_scene', None)
+        continuity_reason = getattr(scene_data, 'continuity_reason', '')
+        
+        self.logger.info(f"📋 Scene {scene_data.scene_number}: Script Writer strategy = {strategy}")
+        
+        # 🚫 跨组件资源优化：需要连续性的场景跳过图像生成
+        if strategy == "continue_from_previous" and depends_on_scene:
+            self.logger.info(
+                f"🔗 Scene {scene_data.scene_number}: Skipping image generation, will use continuity from Scene {depends_on_scene} in Video Generator\n"
+                f"   Reason: {continuity_reason}"
+            )
+            
+            # 返回跳过标记，但保持接口兼容性
+            return {
+                "generation_mode": "single_image_with_description",
+                "continuity_strategy": strategy,
+                "depends_on_scene": depends_on_scene,
+                "skipped": True,
+                "skip_reason": "continuity_required",
+                "first_frame_result": {
+                    "skipped": True,
+                    "message": f"Image generation skipped for Scene {scene_data.scene_number}, will use continuity from Scene {depends_on_scene}",
+                    "image_url": None,
+                    "image_path": None
+                },
+                "action_description": {
+                    "action_description": f"Scene {scene_data.scene_number} will continue from Scene {depends_on_scene}",
+                    "generation_method": "skipped_for_continuity",
+                    "continuity_strategy": strategy
+                },
+                "primary_image": None  # 无主要图像，由Video Generator处理
+            }
+        
+        # 🎨 只为独立场景生成图像
+        self.logger.info(f"🎨 Scene {scene_data.scene_number}: Generating new image (independent scene)")
         first_frame_result = await self._generate_scene_image_from_data(
             scene_data, workflow_state_id, execution, input_data, "first", frame_prompts=None
         )
         
-        # 2. 生成视频动作描述
+        # 🎬 生成视频动作描述
         action_description_result = await self._generate_video_action_description(
             scene_data, concept_plan, first_frame_result
         )
         
         return {
             "generation_mode": "single_image_with_description",
+            "continuity_strategy": strategy,  # 记录策略但不执行
+            "depends_on_scene": depends_on_scene,
             "first_frame_result": first_frame_result,
             "action_description": action_description_result,
             "primary_image": first_frame_result  # 主要图像信息
@@ -1849,7 +1536,11 @@ Return only the JSON object, no additional text.
     async def _generate_first_last_frame_images(
         self, scene_data, concept_plan, execution, workflow_state_id, input_data
     ) -> Dict[str, Any]:
-        """原方案：生成首帧 + 尾帧图像"""
+        """
+        [LEGACY/COMPATIBILITY] 原方案: 生成首帧 + 尾帧图像
+        
+        ⚠️ 此方法仅用于向下兼容，当前主流方案是 single_image_with_description
+        """
         
         # First, generate CORRELATED frame prompts based on scene design and duration
         frame_prompts = await self._generate_correlated_frame_prompts(
@@ -1884,7 +1575,8 @@ Return only the JSON object, no additional text.
         return {
             "action_description": simple_description,
             "first_frame_prompt": first_frame_result.get("prompt_used", ""),
-            "generation_method": "simplified"
+            "generation_method": "simplified",
+            "continuity_strategy": "new_image"  # Image Generator 始终生成新图像
         }
     
     
@@ -1909,7 +1601,11 @@ Return only the JSON object, no additional text.
                 
                 # 视频生成相关
                 video_generation_mode=generation_mode,
-                video_action_description=action_description.get("action_description", "")
+                video_action_description=action_description.get("action_description", ""),
+                
+                # 新增：连续性策略信息
+                scene_continuity_strategy=result.get("generation_strategy", {}).get("strategy", "new_image"),
+                scene_continuity_reasoning=result.get("generation_strategy", {}).get("reasoning", "")
             )
         else:
             # 原方案更新逻辑
@@ -1959,3 +1655,271 @@ Return only the JSON object, no additional text.
             })
         
         return summary
+    
+    async def _determine_image_generation_strategy(
+        self, scene_data, workflow_state_id, concept_plan
+    ) -> Dict[str, Any]:
+        """
+        🔗 读取Script Writer设置的连续性策略
+        不再重新分析，直接使用ScriptWriter阶段确定的策略
+        """
+        
+        # 读取Script Writer设置的连续性策略
+        strategy = getattr(scene_data, 'image_generation_strategy', 'new')
+        depends_on_scene = getattr(scene_data, 'depends_on_scene', None)
+        continuity_reason = getattr(scene_data, 'continuity_reason', '')
+        continuity_confidence = getattr(scene_data, 'continuity_confidence', 0.8)
+        
+        # Image Generator 始终返回 new_image 策略（连续性由 Video Generator 处理）
+        return {
+            "strategy": "new_image", 
+            "reasoning": "Image Generator always generates new images, continuity handled by Video Generator",
+            "confidence_score": 1.0,
+            "source_scene": None,
+            "original_strategy": strategy,  # 保留原始策略信息
+            "original_depends_on_scene": depends_on_scene
+        }
+    
+    async def _get_previous_scene_data(self, workflow_state_id: str, current_scene_number: int):
+        """获取前一场景数据"""
+        
+        if current_scene_number <= 1:
+            return None
+            
+        try:
+            from ..core.workflow_state import workflow_manager
+            workflow_state = workflow_manager.get_workflow(workflow_state_id)
+            
+            if not workflow_state:
+                return None
+            
+            # 查找前一个场景
+            previous_scene_number = current_scene_number - 1
+            for scene in workflow_state.scenes:
+                if scene.scene_number == previous_scene_number:
+                    return scene
+                    
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get previous scene data: {e}")
+            return None
+    
+    async def _analyze_scene_continuity_with_llm(
+        self, current_scene, previous_scene, concept_plan, workflow_state_id
+    ) -> Dict[str, Any]:
+        """使用LLM分析场景连续性"""
+        
+        # 获取工作流上下文
+        from ..core.workflow_state import workflow_manager
+        workflow_state = workflow_manager.get_workflow(workflow_state_id)
+        
+        # 构建分析提示词
+        analysis_prompt = self.render_prompt(
+            "scene_generation_strategy_analysis",
+            current_scene_number=current_scene.scene_number,
+            current_scene_title=current_scene.title,
+            current_scene_description=current_scene.description,
+            current_scene_narrative=getattr(current_scene, 'narrative_description', ''),
+            current_scene_initial_state=getattr(current_scene, 'initial_state_description', ''),
+            
+            previous_scene_number=previous_scene.scene_number,
+            previous_scene_title=previous_scene.title,
+            previous_scene_description=previous_scene.description,
+            previous_scene_narrative=getattr(previous_scene, 'narrative_description', ''),
+            previous_scene_final_state=getattr(previous_scene, 'target_outcome_description', ''),
+            
+            user_prompt=workflow_state.user_prompt if workflow_state else '',
+            intelligent_style_design=workflow_state.intelligent_style_design if workflow_state else {},  # 🔧 修复: 使用智能风格设计
+            overall_concept=concept_plan.get('overview', ''),
+            project_duration=workflow_state.duration if workflow_state else 30
+        )
+        
+        try:
+            # 使用AI服务分析
+            from ..core.ai_config import get_ai_config
+            ai_config_manager = get_ai_config()
+            model = ai_config_manager.get_model_for_agent("image_generator")
+            
+            result = await self.use_tool(
+                "image_generation", "enhance_prompt",
+                {
+                    "prompt": analysis_prompt, 
+                    "target_style": "realistic",
+                    "focus": "continuity"
+                }
+            )
+            
+            # 解析结果 - 正确处理ToolOutput对象
+            import json
+            
+            # 获取内容
+            if hasattr(result, 'result') and isinstance(result.result, dict):
+                content = result.result.get("content", "")
+            elif hasattr(result, 'content'):
+                content = result.content
+            elif isinstance(result, dict):
+                content = result.get("content", "")
+            else:
+                content = str(result)
+            
+            self.logger.info(f"📝 Raw LLM response content: '{content[:200]}...' (length: {len(content)})")
+            
+            # 智谱AI 使用 response_format 参数时返回干净的JSON，直接解析
+            # 但也处理可能的 ```json``` 包装格式作为降级
+            try:
+                analysis_data = json.loads(content.strip())
+            except json.JSONDecodeError:
+                # 降级：尝试提取 ```json``` 包装的JSON
+                if "```json" in content and "```" in content:
+                    import re
+                    json_match = re.search(r'```json\s*({.*?})\s*```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        analysis_data = json.loads(json_str)
+                    else:
+                        raise ValueError("Cannot extract JSON from markdown code block")
+                else:
+                    raise ValueError(f"Unable to parse JSON from content: {content[:100]}")
+            
+            # 验证必需字段
+            if "strategy" not in analysis_data:
+                raise ValueError("Missing 'strategy' field in LLM response")
+            
+            # 标准化结果
+            standardized_result = {
+                "strategy": analysis_data.get("strategy", "new_image"),
+                "reasoning": analysis_data.get("reasoning", "LLM analysis completed"),
+                "confidence_score": analysis_data.get("confidence_score", 0.8),
+                "analysis_dimensions": analysis_data.get("analysis_dimensions", {}),
+                "continuity_requirements": analysis_data.get("continuity_requirements", {})
+            }
+            
+            self.logger.info(f"✨ Scene Continuity Analysis Result:")
+            self.logger.info(f"   📋 Strategy: {standardized_result['strategy']}")
+            self.logger.info(f"   🎯 Confidence: {standardized_result['confidence_score']}")
+            self.logger.info(f"   💭 Reasoning: {standardized_result['reasoning'][:100]}...")
+            
+            # 如果需要连续性，标记到内存系统
+            if standardized_result['strategy'] == 'continue_from_previous':
+                await self._mark_scene_continuity(
+                    current_scene, previous_scene, standardized_result, workflow_state_id
+                )
+            
+            return standardized_result
+            
+        except Exception as e:
+            self.logger.error(f"LLM scene continuity analysis failed: {e}")
+            # 更详细的错误信息
+            if 'result' in locals():
+                self.logger.error(f"Raw result type: {type(result)}")
+                if hasattr(result, 'result'):
+                    self.logger.error(f"Raw result.result: {result.result}")
+            raise
+    
+    async def _mark_scene_continuity(
+        self, current_scene, previous_scene, analysis_result, workflow_state_id
+    ):
+        """标记场景连续性到内存系统和SceneData"""
+        try:
+            # 导入内存管理器
+            from ..core.scene_continuity_memory import get_scene_continuity_memory
+            continuity_memory = get_scene_continuity_memory()
+            
+            # 标记到内存系统
+            await continuity_memory.mark_scene_continuity(
+                current_scene_number=current_scene.scene_number,
+                previous_scene_number=previous_scene.scene_number,
+                reason=analysis_result['reasoning'],
+                confidence=analysis_result['confidence_score']
+            )
+            
+            # 更新当前场景的连续性字段
+            current_scene.requires_continuity_from = previous_scene.scene_number
+            current_scene.continuity_reason = analysis_result['reasoning'] 
+            current_scene.continuity_confidence = analysis_result['confidence_score']
+            
+            self.logger.info(
+                f"🔗 Scene {current_scene.scene_number} marked for continuity "
+                f"from Scene {previous_scene.scene_number}"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to mark scene continuity: {e}")
+            # 不抛出异常，继续后续处理
+    
+    async def _extract_previous_scene_final_frame(
+        self, scene_data, workflow_state_id, generation_strategy
+    ) -> Dict[str, Any]:
+        """
+        ⚠️ [DEPRECATED] 此方法已废弃
+        Image Generator 不再处理连续性逻辑，该功能已移至 Video Generator
+        """
+        
+        self.logger.error(f"DEPRECATED: _extract_previous_scene_final_frame called for Scene {scene_data.scene_number}")
+        self.logger.error("This method should not be called - continuity logic moved to Video Generator")
+        
+        # 返回错误标记，表明此方法不应被调用
+        return {
+            "error": "Method deprecated - continuity handled by Video Generator",
+            "image_url": "",
+            "image_path": "",
+            "prompt_used": f"ERROR: Frame extraction in wrong agent - Scene {scene_data.scene_number}",
+            "model": "deprecated_method",
+            "parameters": {"error": "continuity_logic_moved_to_video_generator"},
+            "source": "deprecated_image_generator_method"
+        }
+    
+    async def _extract_final_frame_with_ffmpeg(self, video_path: str, scene_number: int) -> str:
+        """
+        ⚠️ [DEPRECATED] 此方法已废弃
+        FFmpeg 视频帧提取已移至 Video Generator
+        """
+        
+        try:
+            import subprocess
+            import os
+            
+            # 生成输出文件名
+            output_filename = f"scene_{scene_number}_extracted_frame.jpg"
+            output_path = self.file_storage.get_output_path(output_filename)
+            
+            # FFmpeg命令：提取最后一帧
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",  # -y 覆盖输出
+                "-sseof", "-1",  # 从结束前1秒开始
+                "-i", video_path,  # 输入视频
+                "-frames:v", "1",  # 只提取一帧
+                "-q:v", "2",  # 高质量
+                output_path
+            ]
+            
+            self.logger.info(f"🎥 Extracting final frame: {' '.join(ffmpeg_cmd)}")
+            
+            # 执行FFmpeg命令
+            process = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30  # 30秒超时
+            )
+            
+            if process.returncode != 0:
+                error_msg = process.stderr if process.stderr else "Unknown FFmpeg error"
+                self.logger.error(f"FFmpeg frame extraction failed: {error_msg}")
+                return ""
+            
+            # 验证输出文件
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                self.logger.info(f"✅ Final frame extracted successfully: {output_path}")
+                return output_path
+            else:
+                self.logger.error(f"Final frame extraction failed: output file not created or empty")
+                return ""
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("FFmpeg frame extraction timed out")
+            return ""
+        except Exception as e:
+            self.logger.error(f"FFmpeg frame extraction error: {e}")
+            return ""

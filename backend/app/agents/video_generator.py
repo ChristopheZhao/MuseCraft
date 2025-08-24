@@ -3,7 +3,7 @@ Video Generator Agent - Generates video clips from images and prompts
 """
 import asyncio
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
@@ -23,11 +23,15 @@ class VideoGeneratorAgent(BaseAgent):
             agent_type=AgentType.VIDEO_GENERATOR,
             agent_name="video_generator",
             timeout_seconds=900,  # 15 minutes for video generation
-            max_retries=2,
-            tools=["zhipu_client"]  # 恢复工具注册
+            max_retries=2
+            # tools 将由工具分配系统自动设置
         )
         self.file_storage = FileStorageService()
-        self.ai_client = AIClient()  # 保留AI客户端用于图像分析
+        self.logger.info(f"VideoGeneratorAgent initialized with specialized tools: {self.get_tool_names()}")
+    
+    def get_tool_names(self):
+        """获取已分配工具名称列表"""
+        return [tool_name for tool_name in self._available_tools.keys()] if self._available_tools else []
     
     async def _execute_impl(
         self, 
@@ -42,6 +46,18 @@ class VideoGeneratorAgent(BaseAgent):
         self._validate_input(input_data, ["workflow_state_id"])
         
         workflow_state_id = input_data["workflow_state_id"]
+        
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：VideoGenerator检索创意指导
+        concept_plan = {}
+        try:
+            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
+            if retrieved_guidance:
+                concept_plan = retrieved_guidance
+                self.logger.info(f"🧠 VideoGenerator: 成功检索到创意指导，增强视频理解")
+            else:
+                self.logger.warning(f"⚠️ VideoGenerator: 未找到创意指导记忆")
+        except Exception as e:
+            self.logger.warning(f"⚠️ VideoGenerator: 记忆检索失败 - {e}")
         
         # 通过 workflow_manager 获取 WorkflowState
         from ..core.workflow_state import workflow_manager
@@ -59,7 +75,7 @@ class VideoGeneratorAgent(BaseAgent):
         generated_videos = []
         total_scenes = len(scenes_data)
         
-        # Generate video for each scene
+        # Generate video for each scene using Function Call
         for i, scene_data in enumerate(scenes_data):
             scene_progress = 10 + int((i / total_scenes) * 80)
             await self._update_progress(
@@ -75,8 +91,8 @@ class VideoGeneratorAgent(BaseAgent):
                     self.logger.warning(f"No image found for scene {scene_data.scene_number}, skipping video generation")
                     continue
                 
-                # Generate video for this scene with motion direction guidance
-                video_result = await self._generate_scene_video_from_data(
+                # Use Function Call to let LLM decide video generation strategy
+                video_result = await self._llm_guided_video_generation(
                     scene_data, workflow_state_id, execution, input_data
                 )
                 
@@ -87,6 +103,9 @@ class VideoGeneratorAgent(BaseAgent):
                     video_path=video_result.get("video_path", ""),
                     video_generation_params=video_result.get("parameters", {})
                 )
+                
+                # 🔗 存储场景视频的最后一帧到连续性内存（为后续场景做准备）
+                await self._store_scene_final_frame(scene_data, video_result)
                 
                 generated_videos.append({
                     "scene_number": scene_data.scene_number,
@@ -135,6 +154,72 @@ class VideoGeneratorAgent(BaseAgent):
         
         return output_data
     
+    async def _llm_guided_video_generation(
+        self,
+        scene_data,
+        workflow_state_id: str,
+        execution: AgentExecution,
+        context_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        使用Function Call让LLM根据场景情况选择合适的工具和参数
+        """
+        
+        # 检查场景连续性需求
+        continuity_frame_path = await self._check_scene_continuity_requirements(scene_data)
+        
+        # 构建上下文信息
+        context_messages = [
+            {
+                "role": "system",
+                "content": """你是视频生成专家，负责根据场景内容和用户需求选择最合适的工具和参数。
+
+可用工具说明：
+- video_generation: 生成视频，需要prompt和duration参数
+- scene_analysis: 分析场景复杂度和特征
+- parameter_optimization: 优化生成参数
+
+请根据场景内容智能选择工具调用顺序和参数。"""
+            },
+            {
+                "role": "user",
+                "content": f"""
+场景数据：
+场景号：{scene_data.scene_number}
+脚本：{getattr(scene_data, 'script_text', '')}
+视觉描述：{getattr(scene_data, 'visual_description', '')}
+叙事描述：{getattr(scene_data, 'narrative_description', '')}
+气氛：{getattr(scene_data, 'mood_and_atmosphere', '')}
+时长：{scene_data.duration}秒
+图像URL：{getattr(scene_data, 'image_url', '') or getattr(scene_data, 'image_path', '')}
+连续性需求：{'是' if continuity_frame_path else '否'}
+
+请分析这个场景并选择合适的工具来处理。
+"""
+            }
+        ]
+        
+        try:
+            # 使用Function Call让LLM选择工具
+            llm_response = await self.llm_function_call(
+                messages=context_messages,
+                context_description=f"生成场景{scene_data.scene_number}的视频",
+                temperature=0.3
+            )
+            
+            if llm_response.get("success") and llm_response.get("tool_calls"):
+                return await self._execute_llm_selected_tools(
+                    llm_response["tool_calls"], scene_data, continuity_frame_path, workflow_state_id
+                )
+            else:
+                # 如果LLM没有选择工具，使用默认策略
+                self.logger.warning(f"LLM did not select tools for scene {scene_data.scene_number}, using default strategy")
+                return await self._fallback_video_generation(scene_data, continuity_frame_path, workflow_state_id)
+                
+        except Exception as e:
+            self.logger.error(f"Function call failed for scene {scene_data.scene_number}: {e}")
+            return await self._fallback_video_generation(scene_data, continuity_frame_path, workflow_state_id)
+    
     async def _call_tool_with_extended_timeout(
         self, 
         tool_name: str, 
@@ -176,6 +261,366 @@ class VideoGeneratorAgent(BaseAgent):
             self.logger.error(f"Tool execution failed for {tool_name}.{action}: {e}")
             raise AgentError(f"Failed to execute {tool_name}: {str(e)}") from e
     
+    async def _execute_llm_selected_tools(
+        self, 
+        tool_calls: List[Dict], 
+        scene_data, 
+        continuity_frame_path: Optional[str],
+        workflow_state_id: str
+    ) -> Dict[str, Any]:
+        """执行LLM选择的工具调用"""
+        
+        results = []
+        final_video_result = None
+        
+        for tool_call in tool_calls:
+            function_name = tool_call["function"]["name"]
+            function_args = tool_call["function"]["arguments"]
+            
+            self.logger.info(f"🤖 LLM选择调用工具: {function_name}")
+            self.logger.info(f"📋 参数: {function_args}")
+            
+            try:
+                # 解析工具名称和action
+                if "_" in function_name:
+                    tool_name, action = function_name.rsplit("_", 1)
+                else:
+                    tool_name = function_name
+                    action = "execute"
+                
+                # 特殊处理video_generation
+                if tool_name == "video" and action == "generation":
+                    final_video_result = await self._execute_video_generation_with_params(
+                        function_args, scene_data, continuity_frame_path, workflow_state_id
+                    )
+                    results.append({
+                        "tool": function_name,
+                        "args": function_args,
+                        "result": final_video_result
+                    })
+                
+                # 其他工具的标准执行
+                else:
+                    tool_result = await self.use_tool(tool_name, action, function_args)
+                    results.append({
+                        "tool": function_name,
+                        "args": function_args,
+                        "result": tool_result
+                    })
+                
+            except Exception as e:
+                self.logger.error(f"Failed to execute {function_name}: {e}")
+                results.append({
+                    "tool": function_name,
+                    "args": function_args,
+                    "error": str(e)
+                })
+        
+        # 如果没有视频生成结果，使用fallback
+        if not final_video_result:
+            self.logger.warning(f"No video generation result from LLM tools, using fallback")
+            final_video_result = await self._fallback_video_generation(
+                scene_data, continuity_frame_path, workflow_state_id
+            )
+        
+        return final_video_result
+    
+    async def _execute_video_generation_with_params(
+        self,
+        llm_params: Dict[str, Any],
+        scene_data,
+        continuity_frame_path: Optional[str],
+        workflow_state_id: str
+    ) -> Dict[str, Any]:
+        """根据LLM决定的参数执行视频生成"""
+        
+        # 获取基本参数
+        prompt = llm_params.get("prompt", "")
+        
+        # ✅ MAS设计原则：信任LLM Function Call的参数选择
+        # LLM已经通过上下文了解场景规划时长，会智能选择duration参数
+        duration = llm_params.get("duration", 5)  # LLM未指定时的fallback
+        self.logger.info(f"🤖 LLM selected duration: {duration}s for scene {scene_data.scene_number}")
+        
+        # 如果没有prompt，生成一个
+        if not prompt:
+            prompt = await self._build_enhanced_video_prompt(scene_data, workflow_state_id)
+        
+        # 准备图像输入 - 优先使用连续性帧
+        image_input = continuity_frame_path if continuity_frame_path else (
+            scene_data.image_url or scene_data.image_path
+        )
+        
+        if not image_input:
+            raise AgentError(f"No image input available for scene {scene_data.scene_number}")
+        
+        # 使用video_generation工具
+        try:
+            result = await self.use_tool(
+                "video_generation",
+                "generate_video",
+                {
+                    "prompt": prompt,
+                    "duration": duration,
+                    "image_url": image_input,
+                    "continuity_frame": continuity_frame_path
+                }
+            )
+            
+            # 处理工具返回结果
+            if hasattr(result, 'result') and isinstance(result.result, dict):
+                video_result = result.result
+            else:
+                video_result = result if isinstance(result, dict) else {}
+            
+            # 下载视频文件
+            if video_result.get("video_url"):
+                video_result["video_path"] = await self._save_video_from_result(
+                    video_result, scene_data.scene_number
+                )
+            
+            return video_result
+            
+        except Exception as e:
+            self.logger.error(f"Video generation tool failed: {e}")
+            raise AgentError(f"Failed to generate video: {str(e)}")
+    
+    async def _fallback_video_generation(
+        self,
+        scene_data,
+        continuity_frame_path: Optional[str],
+        workflow_state_id: str
+    ) -> Dict[str, Any]:
+        """默认的视频生成策略（当Function Call失败时使用）"""
+        
+        self.logger.info(f"Using fallback video generation for scene {scene_data.scene_number}")
+        
+        # 使用现有的方法生成视频
+        return await self._generate_video_from_single_image_with_description(
+            scene_data, workflow_state_id, None, {}, continuity_frame_path
+        )
+    
+    async def _check_scene_continuity_requirements(self, scene_data) -> Optional[str]:
+        """
+        检查场景是否需要使用前一场景的最后一帧
+        
+        Returns:
+            前一场景最后一帧的文件路径，如果不需要连续性则返回None
+        """
+        try:
+            # 检查SceneData中的连续性标记（使用Script Writer设置的字段）
+            if not scene_data.depends_on_scene:
+                return None
+                
+            from ..core.scene_continuity_memory import get_scene_continuity_memory
+            continuity_memory = get_scene_continuity_memory()
+            
+            # 从内存系统获取前一场景的最后一帧
+            previous_frame_path = await continuity_memory.get_previous_scene_final_frame(
+                scene_data.depends_on_scene
+            )
+            
+            if previous_frame_path:
+                self.logger.info(
+                    f"🔗 Scene {scene_data.scene_number} requires continuity from Scene {scene_data.depends_on_scene}: {scene_data.continuity_reason}"
+                )
+                return previous_frame_path
+            else:
+                self.logger.warning(
+                    f"⚠️  Scene {scene_data.scene_number} requires continuity from Scene {scene_data.depends_on_scene}, but previous frame not found"
+                )
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to check scene continuity: {e}")
+            return None
+    
+    async def _store_scene_final_frame(self, scene_data, video_result: Dict[str, Any]) -> None:
+        """
+        提取并存储场景视频的最后一帧到连续性内存系统
+        
+        Args:
+            scene_data: 场景数据
+            video_result: 视频生成结果
+        """
+        try:
+            video_path = video_result.get("video_path")
+            video_url = video_result.get("video_url")
+            
+            if not video_path and not video_url:
+                self.logger.warning(f"No video path/url for scene {scene_data.scene_number}, cannot extract final frame")
+                return
+                
+            # 使用FFmpeg提取最后一帧
+            final_frame_path = await self._extract_video_final_frame(
+                video_path or video_url, scene_data.scene_number
+            )
+            
+            if final_frame_path:
+                # 处理连续性帧（转换为base64或上传到存储系统）
+                final_frame_data = await self._upload_continuity_frame_to_storage(final_frame_path, scene_data.scene_number)
+                
+                if final_frame_data:
+                    # 存储处理后的数据到连续性内存系统
+                    from ..core.scene_continuity_memory import get_scene_continuity_memory
+                    continuity_memory = get_scene_continuity_memory()
+                    
+                    await continuity_memory.store_scene_final_frame(
+                        scene_data.scene_number, final_frame_data  # base64数据或URL
+                    )
+                    
+                    data_type = "base64" if final_frame_data.startswith("data:") else "URL"
+                    if data_type == "base64":
+                        self.logger.info(
+                            f"💾 Stored final frame (base64) for Scene {scene_data.scene_number}: {len(final_frame_data)} chars"
+                        )
+                    else:
+                        self.logger.info(
+                            f"💾 Stored final frame (URL) for Scene {scene_data.scene_number}: {final_frame_data}"
+                        )
+                else:
+                    self.logger.warning(f"Failed to process final frame for scene {scene_data.scene_number}")
+            else:
+                self.logger.warning(f"Failed to extract final frame for scene {scene_data.scene_number}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to store scene final frame: {e}")
+            # 不抛出异常，不影响主要视频生成流程
+    
+    async def _convert_local_image_to_base64(self, image_path: str) -> Optional[str]:
+        """
+        将本地图片转换为base64格式，用于AI分析
+        
+        Args:
+            image_path: 本地图片路径
+            
+        Returns:
+            base64编码的图片数据
+        """
+        try:
+            import base64
+            from pathlib import Path
+            
+            if not Path(image_path).exists():
+                self.logger.warning(f"Image file not found: {image_path}")
+                return None
+            
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                base64_encoded = base64.b64encode(image_data).decode('utf-8')
+                # 返回data URL格式，智谱AI支持
+                return f"data:image/jpeg;base64,{base64_encoded}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to convert image to base64: {e}")
+            return None
+    
+    async def _upload_continuity_frame_to_storage(self, frame_path: str, scene_number: int) -> Optional[str]:
+        """
+        处理连续性帧存储（优先使用base64格式用于AI分析）
+        
+        Args:
+            frame_path: 本地连续性帧路径
+            scene_number: 场景号
+            
+        Returns:
+            base64格式的图片数据或上传后的URL
+        """
+        try:
+            # 首先尝试转换为base64格式（智谱AI支持）
+            base64_data = await self._convert_local_image_to_base64(frame_path)
+            if base64_data:
+                self.logger.info(f"Converted continuity frame to base64 for scene {scene_number}")
+                return base64_data
+            
+            # 如果base64转换失败，尝试文件存储工具上传（可选）
+            try:
+                result = await self.use_tool(
+                    "file_storage_tool",
+                    "upload_file",
+                    {
+                        "file_path": frame_path,
+                        "destination_key": f"continuity_frames/scene_{scene_number}_final_frame.jpg",
+                        "content_type": "image/jpeg",
+                        "public": True,
+                        "metadata": {
+                            "type": "continuity_frame",
+                            "scene_number": scene_number,
+                            "purpose": "scene_continuity_analysis"
+                        }
+                    }
+                )
+                
+                # 提取URL
+                if hasattr(result, 'result') and isinstance(result.result, dict):
+                    return result.result.get("url")
+                elif isinstance(result, dict):
+                    return result.get("url")
+                    
+            except Exception as upload_error:
+                self.logger.warning(f"File storage upload failed: {upload_error}")
+            
+            return None
+                
+        except Exception as e:
+            self.logger.error(f"Failed to process continuity frame: {e}")
+            return None
+    
+    async def _extract_video_final_frame(self, video_source: str, scene_number: int) -> Optional[str]:
+        """
+        使用FFmpeg从视频中提取最后一帧
+        
+        Args:
+            video_source: 视频文件路径或URL
+            scene_number: 场景号
+            
+        Returns:
+            最后一帧图片的文件路径
+        """
+        try:
+            import subprocess
+            import tempfile
+            from pathlib import Path
+            
+            # 创建输出文件路径
+            output_dir = Path("./storage/continuity_frames").resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            output_path = output_dir / f"scene_{scene_number}_final_frame.jpg"
+            
+            # FFmpeg命令：提取最后一帧
+            # 正确的语法：输入参数必须在输入文件之前
+            cmd = [
+                "ffmpeg", 
+                "-sseof", "-1",        # 从结尾前1秒开始（输入参数，必须在-i之前）
+                "-i", video_source,    # 输入文件
+                "-vframes", "1",       # 只提取1帧（输出参数）
+                "-y",                  # 覆盖输出文件
+                str(output_path)       # 输出文件
+            ]
+            
+            # 执行FFmpeg命令
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                check=True
+            )
+            
+            if output_path.exists():
+                self.logger.info(f"✅ Extracted final frame: {output_path}")
+                return str(output_path)
+            else:
+                self.logger.warning(f"FFmpeg completed but output file not found: {output_path}")
+                return None
+                
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"FFmpeg failed to extract final frame: {e.stderr}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to extract final frame: {e}")
+            return None
+    
     async def _generate_scene_video_from_data(
         self, 
         scene_data,  # SceneData object from WorkflowState
@@ -185,12 +630,25 @@ class VideoGeneratorAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """根据场景的生成模式选择相应的视频生成策略"""
         
+        # 🔗 STEP 1: 检查场景连续性需求
+        continuity_frame_path = await self._check_scene_continuity_requirements(scene_data)
+        if continuity_frame_path:
+            # 不打印完整的base64数据
+            if continuity_frame_path.startswith("data:image"):
+                self.logger.info(
+                    f"🎬 Scene {scene_data.scene_number} will use continuity frame (base64, {len(continuity_frame_path)} chars) from Scene {scene_data.depends_on_scene}"
+                )
+            else:
+                self.logger.info(
+                    f"🎬 Scene {scene_data.scene_number} will use continuity frame from Scene {scene_data.depends_on_scene}: {continuity_frame_path}"
+                )
+        
         generation_mode = getattr(scene_data, 'video_generation_mode', 'first_last_frame')
         
         if generation_mode == "single_image_with_description":
-            # 新方案：单图 + 动作描述
+            # 新方案：单图 + 动作描述，支持连续性帧
             return await self._generate_video_from_single_image_with_description(
-                scene_data, workflow_state_id, execution, context_data
+                scene_data, workflow_state_id, execution, context_data, continuity_frame_path
             )
         else:
             # 原方案：首尾帧模式（保留）
@@ -199,12 +657,21 @@ class VideoGeneratorAgent(BaseAgent):
             )
 
     async def _generate_video_from_single_image_with_description(
-        self, scene_data, workflow_state_id, execution, context_data
+        self, scene_data, workflow_state_id, execution, context_data, continuity_frame_path: Optional[str] = None
     ) -> Dict[str, Any]:
-        """新方案：基于首帧图像 + 完整动作描述生成视频"""
+        """新方案：基于首帧图像 + 完整动作描述生成视频，支持场景连续性"""
         
-        # 1. 获取首帧图像
-        image_input = scene_data.first_frame_url or scene_data.image_url
+        # 1. 获取首帧图像 - 优先使用连续性帧
+        if continuity_frame_path:
+            image_input = continuity_frame_path
+            # 不打印完整的base64数据
+            if continuity_frame_path.startswith("data:image"):
+                self.logger.info(f"🔗 Using continuity frame (base64, {len(continuity_frame_path)} chars) for Scene {scene_data.scene_number}")
+            else:
+                self.logger.info(f"🔗 Using continuity frame for Scene {scene_data.scene_number}: {continuity_frame_path}")
+        else:
+            image_input = scene_data.first_frame_url or scene_data.image_url
+            
         if not image_input:
             raise AgentError(f"No first frame image for scene {scene_data.scene_number}")
         
@@ -226,7 +693,8 @@ class VideoGeneratorAgent(BaseAgent):
             {
                 "prompt": video_prompt,
                 "image_url": image_input,  # 单个URL
-                "model": provider_config.model_name
+                "model": provider_config.model_name,
+                "duration": provider_config.default_duration  # 使用配置的默认时长
             },
             timeout=240
         )
@@ -301,7 +769,8 @@ class VideoGeneratorAgent(BaseAgent):
                         "prompt": video_prompt,
                         "first_frame_image": scene_data.first_frame_url,
                         "last_frame_image": scene_data.last_frame_url,
-                        "model": provider_config.model_name
+                        "model": provider_config.model_name,
+                        "duration": provider_config.default_duration  # 使用配置的默认时长
                     },
                     timeout=240
                 )
@@ -316,7 +785,8 @@ class VideoGeneratorAgent(BaseAgent):
                     {
                         "prompt": video_prompt,
                         "image_url": image_input,
-                        "model": provider_config.model_name
+                        "model": provider_config.model_name,
+                        "duration": provider_config.default_duration  # 使用配置的默认时长
                     },
                     timeout=240
                 )
@@ -448,7 +918,7 @@ class VideoGeneratorAgent(BaseAgent):
             template_variables["first_frame_actual_content"] = first_frame_description
         
         # 使用模板系统渲染提示词
-        motion_prompt_template = await self.render_prompt("motion_guided_video_generation", template_variables)
+        motion_prompt_template = self.render_prompt("motion_guided_video_generation", **template_variables)
         
         # 通过LLM生成专业的动作提示词
         llm_result = await self.use_tool(
@@ -504,7 +974,7 @@ class VideoGeneratorAgent(BaseAgent):
         template_variables["max_prompt_length"] = provider_config.prompt_max_length
         
         # 使用模板系统渲染提示词
-        video_prompt_template = await self.render_prompt("basic_video_generation", template_variables)
+        video_prompt_template = self.render_prompt("basic_video_generation", **template_variables)
         
         # 通过LLM生成专业的视频提示词
         llm_result = await self.use_tool(
@@ -603,7 +1073,7 @@ class VideoGeneratorAgent(BaseAgent):
         template_variables["max_prompt_length"] = provider_config.prompt_max_length
         
         # 使用模板系统渲染提示词
-        video_prompt_template = await self.render_prompt("script_based_video_generation", template_variables)
+        video_prompt_template = self.render_prompt("script_based_video_generation", **template_variables)
         
         # 通过LLM生成专业的视频提示词
         llm_result = await self.use_tool(
@@ -788,7 +1258,7 @@ class VideoGeneratorAgent(BaseAgent):
         provider_config = video_config.get_current_provider_config()
         context_info["max_prompt_length"] = provider_config.prompt_max_length
         
-        video_prompt_template = await self.render_prompt("enhanced_video_generation", context_info)
+        video_prompt_template = self.render_prompt("enhanced_video_generation", **context_info)
         
         # 通过LLM生成专业的视频提示词
         llm_result = await self.use_tool(
@@ -800,17 +1270,30 @@ class VideoGeneratorAgent(BaseAgent):
             }
         )
         
+        # DEBUG: 记录完整的LLM返回结果
+        self.logger.info(f"🔍 DEBUG - LLM result type in _build_enhanced_video_prompt: {type(llm_result)}")
+        self.logger.info(f"🔍 DEBUG - LLM result content: {str(llm_result)[:500]}...")
+        
         # 处理ToolOutput对象
         if hasattr(llm_result, 'result') and isinstance(llm_result.result, dict):
             enhanced_prompt = llm_result.result.get("content", "").strip()
+            self.logger.info(f"🔍 DEBUG - Extracted from result.content: '{enhanced_prompt}'")
         elif hasattr(llm_result, 'content'):
             enhanced_prompt = llm_result.content.strip()
+            self.logger.info(f"🔍 DEBUG - Extracted from content: '{enhanced_prompt}'")
         elif isinstance(llm_result, dict):
             enhanced_prompt = llm_result.get("content", "").strip()
+            self.logger.info(f"🔍 DEBUG - Extracted from dict.content: '{enhanced_prompt}'")
         else:
             # 最后才转换为字符串，这里一般不应该执行
             self.logger.warning(f"Unexpected llm_result type in _build_enhanced_video_prompt: {type(llm_result)}, result: {llm_result}")
             enhanced_prompt = str(llm_result).strip()
+        
+        # 如果LLM生成的提示词为空，使用fallback
+        if not enhanced_prompt:
+            fallback_prompt = f"{scene_data.description or scene_data.title or 'Video scene'}, {scene_data.mood_and_atmosphere or 'cinematic style'}"
+            self.logger.warning(f"⚠️ Empty enhanced_prompt, using fallback: '{fallback_prompt}'")
+            enhanced_prompt = fallback_prompt
         
         # 限制提示词长度以符合CogVideoX API要求（1-512字符）
         if len(enhanced_prompt) > 512:
@@ -829,7 +1312,7 @@ class VideoGeneratorAgent(BaseAgent):
             "duration": scene_data.duration,
             "user_prompt": workflow_state.user_prompt,
             "overall_duration": workflow_state.duration,
-            "video_style": workflow_state.video_style,
+            "intelligent_style_design": workflow_state.intelligent_style_design,  # 🔧 修复: 使用智能风格设计
         }
         
         # 添加首帧图像的实际内容描述（如果ImageGenerator生成了的话）
@@ -912,53 +1395,37 @@ class VideoGeneratorAgent(BaseAgent):
 请提供结构化描述，重点关注物体的具体位置和状态，避免模糊表述。
 """
 
-            # 使用智谱AI的GLM-4V进行图像分析
-            from ..core.config import settings
-            
-            if not settings.GLM_API_KEY:
-                self.logger.warning("GLM_API_KEY not configured, skipping image analysis")
-                return ""
-            
+            # ✅ 使用工具系统调用智谱AI的GLM-4V进行图像分析
             try:
-                # 直接使用zhipuai库进行图像分析
-                import zhipuai
-                client = zhipuai.ZhipuAI(api_key=settings.GLM_API_KEY)
-                
-                # 构建消息格式
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_url
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": analysis_prompt
-                            }
-                        ]
+                # 通过工具系统调用图像分析
+                result = await self.use_tool(
+                    tool_name="zhipu_client",
+                    action="analyze_image",
+                    parameters={
+                        "image_url": image_url,
+                        "prompt": analysis_prompt,
+                        "model": "glm-4v",
+                        "temperature": 0.3,
+                        "max_tokens": 800
                     }
-                ]
-                
-                # 调用GLM-4V进行图像分析，强制文本格式输出
-                response = client.chat.completions.create(
-                    model="glm-4v",
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=800
                 )
                 
-                description = response.choices[0].message.content.strip()
+                # 处理ToolOutput格式
+                if not result.success:
+                    self.logger.error(f"GLM-4V image analysis failed: {result.error}")
+                    return ""
+                
+                # 从ToolOutput中提取分析结果
+                ai_result = result.result
+                if not ai_result or "analysis" not in ai_result:
+                    self.logger.error("Invalid response from image analysis tool")
+                    return ""
+                
+                description = ai_result["analysis"].strip()
                 
                 # 清理可能的JSON格式响应，确保为纯文本
                 description = self._clean_json_response_to_text(description)
                 
-            except ImportError:
-                self.logger.error("zhipuai package not installed")
-                return ""
             except Exception as e:
                 self.logger.error(f"GLM-4V image analysis failed: {str(e)}")
                 return ""
@@ -1043,3 +1510,59 @@ class VideoGeneratorAgent(BaseAgent):
             import re
             safe_text = re.sub(r'[{}%#]', ' ', text)
             return safe_text.strip()
+    
+    async def _check_scene_continuity_requirements(self, scene_data) -> Optional[str]:
+        """
+        检查场景的连续性需求，如果需要连续性，则获取前一场景的最后一帧
+        
+        Args:
+            scene_data: 当前场景数据
+            
+        Returns:
+            连续性帧的路径/URL（base64或文件路径），如果不需要连续性返回None
+        """
+        try:
+            # 只有第二个及以后的场景才可能需要连续性
+            if scene_data.scene_number <= 1:
+                return None
+            
+            # 检查场景是否设置了连续性策略
+            if hasattr(scene_data, 'image_generation_strategy'):
+                strategy = getattr(scene_data, 'image_generation_strategy', 'new')
+                if strategy != 'continue_from_previous':
+                    self.logger.info(f"Scene {scene_data.scene_number} 独立生成，不需要连续性")
+                    return None
+            else:
+                # 如果没有设置策略，默认为独立生成
+                self.logger.info(f"Scene {scene_data.scene_number} 无连续性策略，默认独立生成")
+                return None
+            
+            # 需要连续性，获取前一场景的最后一帧
+            previous_scene_number = scene_data.scene_number - 1
+            
+            # 从连续性内存系统获取前一场景的最后一帧
+            from ..core.scene_continuity_memory import get_scene_continuity_memory
+            continuity_memory = get_scene_continuity_memory()
+            
+            continuity_frame = await continuity_memory.get_scene_final_frame(previous_scene_number)
+            
+            if continuity_frame:
+                # 判断数据类型并记录日志
+                if continuity_frame.startswith("data:image"):
+                    self.logger.info(
+                        f"🔗 Scene {scene_data.scene_number} 将使用前一场景最后一帧 (base64, {len(continuity_frame)} chars)"
+                    )
+                else:
+                    self.logger.info(
+                        f"🔗 Scene {scene_data.scene_number} 将使用前一场景最后一帧: {continuity_frame}"
+                    )
+                return continuity_frame
+            else:
+                self.logger.warning(
+                    f"⚠️ Scene {scene_data.scene_number} 需要连续性但未找到前一场景最后一帧，将使用独立生成"
+                )
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"检查场景连续性需求失败: {e}")
+            return None

@@ -68,10 +68,10 @@ class OrchestratorAgent(BaseAgent):
         
         self._current_task = task
         
-        # 创建WorkflowState对象
+        # 创建WorkflowState对象 - MAS智能风格决策
         workflow_state = workflow_manager.create_workflow(
             user_prompt=input_data.get("user_prompt", ""),
-            video_style=input_data.get("video_style", "professional"),
+            style_preference=input_data.get("style_preference"),
             duration=input_data.get("duration", 30),
             aspect_ratio=input_data.get("aspect_ratio", "16:9")
         )
@@ -145,6 +145,11 @@ class OrchestratorAgent(BaseAgent):
                     if agent_type == AgentType.CONCEPT_PLANNER:
                         self.logger.info("🧠 DEBUG: About to store creative guidance from ConceptPlanner")
                         await self._store_creative_guidance_from_output(agent_output)
+                        
+                        # 🔧 修复：设置concept_plan到workflow_state
+                        if "concept_plan" in agent_output:
+                            workflow_state.concept_plan = agent_output["concept_plan"]
+                            self.logger.info("🎭 设置concept_plan到workflow_state")
                     else:
                         self.logger.info(f"🧠 DEBUG: No memory storage needed for {agent_type.value}")
                     
@@ -167,6 +172,11 @@ class OrchestratorAgent(BaseAgent):
                         )
                         workflow_results[agent_type.value] = agent_output
                         workflow_data.update(agent_output)
+                        
+                        # 🔧 修复：在重试成功后也设置concept_plan
+                        if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
+                            workflow_state.concept_plan = agent_output["concept_plan"]
+                            self.logger.info("🎭 重试后设置concept_plan到workflow_state")
                     else:
                         # Mark task as failed
                         task.status = TaskStatus.FAILED

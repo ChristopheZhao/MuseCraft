@@ -125,7 +125,8 @@ class ZhipuClientTool(AsyncTool):
             "generate_video",
             "generate_code",
             "chinese_writing",
-            "json_completion"
+            "json_completion",
+            "function_call"
         ]
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
@@ -179,7 +180,8 @@ class ZhipuClientTool(AsyncTool):
                     "image_url": {"type": "string", "description": "参考图片URL（可选）"},
                     "first_frame_image": {"type": "string", "description": "首帧图片URL（CogVideoX-3首尾帧模式）"},
                     "last_frame_image": {"type": "string", "description": "尾帧图片URL（CogVideoX-3首尾帧模式）"},
-                    "model": {"type": "string", "enum": self.video_models}
+                    "model": {"type": "string", "enum": self.video_models},
+                    "duration": {"type": "integer", "description": "视频时长（秒），CogVideoX-3支持5或10秒", "enum": [5, 10]}
                 },
                 "required": ["prompt"]
             },
@@ -191,6 +193,34 @@ class ZhipuClientTool(AsyncTool):
                     "model": {"type": "string", "enum": self.code_models}
                 },
                 "required": ["prompt"]
+            },
+            "function_call": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object", 
+                            "properties": {
+                                "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                                "content": {"type": "string"}
+                            },
+                            "required": ["role", "content"]
+                        }
+                    },
+                    "tools": {
+                        "type": "array",
+                        "description": "可用的工具列表"
+                    },
+                    "tool_choice": {
+                        "type": "string",
+                        "description": "工具选择策略",
+                        "enum": ["auto", "none"]
+                    },
+                    "model": {"type": "string", "enum": self.text_models},
+                    "temperature": {"type": "number"}
+                },
+                "required": ["messages", "tools"]
             }
         }
         
@@ -236,6 +266,10 @@ class ZhipuClientTool(AsyncTool):
                 "stream": params.get("stream", False)
             }
             
+            # 添加 response_format 参数支持
+            if "response_format" in params:
+                payload["response_format"] = params["response_format"]
+            
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
@@ -279,6 +313,10 @@ class ZhipuClientTool(AsyncTool):
                 "max_tokens": params.get("max_tokens", self.default_max_tokens),
                 "temperature": params.get("temperature", self.default_temperature)
             }
+            
+            # 传递 response_format 参数
+            if "response_format" in params:
+                chat_params["response_format"] = params["response_format"]
             
             return await self._chat_completion(chat_params)
             
@@ -419,6 +457,11 @@ class ZhipuClientTool(AsyncTool):
                 "prompt": params["prompt"]
             }
             
+            # 添加视频时长参数（如果API支持）
+            duration = params.get("duration")
+            if duration:
+                payload["duration"] = duration
+            
             # 优先使用首尾帧模式（CogVideoX-3）
             if params.get("first_frame_image") and params.get("last_frame_image"):
                 # payload["first_frame_image"] = params["first_frame_image"]
@@ -475,7 +518,7 @@ class ZhipuClientTool(AsyncTool):
                     "model": payload["model"],
                     "prompt": params["prompt"],
                     "generation_mode": "first_last_frame" if payload.get("first_frame_image") else "single_image",
-                    "duration": 6.0,  # CogVideoX默认生成6秒视频
+                    "duration": params.get("duration", 5.0),  # 使用传入的duration，默认5秒
                     "usage": result.get("usage", {}),
                     "timeout": status == "timeout"  # 添加超时标记
                 }

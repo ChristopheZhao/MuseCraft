@@ -43,7 +43,7 @@ class MultiAgentSystemVerifier:
             return False
     
     def check_method_in_class(self, file_path: Path, class_name: str, method_name: str) -> bool:
-        """检查类中是否包含指定方法"""
+        """检查类中是否包含指定方法（支持异步方法）"""
         if not self.check_file_exists(file_path):
             return False
         
@@ -55,10 +55,13 @@ class MultiAgentSystemVerifier:
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef) and node.name == class_name:
                     for item in node.body:
-                        if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                        # 同时检查同步方法 (FunctionDef) 和异步方法 (AsyncFunctionDef)
+                        if ((isinstance(item, ast.FunctionDef) or isinstance(item, ast.AsyncFunctionDef)) 
+                            and item.name == method_name):
                             return True
             return False
-        except:
+        except Exception as e:
+            print(f"Error checking {file_path}: {e}")
             return False
     
     def verify_agent_architecture(self) -> dict:
@@ -224,13 +227,13 @@ class MultiAgentSystemVerifier:
             "has_manager": self.check_class_in_file(template_manager_path, "PromptTemplateManager")
         }
         
-        # 检查模板文件
+        # 检查模板文件（修正路径）
         templates_dir = prompts_root / "templates"
         template_files = [
-            "concept_planner.yaml",
-            "script_writer.yaml", 
-            "quality_checker.yaml",
-            "react_orchestrator.yaml"
+            "concept_planner/concept_planner.yaml",
+            "script_writer/script_writer.yaml", 
+            "quality_checker/quality_checker.yaml",
+            "orchestrator/react_orchestrator.yaml"
         ]
         
         template_status = {}
@@ -411,10 +414,30 @@ class MultiAgentSystemVerifier:
         total_checks = len(results)
         passed_checks = 0
         
-        for result in results.values():
+        for key, result in results.items():
             if isinstance(result, dict) and "error" not in result:
-                # 简单的启发式检查：如果结果中包含True值，认为通过
-                if any(isinstance(v, bool) and v for v in str(result).split() if v in ["True"]):
+                # 更准确的检查方式
+                check_passed = False
+                
+                if key == "agent_architecture":
+                    check_passed = result.get("valid_agents", 0) == result.get("total_agents", 0)
+                elif key == "orchestration_modes":
+                    check_passed = result.get("both_modes_available", False)
+                elif key == "tool_system":
+                    check_passed = (result.get("base_tool_features", {}).get("has_base_tool", False) 
+                                  and result.get("registry_features", {}).get("has_registry", False))
+                elif key == "memory_management":
+                    check_passed = result.get("memory_system_complete", False)
+                elif key == "prompt_templates":
+                    template_count = sum(1 for status in result.get("template_status", {}).values() 
+                                       if status.get("file_exists", False))
+                    check_passed = template_count > 0
+                elif key == "models_database":
+                    check_passed = result.get("models_complete", False)
+                elif key == "integration_points":
+                    check_passed = result.get("integration_complete", False)
+                
+                if check_passed:
                     passed_checks += 1
         
         success_rate = (passed_checks / total_checks) * 100 if total_checks > 0 else 0

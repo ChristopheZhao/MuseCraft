@@ -53,6 +53,7 @@ class ToolRegistry:
         
         self.logger = logging.getLogger("tool_registry")
         self._initialized = True
+        self._register_default_ai_tools()  # 🚀 Phase 1.3 - 自动注册AI服务工具
     
     def register_tool(
         self,
@@ -78,15 +79,22 @@ class ToolRegistry:
             Registered tool name
         """
         # Get metadata from tool class
-        if hasattr(tool_class, 'get_metadata'):
-            metadata = tool_class.get_metadata()
-        else:
-            # Try to instantiate to get metadata
-            try:
-                temp_instance = tool_class(config=config or {})
-                metadata = temp_instance.metadata
-            except Exception as e:
-                raise ToolError(f"Failed to get metadata for {tool_class.__name__}: {e}")
+        try:
+            # First try class method (for legacy tools)
+            if hasattr(tool_class, 'get_metadata') and callable(getattr(tool_class, 'get_metadata')):
+                # Check if it's a classmethod by trying to call it directly
+                try:
+                    metadata = tool_class.get_metadata()
+                except TypeError:
+                    # If that fails, try instance method
+                    temp_instance = tool_class()
+                    metadata = temp_instance.get_metadata()
+            else:
+                # Try to instantiate to get metadata
+                temp_instance = tool_class()
+                metadata = temp_instance.get_metadata()
+        except Exception as e:
+            raise ToolError(f"Failed to get metadata for {tool_class.__name__}: {e}")
         
         tool_name = name or metadata.name
         
@@ -226,20 +234,29 @@ class ToolRegistry:
         
         return tools
     
-    def list_tools(self, tool_type: Optional[ToolType] = None) -> List[str]:
+    def list_tools(self, tool_type: Optional[ToolType] = None) -> List[BaseTool]:
         """
-        List registered tool names
+        List registered tools
         
         Args:
             tool_type: Optional tool type filter
         
         Returns:
-            List of tool names
+            List of tool instances
         """
         if tool_type is None:
-            return list(self._tools.keys())
+            tool_names = list(self._tools.keys())
+        else:
+            tool_names = list(self._categories.get(tool_type, set()))
         
-        return list(self._categories.get(tool_type, set()))
+        tools = []
+        for tool_name in tool_names:
+            try:
+                tools.append(self.get_tool(tool_name))
+            except Exception as e:
+                self.logger.warning(f"Failed to load tool {tool_name}: {e}")
+        
+        return tools
     
     def get_tool_info(self, name: str) -> Dict[str, Any]:
         """
@@ -463,6 +480,65 @@ class ToolRegistry:
             "tools_with_dependencies": len(self._dependencies),
             "validation_issues": len(self.validate_registry())
         }
+    
+    def _register_default_ai_tools(self):
+        """🚀 Phase 1.3 - 自动注册原子性AI服务工具"""
+        try:
+            # 注册概念生成工具
+            from .ai_services.concept_generation_tool import ConceptGenerationTool
+            self.register_tool(
+                tool_class=ConceptGenerationTool,
+                name="concept_generation_tool",
+                config={},
+                is_singleton=True,
+                auto_load=False
+            )
+            
+            # 注册场景脚本生成工具
+            from .ai_services.scene_script_generation_tool import SceneScriptGenerationTool
+            self.register_tool(
+                tool_class=SceneScriptGenerationTool,
+                name="scene_script_generation_tool",
+                config={},
+                is_singleton=True,
+                auto_load=False
+            )
+            
+            # 注册叙事结构生成工具
+            from .ai_services.narrative_structure_generation_tool import NarrativeStructureGenerationTool
+            self.register_tool(
+                tool_class=NarrativeStructureGenerationTool,
+                name="narrative_structure_generation_tool",
+                config={},
+                is_singleton=True,
+                auto_load=False
+            )
+            
+            # 注册质量分析工具
+            from .ai_services.quality_analysis_tool import QualityAnalysisTool
+            self.register_tool(
+                tool_class=QualityAnalysisTool,
+                name="quality_analysis_tool",
+                config={},
+                is_singleton=True,
+                auto_load=False
+            )
+            
+            # 注册场景连续性分析工具
+            from .ai_services.scene_continuity_analysis_tool import SceneContinuityAnalysisTool
+            self.register_tool(
+                tool_class=SceneContinuityAnalysisTool,
+                name="scene_continuity_analysis_tool",
+                config={},
+                is_singleton=True,
+                auto_load=False
+            )
+            
+            self.logger.info("🤖 原子性AI服务工具注册完成")
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ 原子性AI工具注册失败: {e}")
+            # 不抛出异常，避免影响整个注册系统的初始化
 
 
 # Global registry instance
