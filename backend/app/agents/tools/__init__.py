@@ -12,6 +12,13 @@ from .ai_services.zhipu_client import ZhipuClientTool
 from .ai_services.suno_client import SunoClientTool
 from .ai_services.image_generation_client import ImageGenerationClientTool
 from .ai_services.jimeng_image_tool import JimengImageTool
+from .ai_services.video_generation_tool_v2 import VideoGenerationTool
+from .ai_services.scene_analysis_tool import SceneAnalysisTool
+from .ai_services.parameter_optimization_tool import ParameterOptimizationTool
+from .ai_services.intelligent_scene_planning_tool import IntelligentScenePlanningTool
+from .ai_services.script_generation_tool import ScriptGenerationTool
+from .ai_services.image_generation_tool import ImageGenerationTool
+from .ai_services.quality_analysis_tool import QualityAnalysisTool
 
 # Video Processing Tools
 from .video_processing.ffmpeg_tool import FFmpegTool
@@ -47,6 +54,15 @@ def register_default_tools():
     
     # Register video composition tools
     tool_registry.register_tool(VideoComposerTool)
+    
+    # Register new MAS tools
+    tool_registry.register_tool(VideoGenerationTool)
+    tool_registry.register_tool(SceneAnalysisTool)
+    tool_registry.register_tool(ParameterOptimizationTool)
+    tool_registry.register_tool(IntelligentScenePlanningTool)
+    tool_registry.register_tool(ScriptGenerationTool)
+    tool_registry.register_tool(ImageGenerationTool)
+    tool_registry.register_tool(QualityAnalysisTool)
 
 __all__ = [
     # Base classes
@@ -70,6 +86,13 @@ __all__ = [
     "SunoClientTool",
     "ImageGenerationClientTool",
     "JimengImageTool",
+    "VideoGenerationTool",
+    "SceneAnalysisTool", 
+    "ParameterOptimizationTool",
+    "IntelligentScenePlanningTool",
+    "ScriptGenerationTool", 
+    "ImageGenerationTool",
+    "QualityAnalysisTool",
     
     # Video Processing Tools
     "FFmpegTool",

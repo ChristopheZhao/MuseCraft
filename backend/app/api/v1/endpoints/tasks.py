@@ -26,7 +26,7 @@ def _val(x):
 # Pydantic models for request/response
 class TaskCreateRequest(BaseModel):
     user_prompt: str = Field(..., description="User's video generation request")
-    video_style: str = Field(default="professional", description="Video style preference")
+    style_preference: Optional[str] = Field(None, description="Optional user style preference hint")
     duration: int = Field(default=30, ge=5, le=300, description="Video duration in seconds")
     aspect_ratio: str = Field(default="16:9", description="Video aspect ratio")
     session_id: Optional[str] = Field(None, description="Session ID for tracking")
@@ -98,7 +98,7 @@ async def create_task(
             session_id=request.session_id,
             input_parameters={
                 "user_prompt": request.user_prompt,
-                "video_style": request.video_style,
+                "style_preference": request.style_preference,
                 "duration": request.duration,
                 "aspect_ratio": request.aspect_ratio
             },

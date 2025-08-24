@@ -1,0 +1,192 @@
+# Video Generator Agent 提示词配置
+name: video_generator
+description: 视频生成Agent的提示词模板
+version: "1.0.0"
+
+# 角色设定
+role:
+  identity: "专业的动态影像导演"
+  context: "根据图像和动作指导生成高质量视频片段"
+  responsibility: "将静态图像转换为动态视频，控制运动和时序"
+
+# 核心提示词模板
+templates:
+  motion_guided_video_generation:
+    name: "动作指导视频生成"
+    description: "为视频生成提供动作和运动指导"
+    variables:
+      - "scene_description"
+      - "motion_guidance"
+      - "first_frame_description"
+      - "video_duration"
+      - "camera_movement"
+      - "motion_intensity"
+      - "visual_style"
+      - "max_prompt_length"
+    template: |
+      Create a {{ video_duration }}-second video with the following specifications:
+
+      ## Scene Description
+      {{ scene_description }}
+
+      ## Motion Guidance
+      {{ motion_guidance }}
+
+      ## Starting Frame
+      {{ first_frame_description }}
+
+      ## Camera Movement
+      {{ camera_movement }}
+
+      ## Motion Settings
+      - Intensity: {{ motion_intensity }}
+      - Style: {{ visual_style }}
+
+      Focus on smooth, natural motion that enhances the narrative without being distracting.
+      
+      {% if max_prompt_length %}
+      (Keep prompt under {{ max_prompt_length }} characters)
+      {% endif %}
+
+  video_prompt_enhancement:
+    name: "视频提示词增强"
+    description: "使用LLM增强视频生成提示词"
+    variables:
+      - "base_prompt"
+      - "motion_requirements"
+      - "style_preferences"
+      - "duration_constraints"
+    template: |
+      Enhance this video generation prompt for better motion and visual quality:
+
+      ## Base Prompt
+      {{ base_prompt }}
+
+      ## Motion Requirements
+      {{ motion_requirements }}
+
+      ## Style Preferences  
+      {{ style_preferences }}
+
+      ## Duration Constraints
+      {{ duration_constraints }}
+
+      Create an enhanced prompt that:
+      1. Describes clear, purposeful motion
+      2. Maintains visual consistency
+      3. Optimizes for the specified duration
+      4. Enhances cinematic quality
+
+      Return only the enhanced prompt text.
+
+  basic_video_generation:
+    name: "基础视频生成"
+    description: "基于场景数据生成基础视频提示词"
+    variables:
+      - "visual_description"
+      - "narrative_description"
+      - "script_text"
+      - "mood_and_atmosphere"
+      - "max_prompt_length"
+    template: |
+      Create a high-quality video based on the following scene information:
+
+      ## Visual Description
+      {{ visual_description }}
+
+      ## Narrative Context
+      {{ narrative_description }}
+
+      ## Script Content
+      {{ script_text }}
+
+      ## Mood & Atmosphere
+      {{ mood_and_atmosphere }}
+
+      Generate a compelling video that captures the essence of this scene with smooth, natural motion and cinematic quality.
+      
+      {% if max_prompt_length %}
+      (Keep prompt under {{ max_prompt_length }} characters)
+      {% endif %}
+
+  camera_movement_guidance:
+    name: "镜头运动指导"
+    description: "为视频生成提供专业的镜头运动指导"
+    variables:
+      - "scene_content"
+      - "narrative_purpose"
+      - "camera_style"
+      - "movement_type"
+    template: |
+      Design camera movement for this scene:
+
+      Scene content: {{ scene_content }}
+      Narrative purpose: {{ narrative_purpose }}
+      Camera style: {{ camera_style }}
+      Movement type: {{ movement_type }}
+
+      Provide specific camera movement instructions that enhance the storytelling and visual impact.
+
+  enhanced_video_generation:
+    name: "增强视频生成"
+    description: "基于首帧图像和场景信息生成专业的CogVideoX视频提示词"
+    type: "jinja2_file"
+    template_file: "video_generator/enhanced_video_generation.jinja2"
+    required_variables:
+      - "image_prompt"
+      - "title"
+      - "description"
+      - "duration"
+      - "user_prompt"
+      - "overall_duration"
+      - "intelligent_style_design"
+    optional_variables:
+      - "duration_reasoning"
+      - "visual_description"
+      - "narrative_description"
+      - "mood_and_atmosphere"
+      - "camera_angle"
+      - "lighting_style"
+      - "art_style"
+      - "character_descriptions"
+      - "props_and_objects"
+      - "color_palette"
+      - "script_text"
+      - "scene_design_elements"
+      - "narrative_structure"
+      - "pacing_and_timing"
+      - "content_development_arc"
+      - "video_generation_mode"
+      - "initial_state_description"
+      - "action_sequence_description"
+      - "target_outcome_description"
+      - "timing_structure_description"
+      - "complete_video_description"
+      - "scene_physics_type"
+      - "first_frame_actual_content"
+      - "max_prompt_length"
+
+# 系统指令
+system_instructions:
+  primary_role: "专业动态影像导演，负责视频生成和运动控制"
+  capabilities:
+    - "动态视频生成和运动设计"
+    - "镜头运动和cinematography指导"
+    - "多平台视频生成服务协调"
+    - "时序和动作质量控制"
+  constraints:
+    - "保持动作的自然性和流畅性"
+    - "遵循叙事逻辑和视觉连贯性"
+    - "优化视频时长和质量平衡"
+    - "支持多种视频生成平台"
+
+# 元数据
+metadata:
+  author: "MuseCraft MAS Team"
+  created_at: "2025-01-14"
+  tags: ["video", "motion", "generation", "cinematography"]
+  dependencies: ["image_generator", "script_writer"]
+  version_history:
+    - version: "1.0.0"
+      date: "2025-01-14"
+      changes: "初始版本，整合VideoGenerator的模板系统"

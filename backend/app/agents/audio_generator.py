@@ -55,7 +55,9 @@ class AudioGeneratorAgent(BaseAgent):
         # Get final video path from WorkflowState
         final_video_path = workflow_state.final_video_path
         if not final_video_path or not os.path.exists(final_video_path):
-            raise AgentError(f"Final video not found: {final_video_path}")
+            # Handle case where no final video is available (e.g., video generation failed)
+            self.logger.warning(f"Final video not found: {final_video_path}. Creating audio-only result.")
+            return await self._create_audio_only_result(workflow_state, input_data, execution, db)
         
         # Get concept plan and scenes data for context
         concept_plan = workflow_state.concept_plan
@@ -773,3 +775,62 @@ class AudioGeneratorAgent(BaseAgent):
             self.logger.error(f"Video audio composition failed: {str(e)}")
             # Return original video path as fallback
             return video_path
+    
+    async def _create_audio_only_result(
+        self, 
+        workflow_state, 
+        input_data: Dict[str, Any], 
+        execution: AgentExecution,
+        db: Session
+    ) -> Dict[str, Any]:
+        """Create audio-only result when no final video is available"""
+        
+        workflow_state_id = input_data["workflow_state_id"]
+        concept_plan = workflow_state.concept_plan
+        scenes_data = workflow_state.scenes
+        
+        if not concept_plan:
+            raise AgentError("No concept plan found for audio generation")
+        
+        await self._update_progress(execution, 30, "Generating background music without video", db)
+        
+        # Generate background music based on concept plan and scenes
+        # Since we don't have actual video metadata, create a minimal one
+        video_metadata = {"duration": sum(getattr(scene, 'duration', 5) for scene in scenes_data)}
+        music_result = await self._generate_background_music_from_concept(
+            concept_plan, scenes_data, video_metadata, execution
+        )
+        
+        await self._update_progress(execution, 70, "Processing and saving audio files", db)
+        
+        # Save and process music file
+        audio_files = await self._save_music_file(music_result, workflow_state_id)
+        
+        await self._update_progress(execution, 90, "Creating audio summary", db)
+        
+        # Create audio summary and metadata
+        audio_summary = self._create_audio_summary(music_result, audio_files)
+        
+        # Store audio file info in workflow state
+        workflow_state.background_audio_path = audio_files.get("background_music_path", "")
+        workflow_state.background_audio_url = audio_files.get("background_music_url", "")
+        
+        # Prepare output data for audio-only result
+        output_data = {
+            "audio_generation_type": "audio_only",
+            "final_video_path": "",  # No video available
+            "final_video_url": "",
+            "background_audio_path": audio_files.get("background_music_path", ""),
+            "background_audio_url": audio_files.get("background_music_url", ""), 
+            "audio_duration": music_result.get("duration", 30),
+            "audio_summary": audio_summary,
+            "music_style": music_result.get("style", "ambient"),
+            "music_mood": music_result.get("mood", "neutral"),
+            "audio_files": audio_files,
+            "workflow_state_id": workflow_state_id,
+            "fallback_reason": "no_final_video_available"
+        }
+        
+        await self._update_progress(execution, 100, "Audio-only generation completed", db)
+        
+        return output_data

@@ -21,6 +21,7 @@ class ToolType(Enum):
     COMMUNICATION = "communication"
     DATA_PROCESSING = "data_processing"
     UTILITY = "utility"
+    ANALYSIS = "analysis"  # 添加分析类型
 
 
 class ToolStatus(Enum):

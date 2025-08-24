@@ -23,9 +23,10 @@ class QualityCheckerAgent(BaseAgent):
             agent_type=AgentType.QUALITY_CHECKER,
             agent_name="quality_checker",
             timeout_seconds=180,  # 3 minutes for quality analysis
-            max_retries=1
+            max_retries=1,
+            tools=["quality_analysis_tool"]  # 🚀 Phase 1.3 - 使用原子性质量分析工具
         )
-        self.ai_client = AIClient()
+        # 移除直接AI客户端依赖
         self.file_storage = FileStorageService()
     
     async def _execute_impl(
@@ -41,6 +42,18 @@ class QualityCheckerAgent(BaseAgent):
         self._validate_input(input_data, ["workflow_state_id"])
         
         workflow_state_id = input_data["workflow_state_id"]
+        
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：QualityChecker检索创意指导和质量标准
+        original_concept_plan = {}
+        try:
+            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
+            if retrieved_guidance:
+                original_concept_plan = retrieved_guidance
+                self.logger.info(f"🧠 QualityChecker: 成功检索到原始创意指导，用于质量对比验证")
+            else:
+                self.logger.warning(f"⚠️ QualityChecker: 未找到创意指导记忆，无法进行原始需求对比")
+        except Exception as e:
+            self.logger.warning(f"⚠️ QualityChecker: 记忆检索失败 - {e}")
         
         # 通过 workflow_manager 获取 WorkflowState
         from ..core.workflow_state import workflow_manager
@@ -336,32 +349,12 @@ class QualityCheckerAgent(BaseAgent):
         """Use AI to analyze content quality"""
         
         try:
-            analysis_prompt = f"""
-Analyze this video composition for content quality and coherence.
-
-Original Concept:
-{json.dumps(concept_plan, indent=2)}
-
-Final Composition Timeline:
-{json.dumps(composition_timeline, indent=2)}
-
-Please evaluate:
-1. Narrative coherence and flow
-2. Message clarity and effectiveness
-3. Scene transitions and pacing
-4. Overall content quality
-
-Provide analysis in JSON format:
-{{
-    "narrative_coherence": "assessment",
-    "message_clarity": "assessment", 
-    "pacing_analysis": "assessment",
-    "content_suggestions": ["suggestion1", "suggestion2"],
-    "overall_assessment": "brief overall assessment"
-}}
-
-Return only JSON, no additional text.
-"""
+            # 使用新的提示词模板系统，从25+行硬编码减少到简单的模板调用
+            analysis_prompt = self.render_prompt(
+                "video_quality_analysis",
+                concept_plan=json.dumps(concept_plan, indent=2),
+                composition_timeline=json.dumps(composition_timeline, indent=2)
+            )
             
             # 使用AI配置管理器获取适合的模型
             from ..core.ai_config import get_ai_config
@@ -369,14 +362,30 @@ Return only JSON, no additional text.
             quality_model = ai_config_manager.get_model_for_agent("quality_checker")
             model_config = ai_config_manager.get_model_config(quality_model)
             
-            response = await self.ai_client.generate_text(
-                prompt=analysis_prompt,
-                model=quality_model,
-                max_tokens=model_config.max_tokens if model_config else 500,
-                temperature=model_config.temperature if model_config else 0.3
+            # 🚀 Phase 1.3 - 使用原子性质量分析工具
+            response = await self.use_tool(
+                tool_name="quality_analysis_tool",
+                action="analyze_quality",
+                parameters={
+                    "video_data": video_data,
+                    "original_requirements": original_concept_plan,
+                    "quality_criteria": {},  # 可以从配置中获取
+                    "model": quality_model,
+                    "temperature": model_config.temperature if model_config else 0.3,
+                    "max_tokens": model_config.max_tokens if model_config else 500
+                }
             )
             
-            return json.loads(response["content"].strip())
+            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
+            if not response.success:
+                raise Exception(f"Quality analysis failed: {response.error}")
+            
+            # 从ToolOutput中提取AI响应结果
+            ai_result = response.result
+            if not ai_result or "content" not in ai_result:
+                raise Exception("Invalid response from quality analysis tool")
+            
+            return json.loads(ai_result["content"].strip())
             
         except Exception as e:
             self.logger.warning(f"AI content analysis failed: {str(e)}")

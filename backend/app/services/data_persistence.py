@@ -109,7 +109,7 @@ class DataPersistenceService:
         
         # 清理主要字段
         workflow_state.user_prompt = self._safe_truncate(workflow_state.user_prompt, 1000)
-        workflow_state.video_style = self._safe_truncate(workflow_state.video_style, 50)
+        workflow_state.style_preference = self._safe_truncate(workflow_state.style_preference, 200)  # 🔧 修复: 使用style_preference替换video_style
         workflow_state.aspect_ratio = self._safe_truncate(workflow_state.aspect_ratio, 10)
         workflow_state.current_step = self._safe_truncate(workflow_state.current_step, 90)  # 修复为合适的长度
         workflow_state.overall_narrative = self._safe_truncate(workflow_state.overall_narrative, 2000)
@@ -243,7 +243,8 @@ class DataPersistenceService:
                 current_step=workflow_state.current_step,
                 input_parameters={
                     "user_prompt": workflow_state.user_prompt,
-                    "video_style": workflow_state.video_style,
+                    "style_preference": workflow_state.style_preference,  # 🔧 修复: 使用style_preference替换video_style
+                    "intelligent_style_design": workflow_state.intelligent_style_design,  # 新增: 智能风格设计
                     "duration": workflow_state.duration,
                     "aspect_ratio": workflow_state.aspect_ratio
                 },

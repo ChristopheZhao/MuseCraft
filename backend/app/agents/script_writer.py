@@ -22,9 +22,10 @@ class ScriptWriterAgent(BaseAgent):
             agent_type=AgentType.SCRIPT_WRITER,
             agent_name="script_writer",
             timeout_seconds=180,
-            max_retries=2
+            max_retries=2,
+            tools=["script_generation"]  # 🚀 MAS - 使用单一业务逻辑工具
         )
-        self.ai_client = AIClient()
+        # 移除直接AI客户端依赖
     
     async def _execute_impl(
         self, 
@@ -40,6 +41,19 @@ class ScriptWriterAgent(BaseAgent):
         
         concept_plan = input_data["concept_plan"]
         workflow_state_id = input_data["workflow_state_id"]
+        
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：ScriptWriter检索创意指导
+        try:
+            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
+            if retrieved_guidance:
+                # 使用检索到的创意指导增强概念计划
+                self.logger.info(f"🧠 ScriptWriter: 成功检索到创意指导，增强概念理解")
+                # 合并检索到的指导信息
+                concept_plan.update(retrieved_guidance)
+            else:
+                self.logger.warning(f"⚠️ ScriptWriter: 未找到创意指导记忆，使用原始概念计划")
+        except Exception as e:
+            self.logger.warning(f"⚠️ ScriptWriter: 记忆检索失败 - {e}")
         
         # 通过 workflow_manager 获取 WorkflowState
         from ..core.workflow_state import workflow_manager
@@ -74,9 +88,9 @@ class ScriptWriterAgent(BaseAgent):
             
             # Update scene data in WorkflowState with enhanced scene design elements
             workflow_state.update_scene(scene_data.scene_number, 
-                script_text=scene_script["script_text"],
-                voice_over_text=scene_script["voice_over_text"], 
-                narrative_description=scene_script["narrative_description"],
+                script_text=scene_script.get("script_text", ""),
+                voice_over_text=scene_script.get("script_text", ""),  # 🔧 修复：使用script_text作为voice_over_text
+                narrative_description=scene_script.get("narrative_description", scene_data.narrative_description),
                 background_music_style=scene_script.get("background_music_style", ""),
                 sound_effects=scene_script.get("sound_effects", []),
                 # 新增：ScriptWriter专注的场景设计元素
@@ -109,7 +123,33 @@ class ScriptWriterAgent(BaseAgent):
         )
         workflow_state.estimated_reading_time = self._calculate_reading_time(script_results)
         
+        await self._update_progress(execution, 88, "Analyzing scene continuity", db)
+        
+        # 🔗 新增：场景连续性分析
+        await self._analyze_and_set_scene_continuity(workflow_state, overall_narrative, execution)
+        
         await self._update_progress(execution, 95, "Finalizing scripts", db)
+        
+        # 🧠 Phase 1.2 - 实现MAS记忆共享：ScriptWriter存储场景引用数据
+        try:
+            for scene_script in script_results:
+                scene_number = scene_script["scene_number"]
+                scene_references = {
+                    "scene_design": scene_script.get("scene_design", {}),
+                    "narrative_structure": scene_script.get("narrative_structure", {}),
+                    "visual_style_notes": scene_script.get("visual_style_notes", ""),
+                    "composition_requirements": scene_script.get("composition_requirements", ""),
+                    "overall_narrative": overall_narrative
+                }
+                
+                memory_stored = await self.store_scene_references(
+                    workflow_id=workflow_state_id,
+                    scene_number=scene_number,
+                    scene_references=scene_references
+                )
+                self.logger.info(f"🧠 ScriptWriter: 场景{scene_number}引用数据已存储 (success={memory_stored})")
+        except Exception as e:
+            self.logger.warning(f"⚠️ ScriptWriter: 场景引用存储失败 - {e}")
         
         # Prepare output data
         output_data = {
@@ -135,86 +175,25 @@ class ScriptWriterAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Generate script for a single scene"""
         
-        script_prompt = f"""
-You are a professional scriptwriter creating a script for a video scene.
-
-Scene Information:
-- Scene Number: {scene_data.scene_number}
-- Scene Type: {scene_data.scene_type}
-- Title: {scene_data.title}
-- Duration: {scene_data.duration} seconds
-- Description: {scene_data.description}
-- Visual Description: {scene_data.visual_description}
-- Mood: {scene_data.mood_and_atmosphere}
-- Camera Angle: {scene_data.camera_angle}
-- Characters: {scene_data.character_descriptions}
-- Props: {scene_data.props_and_objects}
-
-Video Context:
-- Overall Concept: {concept_plan.get('overview', '')}
-- Target Audience: {concept_plan.get('target_audience', '')}
-- Key Messages: {concept_plan.get('key_messages', [])}
-- Visual Style: {concept_plan.get('visual_style', '')}
-- Mood and Tone: {concept_plan.get('mood_and_tone', '')}
-
-Please create a detailed script focused on scene narrative and development in JSON format:
-
-{{
-    "script_text": "Main script/dialogue text that will be spoken or displayed",
-    "voice_over_text": "Optimized text for voice-over narration (if different from script)",
-    "narrative_description": "Detailed narrative description of what happens in this scene",
-    "content_development_arc": {{
-        "scene_concept_duration": "Dynamic duration based on content complexity (not hardcoded)",
-        "narrative_progression": "How the scene advances the overall story",
-        "emotional_journey": "Emotional arc within this scene duration",
-        "action_sequence": "Key actions/events that happen in sequence",
-        "scene_transition": "How this scene connects to the next scene"
-    }},
-    "scene_design_elements": {{
-        "key_subjects": ["list", "of", "main", "subjects", "in", "scene"],
-        "scene_setting": "Physical environment and location description",
-        "visual_style_notes": "Visual style guidance for image generation",
-        "composition_requirements": "Key composition elements that must be maintained",
-        "continuity_elements": "Elements that must remain consistent throughout scene"
-    }},
-    "narrative_structure": {{
-        "opening_state": "How the scene begins - narrative context",
-        "main_action": "Central action or event in the scene", 
-        "closing_state": "How the scene concludes - narrative context",
-        "story_function": "What role this scene plays in overall narrative"
-    }},
-    "audio_design": {{
-        "background_music_style": "Type of background music that would fit",
-        "sound_effects": ["list", "of", "sound", "effects", "needed"],
-        "audio_pacing": "Audio rhythm and timing notes"
-    }},
-    "pacing_and_timing": {{
-        "narrative_tempo": "Fast/Medium/Slow narrative pacing for this scene",
-        "key_timing_moments": ["important", "timing", "cues"],
-        "transition_timing": "How long transitions should take"
-    }},
-    "emotional_tone": "Emotional tone of this scene",
-    "key_words": ["important", "keywords", "for", "emphasis"]
-}}
-
-Guidelines for Scene Design and Narrative Structure:
-1. Design content development arc based on scene concept (not hardcoded {scene_data.duration}s)
-2. Focus on NARRATIVE STRUCTURE: story progression, character development, emotional journey
-3. Create clear scene transitions that connect seamlessly with adjacent scenes
-4. Design action sequences that are filmable and visually compelling
-5. Provide detailed scene design elements for ImageGenerator to use
-6. Match the visual style and mood from Creative Director's guidance
-7. Consider the target audience and overall narrative flow
-8. Ensure continuity with overall video concept and previous scenes
-9. Voice-over text should be natural, engaging, and match the emotional tone
-10. Plan pacing and timing that serves the story, not arbitrary durations
-11. Identify key subjects and elements that define each scene
-12. Design narrative opening/closing states that create story flow
-13. Provide clear composition requirements for visual consistency
-14. CRITICAL: Focus on story structure, leave visual frame generation to ImageGenerator
-
-Return only the JSON object, no additional text.
-"""
+        # 使用新的提示词模板系统，从80+行硬编码减少到简单的模板调用
+        script_prompt = self.render_prompt(
+            "scene_script_generation",
+            scene_number=scene_data.scene_number,
+            scene_type=scene_data.scene_type,
+            scene_title=scene_data.title,
+            scene_duration=scene_data.duration,
+            scene_description=scene_data.description,
+            visual_description=scene_data.visual_description,
+            mood_and_atmosphere=scene_data.mood_and_atmosphere,
+            camera_angle=scene_data.camera_angle,
+            character_descriptions=scene_data.character_descriptions,
+            props_and_objects=scene_data.props_and_objects,
+            concept_overview=concept_plan.get('overview', ''),
+            target_audience=concept_plan.get('target_audience', ''),
+            key_messages=concept_plan.get('key_messages', []),
+            visual_style=concept_plan.get('visual_style', ''),
+            mood_and_tone=concept_plan.get('mood_and_tone', '')
+        )
         
         try:
             # 使用AI配置管理器获取适合的模型
@@ -223,19 +202,52 @@ Return only the JSON object, no additional text.
             script_model = ai_config_manager.get_model_for_agent("script_writer")
             model_config = ai_config_manager.get_model_config(script_model)
             
-            response = await self.ai_client.generate_text(
-                prompt=script_prompt,
-                model=script_model,
-                max_tokens=model_config.max_tokens if model_config else 1500,
-                temperature=model_config.temperature if model_config else 0.7
+            # 🚀 MAS - 使用script_generation工具
+            response = await self.use_tool(
+                tool_name="script_generation",
+                action="generate_scene_script",
+                parameters={
+                    "scene_data": {
+                        "scene_number": scene_data.scene_number,
+                        "title": scene_data.title,
+                        "description": scene_data.description,
+                        "duration": scene_data.duration,
+                        "visual_description": scene_data.visual_description,
+                        "mood_and_atmosphere": scene_data.mood_and_atmosphere
+                    },
+                    "concept_plan": concept_plan,
+                    "model": script_model,
+                    "temperature": model_config.temperature if model_config else 0.7,
+                    "max_tokens": model_config.max_tokens if model_config else 1500
+                }
             )
             
-            self._update_token_usage(
-                execution, 
-                response.get("usage", {}).get("total_tokens", 0)
-            )
+            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
+            if not response.success:
+                raise AgentError(f"Scene script generation failed: {response.error}")
             
-            return self._parse_script_response(response["content"])
+            # 从ToolOutput中提取AI响应结果
+            ai_result = response.result
+            if not ai_result:
+                raise AgentError("Empty response from scene script generation tool")
+            
+            # ✅ ScriptGenerationTool返回结构化数据，不是原始content格式
+            if "script_text" in ai_result:
+                # 直接使用ScriptGenerationTool的结构化输出
+                return {
+                    "script_text": ai_result.get("script_text", ""),
+                    "visual_guidance": ai_result.get("visual_guidance", ""),
+                    "emotional_tone": ai_result.get("emotional_tone", ""),
+                    "keywords": ai_result.get("keywords", []),
+                    "duration": ai_result.get("duration", 5),
+                    "duration_reasoning": ai_result.get("duration_reasoning", ""),
+                    "success": ai_result.get("success", True)
+                }
+            elif "content" in ai_result:
+                # 兼容旧格式：原始content需要解析
+                return self._parse_script_response(ai_result["content"])
+            else:
+                raise AgentError("Invalid response format from scene script generation tool")
             
         except Exception as e:
             self.logger.error(f"Failed to generate script for scene {scene_data.scene_number}: {str(e)}")
@@ -358,30 +370,13 @@ Return only the JSON object, no additional text.
                 "narrative": scene_data.narrative_description[:200] if scene_data.narrative_description else ""
             })
         
-        narrative_prompt = f"""
-Create an overall narrative structure for this video based on all scenes.
-
-Video Concept: {concept_plan.get('overview', '')}
-Total Scenes: {len(scenes)}
-
-Scene Summary:
-{json.dumps(scenes_summary, indent=2)}
-
-Please provide:
-{{
-    "story_arc": "Description of the overall story progression",
-    "opening_hook": "How the video captures attention in the first few seconds",
-    "main_message": "Core message or theme",
-    "climax_scene": "Which scene number contains the climax/key moment",
-    "resolution": "How the video concludes",
-    "narrative_flow": "Description of how scenes connect",
-    "call_to_action": "What action viewers should take after watching",
-    "tone_consistency": "Notes about maintaining consistent tone",
-    "pacing_strategy": "Overall pacing and rhythm strategy"
-}}
-
-Return only JSON, no additional text.
-"""
+        # 使用新的提示词模板系统 - 整体叙事结构
+        narrative_prompt = self.render_prompt(
+            "overall_narrative_structure",
+            concept_overview=concept_plan.get('overview', ''),
+            total_scenes=len(scenes),
+            scenes_summary=json.dumps(scenes_summary, indent=2)
+        )
         
         try:
             # 使用AI配置管理器获取适合的模型
@@ -390,14 +385,29 @@ Return only JSON, no additional text.
             script_model = ai_config_manager.get_model_for_agent("script_writer")
             model_config = ai_config_manager.get_model_config(script_model)
             
-            response = await self.ai_client.generate_text(
-                prompt=narrative_prompt,
-                model=script_model,
-                max_tokens=model_config.max_tokens if model_config else 800,
-                temperature=model_config.temperature if model_config else 0.6
+            # 🚀 Phase 1.3 - 使用原子性叙事结构生成工具
+            response = await self.use_tool(
+                tool_name="script_generation",
+                action="generate_narrative_structure",
+                parameters={
+                    "scenes": scenes,
+                    "concept_plan": concept_plan,
+                    "model": script_model,
+                    "temperature": model_config.temperature if model_config else 0.6,
+                    "max_tokens": model_config.max_tokens if model_config else 800
+                }
             )
             
-            return json.loads(response["content"].strip())
+            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
+            if not response.success:
+                raise Exception(f"Narrative structure generation failed: {response.error}")
+            
+            # 从ToolOutput中提取AI响应结果
+            ai_result = response.result
+            if not ai_result or "content" not in ai_result:
+                raise Exception("Invalid response from narrative structure generation tool")
+            
+            return json.loads(ai_result["content"].strip())
             
         except Exception as e:
             self.logger.warning(f"Failed to generate overall narrative: {str(e)}")
@@ -450,3 +460,93 @@ Return only JSON, no additional text.
             "emphasis_points": concept_plan.get("key_messages", []),
             "pauses_and_timing": "Natural pauses between scenes"
         }
+    
+    async def _analyze_and_set_scene_continuity(
+        self, 
+        workflow_state: WorkflowState, 
+        overall_narrative: Dict[str, Any],
+        execution: AgentExecution
+    ) -> None:
+        """
+        分析所有场景的连续性需求并设置连续性策略
+        基于完整脚本 + 整体叙事判断场景间的连续性
+        """
+        
+        try:
+            scenes = workflow_state.scenes
+            if not scenes or len(scenes) <= 1:
+                return
+            
+            self.logger.info(f"🔗 开始分析 {len(scenes)} 个场景的连续性")
+            
+            # 调用连续性分析工具
+            continuity_analysis = await self.use_tool(
+                "scene_continuity_analysis_tool",
+                "analyze_all_scenes_continuity", 
+                {
+                    "scenes": [
+                        {
+                            "scene_number": scene.scene_number,
+                            "title": scene.title,
+                            "description": scene.description,
+                            "script_text": scene.script_text,
+                            "narrative_description": scene.narrative_description,
+                            "mood_and_atmosphere": scene.mood_and_atmosphere
+                        }
+                        for scene in scenes
+                    ],
+                    "overall_narrative": overall_narrative.get("story_arc", ""),
+                    "narrative_flow": overall_narrative.get("narrative_flow", ""),
+                    "main_message": overall_narrative.get("main_message", "")
+                }
+            )
+            
+            # 处理分析结果
+            if hasattr(continuity_analysis, 'result'):
+                analysis_result = continuity_analysis.result
+            else:
+                analysis_result = continuity_analysis
+                
+            if not isinstance(analysis_result, dict):
+                self.logger.warning(f"Unexpected continuity analysis result type: {type(analysis_result)}")
+                return
+                
+            # 应用连续性策略到各个场景
+            continuity_decisions = analysis_result.get("continuity_decisions", {})
+            
+            for scene in scenes:
+                scene_key = str(scene.scene_number)
+                if scene_key in continuity_decisions:
+                    decision = continuity_decisions[scene_key]
+                    
+                    # 设置图像生成策略
+                    scene.image_generation_strategy = decision.get("strategy", "new")
+                    
+                    # 设置依赖关系
+                    if decision.get("strategy") == "continue_from_previous" and scene.scene_number > 1:
+                        scene.depends_on_scene = scene.scene_number - 1
+                        scene.continuity_reason = decision.get("reason", "")
+                        scene.continuity_confidence = decision.get("confidence", 0.8)
+                        
+                        self.logger.info(
+                            f"🔗 Scene {scene.scene_number} 设置连续性策略: "
+                            f"continue_from_scene_{scene.depends_on_scene} "
+                            f"(confidence: {scene.continuity_confidence})"
+                        )
+                    else:
+                        scene.depends_on_scene = None
+                        scene.continuity_reason = decision.get("reason", "Independent scene")
+                        scene.continuity_confidence = decision.get("confidence", 0.9)
+                        
+                        self.logger.info(
+                            f"🆕 Scene {scene.scene_number} 设置独立生成策略: new"
+                        )
+                        
+            self.logger.info(f"🔗 场景连续性分析完成")
+            
+        except Exception as e:
+            self.logger.error(f"Scene continuity analysis failed: {e}")
+            # 不抛出异常，使用默认策略（所有场景独立生成）
+            for scene in workflow_state.scenes:
+                scene.image_generation_strategy = "new"
+                scene.depends_on_scene = None
