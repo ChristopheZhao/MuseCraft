@@ -430,3 +430,46 @@ if result.get("tool_calls"):
 3. **Intelligence**: Decisions based on content analysis rather than fixed rules
 4. **Maintainability**: Clear separation of concerns between reasoning and execution
 5. **Scalability**: Agent specialization prevents tool overload and improves focus
+
+## Agent Design Principles
+
+### Thinking Mode Policy
+- **Planning agents**: Enable thinking (concept planning, scene design, orchestration)
+- **Execution agents**: Disable thinking (single-pass generation, media ops, file operations)
+- **Mixed agents**: Split phases — upstream planning with thinking, downstream finalization without thinking
+- **No hardcoded complexity rules**: Selection is a priori by agent role, with optional per-call overrides
+
+### Token Budgeting
+- **Two-tier defaults**: Standard (thinking disabled) vs Thinking (larger budget when enabled)
+- **Centralized configuration**: Global defaults in config with .env overrides
+- **No call-site hardcoding**: Keep per-call token overrides optional
+
+### Function Call Constraints
+- **Tool routing**: All tool steps use FC — expose function list to LLM for autonomous tool selection
+- **Thinking decoupling**: Thinking only affects reasoning budget, not FC decision capability
+- **Pure LLM abilities**: Internal capabilities (prompt enhancement, text polishing) use direct LLM calls, not tools
+- **Chinese FC constraints**:
+  - If tools needed: Return only tool_calls
+  - If no tools needed: Return final Chinese answer in content
+  - No explanations, headings, or code blocks
+
+### Tool Architecture Principles
+- **Single extension path**: Tools are the ONLY way for Agents to extend LLM capabilities
+- **External integration mandate**: All side-effects (IO/network/system) MUST be tools
+- **Centralized registration**: Tools registered in tool layer for reuse; implementation swapping doesn't affect Agent code
+- **Tool layer responsibilities**: Dependency validation, timeout/retry/rate limiting, observability
+- **Agent restrictions**: Only orchestration, strategy selection, pure function transforms, prompt assembly
+
+### Memory and Fallback Principles
+- **Memory decoupling**: Context/creative guidance through shared memory interface
+- **Graceful degradation**: Memory unavailability causes warnings, not workflow blocks
+- **External policies**: Read/write rules, tags, TTL through configuration, not hardcoded
+- **Systematic fallbacks**: Tool unavailability triggers fallback paths through tools/memory, not temporary IO
+- **Limited retries**: Configurable retry limits with fallback to minimal viable results
+
+### Anti-Hardcoding Guidelines
+- **Prohibited hardcoding**: No if/else/rule-trees replacing LLM semantic understanding, tool selection, parameter decisions
+- **Tool names/schemas**: Centrally defined in tool registry (configuration, not hardcoding)
+- **Business thresholds**: Move to config files, not scattered magic numbers in code
+- **Domain priors**: Inject into LLM context (system prompts, few-shot) rather than code branches
+- **Decision autonomy**: Preserve LLM Function Call decision rights; Agents declare capability boundaries only

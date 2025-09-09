@@ -172,7 +172,8 @@ def start_celery_worker():
             celery_cmd,
             cwd=Path(__file__).parent.parent,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid  # create new process group for clean shutdown
         )
         
         # Give it a moment to start
@@ -206,7 +207,8 @@ def start_celery_beat():
             beat_cmd,
             cwd=Path(__file__).parent.parent,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid
         )
         
         # Give it a moment to start
@@ -275,7 +277,8 @@ def start_api_server():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                bufsize=1
+                bufsize=1,
+                preexec_fn=os.setsid
             )
             import threading
             def _forward():
@@ -288,7 +291,8 @@ def start_api_server():
             process = subprocess.Popen(
                 api_cmd,
                 cwd=Path(__file__).parent.parent,
-                env=env
+                env=env,
+                preexec_fn=os.setsid
             )
         if enable_reload:
             print("✓ FastAPI server started on http://localhost:8000 (reload ON)")
@@ -318,24 +322,34 @@ def cleanup_processes(processes):
     for name, process in processes.items():
         if process and process.poll() is None:
             print(f"Stopping {name}...")
-            process.terminate()
-            
+            try:
+                # terminate whole process group
+                os.killpg(process.pid, signal.SIGTERM)
+            except Exception:
+                process.terminate()
+
             # Wait for graceful shutdown
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                print(f"Force killing {name}...")
-                process.kill()
+                print(f"Force killing {name} (group)...")
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except Exception:
+                    process.kill()
     
     # 额外清理可能残留的Celery进程
+    # Best-effort extra cleanup of stray processes (Celery worker/beat, watchmedo, uvicorn)
     try:
-        result = subprocess.run(
-            ["pkill", "-f", "celery.*worker"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("✓ Cleaned up residual Celery processes")
+        patterns = [
+            "celery.*worker",
+            "celery.*beat",
+            "watchmedo auto-restart",
+            "uvicorn app.main:app"
+        ]
+        for pat in patterns:
+            subprocess.run(["pkill", "-f", pat], capture_output=True, text=True)
+        print("✓ Attempted cleanup of residual processes (celery/watchmedo/uvicorn)")
     except Exception:
         pass  # 忽略清理错误
 

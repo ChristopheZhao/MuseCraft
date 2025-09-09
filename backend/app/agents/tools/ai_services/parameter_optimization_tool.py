@@ -208,10 +208,12 @@ class ParameterOptimizationTool(AsyncTool):
         try:
             # 使用LLM分析（如果可用的话）
             if self.llm_service:
-                result = await self.llm_service.function_call(
+                # 直接使用 chat_completion 并强制 JSON 输出，避免依赖 FC 计划文本
+                result = await self.llm_service.chat_completion(
                     messages=[{"role": "user", "content": analysis_prompt}],
                     temperature=0.3,
-                    model="glm-4-plus"
+                    model="glm-4-plus",
+                    response_format={"type": "json_object"}
                 )
                 
                 if result.get("content"):

@@ -1,0 +1,15 @@
+name: agents/react_orchestrator
+description: ReAct Orchestrator decision prompts
+version: 1.0.0
+templates:
+  fc_decision_user:
+    description: User message for FC-based orchestrator decision
+    required_variables: [completed_json, failed_json, quality_json, iteration]
+    template: |
+      你是视频生成编排器，请根据当前进度决定下一步：
+      已完成: {{ completed_json }}
+      失败: {{ failed_json }}
+      质量分: {{ quality_json }}
+      本轮: {{ iteration }}
+      可选：继续下一步、重复上一代理一次、或中止并给出原因。
+

@@ -22,6 +22,7 @@ import {
   Clock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useI18n } from '@/i18n/I18nProvider';
 
 interface ResultPreviewProps {
   className?: string;
@@ -31,47 +32,48 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
   const { results } = useAppStore();
   const [selectedType, setSelectedType] = useState<ResultType | 'all'>('all');
   const [selectedResult, setSelectedResult] = useState<GenerationResult | null>(null);
+  const { t } = useI18n();
 
   const resultTypes: { id: ResultType | 'all'; label: string; icon: React.ElementType; count: number }[] = [
     { 
       id: 'all', 
-      label: 'All Results', 
+      label: t('results.all'), 
       icon: Grid, 
       count: results.length 
     },
     { 
       id: 'concept', 
-      label: 'Concepts', 
+      label: t('results.concepts'), 
       icon: Lightbulb, 
       count: results.filter(r => r.type === 'concept').length 
     },
     { 
       id: 'script', 
-      label: 'Scripts', 
+      label: t('results.scripts'), 
       icon: FileText, 
       count: results.filter(r => r.type === 'script').length 
     },
     { 
       id: 'storyboard', 
-      label: 'Storyboards', 
+      label: t('results.storyboards'), 
       icon: Layers, 
       count: results.filter(r => r.type === 'storyboard').length 
     },
     { 
       id: 'image', 
-      label: 'Images', 
+      label: t('results.images'), 
       icon: Image, 
       count: results.filter(r => r.type === 'image').length 
     },
     { 
       id: 'voice', 
-      label: 'Voice', 
+      label: t('results.voice'), 
       icon: Mic, 
       count: results.filter(r => r.type === 'voice').length 
     },
     { 
       id: 'video', 
-      label: 'Videos', 
+      label: t('results.videos'), 
       icon: Video, 
       count: results.filter(r => r.type === 'video').length 
     },
@@ -121,10 +123,10 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
         return (
           <div className="space-y-3">
             <h4 className="font-medium text-gray-900">
-              {result.data?.title || 'Concept Idea'}
+              {result.data?.title || '概念想法'}
             </h4>
             <p className="text-sm text-gray-600 leading-relaxed">
-              {result.data?.description || 'Concept description will appear here...'}
+              {result.data?.description || '概念描述将显示在这里…'}
             </p>
             {result.data?.keyPoints && (
               <ul className="text-sm text-gray-600 space-y-1">
@@ -143,16 +145,16 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
         return (
           <div className="space-y-3">
             <h4 className="font-medium text-gray-900">
-              Script Preview
+              剧本预览
             </h4>
             <div className="bg-gray-50 rounded-lg p-3 font-mono text-sm">
               <pre className="whitespace-pre-wrap text-gray-700">
-                {result.data?.content || 'Script content will appear here...'}
+                {result.data?.content || '剧本内容将显示在这里…'}
               </pre>
             </div>
             {result.data?.duration && (
               <p className="text-xs text-gray-500">
-                Estimated duration: {result.data.duration}s
+                预计时长：{result.data.duration}s
               </p>
             )}
           </div>
@@ -162,19 +164,19 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
         return (
           <div className="space-y-3">
             <h4 className="font-medium text-gray-900">
-              Generated Image
+              生成图片
             </h4>
             <div className="aspect-video bg-gradient-to-br from-gray-100 to-gray-200 rounded-lg flex items-center justify-center">
               <div className="text-center">
                 <Image className="w-12 h-12 text-gray-400 mx-auto mb-2" />
                 <p className="text-sm text-gray-500">
-                  {result.data?.prompt || 'Image preview'}
+                  {result.data?.prompt || '图片预览'}
                 </p>
               </div>
             </div>
             {result.data?.style && (
               <p className="text-xs text-gray-500">
-                Style: {result.data.style}
+                风格：{result.data.style}
               </p>
             )}
           </div>
@@ -184,13 +186,13 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
         return (
           <div className="space-y-3">
             <h4 className="font-medium text-gray-900">
-              Voice Audio
+              配音音频
             </h4>
             <div className="bg-gray-50 rounded-lg p-4 flex items-center space-x-3">
               <Mic className="w-8 h-8 text-primary-500" />
               <div className="flex-1">
                 <p className="text-sm font-medium text-gray-900">
-                  Audio Track {result.data?.trackNumber || 1}
+                  音轨 {result.data?.trackNumber || 1}
                 </p>
                 <p className="text-xs text-gray-500">
                   {result.data?.duration || '30'}s • {result.data?.voice || 'Sarah'}
@@ -206,7 +208,7 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
       default:
         return (
           <div className="text-sm text-gray-600">
-            {result.data?.preview || 'Result preview not available'}
+            {result.data?.preview || '暂无可预览内容'}
           </div>
         );
     }
@@ -218,12 +220,8 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
         <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
           <Eye className="w-8 h-8 text-gray-400" />
         </div>
-        <h3 className="text-lg font-medium text-gray-900 mb-2">
-          No Results Yet
-        </h3>
-        <p className="text-gray-600">
-          Results will appear here as agents complete their tasks
-        </p>
+        <h3 className="text-lg font-medium text-gray-900 mb-2">{t('results.none.title')}</h3>
+        <p className="text-gray-600">{t('results.none.desc')}</p>
       </div>
     );
   }
@@ -233,16 +231,12 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">
-            Intermediate Results
-          </h3>
-          <p className="text-sm text-gray-600">
-            Real-time outputs from AI agents
-          </p>
+          <h3 className="text-lg font-semibold text-gray-900">{t('results.title')}</h3>
+          <p className="text-sm text-gray-600">{t('results.subtitle')}</p>
         </div>
         <button className="flex items-center space-x-2 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
           <RefreshCw className="w-4 h-4" />
-          <span>Refresh</span>
+          <span>{t('results.refresh')}</span>
         </button>
       </div>
 
@@ -300,7 +294,7 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
                       {result.type}
                     </h4>
                     <div className="flex items-center space-x-2 text-xs text-gray-500">
-                      <span>by {result.agent}</span>
+                      <span>来自 {result.agent}</span>
                       <span>•</span>
                       <Clock className="w-3 h-3" />
                       <span>{formatRelativeTime(result.createdAt)}</span>
@@ -333,11 +327,11 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
                 <div className="flex items-center space-x-2">
                   <button className="flex items-center space-x-1 px-2 py-1 text-xs text-gray-600 hover:text-green-600 transition-colors">
                     <ThumbsUp className="w-3 h-3" />
-                    <span>Approve</span>
+                    <span>{t('action.approve')}</span>
                   </button>
                   <button className="flex items-center space-x-1 px-2 py-1 text-xs text-gray-600 hover:text-red-600 transition-colors">
                     <ThumbsDown className="w-3 h-3" />
-                    <span>Reject</span>
+                    <span>{t('action.reject')}</span>
                   </button>
                 </div>
                 
@@ -368,10 +362,10 @@ const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
             {getResultIcon(selectedType as ResultType)}
           </div>
           <h3 className="text-lg font-medium text-gray-900 mb-2">
-            No {selectedType} results yet
+            {t('results.filter.none.title').replace('{type}', String(selectedType))}
           </h3>
           <p className="text-gray-600">
-            Results will appear here when the {selectedType} agent completes its work
+            {t('results.filter.none.desc').replace('{type}', String(selectedType))}
           </p>
         </div>
       )}

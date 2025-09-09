@@ -1,0 +1,20 @@
+SCRIPT_WRITING:
+  type: EPISODIC
+  tags:
+    - scene_references
+  ttl: 7d
+  fields:
+    - script_text
+    - voice_over_text
+    - content_development_arc
+
+CONCEPT_PLANNING:
+  type: CONCEPTUAL
+  tags:
+    - creative_direction
+  ttl: 30d
+  fields:
+    - overview
+    - visual_style_guidance
+    - narrative_flow_strategy
+

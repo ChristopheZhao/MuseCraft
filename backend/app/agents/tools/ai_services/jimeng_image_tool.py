@@ -111,6 +111,13 @@ class JimengImageTool(AsyncTool):
             }
         }
         return schemas.get(action, {})
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """即梦图片工具默认暴露文本生图与图生图"""
+        return {
+            "expose": True,
+            "allowed_actions": ["text_to_image", "image_to_image"]
+        }
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行即梦图片生成操作"""

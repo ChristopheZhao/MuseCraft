@@ -18,13 +18,14 @@ class QualityCheckerAgent(BaseAgent):
     and adherence to requirements
     """
     
-    def __init__(self):
+    def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.QUALITY_CHECKER,
             agent_name="quality_checker",
             timeout_seconds=180,  # 3 minutes for quality analysis
             max_retries=1,
-            tools=["quality_analysis_tool"]  # 🚀 Phase 1.3 - 使用原子性质量分析工具
+            tools=["quality_analysis_tool"],  # 🚀 Phase 1.3 - 使用原子性质量分析工具
+            llms=llms
         )
         # 移除直接AI客户端依赖
         self.file_storage = FileStorageService()
@@ -99,7 +100,11 @@ class QualityCheckerAgent(BaseAgent):
         
         # Perform content quality analysis
         content_quality = await self._analyze_content_quality(
-            concept_plan, composition_timeline, final_video_url
+            concept_plan,
+            composition_timeline,
+            final_video_url,
+            original_concept_plan,
+            video_metadata
         )
         
         await self._update_progress(execution, 60, "Checking requirement compliance", db)
@@ -284,10 +289,12 @@ class QualityCheckerAgent(BaseAgent):
         }
     
     async def _analyze_content_quality(
-        self, 
-        concept_plan: Dict[str, Any], 
+        self,
+        concept_plan: Dict[str, Any],
         composition_timeline: List[Dict],
-        video_url: str
+        video_url: str,
+        original_requirements: Dict[str, Any],
+        video_metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Analyze content quality and coherence"""
         
@@ -329,7 +336,10 @@ class QualityCheckerAgent(BaseAgent):
         
         # Use AI to analyze content if available
         ai_content_analysis = await self._ai_content_analysis(
-            concept_plan, composition_timeline
+            concept_plan,
+            composition_timeline,
+            original_requirements,
+            video_metadata
         )
         
         return {
@@ -342,9 +352,11 @@ class QualityCheckerAgent(BaseAgent):
         }
     
     async def _ai_content_analysis(
-        self, 
-        concept_plan: Dict[str, Any], 
-        composition_timeline: List[Dict]
+        self,
+        concept_plan: Dict[str, Any],
+        composition_timeline: List[Dict],
+        original_requirements: Dict[str, Any],
+        video_metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Use AI to analyze content quality"""
         
@@ -362,13 +374,26 @@ class QualityCheckerAgent(BaseAgent):
             quality_model = ai_config_manager.get_model_for_agent("quality_checker")
             model_config = ai_config_manager.get_model_config(quality_model)
             
+            # 构造视频数据摘要供质量分析工具使用
+            try:
+                total_scenes = len(composition_timeline or [])
+            except Exception:
+                total_scenes = 0
+            video_data = {
+                "total_scenes": total_scenes,
+                "actual_duration": video_metadata.get("duration", 0),
+                "file_size": video_metadata.get("file_size_mb", 0.0),
+                "resolution": video_metadata.get("resolution", ""),
+                "video_quality": ""  # 占位：可由技术分析结果提供
+            }
+
             # 🚀 Phase 1.3 - 使用原子性质量分析工具
             response = await self.use_tool(
                 tool_name="quality_analysis_tool",
                 action="analyze_quality",
                 parameters={
                     "video_data": video_data,
-                    "original_requirements": original_concept_plan,
+                    "original_requirements": original_requirements,
                     "quality_criteria": {},  # 可以从配置中获取
                     "model": quality_model,
                     "temperature": model_config.temperature if model_config else 0.3,

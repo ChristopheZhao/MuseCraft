@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     OSS_ENDPOINT: str = config("OSS_ENDPOINT", default="https://oss-cn-beijing.aliyuncs.com")
     OSS_BUCKET_NAME: Optional[str] = config("OSS_BUCKET_NAME", default=None)
     OSS_REGION: str = config("OSS_REGION", default="cn-beijing")
+    # OSS logical directories for categorization
+    OSS_IMAGE_DIR: str = config("OSS_IMAGE_DIR", default="images")
+    OSS_AUDIO_DIR: str = config("OSS_AUDIO_DIR", default="audio")
+    OSS_CONTINUITY_DIR: str = config("OSS_CONTINUITY_DIR", default="continuity_frames")
+    OSS_STAGING_DIR: str = config("OSS_STAGING_DIR", default="staging")
+    OSS_VIDEO_INPUT_PREFIX: str = config("OSS_VIDEO_INPUT_PREFIX", default="video_generation_input")
     
     # AI Service APIs - International
     OPENAI_API_KEY: Optional[str] = config("OPENAI_API_KEY", default=None)
@@ -150,7 +156,8 @@ class Settings(BaseSettings):
     PUBLIC_API_URL: str = config("PUBLIC_API_URL", default="http://localhost:8000")
     
     # Logging Settings
-    LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
+    # LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
+    LOG_LEVEL: str = config("LOG_LEVEL", default="DEBUG")
     LOG_FORMAT: str = config("LOG_FORMAT", default="json")
     
     # Video Generation System Configuration
@@ -174,9 +181,32 @@ class Settings(BaseSettings):
     AVAILABLE_SCENE_DURATIONS: List[int] = [5, 10]  # CogVideoX-3支持的离散时长选项
     DEFAULT_SCENE_DURATION: int = config("DEFAULT_SCENE_DURATION", default=5, cast=int)  # 默认场景时长
     # 废弃连续范围配置，改为离散选项约束
+
+    # Prompt Enhancement Configuration
+    ENHANCE_PROMPT_MAX_TOKENS: int = config("ENHANCE_PROMPT_MAX_TOKENS", default=10240, cast=int)
+    ENHANCE_PROMPT_RETRY_MAX_TOKENS: int = config("ENHANCE_PROMPT_RETRY_MAX_TOKENS", default=2048, cast=int)
+    
+    # Global LLM token tiers (standard vs thinking)
+    LLM_MAX_TOKENS_STANDARD: int = config("LLM_MAX_TOKENS_STANDARD", default=12800, cast=int)
+    LLM_MAX_TOKENS_THINKING: int = config("LLM_MAX_TOKENS_THINKING", default=20000, cast=int)
+    # Image/Video analysis + prompt generation token budgets
+    IMAGE_PROMPT_FROM_SCENE_MAX_TOKENS: int = config("IMAGE_PROMPT_FROM_SCENE_MAX_TOKENS", default=7168, cast=int)
+    IMAGE_STYLE_ANALYSIS_MAX_TOKENS: int = config("IMAGE_STYLE_ANALYSIS_MAX_TOKENS", default=7168, cast=int)
+    VISUAL_FEATURES_EXTRACTION_MAX_TOKENS: int = config("VISUAL_FEATURES_EXTRACTION_MAX_TOKENS", default=12800, cast=int)
+    IMAGE_GENERATOR_TEMPLATE_MAX_TOKENS: int = config("IMAGE_GENERATOR_TEMPLATE_MAX_TOKENS", default=12800, cast=int)
+    VIDEO_ANALYSIS_MAX_TOKENS: int = config("VIDEO_ANALYSIS_MAX_TOKENS", default=4096, cast=int)
     # MIN_SCENE_DURATION: float = config("MIN_SCENE_DURATION", default=2.0, cast=float)  # 已废弃
     # MAX_SCENE_DURATION: float = config("MAX_SCENE_DURATION", default=15.0, cast=float)  # 已废弃
     TRANSITION_DURATION: float = config("TRANSITION_DURATION", default=0.5, cast=float)  # 过渡时长
+
+    # Strictness and degrade controls for image prompt generation
+    IMAGE_PROMPT_STRICT_MODE: bool = config("IMAGE_PROMPT_STRICT_MODE", default=False, cast=bool)
+    IMAGE_PROMPT_ALLOW_DEGRADE: bool = config("IMAGE_PROMPT_ALLOW_DEGRADE", default=True, cast=bool)
+
+    # Script Writer dynamic timeout configuration
+    SCRIPT_WRITER_TIMEOUT_BASE: int = config("SCRIPT_WRITER_TIMEOUT_BASE", default=180, cast=int)
+    SCRIPT_WRITER_TIMEOUT_PER_SCENE: int = config("SCRIPT_WRITER_TIMEOUT_PER_SCENE", default=30, cast=int)
+    SCRIPT_WRITER_TIMEOUT_MAX: int = config("SCRIPT_WRITER_TIMEOUT_MAX", default=900, cast=int)
     
     # Audio Configuration - 替换硬编码音频参数
     DEFAULT_AUDIO_DURATION: float = config("DEFAULT_AUDIO_DURATION", default=30.0, cast=float)  # 默认音频时长
@@ -188,6 +218,55 @@ class Settings(BaseSettings):
     # Video Provider Specific Configuration
     COGVIDEOX_DEFAULT_DURATION: int = config("COGVIDEOX_DEFAULT_DURATION", default=5, cast=int)  # CogVideoX默认时长
     COGVIDEOX_MAX_DURATION: int = config("COGVIDEOX_MAX_DURATION", default=10, cast=int)  # CogVideoX最大时长
+
+    # Composer options
+    COMPOSER_INJECT_SILENT_AUDIO: bool = config("COMPOSER_INJECT_SILENT_AUDIO", default=True, cast=bool)
+    COMPOSER_SILENT_AUDIO_SAMPLE_RATE: int = config("COMPOSER_SILENT_AUDIO_SAMPLE_RATE", default=48000, cast=int)
+    COMPOSER_SILENT_AUDIO_CHANNELS: int = config("COMPOSER_SILENT_AUDIO_CHANNELS", default=2, cast=int)
+    
+    # Agent ReAct Configuration - ReAct循环最大迭代次数配置（业务逻辑配置，不放在.env）
+    VIDEO_GENERATOR_MAX_ITERATIONS: int = 14   # 视频生成Agent最大迭代次数
+    CONCEPT_PLANNER_MAX_ITERATIONS: int = 4  # 概念规划Agent最大迭代次数
+    IMAGE_GENERATOR_MAX_ITERATIONS: int = 10   # 图像生成Agent最大迭代次数
+    ORCHESTRATOR_MAX_ITERATIONS: int = 10     # 编排Agent最大迭代次数
+    ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
+    
+    # Video continuity persistence (domain policy)
+    VIDEO_PERSIST_LAST_FRAME: bool = config("VIDEO_PERSIST_LAST_FRAME", default=False, cast=bool)
+
+    # ReAct execution tuning (configurable via .env)
+    REACT_NO_PROGRESS_MAX_ROUNDS: int = config("REACT_NO_PROGRESS_MAX_ROUNDS", default=2, cast=int)
+    REACT_VIDEO_BATCH_SIZE: int = config("REACT_VIDEO_BATCH_SIZE", default=2, cast=int)
+    REACT_IMAGE_BATCH_SIZE: int = config("REACT_IMAGE_BATCH_SIZE", default=3, cast=int)
+    ORCHESTRATOR_MAX_REPEAT_PER_STEP: int = config("ORCHESTRATOR_MAX_REPEAT_PER_STEP", default=1, cast=int)
+    ORCHESTRATOR_DECISION_MODEL: str = config("ORCHESTRATOR_DECISION_MODEL", default="glm-4.5-air")
+
+    # ReAct WF observation/commit policy
+    # internal: 仅使用inner_react_state判断完成；wf: 合并WorkflowState中的已完成资产（用于超时/重试后的断点续跑）
+    REACT_OBSERVE_COMPLETION_SOURCE: str = config("REACT_OBSERVE_COMPLETION_SOURCE", default="internal")
+    # True: 仅在任务完成时一次性写入WF；False: 每轮生成成功后即刻写入WF（便于断点续跑）
+    REACT_WRITE_WF_ON_COMPLETE_ONLY: bool = config("REACT_WRITE_WF_ON_COMPLETE_ONLY", default=True, cast=bool)
+    
+    
+    # Content preview configuration for ReAct text observations
+    CONTENT_PREVIEW_CHARS: int = config("CONTENT_PREVIEW_CHARS", default=600, cast=int)
+    # Whether to include a verbose tools overview block in system messages for FC (usually unnecessary and may distract)
+    FC_INCLUDE_TOOLS_OVERVIEW: bool = config("FC_INCLUDE_TOOLS_OVERVIEW", default=False, cast=bool)
+
+    # ReAct scratchpad/summary injection (Agent-level, not Base)
+    REACT_INJECT_SCRATCHPAD: bool = config("REACT_INJECT_SCRATCHPAD", default=True, cast=bool)
+    REACT_SCRATCHPAD_STEPS: int = config("REACT_SCRATCHPAD_STEPS", default=2, cast=int)
+    REACT_SCRATCHPAD_MAX_CHARS: int = config("REACT_SCRATCHPAD_MAX_CHARS", default=800, cast=int)
+
+    # Tool/runtime timeouts (config over constants)
+    DEFAULT_TOOL_TIMEOUT: int = config("DEFAULT_TOOL_TIMEOUT", default=120, cast=int)  # 默认工具超时
+    VIDEO_GENERATION_TOOL_TIMEOUT: int = config("VIDEO_GENERATION_TOOL_TIMEOUT", default=300, cast=int)
+    IMAGE_GENERATION_TOOL_TIMEOUT: int = config("IMAGE_GENERATION_TOOL_TIMEOUT", default=180, cast=int)
+    AUDIO_GENERATION_TOOL_TIMEOUT: int = config("AUDIO_GENERATION_TOOL_TIMEOUT", default=240, cast=int)
+    # HTTP下载类（如从第三方拉取音频/视频到本地）超时，供 file_storage_tool 使用
+    FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=240, cast=int)
+    # Agent-level end-to-end timeouts
+    VIDEO_GENERATOR_TIMEOUT_SECONDS: int = config("VIDEO_GENERATOR_TIMEOUT_SECONDS", default=1800, cast=int)
     
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

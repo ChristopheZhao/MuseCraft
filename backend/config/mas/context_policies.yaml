@@ -1,0 +1,29 @@
+IMAGE_GENERATION:
+  requires:
+    - { type: CONCEPTUAL, tags: ["creative_direction"] }
+    - { type: EPISODIC, tags: ["scene_design"], scene: current }
+    - { type: CONTINUITY, scene: previous }
+  scope:
+    workflow: required
+    scene: optional
+  max_items: 5
+
+VIDEO_GENERATION:
+  requires:
+    - { type: CONCEPTUAL, tags: ["creative_direction"] }
+    - { type: EPISODIC, tags: ["scene_design"], scene: current }
+    - { type: CONTINUITY, scene: previous }
+  scope:
+    workflow: required
+    scene: optional
+  max_items: 15
+
+SCRIPT_WRITING:
+  requires:
+    - { type: CONCEPTUAL }
+    - { type: EPISODIC, tags: ["scene_design"], scene: current }
+  scope:
+    workflow: required
+    scene: optional
+  max_items: 5
+

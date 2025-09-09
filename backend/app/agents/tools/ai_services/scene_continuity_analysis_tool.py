@@ -203,7 +203,20 @@ class SceneContinuityAnalysisTool(AsyncTool):
         all_scenes: List[Dict[str, Any]] = None
     ) -> str:
         """构建连续性分析提示词"""
-        
+        # 注入 MAS 全局与通用连续性先验（分层系统指令合成，不暴露工具名/参数）
+        sys_blocks: List[str] = []
+        try:
+            from ....core.prompt_manager import get_prompt_manager
+            pm = get_prompt_manager()
+            mas_sys = pm.render_template("mas_system", "system", variables={}, use_cache=True, auto_reload=False)
+            cont_sys = pm.render_template("continuity_priors", "system", variables={}, use_cache=True, auto_reload=False)
+            if mas_sys:
+                sys_blocks.append(mas_sys.strip())
+            if cont_sys:
+                sys_blocks.append(cont_sys.strip())
+        except Exception:
+            pass
+
         # 如果包含首个场景上下文，则显示完整信息但说明不需要分析首个场景
         if include_first_scene_context and all_scenes:
             first_scene = all_scenes[0]
@@ -232,6 +245,20 @@ class SceneContinuityAnalysisTool(AsyncTool):
         
         context_note = "**注意：首个场景已自动设为独立生成（new），无需分析。**\n\n" if include_first_scene_context else ""
         
+        # 动态构造 JSON 示例键，覆盖本次需要分析的所有场景编号，避免模型只返回部分（例如只到4号而漏掉5号）
+        try:
+            scene_keys_example = []
+            for sc in scenes:
+                try:
+                    sid = int(sc.get('scene_number', 0) or 0)
+                except Exception:
+                    sid = 0
+                if sid:
+                    scene_keys_example.append(f'        "{sid}": {{\n            "strategy": "continue_from_previous" | "new",\n            "reason": "具体原因说明",\n            "confidence": 0.0-1.0\n        }}')
+            example_body = (",\n".join(scene_keys_example)) if scene_keys_example else '        "2": {"strategy": "new", "reason": "", "confidence": 0.8}'
+        except Exception:
+            example_body = '        "2": {"strategy": "new", "reason": "", "confidence": 0.8}'
+
         prompt = f"""你是一个专业的视频制作顾问，需要分析场景间的逻辑关系，判断当前场景是否需要从上个场景的结尾画面状态开始，以保持实体状态和事件发展的视觉连贯性。
 
 {context_note}**整体叙事信息：**
@@ -258,27 +285,14 @@ class SceneContinuityAnalysisTool(AsyncTool):
    - 实体状态与前场景无直接关联
    - 叙事节奏需要重新开始的情况
 
-**输出要求：**
-返回JSON格式，只包含第2个场景及之后场景的分析结果（首个场景已自动设为new）：
+**输出要求（严格）：**
+- 返回JSON对象，只包含“本次需要分析的所有场景”的决策（即上文列出的场景，首个场景已另行设为 new 不在此列）。
+- 逐个场景编号给出决策；缺一不可，不要省略任何编号。
 
 ```json
 {{
     "continuity_decisions": {{
-        "2": {{
-            "strategy": "continue_from_previous" | "new",
-            "reason": "具体原因说明",
-            "confidence": 0.0-1.0
-        }},
-        "3": {{
-            "strategy": "continue_from_previous" | "new",
-            "reason": "具体原因说明",
-            "confidence": 0.0-1.0
-        }},
-        "4": {{
-            "strategy": "continue_from_previous" | "new",
-            "reason": "具体原因说明",
-            "confidence": 0.0-1.0
-        }}
+{example_body}
     }},
     "analysis_summary": "分析总结（不包含首个场景）"
 }}
@@ -286,6 +300,9 @@ class SceneContinuityAnalysisTool(AsyncTool):
 
 请严格按照JSON格式返回，分析要客观准确。"""
 
+        # 将系统先验与具体任务提示合并为单一文本（工具层暂不支持多role消息）
+        if sys_blocks:
+            return "\n\n".join(sys_blocks + [prompt]).strip()
         return prompt
     
     def _standardize_continuity_analysis(

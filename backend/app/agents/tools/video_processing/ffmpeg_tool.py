@@ -12,6 +12,10 @@ from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
+try:
+    from ....core.config import settings as _app_settings
+except Exception:
+    _app_settings = None
 
 
 class FFmpegTool(AsyncTool):
@@ -68,9 +72,20 @@ class FFmpegTool(AsyncTool):
         except (subprocess.TimeoutExpired, FileNotFoundError):
             raise ToolError("FFmpeg not installed or not in PATH", self.metadata.name)
         
-        # 配置参数
-        self.output_dir = self.config.get("output_dir", "/tmp/video_output")
-        self.temp_dir = self.config.get("temp_dir", "/tmp/ffmpeg_temp")
+        # 配置参数（默认落盘到项目的 TEMP_PATH 下，保持与存储工具一致）
+        default_base = None
+        try:
+            if _app_settings is not None and getattr(_app_settings, 'TEMP_PATH', None):
+                default_base = _app_settings.TEMP_PATH
+        except Exception:
+            default_base = None
+        if not default_base:
+            default_base = "/tmp"
+        default_output_dir = os.path.join(default_base, "video_output")
+        default_temp_dir = os.path.join(default_base, "ffmpeg_temp")
+
+        self.output_dir = self.config.get("output_dir", default_output_dir)
+        self.temp_dir = self.config.get("temp_dir", default_temp_dir)
         self.max_resolution = self.config.get("max_resolution", "1920x1080")
         self.default_fps = self.config.get("default_fps", 30)
         self.default_bitrate = self.config.get("default_bitrate", "2M")
@@ -87,6 +102,7 @@ class FFmpegTool(AsyncTool):
             "compose_video",
             "convert_format", 
             "add_audio",
+            "extract_last_frame",
             "extract_frames",
             "create_slideshow",
             "add_subtitles",
@@ -100,6 +116,20 @@ class FFmpegTool(AsyncTool):
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         schemas = {
+            "extract_last_frame": {
+                "type": "object",
+                "properties": {
+                    "video_path": {"type": "string", "description": "本地视频路径"},
+                    "video_url": {"type": "string", "description": "可下载的视频URL（与video_path二选一）"},
+                    "output_format": {"type": "string", "enum": ["jpg", "png"], "default": "jpg"},
+                    "output_quality": {"type": "integer", "minimum": 2, "maximum": 31, "default": 2, "description": "jpg质量（qscale），数值越小质量越高"},
+                    "resize_width": {"type": "integer", "description": "可选，缩放宽度"},
+                    "resize_height": {"type": "integer", "description": "可选，缩放高度"},
+                    "time_tolerance": {"type": "number", "default": 0.1, "description": "尾帧时间容忍（秒），避免容器尾部空白"},
+                    "output_filename": {"type": "string", "description": "输出文件名（可选）"}
+                },
+                "required": []
+            },
             "compose_video": {
                 "type": "object",
                 "properties": {
@@ -172,6 +202,8 @@ class FFmpegTool(AsyncTool):
             return await self._convert_format(params)
         elif action == "add_audio":
             return await self._add_audio(params)
+        elif action == "extract_last_frame":
+            return await self._extract_last_frame(params)
         elif action == "extract_frames":
             return await self._extract_frames(params)
         elif action == "create_slideshow":
@@ -360,19 +392,55 @@ class FFmpegTool(AsyncTool):
             
             output_path = os.path.join(self.output_dir, output_filename)
             
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", video_file,
-                "-i", audio_file,
-                "-filter_complex", 
-                f"[0:a]volume={video_volume}[va];[1:a]volume={audio_volume}[bg];[va][bg]amix=inputs=2:duration=first[a]",
-                "-map", "0:v",
-                "-map", "[a]",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                output_path
-            ]
+            # 检查视频是否包含音频流
+            def _has_audio_stream(path: str) -> bool:
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    return probe.returncode == 0 and bool((probe.stdout or "").strip())
+                except Exception:
+                    # 退化：尝试通过 ffmpeg -i 输出判断
+                    try:
+                        p = subprocess.run(["ffmpeg", "-i", path], capture_output=True, text=True)
+                        out = (p.stderr or "") + (p.stdout or "")
+                        return "Audio:" in out or "Stream #0:1: Audio" in out or ": Audio:" in out
+                    except Exception:
+                        return False
+
+            video_has_audio = _has_audio_stream(video_file)
+
+            if video_has_audio:
+                # 正常混音：视频原音 + 背景音乐
+                filter_complex = f"[0:a]volume={video_volume}[va];[1:a]volume={audio_volume}[bg];[va][bg]amix=inputs=2:duration=first[a]"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", video_file,
+                    "-i", audio_file,
+                    "-filter_complex", filter_complex,
+                    "-map", "0:v",
+                    "-map", "[a]",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    output_path
+                ]
+            else:
+                # 视频无音轨：直接将背景音乐作为音频轨
+                filter_complex = f"[1:a]volume={audio_volume}[bg]"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", video_file,
+                    "-i", audio_file,
+                    "-filter_complex", filter_complex,
+                    "-map", "0:v",
+                    "-map", "[bg]",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    output_path
+                ]
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -413,39 +481,73 @@ class FFmpegTool(AsyncTool):
                 if not os.path.exists(img):
                     raise ToolError(f"Image not found: {img}", self.metadata.name)
             
+            if len(images) == 0:
+                raise ToolError("No images provided for slideshow", self.metadata.name)
+            
             output_path = os.path.join(self.output_dir, output_filename)
             
-            # 创建图片输入列表
-            inputs = []
-            filter_complex = []
-            
-            for i, img in enumerate(images):
-                inputs.extend(["-loop", "1", "-t", str(duration_per_image), "-i", img])
+            # 如果只有一张图片，简单处理
+            if len(images) == 1:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-t", str(duration_per_image),
+                    "-i", images[0],
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(self.default_fps)
+                ]
                 
-                # 添加转场效果
-                if i > 0 and transition_effect != "none":
-                    if transition_effect == "fade":
-                        filter_complex.append(f"[{i-1}:v][{i}:v]xfade=transition=fade:duration=0.5:offset={duration_per_image-0.5}[v{i}]")
+                if audio_file and os.path.exists(audio_file):
+                    cmd.extend(["-i", audio_file, "-c:a", "aac", "-shortest"])
+                else:
+                    cmd.extend(["-an"])  # 无音频
+                
+                cmd.append(output_path)
             
-            cmd = ["ffmpeg", "-y"] + inputs
-            
-            if filter_complex:
-                cmd.extend(["-filter_complex", ";".join(filter_complex)])
-                cmd.extend(["-map", f"[v{len(images)-1}]"])
             else:
-                # 简单拼接
-                cmd.extend(["-filter_complex", f"concat=n={len(images)}:v=1:a=0[v]", "-map", "[v]"])
+                # 多张图片，使用更稳定的实现
+                inputs = []
+                for i, img in enumerate(images):
+                    inputs.extend(["-loop", "1", "-t", str(duration_per_image), "-i", img])
+                
+                cmd = ["ffmpeg", "-y"] + inputs
+                
+                # 根据转场效果选择不同的filter
+                if transition_effect == "fade" and len(images) > 1:
+                    # 构建xfade链式转场
+                    fade_duration = 0.5
+                    fade_offset = duration_per_image - fade_duration
+                    
+                    # 构建filter_complex链
+                    filter_parts = []
+                    current_label = "[0:v]"
+                    
+                    for i in range(1, len(images)):
+                        next_label = f"[v{i}]" if i < len(images) - 1 else "[out]"
+                        filter_parts.append(f"{current_label}[{i}:v]xfade=transition=fade:duration={fade_duration}:offset={fade_offset}{next_label}")
+                        current_label = f"[v{i}]"
+                    
+                    filter_complex = ";".join(filter_parts)
+                    cmd.extend(["-filter_complex", filter_complex, "-map", "[out]"])
+                else:
+                    # 简单拼接，无转场
+                    cmd.extend(["-filter_complex", f"concat=n={len(images)}:v=1:a=0[v]", "-map", "[v]"])
+                
+                # 添加音频
+                if audio_file and os.path.exists(audio_file):
+                    cmd.extend(["-i", audio_file, "-c:a", "aac", "-shortest"])
+                else:
+                    cmd.extend(["-an"])  # 无音频
+                
+                cmd.extend([
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(self.default_fps),
+                    output_path
+                ])
             
-            # 添加音频
-            if audio_file and os.path.exists(audio_file):
-                cmd.extend(["-i", audio_file, "-c:a", "aac", "-shortest"])
-            
-            cmd.extend([
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-r", str(self.default_fps),
-                output_path
-            ])
+            self.logger.info(f"Creating slideshow with command: {' '.join(cmd[:10])}...")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -460,6 +562,7 @@ class FFmpegTool(AsyncTool):
             
             if process.returncode != 0:
                 error_msg = stderr.decode() if stderr else "Unknown FFmpeg error"
+                self.logger.error(f"Slideshow creation failed: {error_msg}")
                 raise ToolError(f"Slideshow creation failed: {error_msg}", self.metadata.name)
             
             return {
@@ -468,10 +571,12 @@ class FFmpegTool(AsyncTool):
                 "image_count": len(images),
                 "duration_per_image": duration_per_image,
                 "total_duration": len(images) * duration_per_image,
-                "has_audio": audio_file is not None
+                "has_audio": audio_file is not None,
+                "transition_effect": transition_effect
             }
             
         except Exception as e:
+            self.logger.error(f"Slideshow creation error: {str(e)}")
             raise ToolError(f"Slideshow creation failed: {str(e)}", self.metadata.name)
     
     async def _get_video_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -568,3 +673,209 @@ class FFmpegTool(AsyncTool):
         elif action == "get_video_info":
             if not parameters.get("file_path"):
                 raise ToolValidationError("file_path is required for get_video_info")
+        
+        elif action == "extract_last_frame":
+            if not parameters.get("video_path") and not parameters.get("video_url"):
+                raise ToolValidationError("video_path or video_url is required for extract_last_frame")
+
+    async def _extract_last_frame(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """提取视频尾帧（或接近尾帧的一帧）"""
+        try:
+            video_path = params.get("video_path")
+            video_url = params.get("video_url")
+            output_format = params.get("output_format", "jpg")
+            q = int(params.get("output_quality", 2))
+            resize_w = params.get("resize_width")
+            resize_h = params.get("resize_height")
+            tol = float(params.get("time_tolerance", 0.1))
+            output_filename = params.get("output_filename")
+
+            # 若提供URL，下载到临时文件
+            temp_input = None
+            if video_url and not video_path:
+                import urllib.request
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=self.temp_dir, suffix=".mp4")
+                os.close(tmp_fd)
+                urllib.request.urlretrieve(video_url, tmp_path)
+                video_path = tmp_path
+                temp_input = tmp_path
+
+            if not video_path or not os.path.exists(video_path):
+                raise ToolError("Video file not found", self.metadata.name)
+
+            # 探测时长
+            info = await self._get_video_info({"file_path": video_path})
+            duration = float(info.get("duration", 0.0))
+            ts = max(duration - tol, 0.0)
+
+            # 输出文件
+            if not output_filename:
+                base = os.path.splitext(os.path.basename(video_path))[0]
+                output_filename = f"{base}_last_frame.{output_format}"
+            out_path = os.path.join(self.output_dir, output_filename)
+
+            # 构建vf
+            vf = None
+            if resize_w and resize_h:
+                vf = f"scale={resize_w}:{resize_h}"
+            elif resize_w:
+                vf = f"scale={resize_w}:-1:force_original_aspect_ratio=decrease"
+            elif resize_h:
+                vf = f"scale=-1:{resize_h}:force_original_aspect_ratio=decrease"
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{ts}",
+                "-i", video_path,
+                "-frames:v", "1",
+            ]
+            if output_format == "jpg":
+                cmd += ["-q:v", str(q)]
+            if vf:
+                cmd += ["-vf", vf]
+            cmd += [out_path]
+
+            self.logger.info(f"Extract last frame: {' '.join(cmd)}")
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
+            if process.returncode != 0:
+                raise ToolError(f"FFmpeg frame extraction failed: {stderr.decode()}", self.metadata.name)
+
+            # 获取图片信息（尺寸可从视频info近似或二次读取）
+            result = {
+                "image_path": out_path,
+                "duration": duration,
+                "frame_ts": ts,
+                "width": info.get("width"),
+                "height": info.get("height")
+            }
+
+            # 清理临时下载
+            if temp_input:
+                try:
+                    os.unlink(temp_input)
+                except Exception:
+                    pass
+
+            return result
+        except asyncio.TimeoutError:
+            raise ToolError("Frame extraction timeout", self.metadata.name)
+        except Exception as e:
+            raise ToolError(f"Extract last frame failed: {str(e)}", self.metadata.name)
+
+    async def _merge_videos(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """拼接多个视频片段为一个视频（无音频混合）。"""
+        try:
+            video_clips = params.get("video_clips") or []
+            output_filename = params.get("output_filename") or "merged_output.mp4"
+            if not video_clips or not isinstance(video_clips, list):
+                raise ToolValidationError("video_clips is required and must be a list", self.metadata.name)
+
+            # 校验输入文件存在
+            for clip in video_clips:
+                if not os.path.exists(clip):
+                    raise ToolError(f"Video clip not found: {clip}", self.metadata.name)
+
+            output_path = os.path.join(self.output_dir, output_filename)
+
+            # 单文件：直接复制到输出目录
+            if len(video_clips) == 1:
+                import shutil
+                shutil.copy2(video_clips[0], output_path)
+                return {
+                    "output_path": output_path,
+                    "clips_processed": 1
+                }
+
+            # 多文件：使用 concat demuxer 并统一编码，避免编码不一致导致失败
+            temp_file_list = os.path.join(self.temp_dir, f"filelist_{os.getpid()}.txt")
+            with open(temp_file_list, 'w') as f:
+                for clip in video_clips:
+                    f.write(f"file '{os.path.abspath(clip)}'\n")
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", temp_file_list,
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(self.default_fps),
+                "-an",
+                output_path
+            ]
+
+            self.logger.info(f"Merging videos: {' '.join(cmd)}")
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
+
+            # 清理临时文件
+            try:
+                os.unlink(temp_file_list)
+            except Exception:
+                pass
+
+            if process.returncode != 0:
+                err = stderr.decode() if stderr else "Unknown FFmpeg error"
+                raise ToolError(f"FFmpeg merge failed: {err}", self.metadata.name)
+
+            # 可选：为合成结果注入静音轨（配置开关），便于后续统一混音流程
+            try:
+                from ....core.config import settings as _app_settings
+                inject_silent = bool(getattr(_app_settings, 'COMPOSER_INJECT_SILENT_AUDIO', False))
+                sr = int(getattr(_app_settings, 'COMPOSER_SILENT_AUDIO_SAMPLE_RATE', 48000))
+                ch = int(getattr(_app_settings, 'COMPOSER_SILENT_AUDIO_CHANNELS', 2))
+            except Exception:
+                inject_silent = False
+                sr, ch = 48000, 2
+
+            def _has_audio_stream(path: str) -> bool:
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    return probe.returncode == 0 and bool((probe.stdout or "").strip())
+                except Exception:
+                    return False
+
+            if inject_silent and not _has_audio_stream(output_path):
+                temp_out = os.path.join(self.output_dir, f"temp_{os.path.basename(output_path)}")
+                cmd2 = [
+                    "ffmpeg", "-y",
+                    "-i", output_path,
+                    "-f", "lavfi",
+                    "-i", f"anullsrc=channel_layout={'stereo' if ch==2 else 'mono'}:sample_rate={sr}",
+                    "-shortest",
+                    "-map", "0:v",
+                    "-map", "1:a",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    temp_out
+                ]
+                proc2 = await asyncio.create_subprocess_exec(
+                    *cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _, err2 = await asyncio.wait_for(proc2.communicate(), timeout=self.timeout)
+                if proc2.returncode == 0:
+                    try:
+                        os.replace(temp_out, output_path)
+                    except Exception:
+                        pass
+                else:
+                    self.logger.warning(f"Inject silent audio failed: {err2.decode() if err2 else ''}")
+
+            return {"output_path": output_path, "clips_processed": len(video_clips)}
+        except asyncio.TimeoutError:
+            raise ToolError("Video merge timeout", self.metadata.name)
+        except Exception as e:
+            raise ToolError(f"Video merge failed: {str(e)}", self.metadata.name)

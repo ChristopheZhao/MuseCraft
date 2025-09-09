@@ -54,16 +54,7 @@ class LLMServiceInterface(ABC):
         """Function Call功能 - 核心智能决策能力"""
         pass
     
-    @abstractmethod
-    async def structured_generation(
-        self,
-        prompt: str,
-        schema: Dict[str, Any] = None,
-        model: str = None,
-        **kwargs  
-    ) -> Dict[str, Any]:
-        """结构化内容生成（JSON等）"""
-        pass
+    # 取消 structured_generation：统一通过 chat_completion + response_format 获取结构化输出
     
     @abstractmethod
     def get_supported_models(self) -> List[str]:

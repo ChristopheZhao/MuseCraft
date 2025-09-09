@@ -1,0 +1,46 @@
+name: agents/orchestrator
+description: Orchestrator decision prompts
+version: 1.0.0
+templates:
+  decision_system:
+    description: System instruction for workflow step decision
+    required_variables: [primary_role]
+    template: |
+      你是{{ primary_role or "工作流编排器" }}，基于已完成事实选择下一步行动。
+      输出必须为结构化 JSON（不添加多余文字、无代码块围栏）。
+      当存在可调用的编排控制工具时，可使用 Function Call；否则请严格输出如下 JSON：
+      {
+        "decision": "repeat_agent|proceed_next|halt_workflow",
+        "rationale": "做出该决策的关键依据（简短）",
+        "subtask_state": "complete|partial|blocked|max_iter_reached|error",
+        "loop_end_reason": "自然完成/达到迭代上限/等待依赖/其他",
+        "pending_count": 0,
+        "pending_ids": [],
+        "completed_count": 0,
+        "failed_count": 0
+      }
+      说明：
+      - decision 仅取三者之一；
+      - subtask_state 用于表达当前子任务在本轮结束时的内部状态；
+      - pending/complete/failed 计数用于编排可观测性。
+
+  decision_user:
+    description: User message containing neutral facts for decision
+    required_variables: [agent_name, meta_json, summary_json, success_count, fail_count]
+    template: |
+      当前Agent: {{ agent_name }}
+      react_metadata: {{ meta_json }}
+      summary: {{ summary_json }}
+      本轮结果：success={{ success_count }}, failed={{ fail_count }}
+      任务：基于上述事实与状态，输出严格 JSON（不含多余文字）：
+      {
+        "decision": "repeat_agent|proceed_next|halt_workflow",
+        "rationale": "…",
+        "subtask_state": "complete|partial|blocked|max_iter_reached|error",
+        "loop_end_reason": "…",
+        "pending_count": <int>,
+        "pending_ids": <int数组>,
+        "completed_count": <int>,
+        "failed_count": <int>
+      }
+      注意：仅输出 JSON 对象本身。

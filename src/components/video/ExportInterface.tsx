@@ -23,6 +23,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useI18n } from '@/i18n/I18nProvider';
 
 interface ExportFormat {
   id: string;
@@ -45,6 +46,7 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
   videoUrl,
   className,
 }) => {
+  const { t } = useI18n();
   const { currentRequest, addNotification } = useAppStore();
   const [selectedFormat, setSelectedFormat] = useState<string>('mp4-1080p');
   const [isExporting, setIsExporting] = useState(false);
@@ -59,8 +61,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
   const exportFormats: ExportFormat[] = [
     {
       id: 'mp4-4k',
-      name: '4K Ultra HD',
-      description: 'Best quality for professional use',
+      name: '4K 超高清',
+      description: '专业用途，最佳画质',
       resolution: '3840×2160',
       aspectRatio: '16:9',
       fileSize: '~200MB',
@@ -69,8 +71,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
     },
     {
       id: 'mp4-1080p',
-      name: 'Full HD',
-      description: 'High quality for most platforms',
+      name: '全高清（1080p）',
+      description: '大多数平台的高质量选择',
       resolution: '1920×1080',
       aspectRatio: '16:9',
       fileSize: '~80MB',
@@ -79,8 +81,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
     },
     {
       id: 'mp4-720p',
-      name: 'HD',
-      description: 'Good quality, smaller file size',
+      name: '高清（720p）',
+      description: '画质良好，文件更小',
       resolution: '1280×720',
       aspectRatio: '16:9',
       fileSize: '~40MB',
@@ -88,18 +90,18 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
     },
     {
       id: 'mp4-mobile',
-      name: 'Mobile Optimized',
-      description: 'Optimized for mobile viewing',
+      name: '移动端优化',
+      description: '适配手机竖屏观看',
       resolution: '1080×1920',
       aspectRatio: '9:16',
       fileSize: '~60MB',
-      platform: 'Mobile',
+      platform: '移动端',
       icon: Smartphone,
     },
     {
       id: 'mp4-square',
-      name: 'Square Format',
-      description: 'Perfect for Instagram posts',
+      name: '方形格式',
+      description: '适合 Instagram 等平台',
       resolution: '1080×1080',
       aspectRatio: '1:1',
       fileSize: '~50MB',
@@ -117,10 +119,10 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
   ];
 
   const qualityOptions = [
-    { value: 'ultra', label: 'Ultra High', bitrate: '12000', description: 'Best quality, largest file' },
-    { value: 'high', label: 'High', bitrate: '8000', description: 'Excellent quality, recommended' },
-    { value: 'medium', label: 'Medium', bitrate: '4000', description: 'Good quality, balanced size' },
-    { value: 'low', label: 'Low', bitrate: '2000', description: 'Smaller file, lower quality' },
+    { value: 'ultra', label: '超高', bitrate: '12000', description: '最佳质量，文件最大' },
+    { value: 'high', label: '高', bitrate: '8000', description: '高质量，推荐' },
+    { value: 'medium', label: '中', bitrate: '4000', description: '质量均衡，体积适中' },
+    { value: 'low', label: '低', bitrate: '2000', description: '体积更小，质量较低' },
   ];
 
   const handleExport = async (format: string) => {
@@ -135,8 +137,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
           setIsExporting(false);
           addNotification({
             type: 'success',
-            title: 'Export Complete',
-            message: 'Your video has been exported successfully',
+            title: t('export.notify.complete.title'),
+            message: t('export.notify.complete.msg'),
             autoClose: 5000,
           });
           return 100;
@@ -156,8 +158,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
   const handleShare = (platform: string) => {
     addNotification({
       type: 'info',
-      title: 'Share Feature',
-      message: `Sharing to ${platform} will be available soon`,
+      title: t('export.notify.share.title'),
+      message: t('export.notify.share.msg').replace('{platform}', platform),
       autoClose: 3000,
     });
   };
@@ -167,8 +169,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
     navigator.clipboard.writeText(shareUrl);
     addNotification({
       type: 'success',
-      title: 'Link Copied',
-      message: 'Share link copied to clipboard',
+      title: t('export.notify.copied.title'),
+      message: t('export.notify.copied.msg'),
       autoClose: 3000,
     });
   };
@@ -180,17 +182,13 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">
-            Export & Share
-          </h3>
-          <p className="text-sm text-gray-600">
-            Download your video or share it directly to social platforms
-          </p>
+          <h3 className="text-lg font-semibold text-gray-900">{t('export.header')}</h3>
+          <p className="text-sm text-gray-600">{t('export.headerDesc')}</p>
         </div>
         {videoUrl && (
           <div className="flex items-center space-x-2 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
             <CheckCircle className="w-4 h-4" />
-            <span>Ready to Export</span>
+            <span>{t('export.ready')}</span>
           </div>
         )}
       </div>
@@ -205,10 +203,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
           <div className="flex items-center space-x-3 mb-3">
             <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
             <div>
-              <h4 className="font-medium text-blue-900">Exporting Video</h4>
-              <p className="text-sm text-blue-700">
-                Processing {selectedFormatData?.name}...
-              </p>
+              <h4 className="font-medium text-blue-900">{t('export.progress.title')}</h4>
+              <p className="text-sm text-blue-700">{t('export.progress.processing').replace('{name}', String(selectedFormatData?.name || ''))}</p>
             </div>
           </div>
           <div className="w-full bg-blue-200 rounded-full h-2">
@@ -219,15 +215,13 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
               transition={{ duration: 0.5 }}
             />
           </div>
-          <p className="text-sm text-blue-600 mt-2">
-            {Math.round(exportProgress)}% complete
-          </p>
-        </motion.div>
+          <p className="text-sm text-blue-600 mt-2">{t('export.progress.percent').replace('{percent}', String(Math.round(exportProgress)))}</p>
+      </motion.div>
       )}
 
       {/* Format Selection */}
       <div>
-        <h4 className="font-medium text-gray-900 mb-4">Choose Export Format</h4>
+        <h4 className="font-medium text-gray-900 mb-4">{t('export.format.choose')}</h4>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {exportFormats.map((format) => {
             const Icon = format.icon;
@@ -290,13 +284,13 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
       <div className="bg-gray-50 rounded-lg p-4">
         <div className="flex items-center space-x-2 mb-4">
           <Settings className="w-5 h-5 text-gray-600" />
-          <h4 className="font-medium text-gray-900">Advanced Settings</h4>
+          <h4 className="font-medium text-gray-900">{t('export.advanced')}</h4>
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Quality Preset
+              {t('export.qualityPreset')}
             </label>
             <select
               value={customSettings.quality}
@@ -313,16 +307,16 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Frame Rate
+              {t('export.frameRate')}
             </label>
             <select
               value={customSettings.fps}
               onChange={(e) => setCustomSettings(prev => ({ ...prev, fps: e.target.value }))}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
             >
-              <option value="24">24 FPS (Cinematic)</option>
-              <option value="30">30 FPS (Standard)</option>
-              <option value="60">60 FPS (Smooth)</option>
+              <option value="24">24 帧（电影感）</option>
+              <option value="30">30 帧（标准）</option>
+              <option value="60">60 帧（流畅）</option>
             </select>
           </div>
         </div>
@@ -343,12 +337,12 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
           {isExporting ? (
             <>
               <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              <span>Exporting...</span>
+              <span>{t('export.exporting')}</span>
             </>
           ) : (
             <>
               <Download className="w-4 h-4" />
-              <span>Export {selectedFormatData?.name}</span>
+              <span>{t('export.export')} {selectedFormatData?.name}</span>
             </>
           )}
         </button>
@@ -364,13 +358,13 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
           )}
         >
           <Copy className="w-4 h-4" />
-          <span>Copy Link</span>
+          <span>{t('export.copyLink')}</span>
         </button>
       </div>
 
       {/* Social Media Sharing */}
       <div>
-        <h4 className="font-medium text-gray-900 mb-4">Share to Social Media</h4>
+        <h4 className="font-medium text-gray-900 mb-4">{t('export.share')}</h4>
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           {socialPlatforms.map((platform) => {
             const Icon = platform.icon;
@@ -400,12 +394,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
           <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
             <Clock className="w-8 h-8 text-gray-400" />
           </div>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
-            Video Not Ready
-          </h3>
-          <p className="text-gray-600">
-            Your video is still being generated. Export options will be available once complete.
-          </p>
+          <h3 className="text-lg font-medium text-gray-900 mb-2">{t('export.notReady.title')}</h3>
+          <p className="text-gray-600">{t('export.notReady.desc')}</p>
         </div>
       )}
     </div>

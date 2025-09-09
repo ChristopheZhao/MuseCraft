@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useI18n } from '@/i18n/I18nProvider';
 import { cn } from '@/lib/utils';
 import { 
   Home,
@@ -25,45 +26,46 @@ interface NavigationItem {
 
 const Sidebar: React.FC = () => {
   const { ui } = useAppStore();
+  const { t } = useI18n();
   const { sidebarCollapsed, currentStep } = ui;
 
   const navigationItems: NavigationItem[] = [
     {
       id: 'dashboard',
-      label: 'Dashboard',
+      label: t('nav.dashboard'),
       icon: Home,
       active: currentStep === 'input',
     },
     {
       id: 'projects',
-      label: 'My Projects',
+      label: t('nav.projects'),
       icon: FileText,
       badge: '3',
     },
     {
       id: 'templates',
-      label: 'Templates',
+      label: t('nav.templates'),
       icon: Sparkles,
     },
     {
       id: 'media',
-      label: 'Media Library',
+      label: t('nav.media'),
       icon: Image,
     },
     {
       id: 'videos',
-      label: 'Generated Videos',
+      label: t('nav.videos'),
       icon: Video,
       badge: '12',
     },
     {
       id: 'analytics',
-      label: 'Analytics',
+      label: t('nav.analytics'),
       icon: BarChart3,
     },
     {
       id: 'history',
-      label: 'History',
+      label: t('nav.history'),
       icon: History,
     },
   ];
@@ -71,12 +73,12 @@ const Sidebar: React.FC = () => {
   const bottomItems: NavigationItem[] = [
     {
       id: 'help',
-      label: 'Help & Support',
+      label: t('nav.help'),
       icon: HelpCircle,
     },
     {
       id: 'settings',
-      label: 'Settings',
+      label: t('nav.settings'),
       icon: Settings,
     },
   ];
@@ -149,20 +151,20 @@ const Sidebar: React.FC = () => {
           {!sidebarCollapsed && (
             <div className="space-y-2">
               <h3 className="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                AI Agents
+                {t('sidebar.aiAgents')}
               </h3>
               <div className="space-y-1">
                 <div className="flex items-center space-x-2 px-3 py-2">
                   <div className="w-2 h-2 bg-green-500 rounded-full" />
-                  <span className="text-sm text-gray-600">Concept Generator</span>
+                  <span className="text-sm text-gray-600">{t('sidebar.agent.concept')}</span>
                 </div>
                 <div className="flex items-center space-x-2 px-3 py-2">
                   <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-                  <span className="text-sm text-gray-600">Script Writer</span>
+                  <span className="text-sm text-gray-600">{t('sidebar.agent.script')}</span>
                 </div>
                 <div className="flex items-center space-x-2 px-3 py-2">
                   <div className="w-2 h-2 bg-gray-300 rounded-full" />
-                  <span className="text-sm text-gray-400">Visual Creator</span>
+                  <span className="text-sm text-gray-400">{t('sidebar.agent.visual')}</span>
                 </div>
               </div>
             </div>
@@ -179,7 +181,7 @@ const Sidebar: React.FC = () => {
           <div className="p-4 bg-gradient-to-r from-primary-50 to-accent-50 m-3 rounded-lg">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-medium text-gray-600">
-                Credits Used
+                {t('usage.credits')}
               </span>
               <span className="text-xs text-gray-500">
                 1,240 / 2,000
@@ -192,7 +194,7 @@ const Sidebar: React.FC = () => {
               />
             </div>
             <button className="w-full mt-3 text-xs text-primary-600 hover:text-primary-700 font-medium">
-              Upgrade Plan
+              {t('actions.upgrade')}
             </button>
           </div>
         )}

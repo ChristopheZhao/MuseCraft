@@ -157,14 +157,12 @@ async def demonstrate_enhanced_agent():
     
     # Test prompt rendering
     try:
-        prompt = await agent.render_prompt(
+        prompt = agent.render_prompt(
             "concept_planner",
-            {
-                "user_description": "Sci-fi short film about AI",
-                "video_style": "cinematic",
-                "target_duration": 60,
-                "target_audience": "sci-fi enthusiasts"
-            }
+            user_description="Sci-fi short film about AI",
+            video_style="cinematic",
+            target_duration=60,
+            target_audience="sci-fi enthusiasts"
         )
         print(f"Rendered prompt: {len(prompt)} characters")
     except Exception as e:
@@ -214,7 +212,7 @@ async def demonstrate_integration():
         "target_duration": task_input["duration"]
     }
     
-    prompt = await agent.render_prompt("concept_planner", template_vars)
+    prompt = agent.render_prompt("concept_planner", **template_vars)
     print(f"3. Rendered prompt: {len(prompt)} characters")
     
     # 4. Simulate tool usage (without actual API call)

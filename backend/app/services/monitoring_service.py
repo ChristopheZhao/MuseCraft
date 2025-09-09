@@ -7,6 +7,7 @@ Comprehensive Monitoring and Analytics Service
 - Performance bottleneck detection
 """
 import asyncio
+import os
 import logging
 import time
 import psutil
@@ -531,6 +532,55 @@ class MonitoringService:
             
         except Exception as e:
             self.logger.error(f"Failed to flush metrics: {e}")
+
+    def get_metrics_snapshot(self) -> List[Dict[str, Any]]:
+        """Return a lightweight snapshot of current buffered metrics.
+
+        This does not clear the buffer. Useful for quick inspection or tests.
+        """
+        snapshot: List[Dict[str, Any]] = []
+        for m in self.metrics_buffer:
+            snapshot.append({
+                "name": m.name,
+                "value": m.value,
+                "type": m.metric_type.value,
+                "timestamp": m.timestamp.isoformat(),
+                "labels": m.labels,
+                "description": m.description,
+            })
+        return snapshot
+
+    async def dump_metrics_to_file(self, file_path: Optional[str] = None, max_items: int = 500):
+        """Dump current buffered metrics to a local JSON file (for quick inspection).
+
+        Args:
+            file_path: Path to write JSON (defaults to backend/storage/metrics_snapshot.json)
+            max_items: Limit number of items written to avoid large files
+        """
+        try:
+            base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
+            if not file_path:
+                file_path = os.path.join(base_dir, "metrics_snapshot.json")
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            snapshot = self.get_metrics_snapshot()[:max_items]
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "generated_at": datetime.now().isoformat(),
+                    "count": len(snapshot),
+                    "metrics": snapshot,
+                }, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"Metrics snapshot written to {file_path} ({len(snapshot)} items)")
+        except Exception as e:
+            self.logger.warning(f"Failed to dump metrics to file: {e}")
+
+    def log_metrics_snapshot(self, max_items: int = 50):
+        """Log a small snapshot of current metrics (for quick debugging)."""
+        try:
+            snapshot = self.get_metrics_snapshot()[:max_items]
+            self.logger.info(f"Metrics snapshot ({len(snapshot)} items):\n{json.dumps(snapshot, ensure_ascii=False)[:2000]}")
+        except Exception as e:
+            self.logger.warning(f"Failed to log metrics snapshot: {e}")
     
     async def _check_alert_rules(self, metric: Metric):
         """Check if metric triggers any alert rules"""

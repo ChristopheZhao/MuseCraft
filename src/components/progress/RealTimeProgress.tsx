@@ -14,6 +14,7 @@ import {
   Cpu
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useI18n } from '@/i18n/I18nProvider';
 
 interface ProgressMetrics {
   overallProgress: number;
@@ -26,13 +27,14 @@ interface ProgressMetrics {
 
 const RealTimeProgress: React.FC = () => {
   const { agents, currentRequest, ui } = useAppStore();
+  const { t } = useI18n();
   const [metrics, setMetrics] = useState<ProgressMetrics>({
     overallProgress: 0,
     activeAgents: 0,
     completedTasks: 0,
     totalTasks: 0,
     estimatedTimeRemaining: 0,
-    currentPhase: 'Initializing',
+    currentPhase: t('progress.phase.initializing'),
   });
 
   const [startTime] = useState(Date.now());
@@ -59,9 +61,9 @@ const RealTimeProgress: React.FC = () => {
       .reduce((acc, a) => Math.max(acc, a.estimatedTime || 0), 0);
 
     // Determine current phase
-    let currentPhase = 'Initializing';
+    let currentPhase = t('progress.phase.initializing');
     if (completedAgents === totalAgents) {
-      currentPhase = 'Completed';
+      currentPhase = t('progress.phase.completed');
     } else if (activeAgents > 0) {
       const workingAgent = agents.find(a => a.status === 'working');
       if (workingAgent) {
@@ -84,12 +86,12 @@ const RealTimeProgress: React.FC = () => {
   }
 
   const progressSteps = [
-    { name: 'Concept Generation', agent: 'concept-generator', icon: Zap },
-    { name: 'Script Writing', agent: 'script-writer', icon: CheckCircle },
-    { name: 'Visual Creation', agent: 'image-generator', icon: CheckCircle },
-    { name: 'Voice Synthesis', agent: 'voice-synthesizer', icon: CheckCircle },
-    { name: 'Video Assembly', agent: 'video-composer', icon: CheckCircle },
-    { name: 'Quality Control', agent: 'quality-controller', icon: CheckCircle },
+    { name: t('progress.step.concept'), agent: 'concept-generator', icon: Zap },
+    { name: t('progress.step.script'), agent: 'script-writer', icon: CheckCircle },
+    { name: t('progress.step.visual'), agent: 'image-generator', icon: CheckCircle },
+    { name: t('progress.step.voice'), agent: 'voice-synthesizer', icon: CheckCircle },
+    { name: t('progress.step.video'), agent: 'video-composer', icon: CheckCircle },
+    { name: t('progress.step.quality'), agent: 'quality-controller', icon: CheckCircle },
   ];
 
   const getStepStatus = (agentId: string) => {
@@ -108,21 +110,21 @@ const RealTimeProgress: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900">
-            Generation Progress
+            {t('progress.title')}
           </h3>
           <p className="text-sm text-gray-600">
-            Real-time progress for: {currentRequest.title}
+            {t('progress.subtitle')}{currentRequest.title}
           </p>
         </div>
         <div className="flex items-center space-x-4 text-sm">
           <div className="flex items-center space-x-1 text-gray-600">
             <Timer className="w-4 h-4" />
-            <span>{formatTime(elapsedTime)} elapsed</span>
+            <span>{formatTime(elapsedTime)} {t('progress.elapsed')}</span>
           </div>
           {metrics.estimatedTimeRemaining > 0 && (
             <div className="flex items-center space-x-1 text-gray-600">
               <Clock className="w-4 h-4" />
-              <span>~{formatTime(metrics.estimatedTimeRemaining)} remaining</span>
+              <span>~{formatTime(metrics.estimatedTimeRemaining)} {t('progress.remaining')}</span>
             </div>
           )}
         </div>
@@ -133,7 +135,7 @@ const RealTimeProgress: React.FC = () => {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h4 className="text-xl font-semibold text-gray-900">
-              {metrics.overallProgress}% Complete
+              总体完成度 {metrics.overallProgress}%
             </h4>
             <p className="text-gray-600">
               {metrics.currentPhase}
@@ -143,13 +145,13 @@ const RealTimeProgress: React.FC = () => {
             <div className="flex items-center space-x-2">
               <Activity className="w-5 h-5 text-green-500" />
               <span className="text-sm font-medium text-gray-700">
-                {metrics.activeAgents} Active
+                活跃智能体 {metrics.activeAgents}
               </span>
             </div>
             <div className="flex items-center space-x-2">
               <CheckCircle className="w-5 h-5 text-blue-500" />
               <span className="text-sm font-medium text-gray-700">
-                {metrics.completedTasks}/{metrics.totalTasks} Tasks
+                {metrics.completedTasks}/{metrics.totalTasks} {t('progress.tasks_unit')}
               </span>
             </div>
           </div>
@@ -188,7 +190,7 @@ const RealTimeProgress: React.FC = () => {
 
       {/* Step Progress */}
       <div className="space-y-3">
-        <h4 className="font-medium text-gray-900">Pipeline Progress</h4>
+        <h4 className="font-medium text-gray-900">{t('progress.pipeline')}</h4>
         <div className="space-y-2">
           {progressSteps.map((step, index) => {
             const status = getStepStatus(step.agent);
@@ -251,7 +253,7 @@ const RealTimeProgress: React.FC = () => {
                         'bg-gray-100 text-gray-600': status === 'idle' || status === 'waiting',
                       }
                     )}>
-                      {status}
+                      {t(`status.${status}`)}
                     </span>
                   </div>
 
@@ -278,7 +280,7 @@ const RealTimeProgress: React.FC = () => {
         <div className="bg-white p-4 rounded-lg border border-gray-200">
           <div className="flex items-center space-x-2 mb-2">
             <Cpu className="w-5 h-5 text-primary-500" />
-            <span className="text-sm font-medium text-gray-700">CPU Usage</span>
+            <span className="text-sm font-medium text-gray-700">{t('metrics.cpu')}</span>
           </div>
           <div className="text-2xl font-bold text-gray-900">
             {Math.round(metrics.activeAgents * 25)}%
@@ -288,7 +290,7 @@ const RealTimeProgress: React.FC = () => {
         <div className="bg-white p-4 rounded-lg border border-gray-200">
           <div className="flex items-center space-x-2 mb-2">
             <TrendingUp className="w-5 h-5 text-green-500" />
-            <span className="text-sm font-medium text-gray-700">Efficiency</span>
+            <span className="text-sm font-medium text-gray-700">{t('metrics.efficiency')}</span>
           </div>
           <div className="text-2xl font-bold text-gray-900">
             {Math.max(85, Math.round(100 - (elapsedTime / 10)))}%
@@ -298,7 +300,7 @@ const RealTimeProgress: React.FC = () => {
         <div className="bg-white p-4 rounded-lg border border-gray-200">
           <div className="flex items-center space-x-2 mb-2">
             <Activity className="w-5 h-5 text-blue-500" />
-            <span className="text-sm font-medium text-gray-700">Throughput</span>
+            <span className="text-sm font-medium text-gray-700">{t('metrics.throughput')}</span>
           </div>
           <div className="text-2xl font-bold text-gray-900">
             {metrics.completedTasks * 2}/min
@@ -308,7 +310,7 @@ const RealTimeProgress: React.FC = () => {
         <div className="bg-white p-4 rounded-lg border border-gray-200">
           <div className="flex items-center space-x-2 mb-2">
             <Zap className="w-5 h-5 text-yellow-500" />
-            <span className="text-sm font-medium text-gray-700">Queue</span>
+            <span className="text-sm font-medium text-gray-700">{t('metrics.queue')}</span>
           </div>
           <div className="text-2xl font-bold text-gray-900">
             {Math.max(0, metrics.totalTasks - metrics.completedTasks - metrics.activeAgents)}

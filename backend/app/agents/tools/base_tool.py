@@ -11,6 +11,75 @@ from enum import Enum
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
+# Optional settings import (avoid hard dependency during import time)
+try:
+    from ...core.config import settings  # type: ignore
+except Exception:  # pragma: no cover - fallback for lint contexts
+    settings = None  # type: ignore
+
+
+def _get_settings_tool_timeout(tool_name: str) -> Optional[int]:
+    """Return settings-level default timeout for a specific tool name, if any."""
+    if settings is None:
+        return None
+    try:
+        key = f"{tool_name.upper()}_TIMEOUT"
+        value = getattr(settings, key)
+        return int(value) if isinstance(value, (int, float)) and value > 0 else None
+    except Exception:
+        return None
+
+
+def _resolve_timeout(
+    tool_name: str,
+    explicit_timeout: Optional[int],
+    tool_config: Optional[Dict[str, Any]],
+    context: Optional[Dict[str, Any]],
+) -> int:
+    """Compute timeout with a clear, minimal priority chain."""
+    tool_config = tool_config or {}
+    context = context or {}
+
+    # 1) Explicit per-call
+    if isinstance(explicit_timeout, (int, float)) and explicit_timeout > 0:
+        resolved = int(explicit_timeout)
+    else:
+        # 2) Agent-level tool timeout (from context)
+        agent_tool_timeout = context.get("agent_tool_timeout")
+        if isinstance(agent_tool_timeout, (int, float)) and agent_tool_timeout > 0:
+            resolved = int(agent_tool_timeout)
+        else:
+            # 3) Tool config default (accept both default_timeout and timeout)
+            cfg_timeout = tool_config.get("default_timeout")
+            if not (isinstance(cfg_timeout, (int, float)) and cfg_timeout > 0):
+                cfg_timeout = tool_config.get("timeout")
+            if isinstance(cfg_timeout, (int, float)) and cfg_timeout > 0:
+                resolved = int(cfg_timeout)
+            else:
+                # 4) Settings per-tool
+                settings_tool = _get_settings_tool_timeout(tool_name)
+                if isinstance(settings_tool, int) and settings_tool > 0:
+                    resolved = settings_tool
+                else:
+                    # 5) Global default
+                    default_global = 120
+                    if settings is not None:
+                        try:
+                            default_global = int(getattr(settings, "DEFAULT_TOOL_TIMEOUT", 120))
+                        except Exception:
+                            default_global = 120
+                    resolved = default_global
+
+    # Clamp by overall agent timeout if provided
+    agent_timeout_total = context.get("agent_timeout_seconds")
+    if isinstance(agent_timeout_total, (int, float)) and agent_timeout_total > 0:
+        safety_margin = 2  # avoid hitting agent timeout exactly
+        max_allowed = max(1, int(agent_timeout_total) - safety_margin)
+        if resolved > max_allowed:
+            resolved = max_allowed
+
+    return resolved
+
 
 class ToolType(Enum):
     """Tool type enumeration"""
@@ -143,6 +212,7 @@ class BaseTool(ABC):
             List of action names
         """
         pass
+
     
     @abstractmethod
     def get_action_schema(self, action: str) -> Dict[str, Any]:
@@ -156,6 +226,30 @@ class BaseTool(ABC):
             JSON schema for the action parameters
         """
         pass
+
+    # === FC 可见性（可选覆盖）===
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """
+        返回该工具的默认 Function Call 可见性配置（可由具体工具覆盖）。
+
+        返回结构示例：
+        {"expose": True/False, "allowed_actions": ["action_a", "action_b"]}
+
+        说明：
+        - 默认不暴露，防止工具被 LLM 误用；建议具体业务工具显式覆盖。
+        - BaseAgent 会将该默认配置与 fc_policies.yaml 进行合并（策略优先）。
+        """
+        return {"expose": False, "allowed_actions": []}
+
+    # === 动作语义（可选覆盖）===
+    def get_action_stage(self, action: str) -> str:
+        """
+        返回动作所属阶段，用于 ReAct 的阶段性最小暴露控制：
+        - "plan": 规划类（如提示词生成、参数筹备）
+        - "act": 执行类（如真实生成、下载、处理）
+        默认视为 "act"。
+        """
+        return "act"
     
     async def execute(self, tool_input: Union[ToolInput, Dict[str, Any]]) -> ToolOutput:
         """
@@ -181,13 +275,18 @@ class BaseTool(ABC):
             self.status = ToolStatus.RUNNING
             self.execution_count += 1
             
-            self.logger.info(f"Executing {self.metadata.name} action: {tool_input.action}")
+            self.logger.info(f"Executing {self.metadata.name}:{tool_input.action}")
             
             # Execute pre-hooks
             await self._execute_hooks(self._pre_execution_hooks, tool_input)
             
-            # Execute tool with timeout
-            timeout = tool_input.timeout or self.config.get("default_timeout", 60)
+            # Execute tool with timeout using minimal inline resolver
+            timeout = _resolve_timeout(
+                tool_name=self.metadata.name,
+                explicit_timeout=tool_input.timeout,
+                tool_config=self.config,
+                context=tool_input.context or {},
+            )
             
             result = await asyncio.wait_for(
                 self._execute_impl(tool_input),
@@ -218,7 +317,7 @@ class BaseTool(ABC):
             # Execute post-hooks
             await self._execute_hooks(self._post_execution_hooks, tool_input, output)
             
-            self.logger.info(f"Completed {self.metadata.name} in {execution_time:.2f}s")
+            self.logger.info(f"Completed {self.metadata.name}:{tool_input.action} in {execution_time:.2f}s")
             
             return output
             
@@ -227,7 +326,7 @@ class BaseTool(ABC):
             self.status = ToolStatus.TIMEOUT
             self.error_count += 1
             
-            error_msg = f"Tool {self.metadata.name} timed out after {timeout}s"
+            error_msg = f"Tool {self.metadata.name}:{tool_input.action} timed out after {timeout}s"
             self.logger.error(error_msg)
             
             return ToolOutput(
@@ -242,7 +341,7 @@ class BaseTool(ABC):
             self.status = ToolStatus.FAILED
             self.error_count += 1
             
-            error_msg = f"Tool {self.metadata.name} failed: {str(e)}"
+            error_msg = f"Tool {self.metadata.name}:{tool_input.action} failed: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
             
             return ToolOutput(

@@ -46,6 +46,7 @@ class AIConfigManager:
         self.providers: Dict[str, ProviderConfig] = {}
         self.models: Dict[str, ModelConfig] = {}
         self.agent_model_mapping: Dict[str, str] = {}
+        self.agent_thinking_mode: Dict[str, str] = {}  # agent -> "thinking" | "standard"
         self._load_default_config()
         self._load_user_config()
     
@@ -109,7 +110,7 @@ class AIConfigManager:
                 "glm-4.5": ModelConfig(
                     name="glm-4.5",
                     provider="zhipu",
-                    max_tokens=8000,
+                    max_tokens=settings.LLM_MAX_TOKENS_THINKING,
                     temperature=0.7,
                     capabilities=["text_generation", "chat", "chinese", "reasoning", "long_context", "latest"],
                     fallback_model="glm-4.5-air"
@@ -117,7 +118,7 @@ class AIConfigManager:
                 "glm-4.5-air": ModelConfig(
                     name="glm-4.5-air", 
                     provider="zhipu",
-                    max_tokens=4000,
+                    max_tokens=settings.LLM_MAX_TOKENS_STANDARD,
                     temperature=0.7,
                     capabilities=["text_generation", "chat", "chinese", "fast", "latest"],
                     fallback_model="glm-4-plus"
@@ -254,14 +255,45 @@ class AIConfigManager:
             "audio_generator": concept_model,  # 音频生成也需要理解内容
             "default": concept_model
         }
+
+        # 设置默认的Agent思维链模式（先验：规划开、执行关）
+        self.agent_thinking_mode = {
+            # 规划类：开启
+            "concept_planner": "thinking",
+            "script_writer": "thinking",
+            # 执行类：关闭
+            "image_generator": "standard",
+            "video_generator": "standard",
+            "video_composer": "standard",
+            "quality_checker": "standard",
+            "audio_generator": "standard",
+            # 默认：关闭
+            "default": "standard",
+        }
     
     def _load_user_config(self):
         """加载用户自定义配置"""
-        config_paths = [
+        # 构建候选路径，兼容多种仓库布局
+        here = Path(__file__).resolve()
+        backend_dir = here.parents[2]  # backend/
+        repo_root = backend_dir.parent  # project root
+        candidates = [
             Path("ai_config.yaml"),
             Path("config/ai_config.yaml"),
-            Path("app/config/ai_config.yaml")
+            Path("app/config/ai_config.yaml"),
+            Path("backend/ai_config.yaml"),
+            Path("backend/config/ai_config.yaml"),
+            backend_dir / "ai_config.yaml",
+            backend_dir / "config/ai_config.yaml",
+            repo_root / "backend" / "config" / "ai_config.yaml",
         ]
+        # 去重并按出现顺序尝试
+        seen = set()
+        config_paths = []
+        for p in candidates:
+            if p not in seen:
+                seen.add(p)
+                config_paths.append(p)
         
         for config_path in config_paths:
             if config_path.exists():
@@ -288,6 +320,10 @@ class AIConfigManager:
         # 更新Agent模型映射
         if "agent_model_mapping" in user_config:
             self.agent_model_mapping.update(user_config["agent_model_mapping"])
+
+        # 更新Agent思维链默认模式
+        if "agent_thinking_mode" in user_config:
+            self.agent_thinking_mode.update(user_config["agent_thinking_mode"])
         
         # 更新提供商配置
         if "providers" in user_config:
@@ -325,6 +361,10 @@ class AIConfigManager:
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """获取模型配置"""
         return self.models.get(model_name)
+
+    def get_thinking_mode_for_agent(self, agent_name: str) -> str:
+        """获取Agent的默认思维链模式: "thinking" | "standard""" 
+        return self.agent_thinking_mode.get(agent_name, self.agent_thinking_mode.get("default", "standard"))
     
     def get_provider_config(self, provider_name: str) -> Optional[ProviderConfig]:
         """获取提供商配置"""

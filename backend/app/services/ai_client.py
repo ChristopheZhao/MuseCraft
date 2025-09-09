@@ -58,8 +58,10 @@ class AIClient:
         # Try GLM first if available
         if self.glm_client:
             try:
-                self.logger.info(f"Using GLM model: {model}")
-                glm_model = model if model.startswith("glm-") else "glm-4-plus"
+                # 容错：允许调用方传入None/空字符串，自动回退至默认模型
+                safe_model = model or settings.GLM_DEFAULT_MODEL or "glm-4-plus"
+                self.logger.info(f"Using GLM model: {safe_model}")
+                glm_model = safe_model if str(safe_model).startswith("glm-") else (settings.GLM_DEFAULT_MODEL or "glm-4-plus")
                 
                 response = self.glm_client.chat.completions.create(
                     model=glm_model,
@@ -90,7 +92,8 @@ class AIClient:
             try:
                 self.logger.info("Using OpenAI as fallback")
                 # Map GLM model to OpenAI model
-                openai_model = "gpt-3.5-turbo" if model.startswith("glm-") else model
+                model_str = (model or "")
+                openai_model = "gpt-3.5-turbo" if model_str.startswith("glm-") or not model_str else model_str
                 
                 response = await self.openai_client.chat.completions.create(
                     model=openai_model,

@@ -9,10 +9,12 @@ import RealTimeProgress from '@/components/progress/RealTimeProgress';
 import ResultPreview from '@/components/preview/ResultPreview';
 import VideoPlayer from '@/components/video/VideoPlayer';
 import ExportInterface from '@/components/video/ExportInterface';
+import { useI18n } from '@/i18n/I18nProvider';
 
 const HomePage: React.FC = () => {
   const { ui, currentRequest } = useAppStore();
   const { currentStep } = ui;
+  const { t } = useI18n();
 
   // Initialize WebSocket connection
   useWebSocket({
@@ -33,17 +35,17 @@ const HomePage: React.FC = () => {
           <div className="flex-1 flex flex-col lg:flex-row gap-6 overflow-hidden">
             {/* Left Column - Agent Status & Progress */}
             <div className="lg:w-1/2 space-y-6 overflow-auto">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
                 <AgentOrchestrator />
               </div>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
                 <RealTimeProgress />
               </div>
             </div>
 
             {/* Right Column - Results Preview */}
             <div className="lg:w-1/2 overflow-auto">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 h-full">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 h-full">
                 <ResultPreview />
               </div>
             </div>
@@ -55,7 +57,7 @@ const HomePage: React.FC = () => {
           <div className="flex-1 flex flex-col lg:flex-row gap-6 overflow-hidden">
             {/* Left Column - Video Player */}
             <div className="lg:w-2/3 space-y-6">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
                 <VideoPlayer
                   src="/api/video/sample.mp4" // This would be the actual generated video URL
                   title={currentRequest?.title}
@@ -64,14 +66,14 @@ const HomePage: React.FC = () => {
               </div>
               
               {/* Final Results Summary */}
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
                 <ResultPreview />
               </div>
             </div>
 
             {/* Right Column - Export Interface */}
             <div className="lg:w-1/3">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 h-full">
+              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 h-full">
                 <ExportInterface 
                   videoUrl="/api/video/sample.mp4"
                 />
@@ -84,7 +86,7 @@ const HomePage: React.FC = () => {
         return (
           <div className="flex-1 flex flex-col gap-6 overflow-hidden">
             {/* Video Player */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
               <VideoPlayer
                 src="/api/video/sample.mp4"
                 title={currentRequest?.title}
@@ -93,7 +95,7 @@ const HomePage: React.FC = () => {
             </div>
 
             {/* Export Interface */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
               <ExportInterface 
                 videoUrl="/api/video/sample.mp4"
               />
@@ -116,10 +118,10 @@ const HomePage: React.FC = () => {
       <div className="flex items-center justify-center">
         <div className="flex items-center space-x-8">
           {[
-            { id: 'input', label: 'Create Request', number: 1 },
-            { id: 'processing', label: 'AI Generation', number: 2 },
-            { id: 'review', label: 'Review Results', number: 3 },
-            { id: 'export', label: 'Export & Share', number: 4 },
+            { id: 'input', label: t('step.create'), number: 1 },
+            { id: 'processing', label: t('step.generation'), number: 2 },
+            { id: 'review', label: t('step.review'), number: 3 },
+            { id: 'export', label: t('step.export'), number: 4 },
           ].map((step, index) => {
             const isActive = currentStep === step.id;
             const isCompleted = ['input', 'processing', 'review'].indexOf(currentStep) > ['input', 'processing', 'review'].indexOf(step.id);
@@ -131,11 +133,11 @@ const HomePage: React.FC = () => {
                   ${isActive ? 'text-primary-600' : isCompleted ? 'text-green-600' : 'text-gray-400'}
                 `}>
                   <div className={`
-                    w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium
+                    w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold shadow-card
                     ${isActive 
-                      ? 'bg-primary-100 text-primary-600 ring-2 ring-primary-200' 
+                      ? 'bg-gradient-to-br from-primary-100 to-accent-100 text-primary-700 ring-2 ring-primary-200' 
                       : isCompleted 
-                        ? 'bg-green-100 text-green-600'
+                        ? 'bg-green-100 text-green-700'
                         : 'bg-gray-100 text-gray-400'
                     }
                   `}>
@@ -148,8 +150,8 @@ const HomePage: React.FC = () => {
                 
                 {index < 3 && (
                   <div className={`
-                    w-16 h-0.5 mx-4
-                    ${isCompleted ? 'bg-green-300' : 'bg-gray-200'}
+                    w-16 h-1 mx-4 rounded-full
+                    ${isCompleted ? 'bg-gradient-to-r from-green-300 to-emerald-400' : 'bg-gray-200'}
                   `} />
                 )}
               </div>

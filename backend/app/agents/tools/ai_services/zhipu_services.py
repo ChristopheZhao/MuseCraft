@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional, Union
 import logging
 
 from .service_interfaces import LLMServiceInterface, VLMServiceInterface, VideoModelServiceInterface, ServiceProvider
+from ....core.config import settings
 
 
 class ZhipuLLMService(LLMServiceInterface):
@@ -37,11 +38,17 @@ class ZhipuLLMService(LLMServiceInterface):
         self.default_model = self.config.get("default_model", "glm-4.5")
     
     def _get_api_key(self) -> Optional[str]:
-        """获取API密钥"""
+        """获取API密钥（配置 > 环境变量 > settings）"""
         api_key = self.config.get("api_key")
         if not api_key:
             import os
             api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
+        if not api_key:
+            try:
+                from ....core.config import settings
+                api_key = settings.GLM_API_KEY or os.getenv("ZHIPU_API_KEY")
+            except Exception:
+                pass
         return api_key
     
     def is_available(self) -> bool:
@@ -77,10 +84,18 @@ class ZhipuLLMService(LLMServiceInterface):
             "top_p": kwargs.get("top_p", 0.7),
             "stream": kwargs.get("stream", False)
         }
+        # 透传 thinking（GLM-4.5+ 支持），例如 {"type": "disabled"}
+        if "thinking" in kwargs and kwargs["thinking"] is not None:
+            payload["thinking"] = kwargs["thinking"]
         
-        # 添加 response_format 参数支持
-        if "response_format" in kwargs:
+        # 透传 response_format（若供应商支持则生效）
+        if "response_format" in kwargs and kwargs["response_format"]:
             payload["response_format"] = kwargs["response_format"]
+            try:
+                rf = payload.get("response_format")
+                self.logger.info(f"Zhipu.chat_completion using response_format={rf} max_tokens={payload.get('max_tokens')}")
+            except Exception:
+                pass
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -100,12 +115,23 @@ class ZhipuLLMService(LLMServiceInterface):
                     raise RuntimeError(f"Zhipu LLM API error: {response.status_code} - {error_detail}")
                 
                 result = response.json()
-                
+                choice = result["choices"][0]
+                msg = choice.get("message", {}) or {}
+                content = msg.get("content")
+                reasoning = msg.get("reasoning_content")
+                try:
+                    # 诊断：记录 content 与 reasoning_content 的长度
+                    clen = len(content or "") if isinstance(content, str) else 0
+                    rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
+                    self.logger.info(f"Zhipu.chat_completion result lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}")
+                except Exception:
+                    pass
                 return {
-                    "content": result["choices"][0]["message"]["content"],
-                    "model": result["model"],
+                    "content": content,
+                    "reasoning_content": reasoning,
+                    "model": result.get("model"),
                     "usage": result.get("usage", {}),
-                    "finish_reason": result["choices"][0]["finish_reason"],
+                    "finish_reason": choice.get("finish_reason"),
                     "provider": self.get_provider_name()
                 }
                 
@@ -136,6 +162,32 @@ class ZhipuLLMService(LLMServiceInterface):
             "temperature": temperature,
             "max_tokens": kwargs.get("max_tokens", 2000)
         }
+        if "thinking" in kwargs and kwargs["thinking"] is not None:
+            payload["thinking"] = kwargs["thinking"]
+
+        # 透传 response_format（若供应商支持则生效）
+        # 说明：即便在 FC 模式下，部分场景（如 tools 为空或直接文本响应）依然需要结构化输出约束
+        # 因此这里与 chat_completion 保持一致支持 response_format 透传
+        if "response_format" in kwargs and kwargs["response_format"]:
+            try:
+                payload["response_format"] = kwargs["response_format"]
+                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')}")
+            except Exception:
+                pass
+        # 诊断：打印工具schema数量与前几个函数名
+        try:
+            tlist = payload.get("tools") or []
+            fnames = []
+            for t in tlist[:3]:
+                try:
+                    fn = (t or {}).get("function", {}).get("name")
+                    if fn:
+                        fnames.append(fn)
+                except Exception:
+                    continue
+            self.logger.info(f"Zhipu.function_call tools_count={len(tlist)} names={fnames}")
+        except Exception:
+            pass
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -156,29 +208,36 @@ class ZhipuLLMService(LLMServiceInterface):
                 
                 result = response.json()
                 choice = result["choices"][0]
-                
-                # 解析Function Call响应
+                msg = choice.get("message", {}) or {}
+                content = msg.get("content")
+                reasoning = msg.get("reasoning_content")
+
+                # 统一响应体：无论是否有 tool_calls，都返回 content 与 reasoning_content，便于“计划+执行合一”场景解析 PlanningDecision
                 response_data = {
-                    "model": result["model"],
+                    "model": result.get("model"),
                     "usage": result.get("usage", {}),
-                    "finish_reason": choice["finish_reason"],
-                    "provider": self.get_provider_name()
+                    "finish_reason": choice.get("finish_reason"),
+                    "provider": self.get_provider_name(),
+                    "content": content,
+                    "reasoning_content": reasoning,
+                    "has_function_call": False,
                 }
-                
-                if choice["finish_reason"] == "tool_calls" and choice["message"].get("tool_calls"):
-                    # 有Function Call
-                    tool_calls = choice["message"]["tool_calls"]
-                    response_data.update({
-                        "tool_calls": tool_calls,
-                        "has_function_call": True
-                    })
-                else:
-                    # 普通文本响应
-                    response_data.update({
-                        "content": choice["message"]["content"],
-                        "has_function_call": False
-                    })
-                
+
+                # Function Call 分支（若存在）
+                if choice.get("finish_reason") == "tool_calls" and msg.get("tool_calls"):
+                    response_data["tool_calls"] = msg.get("tool_calls")
+                    response_data["has_function_call"] = True
+
+                # 统一 lens 日志
+                try:
+                    clen = len(content or "") if isinstance(content, str) else 0
+                    rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
+                    self.logger.info(
+                        f"Zhipu.function_call(text) lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}"
+                    )
+                except Exception:
+                    pass
+
                 return response_data
                 
         except httpx.TimeoutException:
@@ -186,61 +245,7 @@ class ZhipuLLMService(LLMServiceInterface):
         except Exception as e:
             raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
     
-    async def structured_generation(
-        self,
-        prompt: str,
-        schema: Dict[str, Any] = None,
-        model: str = None,
-        **kwargs  
-    ) -> Dict[str, Any]:
-        """结构化内容生成（JSON等）"""
-        
-        system_prompt = "你是一个专业的结构化数据生成助手。请根据用户需求生成符合要求的JSON数据，只返回有效的JSON格式。"
-        
-        if schema:
-            system_prompt += f"\n\n请确保返回的JSON符合以下结构：\n{json.dumps(schema, indent=2, ensure_ascii=False)}"
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-        
-        result = await self.chat_completion(
-            messages=messages,
-            model=model,
-            temperature=kwargs.get("temperature", 0.3)
-        )
-        
-        # 尝试解析JSON
-        try:
-            json_result = json.loads(result["content"])
-            result.update({
-                "structured_data": json_result,
-                "valid_json": True
-            })
-        except json.JSONDecodeError:
-            # 尝试提取JSON
-            import re
-            json_match = re.search(r'\{.*\}', result["content"], re.DOTALL)
-            if json_match:
-                try:
-                    json_result = json.loads(json_match.group())
-                    result.update({
-                        "structured_data": json_result,
-                        "valid_json": True
-                    })
-                except:
-                    result.update({
-                        "valid_json": False,
-                        "error": "Failed to parse JSON from response"
-                    })
-            else:
-                result.update({
-                    "valid_json": False,
-                    "error": "No JSON found in response"
-                })
-        
-        return result
+    # structured_generation 已移除：改用 chat_completion + response_format 实现结构化输出
 
 
 class ZhipuVLMService(VLMServiceInterface):
@@ -266,11 +271,17 @@ class ZhipuVLMService(VLMServiceInterface):
         self.generation_models = ["cogview-3", "cogview-3-plus", "cogview-4"]
     
     def _get_api_key(self) -> Optional[str]:
-        """获取API密钥"""
+        """获取API密钥（配置 > 环境变量 > settings）"""
         api_key = self.config.get("api_key")
         if not api_key:
             import os
             api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
+        if not api_key:
+            try:
+                from ....core.config import settings
+                api_key = settings.GLM_API_KEY or os.getenv("ZHIPU_API_KEY")
+            except Exception:
+                pass
         return api_key
     
     def is_available(self) -> bool:
@@ -462,15 +473,22 @@ class ZhipuVideoService(VideoModelServiceInterface):
         
         # 支持的模型和能力
         self.supported_models = ["cogvideox", "cogvideox-3"]
-        self.duration_capabilities = [5, 10]  # CogVideoX支持的时长
+        # CogVideoX支持的离散时长，从配置读取，避免写死
+        self.duration_capabilities = getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10])
         self.supports_first_last = True  # CogVideoX-3支持首尾帧模式
     
     def _get_api_key(self) -> Optional[str]:
-        """获取API密钥"""
+        """获取API密钥（配置 > 环境变量 > settings）"""
         api_key = self.config.get("api_key")
         if not api_key:
             import os
             api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
+        if not api_key:
+            try:
+                from ....core.config import settings
+                api_key = settings.GLM_API_KEY or os.getenv("ZHIPU_API_KEY")
+            except Exception:
+                pass
         return api_key
     
     def is_available(self) -> bool:

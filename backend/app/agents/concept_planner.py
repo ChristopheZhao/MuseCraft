@@ -1,5 +1,5 @@
 """
-Function Call版本的ConceptPlannerAgent - 完全使用LLM智能决策
+Concept Planner Agent - Analyzes requirements and creates video concept plan
 """
 import json
 import asyncio
@@ -7,24 +7,28 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
+from ..core.config import settings
 from ..models import Task, AgentExecution, AgentType, Scene, SceneType
-from ..core.workflow_state import workflow_manager, SceneData
+from ..services.ai_client import AIClient
+from .utils import SceneDurationCalculator
 
 
 class ConceptPlannerAgent(BaseAgent):
     """
-    Function Call版本的ConceptPlannerAgent
-    使用LLM Function Call进行所有决策：场景规划、内容分析、创意优化
+    Concept Planner Agent analyzes user requirements and creates a detailed
+    video concept plan with scene breakdowns and visual descriptions
     """
     
-    def __init__(self):
+    def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.CONCEPT_PLANNER,
             agent_name="concept_planner",
             timeout_seconds=120,
-            max_retries=2
-            # 不指定tools，使用Agent工具分配系统自动分配
+            max_retries=2,
+            llms=llms
+            # ConceptPlanner使用LLM原生能力，不需要外部工具
         )
+        # 使用LLM原生FC能力进行概念生成和智能风格设计
     
     async def _execute_impl(
         self, 
@@ -33,412 +37,595 @@ class ConceptPlannerAgent(BaseAgent):
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """使用LLM Function Call进行概念规划"""
+        """Generate video concept plan from user requirements"""
         
-        # 验证输入 - MAS智能风格决策适配
+        # Validate input - ConceptPlanner自主生成智能风格，不需要外部video_style
         self._validate_input(input_data, ["user_prompt", "duration", "workflow_state_id"])
         
         user_prompt = input_data["user_prompt"]
-        style_preference = input_data.get("style_preference")
-        duration = input_data.get("duration", 30)
+        # 移除video_style外部依赖，ConceptPlanner将自主生成智能风格设计
+        style_preference = input_data.get("style_preference", None)  # 可选的用户风格偏好
+        
+        # 使用配置化的总体时长设置
+        from ..core.video_config_manager import get_video_config
+        video_config = get_video_config()
+        
+        # 获取系统duration能力
+        duration_capability = video_config.get_system_duration_capability()
+        default_duration = (duration_capability["min_duration"] + duration_capability["max_duration"]) // 2
+        duration = input_data.get("duration", default_duration)  # seconds
+        
+        # 验证duration请求
+        validation = video_config.validate_duration_request(duration)
+        if not validation["is_valid"]:
+            self.logger.warning(f"🎭 Requested duration {duration}s not supported by {validation['provider']}, "
+                              f"using {validation['suggestion']}s instead")
+            duration = validation["suggestion"]
         aspect_ratio = input_data.get("aspect_ratio", "16:9")
         workflow_state_id = input_data["workflow_state_id"]
         
         # 获取 WorkflowState
+        from ..core.workflow_state import workflow_manager, SceneData
         workflow_state = workflow_manager.get_workflow(workflow_state_id)
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
         
-        await self._update_progress(execution, 10, "Starting LLM-driven concept planning", db)
+        await self._update_progress(execution, 10, "Analyzing requirements", db)
         
-        # 🧠 使用ConceptGenerationTool进行智能风格决策和概念规划
-        try:
-            # 使用智能风格决策工具
-            concept_params = {
-                "user_prompt": user_prompt,
-                "duration": duration,
-                "aspect_ratio": aspect_ratio
-            }
-            if style_preference:
-                concept_params["style_preference"] = style_preference
-                
-            planning_result = await self.use_tool(
-                "concept_generation_tool",
-                "generate_concept", 
-                concept_params
-            )
-            
-            await self._update_progress(execution, 60, "Processing planning results", db)
-            
-            # 处理ConceptGenerationTool的智能风格决策结果
-            if hasattr(planning_result, 'result') and isinstance(planning_result.result, dict):
-                concept_data = planning_result.result
-            elif isinstance(planning_result, dict):
-                concept_data = planning_result
-            else:
-                concept_data = {}
-            
-            # 提取智能风格设计
-            intelligent_style_design = concept_data.get("intelligent_style_design", {})
-            
-            # 更新WorkflowState中的智能风格设计
-            workflow_state.intelligent_style_design = intelligent_style_design
-            
-            await self._update_progress(execution, 80, "Creating scene data", db)
-            
-            # 从ConceptGenerationTool结果创建场景数据
-            scenes = self._create_scene_data_from_tool_result(concept_data, workflow_state_id)
-            
-            await self._update_progress(execution, 95, "Finalizing concept plan", db)
-            
-            # 构建输出结果 - 包含智能风格设计
-            result = {
-                "concept_plan": concept_data,  # 🔧 修复：传递完整的概念数据字典
-                "scenes": scenes,
-                "total_scenes": len(scenes),
-                "intelligent_style_design": intelligent_style_design,  # 新增智能风格设计
-                "duration": duration,
-                "aspect_ratio": aspect_ratio,
-                "llm_driven": True,  # 标记这是LLM驱动的结果
-                "planning_approach": "concept_generation_tool"
-            }
-            
-            self.logger.info(f"🎭 LLM概念规划完成: {len(scenes)}个场景, 方法={result['planning_approach']}")
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"ConceptGenerationTool失败: {e}")
-            self.logger.info("🔄 启用fallback概念规划...")
-            
-            # Fallback: 创建基本的概念规划和场景数据
-            fallback_result = self._create_fallback_concept_plan(
-                user_prompt, style_preference, duration, aspect_ratio, workflow_state_id
-            )
-            
-            self.logger.info(f"🎭 Fallback概念规划完成: {len(fallback_result['scenes'])}个场景")
-            return fallback_result
-    
-    async def _llm_guided_concept_planning(
-        self, 
-        user_prompt: str, 
-        video_style: str, 
-        duration: int,
-        aspect_ratio: str
-    ) -> Dict[str, Any]:
-        """使用LLM Function Call进行概念规划"""
-        
-        # 构建给LLM的消息
-        messages = [
-            {
-                "role": "user",
-                "content": f"""请为以下视频需求制定完整的概念规划：
-
-用户需求：{user_prompt}
-视频风格：{video_style}
-总时长：{duration}秒
-画面比例：{aspect_ratio}
-
-请分析内容并智能决定：
-1. 最佳的场景数量和分配
-2. 每个场景的内容重点和视觉描述
-3. 整体的创意方向和叙事结构
-
-请使用你的工具来完成这个任务。"""
-            }
-        ]
-        
-        # 使用LLM Function Call让AI选择合适的工具和参数
-        fc_result = await self.llm_function_call(
-            messages=messages,
-            context_description="你需要进行视频概念规划，包括场景分析、内容规划和创意优化"
+        # Prepare concept planning prompt - 智能风格设计
+        concept_prompt = self._build_intelligent_concept_prompt(
+            user_prompt, style_preference, duration, aspect_ratio
         )
         
-        if not fc_result.get("success"):
-            raise AgentError(f"LLM Function Call failed: {fc_result.get('error')}")
+        await self._update_progress(execution, 30, "Generating concept plan", db)
         
-        return fc_result
+        try:
+            # 使用LLM原生FC能力生成概念计划和智能风格设计
+            from ..core.ai_config import get_ai_config
+            ai_config_manager = get_ai_config()
+            concept_model = ai_config_manager.get_model_for_agent("concept_planner")
+            model_config = ai_config_manager.get_model_config(concept_model)
+            
+            # 构建系统+用户消息（不暴露工具名/参数；仅角色与事实）
+            messages = []
+            try:
+                from ..core.prompt_manager import get_prompt_manager
+                pm = get_prompt_manager()
+                mas_sys = pm.render_template("mas_system", "system", variables={}, use_cache=True, auto_reload=False)
+                agent_sys = pm.render_template("concept_planner", "system", variables={}, use_cache=True, auto_reload=False)
+                sys_text = ((mas_sys or "").strip() + "\n\n" + (agent_sys or "").strip()).strip()
+                if isinstance(sys_text, str) and sys_text.strip():
+                    messages.append({"role": "system", "content": sys_text})
+            except Exception:
+                pass
+            messages.append({"role": "user", "content": concept_prompt})
+            
+            # 使用LLM原生FC能力进行概念生成
+            concept_response = await self.llm_function_call(
+                messages=messages,
+                model=concept_model,
+                context_description=f"Generate intelligent video concept with style design for: {user_prompt[:100]}...",
+                temperature=model_config.temperature if model_config else 0.7,
+                max_tokens=model_config.max_tokens if model_config else 4000,
+                response_format={"type": "json_object"}
+            )
+            
+            # 解析LLM响应
+            if not concept_response or "content" not in concept_response:
+                raise AgentError("LLM failed to generate concept response")
+            
+            # 提取token使用信息
+            usage_info = concept_response.get("usage", {})
+            self._update_token_usage(execution, usage_info.get("total_tokens", 0))
+            
+            await self._update_progress(execution, 60, "Parsing concept plan", db)
+            
+            # Parse the concept plan - concept_response["content"] 是AI生成的JSON字符串
+            concept_plan = self._parse_concept_response(concept_response["content"])
+            
+            # 关键日志：检查生成的场景描述
+            self.logger.info(f"🎭 ConceptPlanner: user_prompt='{user_prompt}', scenes_count={len(concept_plan.get('scenes', []))}")
+            for i, scene in enumerate(concept_plan.get("scenes", [])):
+                visual_desc = scene.get('visual_description', '')
+                desc = scene.get('description', '')
+                self.logger.info(f"   Scene {i+1}: visual_description='{visual_desc}', description='{desc}'")
+            await self._update_progress(execution, 80, "Creating scene breakdowns", db)
+            
+            # 使用动态时长优化场景
+            optimized_scenes = SceneDurationCalculator.optimize_scene_durations(
+                concept_plan.get("scenes", []),
+                duration
+            )
+            concept_plan["scenes"] = optimized_scenes
+            
+            # Create scene data in WorkflowState (不直接操作数据库)
+            scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
+            
+            await self._update_progress(execution, 95, "Finalizing concept", db)
+            
+            # 更新 WorkflowState 的概念计划
+            workflow_state.concept_plan = concept_plan
+            
+            # 🧠 Phase 1.2 - 实现MAS记忆共享：ConceptPlanner存储创意指导
+            try:
+                memory_stored = await self.store_creative_guidance(
+                    workflow_id=workflow_state_id,
+                    concept_plan=concept_plan
+                )
+                self.logger.info(f"🧠 ConceptPlanner: 创意指导已存储到MAS记忆系统 (success={memory_stored})")
+            except Exception as e:
+                self.logger.warning(f"⚠️ ConceptPlanner: 记忆存储失败 - {e}")
+            
+            # Prepare output data
+            output_data = {
+                "concept_plan": concept_plan,
+                "total_scenes": len(scenes_data),
+                "estimated_duration": duration,
+                "video_concept": concept_plan.get("overview", ""),
+                "visual_style": self._extract_intelligent_style_summary(concept_plan),
+                "target_audience": concept_plan.get("target_audience", "general"),
+                "key_messages": concept_plan.get("key_messages", []),
+                "workflow_state_id": workflow_state_id
+            }
+            
+            await self._update_progress(execution, 100, "Concept planning completed", db)
+            
+            return output_data
+            
+        except Exception as e:
+            error_msg = f"Failed to generate concept plan: {str(e)}"
+            self.logger.error(error_msg)
+            raise AgentError(error_msg) from e
     
-    def _process_planning_results(self, planning_result: Dict[str, Any]) -> Dict[str, Any]:
-        """处理LLM规划结果，提取概念规划信息"""
+    def _build_intelligent_concept_prompt(
+        self, 
+        user_prompt: str, 
+        style_preference: Optional[str], 
+        duration: int,
+        aspect_ratio: str
+    ) -> str:
+        """Build intelligent concept prompt with LLM-driven style design"""
         
-        # 从Function Call结果中提取规划信息
-        tool_results = planning_result.get("tool_results", [])
+        # 使用智能风格设计模板 - LLM自主分析用户内容并设计合适风格
+        return self.render_prompt(
+            "concept_generation",
+            user_prompt=user_prompt,
+            style_preference=style_preference,  # 可选的用户偏好
+            enable_intelligent_style=True,     # 启用智能风格设计
+            duration=duration,
+            aspect_ratio=aspect_ratio
+        )
+    
+    def _parse_concept_response(self, response_content: str) -> Dict[str, Any]:
+        """Parse AI response into structured concept plan with robust error handling"""
         
-        concept_plan = {
-            "title": "LLM Generated Concept",
-            "description": "Intelligent concept planning by LLM",
-            "scenes": [],
-            "video_style": "professional",
-            "approach": "llm_function_call"
-        }
-        
-        # 处理智能场景规划结果
-        for result in tool_results:
-            if result.get("tool") and "intelligent_scene_planning" in result.get("tool", ""):
-                if result.get("result") and hasattr(result["result"], "result"):
-                    planning_data = result["result"].result
-                    if planning_data.get("success") and planning_data.get("scene_plan"):
-                        scene_plan = planning_data["scene_plan"]
-                        if "scenes" in scene_plan:
-                            concept_plan["scenes"] = scene_plan["scenes"]
-                        elif "scene_plan" in scene_plan and "scenes" in scene_plan["scene_plan"]:
-                            concept_plan["scenes"] = scene_plan["scene_plan"]["scenes"]
-                        
-                        concept_plan["approach"] = planning_data.get("approach", "llm_function_call")
-                        self.logger.info(f"🧠 智能场景规划: {len(concept_plan['scenes'])}个场景")
-        
-        # 如果没有场景，创建默认场景
-        if not concept_plan["scenes"]:
-            concept_plan["scenes"] = [
-                {
-                    "scene_number": 1,
-                    "duration": 30,
-                    "content_focus": "Complete video content",
-                    "visual_description": "Full video visualization",
-                    "narrative_description": "Complete narrative"
+        try:
+            # Clean response if needed
+            content = response_content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            
+            # First attempt: direct JSON parsing
+            try:
+                concept_plan = json.loads(content)
+            except json.JSONDecodeError as parse_error:
+                self.logger.warning(f"Initial JSON parsing failed: {parse_error}")
+                
+                # Second attempt: try to fix common JSON issues
+                concept_plan = self._attempt_json_repair(content, parse_error)
+            
+            # Validate required fields
+            required_fields = ["overview", "scenes"]
+            for field in required_fields:
+                if field not in concept_plan:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            # Validate scenes
+            if not isinstance(concept_plan["scenes"], list) or len(concept_plan["scenes"]) == 0:
+                raise ValueError("Scenes must be a non-empty list")
+            
+            # Process scene_physics_type field if it exists
+            if "scene_physics_type" in concept_plan:
+                physics_type = concept_plan["scene_physics_type"]
+                if isinstance(physics_type, dict):
+                    # Convert string "true"/"false" to boolean if needed
+                    if "is_realistic" in physics_type:
+                        if isinstance(physics_type["is_realistic"], str):
+                            is_realistic_str = physics_type["is_realistic"].lower()
+                            if "true" in is_realistic_str:
+                                physics_type["is_realistic"] = True
+                            elif "false" in is_realistic_str:
+                                physics_type["is_realistic"] = False
+                            else:
+                                # Default to true for realistic scenes
+                                physics_type["is_realistic"] = True
+                    
+                    # Ensure physics_constraints is set correctly
+                    if "physics_constraints" not in physics_type or not physics_type["physics_constraints"]:
+                        physics_type["physics_constraints"] = "strict" if physics_type.get("is_realistic", True) else "basic"
+                    elif "strict" in str(physics_type["physics_constraints"]).lower():
+                        physics_type["physics_constraints"] = "strict"
+                    elif "basic" in str(physics_type["physics_constraints"]).lower():
+                        physics_type["physics_constraints"] = "basic"
+            else:
+                # Add default scene_physics_type if missing
+                self.logger.warning("scene_physics_type missing in concept_plan, adding default")
+                concept_plan["scene_physics_type"] = {
+                    "is_realistic": True,
+                    "physics_constraints": "strict",
+                    "reasoning": "Default: assuming realistic scene"
                 }
-            ]
-            concept_plan["approach"] = "fallback"
-            self.logger.warning("🎭 使用fallback场景规划")
+            
+            return concept_plan
         
-        return concept_plan
+            
+        except json.JSONDecodeError as e:
+            # Log the problematic content for debugging
+            self.logger.error(f"JSON parsing failed. Content length: {len(response_content)}")
+            self.logger.error(f"Content preview: {response_content[:500]}...")
+            self.logger.error(f"Content ending: ...{response_content[-200:]}")
+            raise AgentError(f"Failed to parse concept plan JSON: {str(e)}")
+        except Exception as e:
+            raise AgentError(f"Invalid concept plan format: {str(e)}")
     
-    def _create_scene_data(self, concept_plan: Dict[str, Any], workflow_state_id: str) -> List[Dict[str, Any]]:
-        """根据概念规划创建场景数据"""
+    def _attempt_json_repair(self, content: str, original_error: json.JSONDecodeError) -> Dict[str, Any]:
+        """Attempt to repair malformed JSON content"""
+        
+        repair_strategies = [
+            self._fix_unterminated_strings,
+            self._fix_missing_closing_braces,
+            self._extract_complete_json_object,
+            self._create_fallback_concept
+        ]
+        
+        for strategy in repair_strategies:
+            try:
+                repaired_content = strategy(content, original_error)
+                if repaired_content:
+                    concept_plan = json.loads(repaired_content)
+                    self.logger.info(f"JSON repair successful using strategy: {strategy.__name__}")
+                    return concept_plan
+            except (json.JSONDecodeError, Exception) as e:
+                self.logger.debug(f"Repair strategy {strategy.__name__} failed: {e}")
+                continue
+        
+        # If all repair strategies fail, raise the original error
+        raise original_error
+    
+    def _fix_unterminated_strings(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
+        """Try to fix unterminated string literals"""
+        try:
+            # Find the position of the error
+            error_pos = error.pos if hasattr(error, 'pos') else len(content)
+            
+            # Look for the last opening quote before the error position
+            content_before_error = content[:error_pos]
+            last_quote_pos = content_before_error.rfind('"')
+            
+            if last_quote_pos != -1:
+                # Check if this quote is unmatched
+                quote_count = content_before_error[last_quote_pos:].count('"')
+                if quote_count % 2 == 1:  # Odd number means unmatched quote
+                    # Add closing quote and try to complete the JSON
+                    fixed_content = content[:error_pos] + '"'
+                    
+                    # Try to complete the JSON structure
+                    if not fixed_content.rstrip().endswith('}'):
+                        fixed_content += '}'
+                    
+                    return fixed_content
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _fix_missing_closing_braces(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
+        """Try to fix missing closing braces"""
+        try:
+            # Count opening and closing braces
+            open_braces = content.count('{')
+            close_braces = content.count('}')
+            open_brackets = content.count('[')
+            close_brackets = content.count(']')
+            
+            # Add missing closing characters
+            fixed_content = content
+            missing_braces = open_braces - close_braces
+            missing_brackets = open_brackets - close_brackets
+            
+            if missing_braces > 0:
+                fixed_content += '}' * missing_braces
+            
+            if missing_brackets > 0:
+                fixed_content += ']' * missing_brackets
+            
+            return fixed_content if missing_braces > 0 or missing_brackets > 0 else None
+            
+        except Exception:
+            return None
+    
+    def _extract_complete_json_object(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
+        """Try to extract a complete JSON object from the beginning"""
+        try:
+            # Look for the first complete JSON object
+            brace_count = 0
+            start_pos = content.find('{')
+            
+            if start_pos == -1:
+                return None
+            
+            for i, char in enumerate(content[start_pos:], start_pos):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        # Found complete object
+                        return content[start_pos:i+1]
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _create_fallback_concept(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
+        """Create a minimal fallback concept plan"""
+        try:
+            # Extract any text content to use as overview
+            import re
+            
+            # Try to extract overview text
+            overview_match = re.search(r'"overview":\s*"([^"]*)', content)
+            overview = overview_match.group(1) if overview_match else "Generated video concept"
+            
+            # Create minimal valid concept
+            fallback_concept = {
+                "overview": overview,
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "description": "Main video content",
+                        "visual_description": "Visual representation of the video content",
+                        "duration": settings.DEFAULT_SCENE_DURATION,
+                        "key_elements": ["main content"]
+                    }
+                ],
+                "visual_style": "professional",
+                "target_audience": "general",
+                "key_messages": ["main message"]
+            }
+            
+            self.logger.warning("Using fallback concept plan due to JSON parsing failure")
+            return json.dumps(fallback_concept)
+            
+        except Exception:
+            return None
+    
+    async def _create_scenes(
+        self, 
+        task: Task, 
+        concept_plan: Dict[str, Any], 
+        db: Session
+    ) -> List[Scene]:
+        """Create scene records in database"""
         
         scenes = []
-        for i, scene_info in enumerate(concept_plan.get("scenes", [])):
-            scene_data = {
-                "scene_number": i + 1,
-                "duration": scene_info.get("duration", 5),
-                "script_text": scene_info.get("content_focus", ""),
-                "visual_description": scene_info.get("visual_description", ""),
-                "narrative_description": scene_info.get("narrative_description", ""),
-                "scene_type": SceneType.MAIN_CONTENT.value,
-                "workflow_state_id": workflow_state_id
-            }
-            scenes.append(scene_data)
-            
-            # 创建SceneData对象并存储到workflow_state
-            scene_data_obj = SceneData(
-                scene_number=scene_data["scene_number"],
-                duration=scene_data["duration"],
-                script_text=scene_data["script_text"],
-                visual_description=scene_data["visual_description"],
-                narrative_description=scene_data["narrative_description"]
+        current_start_time = 0.0
+        
+        for scene_data in concept_plan["scenes"]:
+            scene = Scene(
+                task_id=task.id,
+                scene_number=scene_data.get("scene_number", len(scenes) + 1),
+                scene_type=self._map_scene_type(scene_data.get("scene_type", "main_content")),
+                title=scene_data.get("title", f"Scene {len(scenes) + 1}"),
+                description=scene_data.get("description", ""),
+                
+                # Content
+                narrative_description=scene_data.get("narrative_description", ""),
+                visual_description=scene_data.get("visual_description", ""),
+                
+                # Timing - 使用动态计算的时长
+                duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
+                start_time=current_start_time,
+                duration_reasoning=scene_data.get("duration_reasoning", ""),
+                
+                # Visual elements
+                background_prompt=scene_data.get("visual_description", ""),
+                character_descriptions=scene_data.get("characters", []),
+                props_and_objects=scene_data.get("props", []),
+                mood_and_atmosphere=scene_data.get("mood", "")[:100],  # Truncate to fit DB
+                
+                # Camera and style
+                camera_angle=scene_data.get("camera_angle", "medium shot")[:50],
+                lighting_style=scene_data.get("lighting", "natural")[:50],
+                art_style=concept_plan.get("visual_style", "realistic")[:100],  # Truncate to fit DB
+                color_palette=concept_plan.get("color_palette", [])
             )
             
-            workflow_state = workflow_manager.get_workflow(workflow_state_id)
-            if workflow_state:
-                workflow_state.add_scene(scene_data_obj)
-                self.logger.info(f"📝 Created scene {scene_data['scene_number']}: {scene_data['script_text'][:50]}...")
+            scene.end_time = current_start_time + scene.duration
+            current_start_time = scene.end_time
+            
+            db.add(scene)
+            scenes.append(scene)
+        
+        db.commit()
+        
+        # Refresh scenes to get IDs
+        for scene in scenes:
+            db.refresh(scene)
         
         return scenes
     
-    def _create_fallback_concept_plan(
+    async def _create_scenes_in_workflow_state(
         self, 
-        user_prompt: str, 
-        style_preference: str, 
-        duration: int, 
-        aspect_ratio: str, 
-        workflow_state_id: str
-    ) -> Dict[str, Any]:
-        """当ConceptGenerationTool失败时的fallback概念规划"""
+        workflow_state, 
+        concept_plan: Dict[str, Any]
+    ) -> List:
+        """Create scene data in WorkflowState (内存操作，不涉及数据库)"""
         
-        self.logger.info("🎭 使用fallback概念规划...")
+        scenes_data = []
+        current_start_time = 0.0
         
-        # 基于时长智能决定场景数量
-        if duration <= 15:
-            scene_count = 1
-        elif duration <= 30:
-            scene_count = 2
-        elif duration <= 60:
-            scene_count = 3
-        else:
-            scene_count = min(4, duration // 20)  # 最多4个场景
-        
-        scene_duration = duration // scene_count
-        remaining_duration = duration % scene_count
-        
-        # 创建基本场景数据
-        scenes = []
-        for i in range(scene_count):
-            # 最后一个场景包含剩余时间
-            current_duration = scene_duration + (remaining_duration if i == scene_count - 1 else 0)
-            
-            scene_data = {
-                "scene_number": i + 1,
-                "duration": current_duration,
-                "script_text": f"Scene {i + 1}: {user_prompt}",
-                "visual_description": f"Visual content for scene {i + 1}",
-                "narrative_description": f"Narrative for scene {i + 1}",
-                "scene_type": "main_content",
-                "workflow_state_id": workflow_state_id
-            }
-            scenes.append(scene_data)
-            
-            # 创建SceneData对象并存储到workflow_state
+        for scene_data in concept_plan["scenes"]:
             from ..core.workflow_state import SceneData
-            scene_data_obj = SceneData(
-                scene_number=scene_data["scene_number"],
-                duration=scene_data["duration"],
-                script_text=scene_data["script_text"],
-                visual_description=scene_data["visual_description"],
-                narrative_description=scene_data["narrative_description"]
+            
+            scene = SceneData(
+                scene_number=scene_data.get("scene_number", len(scenes_data) + 1),
+                scene_type=scene_data.get("scene_type", "main_content"),
+                title=scene_data.get("title", f"Scene {len(scenes_data) + 1}"),
+                description=scene_data.get("description", ""),
+                
+                # Content
+                narrative_description=scene_data.get("narrative_description", ""),
+                visual_description=scene_data.get("visual_description", ""),
+                
+                # Timing - 使用动态计算的时长
+                duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
+                start_time=current_start_time,
+                duration_reasoning=scene_data.get("duration_reasoning", ""),
+                
+                # Visual elements
+                character_descriptions=scene_data.get("characters", []),
+                props_and_objects=scene_data.get("props", []),
+                mood_and_atmosphere=scene_data.get("mood", ""),
+                
+                # Camera and style
+                camera_angle=scene_data.get("camera_angle", "medium shot"),
+                lighting_style=scene_data.get("lighting", "natural"),
+                art_style=concept_plan.get("visual_style", "realistic"),
+                color_palette=concept_plan.get("color_palette", [])
             )
             
-            workflow_state = workflow_manager.get_workflow(workflow_state_id)
-            if workflow_state:
-                workflow_state.add_scene(scene_data_obj)
-                self.logger.info(f"📝 Created fallback scene {scene_data['scene_number']}: {current_duration}s")
+            scene.end_time = current_start_time + scene.duration
+            current_start_time = scene.end_time
+            
+            # 添加到 WorkflowState
+            workflow_state.add_scene(scene)
+            scenes_data.append(scene)
         
-        # 创建fallback智能风格设计
-        fallback_style_design = {
-            "style_name": "balanced_professional",
-            "visual_approach": "mixed_media",
-            "narrative_style": "documentary_style",
-            "production_taste": "clean_minimal",
-            "emotional_tone": "professional_authoritative",
-            "style_reasoning": "Fallback style based on content analysis without LLM assistance"
-        }
-        
-        # 构建fallback结果
-        result = {
-            "concept_plan": {
-                "overview": f"Fallback concept plan for: {user_prompt}",
-                "scenes": [],
-                "intelligent_style_design": fallback_style_design,
-                "success": True
-            },  # 🔧 修复：返回字典而不是字符串
-            "scenes": scenes,
-            "total_scenes": len(scenes),
-            "intelligent_style_design": fallback_style_design,
-            "duration": duration,
-            "aspect_ratio": aspect_ratio,
-            "llm_driven": False,  # 标记这不是LLM驱动的结果
-            "planning_approach": "fallback"
-        }
-        
-        return result
+        return scenes_data
     
-    def _create_scene_data_from_tool_result(self, concept_data: Dict[str, Any], workflow_state_id: str) -> List[Dict[str, Any]]:
-        """从ConceptGenerationTool结果创建场景数据"""
+    def _map_scene_type(self, scene_type_str: str) -> SceneType:
+        """Map string scene type to enum - handles both English and Chinese terms"""
+        if not scene_type_str:
+            return SceneType.MAIN_CONTENT
         
-        scenes = []
-        scene_list = concept_data.get("scenes", [])
+        scene_type_lower = scene_type_str.lower().strip()
         
-        for i, scene_info in enumerate(scene_list):
-            scene_data = {
-                "scene_number": i + 1,
-                "duration": scene_info.get("duration", 5),
-                "script_text": scene_info.get("description", ""),
-                "visual_description": scene_info.get("visual_description", ""),
-                "narrative_description": scene_info.get("description", ""),
-                "scene_type": "main_content",
-                "workflow_state_id": workflow_state_id
-            }
-            scenes.append(scene_data)
-            
-            # 创建SceneData对象并存储到workflow_state
-            from ..core.workflow_state import SceneData
-            scene_data_obj = SceneData(
-                scene_number=scene_data["scene_number"],
-                duration=scene_data["duration"],
-                script_text=scene_data["script_text"],
-                visual_description=scene_data["visual_description"],
-                narrative_description=scene_data["narrative_description"]
-            )
-            
-            workflow_state = workflow_manager.get_workflow(workflow_state_id)
-            if workflow_state:
-                workflow_state.add_scene(scene_data_obj)
-                self.logger.info(f"📝 Created scene {scene_data['scene_number']}: {scene_data['script_text'][:50]}...")
+        # English mappings
+        english_mapping = {
+            "intro": SceneType.INTRO,
+            "introduction": SceneType.INTRO,
+            "opening": SceneType.INTRO,
+            "main_content": SceneType.MAIN_CONTENT,
+            "main": SceneType.MAIN_CONTENT,
+            "content": SceneType.MAIN_CONTENT,
+            "body": SceneType.MAIN_CONTENT,
+            "transition": SceneType.TRANSITION,
+            "bridge": SceneType.TRANSITION,
+            "outro": SceneType.OUTRO,
+            "conclusion": SceneType.OUTRO,
+            "ending": SceneType.OUTRO,
+            "background": SceneType.BACKGROUND
+        }
         
-        return scenes
+        # Chinese mappings for common scenario types
+        chinese_mapping = {
+            # 开始/起始/引入相关
+            "修炼起始": SceneType.INTRO,
+            "开始": SceneType.INTRO,
+            "起始": SceneType.INTRO,
+            "引入": SceneType.INTRO,
+            "初始": SceneType.INTRO,
+            "开场": SceneType.INTRO,
+            # 主要内容/发展/过程
+            "能量爆发": SceneType.MAIN_CONTENT,
+            "主要内容": SceneType.MAIN_CONTENT,
+            "发展": SceneType.MAIN_CONTENT,
+            "过程": SceneType.MAIN_CONTENT,
+            "进行": SceneType.MAIN_CONTENT,
+            "演进": SceneType.MAIN_CONTENT,
+            "修炼过程": SceneType.MAIN_CONTENT,
+            # 突破/成功/结论/高潮
+            "突破成功": SceneType.OUTRO,
+            "突破": SceneType.OUTRO,
+            "成功": SceneType.OUTRO,
+            "完成": SceneType.OUTRO,
+            "结束": SceneType.OUTRO,
+            "结论": SceneType.OUTRO,
+            "收尾": SceneType.OUTRO,
+            # 过渡
+            "过渡": SceneType.TRANSITION,
+            "转场": SceneType.TRANSITION,
+            "衔接": SceneType.TRANSITION,
+            # 背景
+            "背景": SceneType.BACKGROUND,
+            "环境": SceneType.BACKGROUND
+        }
+        
+        # Try English mapping first
+        if scene_type_lower in english_mapping:
+            return english_mapping[scene_type_lower]
+        
+        # Try Chinese mapping
+        if scene_type_str in chinese_mapping:
+            return chinese_mapping[scene_type_str]
+        
+        # Default fallback
+        return SceneType.MAIN_CONTENT
     
-    def _create_fallback_concept_plan(
-        self, 
-        user_prompt: str, 
-        style_preference: str, 
-        duration: int, 
-        aspect_ratio: str, 
-        workflow_state_id: str
-    ) -> Dict[str, Any]:
-        """当ConceptGenerationTool失败时的fallback概念规划"""
-        
-        self.logger.info("🎭 使用fallback概念规划...")
-        
-        # 基于时长智能决定场景数量
-        if duration <= 15:
-            scene_count = 1
-        elif duration <= 30:
-            scene_count = 2
-        elif duration <= 60:
-            scene_count = 3
-        else:
-            scene_count = min(4, duration // 20)  # 最多4个场景
-        
-        scene_duration = duration // scene_count
-        remaining_duration = duration % scene_count
-        
-        # 创建基本场景数据
-        scenes = []
-        for i in range(scene_count):
-            # 最后一个场景包含剩余时间
-            current_duration = scene_duration + (remaining_duration if i == scene_count - 1 else 0)
-            
-            scene_data = {
-                "scene_number": i + 1,
-                "duration": current_duration,
-                "script_text": f"Scene {i + 1}: {user_prompt}",
-                "visual_description": f"Visual content for scene {i + 1}",
-                "narrative_description": f"Narrative for scene {i + 1}",
-                "scene_type": "main_content",
-                "workflow_state_id": workflow_state_id
-            }
-            scenes.append(scene_data)
-            
-            # 创建SceneData对象并存储到workflow_state
-            from ..core.workflow_state import SceneData
-            scene_data_obj = SceneData(
-                scene_number=scene_data["scene_number"],
-                duration=scene_data["duration"],
-                script_text=scene_data["script_text"],
-                visual_description=scene_data["visual_description"],
-                narrative_description=scene_data["narrative_description"]
-            )
-            
-            workflow_state = workflow_manager.get_workflow(workflow_state_id)
-            if workflow_state:
-                workflow_state.add_scene(scene_data_obj)
-                self.logger.info(f"📝 Created fallback scene {scene_data['scene_number']}: {current_duration}s")
-        
-        # 创建fallback智能风格设计
-        fallback_style_design = {
-            "style_name": "balanced_professional",
-            "visual_approach": "mixed_media",
-            "narrative_style": "documentary_style",
-            "production_taste": "clean_minimal",
-            "emotional_tone": "professional_authoritative",
-            "style_reasoning": "Fallback style based on content analysis without LLM assistance"
+    def _scene_to_dict(self, scene: Scene) -> Dict[str, Any]:
+        """Convert scene model to dictionary"""
+        return {
+            "id": scene.id,
+            "scene_number": scene.scene_number,
+            "scene_type": scene.scene_type.value,
+            "title": scene.title,
+            "description": scene.description,
+            "duration": scene.duration,
+            "start_time": scene.start_time,
+            "end_time": scene.end_time,
+            "visual_description": scene.visual_description,
+            "narrative_description": scene.narrative_description,
+            "mood": scene.mood_and_atmosphere,
+            "camera_angle": scene.camera_angle,
+            "lighting": scene.lighting_style,
+            "art_style": scene.art_style,
+            "characters": scene.character_descriptions,
+            "props": scene.props_and_objects,
+            "color_palette": scene.color_palette
         }
+    
+    def _extract_intelligent_style_summary(self, concept_plan: Dict[str, Any]) -> str:
+        """从智能风格设计中提取风格摘要"""
         
-        # 构建fallback结果
-        result = {
-            "concept_plan": {
-                "overview": f"Fallback concept plan for: {user_prompt}",
-                "scenes": [],
-                "intelligent_style_design": fallback_style_design,
-                "success": True
-            },  # 🔧 修复：返回字典而不是字符串
-            "scenes": scenes,
-            "total_scenes": len(scenes),
-            "intelligent_style_design": fallback_style_design,
-            "duration": duration,
-            "aspect_ratio": aspect_ratio,
-            "llm_driven": False,  # 标记这不是LLM驱动的结果
-            "planning_approach": "fallback"
-        }
+        # 尝试从intelligent_style_design提取风格
+        if "intelligent_style_design" in concept_plan:
+            style_design = concept_plan["intelligent_style_design"]
+            if isinstance(style_design, dict) and "chosen_style" in style_design:
+                chosen_style = style_design["chosen_style"]
+                
+                # 构建风格摘要
+                style_parts = []
+                if "presentation_form" in chosen_style:
+                    style_parts.append(chosen_style["presentation_form"])
+                if "narrative_style" in chosen_style:
+                    style_parts.append(chosen_style["narrative_style"])
+                if "emotional_tone" in chosen_style:
+                    style_parts.append(chosen_style["emotional_tone"])
+                
+                if style_parts:
+                    return " + ".join(style_parts)
         
-        return result
+        # Fallback: 尝试从visual_style_guidance提取
+        if "visual_style_guidance" in concept_plan:
+            guidance = concept_plan["visual_style_guidance"]
+            if isinstance(guidance, dict) and "overall_aesthetic" in guidance:
+                return guidance["overall_aesthetic"]
+        
+        # 最终fallback
+        return "智能生成风格"
+    

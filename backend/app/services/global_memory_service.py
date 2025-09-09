@@ -3,11 +3,16 @@ Global Memory Service - System-level memory management for multi-agent collabora
 """
 
 import logging
+import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
 from ..agents.memory.memory_manager import MemoryManager
 from ..agents.memory.dict_memory_store import DictMemoryStore
+try:
+    from ..agents.memory.sqlite_memory_store import SQLiteMemoryStore  # optional
+except Exception:
+    SQLiteMemoryStore = None  # type: ignore
 from ..agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
 
 
@@ -36,7 +41,15 @@ class GlobalMemoryService:
         self.logger = logging.getLogger("global_memory_service")
         
         # 初始化记忆管理器（禁用后台任务避免事件循环问题）
-        default_store = DictMemoryStore()
+        # 默认使用 SQLite 持久化；如需覆盖可设置 MEMORY_BACKEND=dict
+        backend = os.getenv("MEMORY_BACKEND", "sqlite").lower()
+        if backend == "sqlite" and SQLiteMemoryStore is not None:
+            default_store = SQLiteMemoryStore()
+            self.logger.info("Using SQLiteMemoryStore as default memory backend")
+        else:
+            default_store = DictMemoryStore()
+            if backend == "sqlite" and SQLiteMemoryStore is None:
+                self.logger.warning("MEMORY_BACKEND=sqlite set but SQLite backend unavailable, fallback to DictMemoryStore")
         self.memory_manager = MemoryManager(
             stores={"default": default_store},
             config={

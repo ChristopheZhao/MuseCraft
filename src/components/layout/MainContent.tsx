@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { useI18n } from '@/i18n/I18nProvider';
 import { useAppStore } from '@/store/useAppStore';
 
 interface MainContentProps {
@@ -9,18 +10,22 @@ interface MainContentProps {
 
 const MainContent: React.FC<MainContentProps> = ({ children }) => {
   const { ui } = useAppStore();
+  const { t } = useI18n();
   const { isLoading } = ui;
 
   return (
-    <main className="flex-1 flex flex-col overflow-hidden bg-gray-50">
+    <main className="relative flex-1 flex flex-col overflow-hidden">
+      {/* Ambient gradient glows */}
+      <div className="pointer-events-none absolute inset-0 -z-10">
+        <div className="absolute -top-24 -left-24 h-72 w-72 rounded-full bg-primary-200 blur-3xl opacity-40" />
+        <div className="absolute -bottom-24 -right-24 h-72 w-72 rounded-full bg-accent-200 blur-3xl opacity-40" />
+      </div>
       {/* Loading Overlay */}
       {isLoading && (
         <div className="absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50">
           <div className="flex flex-col items-center space-y-4">
             <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin" />
-            <p className="text-sm text-gray-600 font-medium">
-              Processing your request...
-            </p>
+            <p className="text-sm text-gray-600 font-medium">{t('loading.processing')}</p>
           </div>
         </div>
       )}
