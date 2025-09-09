@@ -40,9 +40,10 @@ class VideoConfigManager:
             "cogvideox-3": VideoProviderConfig(
                 provider_name="cogvideox-3",
                 model_name="cogvideox-3",
-                duration_capabilities=[5, 10],
+                # 从配置读取可用离散时长，避免写死 [5,10]
+                duration_capabilities=getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]),
                 max_duration=10,
-                default_duration=5,
+                default_duration=settings.COGVIDEOX_DEFAULT_DURATION,
                 amplification_ratio=settings.VIDEO_AMPLIFICATION_RATIO,
                 supports_first_last_frame=True,
                 resolution_options=["720x480", "1080x720"],
@@ -181,10 +182,10 @@ class VideoConfigManager:
             "system_duration_capability": self.get_system_duration_capability(),
             "optimal_scene_count": lambda target: self.calculate_optimal_scene_count(target),
             
-            # 场景配置
+            # 场景配置 - 使用provider配置而不是固定值
             "default_scene_duration": settings.DEFAULT_SCENE_DURATION,
-            "min_scene_duration": settings.MIN_SCENE_DURATION,
-            "max_scene_duration": settings.MAX_SCENE_DURATION,
+            "min_scene_duration": 3.0,  # 最小场景时长
+            "max_scene_duration": 15.0,  # 最大场景时长
             "transition_duration": settings.TRANSITION_DURATION,
             
             # 音频配置

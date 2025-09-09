@@ -33,14 +33,8 @@ class AgentToolAllocator:
         # 定义每个Agent类型的专门工具列表
         self._agent_tool_mapping = {
             
-            # 概念规划Agent - 创意分析和内容规划
-            AgentType.CONCEPT_PLANNER: [
-                "concept_generation_tool",           # 概念生成 - 匹配注册名称
-                "narrative_structure_generation_tool", # 叙事结构生成 - 匹配注册名称  
-                "intelligent_scene_planning",        # 智能场景规划（LLM动态决策）
-                "content_analysis",                  # 内容分析
-                "creative_optimization"              # 创意优化
-            ],
+            # 概念规划Agent - 纯LLM原生能力，无需外部工具
+            AgentType.CONCEPT_PLANNER: [],
             
             # 脚本编写Agent - 文本生成和叙事分析
             AgentType.SCRIPT_WRITER: [
@@ -52,40 +46,30 @@ class AgentToolAllocator:
             
             # 图像生成Agent - 视觉创作和图像处理
             AgentType.IMAGE_GENERATOR: [
-                "image_generation",             # 图像生成
-                "image_analysis",               # 图像分析
-                "style_extraction",             # 风格提取
-                "visual_consistency_check",     # 视觉一致性检查
-                "image_enhancement",            # 图像增强
-                "scene_continuity_analysis_tool" # 🔧 修复：场景连续性分析，决定是否使用前一场景最后一帧
+                "image_generation",             # 图像生成工具（业务逻辑封装）
+                # Image 阶段不做连续性判定，移除 continuity 分析相关工具
             ],
             
-            # 视频生成Agent - 视频创作和场景分析
+            # 视频生成Agent - 简化工具集合
             AgentType.VIDEO_GENERATOR: [
-                "video_generation",             # 视频生成（核心工具）
-                "scene_analysis",               # 场景分析
-                "parameter_optimization",       # 参数优化
-                "motion_analysis",              # 动作分析
-                "video_enhancement",            # 视频增强
-                "zhipu_client"                  # 🔧 修复：用于图像分析的GLM-4V调用
+                "video_generation",                    # 视频生成（核心工具）
+                "scene_continuity_preparation",       # 连续性准备（组合工具）
+                "file_storage_tool"                   # 文件存储
             ],
             
             # 音频生成Agent - 音频创作和处理
             AgentType.AUDIO_GENERATOR: [
-                "audio_generation",             # 音频生成
-                "music_composition",            # 音乐创作
-                "voice_synthesis",              # 语音合成
-                "audio_analysis",               # 音频分析
-                "audio_processing"              # 音频处理
+                "suno_client",                 # 背景音乐生成（已注册工具名）
+                "audio_processor",             # 音频后处理（时长/淡入淡出/循环）
+                "ffmpeg_tool",                 # 媒体组合（视频加音频）
+                "file_storage_tool"            # 文件持久化/下载
             ],
             
             # 视频合成Agent - 媒体组合和渲染
             AgentType.VIDEO_COMPOSER: [
-                "video_composition",            # 视频合成
-                "ffmpeg_processing",            # FFmpeg处理
-                "media_synchronization",        # 媒体同步
-                "transition_effects",           # 过渡效果
-                "rendering_optimization"        # 渲染优化
+                # 使用已注册、可用的工具：ffmpeg 进行合成、file_storage 做本地URL
+                "ffmpeg_tool",
+                "file_storage_tool"
             ],
             
             # 质量检查Agent - 质量评估和优化
@@ -97,28 +81,24 @@ class AgentToolAllocator:
                 "compliance_check"              # 合规性检查
             ],
             
-            # 协调器Agent - 工作流管理和调度
+            # 协调器Agent - 使用轻量控制工具进行FC调度
             AgentType.ORCHESTRATOR: [
-                "workflow_management",          # 工作流管理
-                "task_scheduling",              # 任务调度
-                "resource_allocation",          # 资源分配
-                "progress_tracking",            # 进度跟踪
-                "error_recovery"                # 错误恢复
+                "orchestrator_control"
             ]
         }
         
         # 定义通用工具（所有Agent都可以使用）
+        # 仅保留已在工具注册表中的通用工具，避免无效名称
         self._common_tools = [
-            "file_storage",                     # 文件存储
-            "progress_reporting",               # 进度报告
-            "error_logging"                     # 错误日志
+            "file_storage_tool"
         ]
         
         # 定义工具依赖关系
+        # 精简依赖：仅保留已注册、稳定的依赖
         self._tool_dependencies = {
-            "video_generation": ["scene_analysis"],      # 视频生成依赖场景分析
-            "image_generation": ["style_extraction"],    # 图像生成依赖风格提取
-            "video_composition": ["ffmpeg_processing"],  # 视频合成依赖FFmpeg
+            # 允许 video_generation 伴随 scene_analysis（均为已注册工具）
+            "video_generation": ["scene_analysis"],
+            # 其余移除不稳定依赖，避免装载未注册工具
         }
     
     def get_tools_for_agent(self, agent_type: AgentType) -> List[str]:
@@ -130,8 +110,11 @@ class AgentToolAllocator:
         # 获取专门工具
         specialized_tools = self._agent_tool_mapping.get(agent_type, [])
         
-        # 添加通用工具
-        all_tools = specialized_tools + self._common_tools
+        # 添加通用工具（概念规划等纯LLM代理不注入通用工具）
+        if agent_type == AgentType.CONCEPT_PLANNER:
+            all_tools = list(specialized_tools)
+        else:
+            all_tools = specialized_tools + self._common_tools
         
         # 添加依赖工具
         dependencies = self._resolve_tool_dependencies(specialized_tools)

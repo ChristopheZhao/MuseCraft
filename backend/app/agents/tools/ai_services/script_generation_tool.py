@@ -149,59 +149,34 @@ class ScriptGenerationTool(AsyncTool):
         else:
             style_context = f"视频风格: {video_style}"
         
-        # ✅ MAS设计原则1：使用专业提示词模板系统
-        try:
-            from ....core.prompt_manager import prompt_manager
-            
-            # 收集模板变量
-            template_variables = {
-                "scene_concept": scene_data.get('content_focus', ''),
-                "visual_description": scene_data.get('visual_description', ''),
-                "narrative_description": scene_data.get('narrative_description', ''),
-                "style_context": style_context,  # 使用智能风格上下文
-                "scene_position": scene_data.get('scene_number', 1),
-                "previous_scene_context": context.get('previous_scene', ''),
-                "overall_narrative_arc": context.get('narrative_arc', ''),
-                # ✅ MAS设计原则2：明确离散时长约束，让LLM智能选择
-                "duration_constraints": "必须选择5秒或10秒（CogVideoX-3 API限制）",
-                "available_durations": [5, 10]
-            }
-            
-            # 渲染专业提示词模板
-            prompt = prompt_manager.render_template(
-                "single_scene_script_generator", 
-                **template_variables
-            )
-            
-        except Exception as template_error:
-            # 如果模板系统失败，使用改进的fallback提示词
-            prompt = f"""作为专业视频脚本作家，为单个场景生成生产就绪的脚本。
+        # 动态读取视频能力（离散时长列表）并构建中性提示
+        from ....core.video_config_manager import get_video_config
+        _prov = get_video_config().get_current_provider_config()
+        _vcaps = _prov.duration_capabilities
+        _default_dur = _prov.default_duration
 
-**MAS设计约束**：
-- 场景时长必须是5秒或10秒（CogVideoX-3 API支持）
-- 基于场景复杂度智能选择时长
+        prompt = f"""你是专业视频脚本作家。为以下单个场景生成生产就绪脚本（JSON）。
 
-**场景信息**：
-- 场景概念：{scene_data.get('content_focus', '')}
+场景信息：
+- 场景编号：{scene_data.get('scene_number', 1)}
 - 视觉描述：{scene_data.get('visual_description', '')}
 - 叙事描述：{scene_data.get('narrative_description', '')}
-- {style_context}
+- 风格上下文：{style_context}
 
-**请智能决策**：
-1. 分析场景复杂度
-2. 选择最适合的时长（5s或10s）
-3. 生成对应时长的脚本
+要求：
+1. 根据场景复杂度选择合适的时长（仅可从{_vcaps}中选择）；
+2. 输出脚本文本与可选的叙事/音乐/音效字段；
+3. 直接返回 JSON，不要解释性文本。
 
-返回JSON格式（必须包含duration字段）：
+JSON 模板示例：
 {{
-    "duration": 5或10,
-    "duration_reasoning": "选择此时长的原因", 
-    "script_text": "完整脚本文本",
-    "visual_guidance": "视觉指导",
-    "emotional_tone": "情绪基调",
-    "keywords": ["关键词"],
-    "success": true
-}}"""
+  "duration": 5,
+  "script_text": "……",
+  "narrative_description": "……",
+  "background_music_style": "……",
+  "sound_effects": ["……"]
+}}
+"""
 
         try:
             # 使用ZhipuClient生成脚本
@@ -231,12 +206,10 @@ class ScriptGenerationTool(AsyncTool):
                 script_data = json.loads(llm_content)
                 
                 # ✅ MAS设计原则3：验证LLM的智能决策结果
-                if "duration" not in script_data:
-                    script_data["duration"] = 5  # fallback
-                elif script_data["duration"] not in [5, 10]:
-                    # LLM选择了无效时长，调整为最接近的有效值
-                    script_data["duration"] = 10 if script_data["duration"] > 7 else 5
-                    script_data["duration_reasoning"] = f"调整为API支持的时长: {script_data['duration']}s"
+                if "duration" not in script_data or script_data["duration"] not in _vcaps:
+                    # LLM返回无效值时，回退到provider默认值
+                    script_data["duration"] = _default_dur
+                    script_data["duration_reasoning"] = f"自动调整为API支持的默认时长: {script_data['duration']}s"
                 
                 if "success" not in script_data:
                     script_data["success"] = True
@@ -244,10 +217,10 @@ class ScriptGenerationTool(AsyncTool):
                 return script_data
                 
             except json.JSONDecodeError:
-                # 如果JSON解析失败，构建基本响应，默认使用5秒
+                # 如果JSON解析失败，构建基本响应，默认使用provider默认时长
                 return {
-                    "duration": 5,  # ✅ 遵循离散时长约束
-                    "duration_reasoning": "JSON解析失败，使用默认5秒时长",
+                    "duration": _default_dur,  # ✅ 遵循离散时长约束
+                    "duration_reasoning": "JSON解析失败，使用默认时长",
                     "script_text": llm_content,
                     "visual_guidance": f"适合{video_style}风格的视觉表现",
                     "emotional_tone": "根据内容自然表达",
@@ -259,8 +232,8 @@ class ScriptGenerationTool(AsyncTool):
             return {
                 "success": False,
                 "error": f"场景脚本生成失败: {str(e)}",
-                "duration": 5,  # ✅ 即使错误也遵循离散时长约束
-                "duration_reasoning": "发生错误，使用默认5秒时长"
+                "duration": _default_dur,  # ✅ 即使错误也遵循离散时长约束
+                "duration_reasoning": "发生错误，使用默认时长"
             }
     
     async def _generate_narrative_structure(self, params: Dict[str, Any]) -> Dict[str, Any]:

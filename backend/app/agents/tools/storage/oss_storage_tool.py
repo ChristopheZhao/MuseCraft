@@ -37,8 +37,10 @@ class OSSStorageTool(AsyncTool):
             limitations=["requires_api_key", "requires_oss2_library"]
         )
     
-    def __init__(self, config: Dict[str, Any] = None):
-        super().__init__(self.get_metadata(), config)
+    def __init__(self, metadata: ToolMetadata = None, config: Dict[str, Any] = None):
+        if metadata is None:
+            metadata = self.get_metadata()
+        super().__init__(metadata, config)
     
     def _initialize(self):
         """Initialize tool-specific resources"""
@@ -46,8 +48,15 @@ class OSSStorageTool(AsyncTool):
             self.logger.warning("oss2 library not installed, tool will not be functional")
             self._functional = False
             return
-            
-        # 配置检查 
+
+        # 降低 OSS SDK 预检日志噪音（如 HEAD 404 -> NoSuchKey 属正常场景）
+        try:
+            import logging as _logging
+            _logging.getLogger("oss2.api").setLevel(_logging.WARNING)
+        except Exception:
+            pass
+
+        # 配置检查（严格：仅使用 OSS_BUCKET_NAME，不做冗余别名）
         self.access_key_id = getattr(settings, 'OSS_ACCESS_KEY_ID', None)
         self.access_key_secret = getattr(settings, 'OSS_ACCESS_KEY_SECRET', None)
         self.endpoint = getattr(settings, 'OSS_ENDPOINT', None)
@@ -55,9 +64,18 @@ class OSSStorageTool(AsyncTool):
         
         # 工具可以在没有配置时创建，但在使用时会检查
         self._functional = all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name])
-        
+
         if not self._functional:
-            self.logger.warning("OSS configuration incomplete, tool will not be functional")
+            missing = []
+            if not self.access_key_id:
+                missing.append('OSS_ACCESS_KEY_ID')
+            if not self.access_key_secret:
+                missing.append('OSS_ACCESS_KEY_SECRET')
+            if not self.endpoint:
+                missing.append('OSS_ENDPOINT')
+            if not self.bucket_name:
+                missing.append('OSS_BUCKET_NAME')
+            self.logger.warning(f"OSS configuration incomplete, missing: {', '.join(missing)}")
             return
             
         # 初始化OSS客户端
@@ -136,6 +154,7 @@ class OSSStorageTool(AsyncTool):
         content_type = params.get("content_type")
         metadata = params.get("metadata", {})
         public_read = params.get("public_read", False)
+        overwrite = bool(params.get("overwrite", False))
         
         if not remote_path:
             raise ValueError("remote_path is required for upload")
@@ -146,6 +165,23 @@ class OSSStorageTool(AsyncTool):
         try:
             # 运行在线程池中的同步操作
             def _sync_upload():
+                # 幂等：若对象已存在且不覆盖，则返回跳过信息
+                try:
+                    if self.bucket.object_exists(remote_path) and not overwrite:
+                        # 构造只读URL（与后续保持一致）
+                        if public_read:
+                            url = f"https://{self.bucket_name}.{self.endpoint.replace('https://', '').replace('http://', '')}/{remote_path}"
+                        else:
+                            url = self.bucket.sign_url('GET', remote_path, self.default_expiry)
+                        return {
+                            "__skipped__": True,
+                            "reason": "already_exists",
+                            "remote_path": remote_path,
+                            "url": url
+                        }
+                except Exception:
+                    # 存在性检查失败时，继续走正常上传流程
+                    pass
                 # 设置对象ACL
                 headers = {}
                 if public_read:
@@ -166,33 +202,46 @@ class OSSStorageTool(AsyncTool):
                 
                 if content:
                     # 上传内容
-                    if isinstance(content, str):
-                        content = content.encode('utf-8')
-                    result = self.bucket.put_object(remote_path, content, headers=headers)
+                    blob = content
+                    if isinstance(blob, str):
+                        blob = blob.encode('utf-8')
+                    result = self.bucket.put_object(remote_path, blob, headers=headers)
                 else:
                     # 上传文件
                     with open(local_path, 'rb') as f:
                         result = self.bucket.put_object(remote_path, f, headers=headers)
-                
-                return result
+
+                return {"put_object_result": result}
             
             # 在线程池中执行同步操作
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _sync_upload)
-            
+
+            # 若返回为幂等跳过
+            if isinstance(result, dict) and result.get("__skipped__"):
+                return {
+                    "remote_path": result.get("remote_path", remote_path),
+                    "url": result.get("url"),
+                    "skipped": True,
+                    "reason": "already_exists",
+                }
+
             # 构造返回URL
             if public_read:
                 url = f"https://{self.bucket_name}.{self.endpoint.replace('https://', '').replace('http://', '')}/{remote_path}"
             else:
                 # 生成签名URL
                 url = self.bucket.sign_url('GET', remote_path, self.default_expiry)
-            
+
+            put_result = result.get("put_object_result") if isinstance(result, dict) else None
+            etag = getattr(put_result, 'etag', None) if put_result is not None else None
+
             return {
                 "remote_path": remote_path,
                 "url": url,
-                "etag": result.etag,
+                "etag": etag,
                 "public_read": public_read,
-                "size": len(content) if content else os.path.getsize(local_path)
+                "size": len(content) if content else (os.path.getsize(local_path) if local_path else None)
             }
             
         except OssError as e:

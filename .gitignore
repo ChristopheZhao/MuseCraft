@@ -72,11 +72,18 @@ backend/storage/temp/*
 backend/storage/uploads/*
 backend/storage/generated/legacy/*
 backend/storage/continuity_frames/*
+backend/storage/*.sqlite-*
+
+# 营销文件
+public/marketing/*
 
 
 
 # 保留legacy文件作为示例
 !backend/storage/generated/legacy/
+
+# 商业计划书
+business_plan_sections/
 
 # 环境变量和敏感配置
 .env
@@ -103,6 +110,9 @@ out/
 build/
 dist/
 *.tsbuildinfo
+
+# 大体积营销媒体文件（避免提交到仓库）
+public/marketing/*.mp4
 
 # 前端环境和缓存
 .env.local

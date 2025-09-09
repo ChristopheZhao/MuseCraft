@@ -1,0 +1,19 @@
+name: agents/common_tools
+description: Common tool guidance blocks
+version: 1.0.0
+templates:
+  tools_overview:
+    description: Overview of available tools and when to use them
+    required_variables: [agent, capabilities]
+    template: |
+      工具能力概览（{{ agent }}）：
+      {{ capabilities }}
+
+  tools_edge_cases:
+    description: Common edge cases and tips
+    required_variables: [items]
+    template: |
+      常见注意事项：
+      {% for it in items %}- {{ it }}
+      {% endfor %}
+

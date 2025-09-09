@@ -18,39 +18,39 @@ templates:
       - "concept_plan"
       - "composition_timeline"
     template: |
-      Analyze this video composition for content quality and coherence.
+      分析此视频作品的内容质量和连贯性。
 
-      ## Original Concept
+      ## 原始概念
       {{ concept_plan }}
 
-      ## Final Composition Timeline
+      ## 最终组合时间线
       {{ composition_timeline }}
 
-      Please evaluate:
-      1. Narrative coherence and flow
-      2. Message clarity and effectiveness
-      3. Scene transitions and pacing
-      4. Overall content quality
+      请评估：
+      1. 叙事连贯性和流畅度
+      2. 信息传递的清晰度和有效性
+      3. 场景转换和节奏把控
+      4. 整体内容质量
 
-      Provide analysis in JSON format:
+      以JSON格式提供分析：
 
       ```json
       {
-        "narrative_coherence": "assessment of story flow and logical progression",
-        "message_clarity": "assessment of how clearly key messages are communicated", 
-        "pacing_analysis": "evaluation of video rhythm and timing",
-        "scene_transitions": "analysis of how scenes connect and flow",
-        "visual_consistency": "assessment of visual style consistency across scenes",
-        "audio_quality": "evaluation of audio elements and synchronization",
-        "technical_quality": "assessment of technical execution",
-        "content_suggestions": ["specific improvement suggestion 1", "specific improvement suggestion 2"],
-        "overall_assessment": "comprehensive summary of video quality",
+        "narrative_coherence": "故事流程和逻辑进展的评估",
+        "message_clarity": "关键信息传达清晰度的评估", 
+        "pacing_analysis": "视频节奏和时机的评估",
+        "scene_transitions": "场景连接和流畅度的分析",
+        "visual_consistency": "跨场景视觉风格一致性的评估",
+        "audio_quality": "音频元素和同步效果的评估",
+        "technical_quality": "技术执行质量的评估",
+        "content_suggestions": ["具体改进建议1", "具体改进建议2"],
+        "overall_assessment": "视频质量的综合总结",
         "quality_score": 8.5,
-        "recommended_actions": ["action 1", "action 2"]
+        "recommended_actions": ["建议行动1", "建议行动2"]
       }
       ```
 
-      **Important**: Return only valid JSON without any additional text or formatting.
+      **重要**：只返回有效的JSON格式，不要包含其他文本或格式。
 
   content_safety_check:
     name: "内容安全检查"
@@ -100,7 +100,7 @@ templates:
       ## Focus Areas for Improvement
       {{ improvement_focus }}
 
-      Please provide detailed, actionable improvement suggestions that address the identified issues while maintaining the core creative vision.
+      请提供详细、可行的改进建议，解决已识别的问题，同时保持核心创意愿景。
 
 # 系统指令
 system_instructions:

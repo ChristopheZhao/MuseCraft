@@ -150,6 +150,7 @@ class ImageGenerationClientTool(AsyncTool):
                 "properties": {
                     "prompt": {"type": "string", "description": "图像生成提示词"},
                     "negative_prompt": {"type": "string", "description": "负面提示词（可选）"},
+                    "scene_number": {"type": ["integer", "string"], "description": "场景编号（可选，用于结果透传）"},
                     "provider": {"type": "string", "enum": providers, "description": "服务提供商"},
                     "model": {"type": "string", "description": "使用的模型"},
                     "size": {"type": "string", "enum": ["512x512", "768x768", "1024x1024", "1024x768", "768x1024", "1344x768", "768x1344"]},
@@ -194,6 +195,15 @@ class ImageGenerationClientTool(AsyncTool):
         }
         
         return schemas.get(action, {})
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """通用图像客户端的默认 FC 策略：暴露单次与批量生成"""
+        # 为了让上层 Agent 不必区分“单/多”，仅暴露 generate_image；
+        # LLM 可在一次 FC 中下发多条 generate_image 调用以并行/逐个生成。
+        return {
+            "expose": True,
+            "allowed_actions": ["generate_image"]
+        }
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行图像生成操作"""
@@ -248,6 +258,20 @@ class ImageGenerationClientTool(AsyncTool):
                 raise ToolError(f"图像生成服务 {provider} 未实现", self.metadata.name)
             
             self.logger.info(f"✅ {display_name} 图像生成成功")
+            # 透传 scene_number（若提供），并在可用时补充顶层 image_url 便于统一持久化与快照
+            try:
+                sn = params.get("scene_number")
+                if isinstance(result, dict):
+                    if sn is not None:
+                        result["scene_number"] = sn
+                    if "image_url" not in result or not result.get("image_url"):
+                        imgs = result.get("images")
+                        if isinstance(imgs, list) and imgs:
+                            first = imgs[0]
+                            if isinstance(first, dict) and first.get("url"):
+                                result["image_url"] = first.get("url")
+            except Exception:
+                pass
             return result
             
         except Exception as e:
@@ -269,7 +293,7 @@ class ImageGenerationClientTool(AsyncTool):
                 size=params.get("size", "1024x1024")
             )
             
-            return {
+            out = {
                 "provider": "glm",
                 "model": params.get("model", "cogview-3"),
                 "images": [
@@ -284,6 +308,12 @@ class ImageGenerationClientTool(AsyncTool):
                     "size": params.get("size", "1024x1024")
                 }
             }
+            # 顶层 image_url 便于统一处理
+            try:
+                out["image_url"] = out["images"][0]["url"]
+            except Exception:
+                pass
+            return out
             
         except Exception as e:
             raise ToolError(f"智谱AI CogView图像生成失败: {str(e)}", self.metadata.name)
@@ -334,20 +364,21 @@ class ImageGenerationClientTool(AsyncTool):
                 
                 result = response.json()
                 
-                return {
-                    "provider": "stability",
-                    "model": model,
-                    "images": [
-                        {
-                            "base64": artifact["base64"],
-                            "seed": artifact["seed"],
-                            "finish_reason": artifact["finishReason"]
-                        }
-                        for artifact in result["artifacts"]
-                    ],
-                    "prompt": params["prompt"],
-                    "generation_params": payload
-                }
+            out = {
+                "provider": "stability",
+                "model": model,
+                "images": [
+                    {
+                        "base64": artifact["base64"],
+                        "seed": artifact["seed"],
+                        "finish_reason": artifact["finishReason"]
+                    }
+                    for artifact in result["artifacts"]
+                ],
+                "prompt": params["prompt"],
+                "generation_params": payload
+            }
+            return out
                 
         except Exception as e:
             raise ToolError(f"Stability AI generation failed: {str(e)}", self.metadata.name)
@@ -386,19 +417,24 @@ class ImageGenerationClientTool(AsyncTool):
                 
                 result = response.json()
                 
-                return {
-                    "provider": "openai",
-                    "model": payload["model"],
-                    "images": [
-                        {
-                            "url": img["url"],
-                            "revised_prompt": img.get("revised_prompt")
-                        }
-                        for img in result["data"]
-                    ],
-                    "prompt": params["prompt"],
-                    "generation_params": payload
-                }
+            out = {
+                "provider": "openai",
+                "model": payload["model"],
+                "images": [
+                    {
+                        "url": img["url"],
+                        "revised_prompt": img.get("revised_prompt")
+                    }
+                    for img in result["data"]
+                ],
+                "prompt": params["prompt"],
+                "generation_params": payload
+            }
+            try:
+                out["image_url"] = out["images"][0]["url"]
+            except Exception:
+                pass
+            return out
                 
         except Exception as e:
             raise ToolError(f"OpenAI DALL-E generation failed: {str(e)}", self.metadata.name)
@@ -443,13 +479,22 @@ class ImageGenerationClientTool(AsyncTool):
                 
                 result = response.json()
                 
-                return {
-                    "provider": "tongyi",
-                    "model": payload["model"],
-                    "images": result["output"]["results"],
-                    "prompt": params["prompt"],
-                    "generation_params": payload
-                }
+            out = {
+                "provider": "tongyi",
+                "model": payload["model"],
+                "images": result["output"]["results"],
+                "prompt": params["prompt"],
+                "generation_params": payload
+            }
+            try:
+                imgs = out.get("images")
+                if isinstance(imgs, list) and imgs:
+                    first = imgs[0]
+                    if isinstance(first, dict) and first.get("url"):
+                        out["image_url"] = first.get("url")
+            except Exception:
+                pass
+            return out
                 
         except Exception as e:
             raise ToolError(f"Tongyi generation failed: {str(e)}", self.metadata.name)

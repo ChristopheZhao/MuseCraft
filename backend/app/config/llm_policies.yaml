@@ -1,0 +1,31 @@
+default:
+  provider: zhipu
+  model: glm-4.5
+
+agents.image_generator:
+  observe:
+    provider: zhipu
+    model: glm-4.5-air
+  plan:
+    provider: zhipu
+    model: glm-4.5
+  act:
+    provider: zhipu
+    model: glm-4.5
+
+agents.video_generator:
+  observe:
+    provider: zhipu
+    model: glm-4.5-air
+  plan:
+    provider: zhipu
+    model: glm-4.5
+  act:
+    provider: zhipu
+    model: glm-4.5
+
+agents.orchestrator:
+  plan:
+    provider: zhipu
+    model: glm-4.5-air
+

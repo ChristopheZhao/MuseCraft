@@ -38,7 +38,8 @@ class AudioProcessorTool(AsyncTool):
                 "volume_control",
                 "audio_trimming"
             ],
-            dependencies=["ffmpeg"],
+            # 依赖于 ffmpeg_tool（工具系统内依赖），不要声明系统二进制名
+            dependencies=["ffmpeg_tool"],
             limitations=[
                 "requires_ffmpeg",
                 "input_file_required",

@@ -51,6 +51,7 @@ tenacity==8.2.3
 jinja2==3.1.2
 pyyaml==6.0.1
 hashlib3==2.1.2
+psutil==5.9.8
 
 # Development and testing
 pytest==7.4.3

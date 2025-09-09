@@ -1,5 +1,6 @@
 """
-Script Writer Agent - Generates detailed scripts for video scenes
+Script Writer Agent - 简化版批量脚本生成
+移除复杂的ReAct接口，直接实现批量处理
 """
 import json
 from typing import Dict, Any, List
@@ -7,546 +8,299 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Scene
-from ..services.ai_client import AIClient
 from ..core.workflow_state import WorkflowState, SceneData
 
 
 class ScriptWriterAgent(BaseAgent):
     """
-    Script Writer Agent generates detailed scripts, narratives, and voice-over
-    text for each scene based on the concept plan
+    Script Writer Agent - 简化版批量脚本生成
+    专注于场景脚本、叙事结构和连续性分析，但使用BaseAgent接口
     """
     
-    def __init__(self):
+    def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.SCRIPT_WRITER,
             agent_name="script_writer",
-            timeout_seconds=180,
+            timeout_seconds=600,
             max_retries=2,
-            tools=["script_generation"]  # 🚀 MAS - 使用单一业务逻辑工具
+            tools=[
+                "scene_continuity_analysis_tool",
+                "script_generation_tool", 
+                "narrative_structure_generation_tool"
+            ],
+            llms=llms
         )
-        # 移除直接AI客户端依赖
-    
+        
     async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
+        self,
+        task: Task,
+        input_data: Dict[str, Any],
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """Generate scripts for all scenes"""
-        
-        # Validate input
-        self._validate_input(input_data, ["concept_plan", "workflow_state_id"])
-        
-        concept_plan = input_data["concept_plan"]
-        workflow_state_id = input_data["workflow_state_id"]
-        
-        # 🧠 Phase 1.2 - 实现MAS记忆共享：ScriptWriter检索创意指导
+        """批量脚本生成 - 实现在 _execute_impl，使用 BaseAgent.execute 统一包装"""
         try:
-            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
-            if retrieved_guidance:
-                # 使用检索到的创意指导增强概念计划
-                self.logger.info(f"🧠 ScriptWriter: 成功检索到创意指导，增强概念理解")
-                # 合并检索到的指导信息
-                concept_plan.update(retrieved_guidance)
-            else:
-                self.logger.warning(f"⚠️ ScriptWriter: 未找到创意指导记忆，使用原始概念计划")
-        except Exception as e:
-            self.logger.warning(f"⚠️ ScriptWriter: 记忆检索失败 - {e}")
-        
-        # 通过 workflow_manager 获取 WorkflowState
-        from ..core.workflow_state import workflow_manager
-        workflow_state = workflow_manager.get_workflow(workflow_state_id)
-        if not workflow_state:
-            raise AgentError(f"WorkflowState {workflow_state_id} not found")
-        
-        await self._update_progress(execution, 10, "Loading scenes", db)
-        
-        # Get scenes from WorkflowState instead of database
-        scenes = workflow_state.scenes
-        
-        if not scenes:
-            raise AgentError("No scenes found in workflow state")
-        
-        await self._update_progress(execution, 20, "Generating scripts", db)
-        
-        script_results = []
-        total_scenes = len(scenes)
-        
-        for i, scene_data in enumerate(scenes):
-            scene_progress = 20 + int((i / total_scenes) * 60)
-            await self._update_progress(
-                execution, 
-                scene_progress, 
-                f"Writing script for scene {scene_data.scene_number}",
-                db
-            )
-            
-            # Generate script for this scene
-            scene_script = await self._generate_scene_script_from_data(scene_data, concept_plan, execution)
-            
-            # Update scene data in WorkflowState with enhanced scene design elements
-            workflow_state.update_scene(scene_data.scene_number, 
-                script_text=scene_script.get("script_text", ""),
-                voice_over_text=scene_script.get("script_text", ""),  # 🔧 修复：使用script_text作为voice_over_text
-                narrative_description=scene_script.get("narrative_description", scene_data.narrative_description),
-                background_music_style=scene_script.get("background_music_style", ""),
-                sound_effects=scene_script.get("sound_effects", []),
-                # 新增：ScriptWriter专注的场景设计元素
-                scene_design_elements=scene_script.get("scene_design_elements", {}),
-                narrative_structure=scene_script.get("narrative_structure", {}),
-                audio_design=scene_script.get("audio_design", {}),
-                pacing_and_timing=scene_script.get("pacing_and_timing", {}),
-                content_development_arc=scene_script.get("content_development_arc", {})
-            )
-            
-            script_results.append({
-                "scene_number": scene_data.scene_number,
-                "script": scene_script
-            })
-        
-        await self._update_progress(execution, 85, "Generating overall narrative", db)
-        
-        # Generate overall video narrative using WorkflowState scenes
-        overall_narrative = await self._generate_overall_narrative_from_state(
-            workflow_state.scenes, concept_plan
-        )
-        
-        # Update workflow state with overall narrative
-        workflow_state.overall_narrative = overall_narrative.get("story_arc", "")
-        workflow_state.script_themes = self._extract_themes(script_results)
-        workflow_state.voice_over_instructions = self._generate_voice_instructions(concept_plan)
-        workflow_state.estimated_word_count = sum(
-            len(script["script"]["script_text"].split()) 
-            for script in script_results
-        )
-        workflow_state.estimated_reading_time = self._calculate_reading_time(script_results)
-        
-        await self._update_progress(execution, 88, "Analyzing scene continuity", db)
-        
-        # 🔗 新增：场景连续性分析
-        await self._analyze_and_set_scene_continuity(workflow_state, overall_narrative, execution)
-        
-        await self._update_progress(execution, 95, "Finalizing scripts", db)
-        
-        # 🧠 Phase 1.2 - 实现MAS记忆共享：ScriptWriter存储场景引用数据
-        try:
-            for scene_script in script_results:
-                scene_number = scene_script["scene_number"]
-                scene_references = {
-                    "scene_design": scene_script.get("scene_design", {}),
-                    "narrative_structure": scene_script.get("narrative_structure", {}),
-                    "visual_style_notes": scene_script.get("visual_style_notes", ""),
-                    "composition_requirements": scene_script.get("composition_requirements", ""),
-                    "overall_narrative": overall_narrative
-                }
-                
-                memory_stored = await self.store_scene_references(
-                    workflow_id=workflow_state_id,
-                    scene_number=scene_number,
-                    scene_references=scene_references
-                )
-                self.logger.info(f"🧠 ScriptWriter: 场景{scene_number}引用数据已存储 (success={memory_stored})")
-        except Exception as e:
-            self.logger.warning(f"⚠️ ScriptWriter: 场景引用存储失败 - {e}")
-        
-        # Prepare output data
-        output_data = {
-            "scripts": script_results,
-            "overall_narrative": overall_narrative,
-            "total_scenes": len(scenes),
-            "estimated_word_count": workflow_state.estimated_word_count,
-            "estimated_reading_time": workflow_state.estimated_reading_time,
-            "script_themes": workflow_state.script_themes,
-            "voice_over_instructions": workflow_state.voice_over_instructions,
-            "workflow_state_id": workflow_state_id  # 返回状态ID而不是对象
-        }
-        
-        await self._update_progress(execution, 100, "Script writing completed", db)
-        
-        return output_data
-    
-    async def _generate_scene_script_from_data(
-        self, 
-        scene_data: SceneData, 
-        concept_plan: Dict[str, Any],
-        execution: AgentExecution
-    ) -> Dict[str, Any]:
-        """Generate script for a single scene"""
-        
-        # 使用新的提示词模板系统，从80+行硬编码减少到简单的模板调用
-        script_prompt = self.render_prompt(
-            "scene_script_generation",
-            scene_number=scene_data.scene_number,
-            scene_type=scene_data.scene_type,
-            scene_title=scene_data.title,
-            scene_duration=scene_data.duration,
-            scene_description=scene_data.description,
-            visual_description=scene_data.visual_description,
-            mood_and_atmosphere=scene_data.mood_and_atmosphere,
-            camera_angle=scene_data.camera_angle,
-            character_descriptions=scene_data.character_descriptions,
-            props_and_objects=scene_data.props_and_objects,
-            concept_overview=concept_plan.get('overview', ''),
-            target_audience=concept_plan.get('target_audience', ''),
-            key_messages=concept_plan.get('key_messages', []),
-            visual_style=concept_plan.get('visual_style', ''),
-            mood_and_tone=concept_plan.get('mood_and_tone', '')
-        )
-        
-        try:
-            # 使用AI配置管理器获取适合的模型
-            from ..core.ai_config import get_ai_config
-            ai_config_manager = get_ai_config()
-            script_model = ai_config_manager.get_model_for_agent("script_writer")
-            model_config = ai_config_manager.get_model_config(script_model)
-            
-            # 🚀 MAS - 使用script_generation工具
-            response = await self.use_tool(
-                tool_name="script_generation",
-                action="generate_scene_script",
-                parameters={
-                    "scene_data": {
-                        "scene_number": scene_data.scene_number,
-                        "title": scene_data.title,
-                        "description": scene_data.description,
-                        "duration": scene_data.duration,
-                        "visual_description": scene_data.visual_description,
-                        "mood_and_atmosphere": scene_data.mood_and_atmosphere
-                    },
-                    "concept_plan": concept_plan,
-                    "model": script_model,
-                    "temperature": model_config.temperature if model_config else 0.7,
-                    "max_tokens": model_config.max_tokens if model_config else 1500
-                }
-            )
-            
-            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
-            if not response.success:
-                raise AgentError(f"Scene script generation failed: {response.error}")
-            
-            # 从ToolOutput中提取AI响应结果
-            ai_result = response.result
-            if not ai_result:
-                raise AgentError("Empty response from scene script generation tool")
-            
-            # ✅ ScriptGenerationTool返回结构化数据，不是原始content格式
-            if "script_text" in ai_result:
-                # 直接使用ScriptGenerationTool的结构化输出
+            from ..core.config import settings
+
+            # 动态超时：基于.env配置的基数、每场景增量和最大值
+            scene_count = self._estimate_scene_count(input_data)
+            base = getattr(settings, 'SCRIPT_WRITER_TIMEOUT_BASE', 180)
+            per_scene = getattr(settings, 'SCRIPT_WRITER_TIMEOUT_PER_SCENE', 30)
+            max_timeout = getattr(settings, 'SCRIPT_WRITER_TIMEOUT_MAX', 900)
+            if scene_count > 0:
+                dynamic_timeout = min(max_timeout, base + scene_count * per_scene)
+                self.timeout_seconds = int(dynamic_timeout)
+
+            # 获取workflow_state
+            workflow_state_id = input_data.get("workflow_state_id")
+            from ..core.workflow_state import workflow_manager
+            workflow_state = workflow_manager.get_workflow(workflow_state_id) if workflow_state_id else None
+
+            if not workflow_state:
                 return {
-                    "script_text": ai_result.get("script_text", ""),
-                    "visual_guidance": ai_result.get("visual_guidance", ""),
-                    "emotional_tone": ai_result.get("emotional_tone", ""),
-                    "keywords": ai_result.get("keywords", []),
-                    "duration": ai_result.get("duration", 5),
-                    "duration_reasoning": ai_result.get("duration_reasoning", ""),
-                    "success": ai_result.get("success", True)
+                    "success": False,
+                    "error": "No workflow state available",
+                    "workflow_state_updated": False,
+                    "results": []
                 }
-            elif "content" in ai_result:
-                # 兼容旧格式：原始content需要解析
-                return self._parse_script_response(ai_result["content"])
-            else:
-                raise AgentError("Invalid response format from scene script generation tool")
-            
+
+            # 获取场景和概念规划
+            scenes = getattr(workflow_state, 'scenes', [])
+            concept_plan = getattr(workflow_state, 'concept_plan', {})
+
+            if not scenes:
+                return {
+                    "success": False,
+                    "error": "No scenes available for script generation",
+                    "workflow_state_updated": False,
+                    "results": []
+                }
+
+            # 批量生成脚本
+            return await self._batch_generate_scripts(scenes, concept_plan, workflow_state, task)
+
         except Exception as e:
-            self.logger.error(f"Failed to generate script for scene {scene_data.scene_number}: {str(e)}")
-            # Return fallback script
-            return self._generate_fallback_script_from_data(scene_data)
-    
-    def _parse_script_response(self, response_content: str) -> Dict[str, Any]:
-        """Parse AI response into structured script data"""
-        
-        try:
-            # Clean response if needed
-            content = response_content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            
-            script_data = json.loads(content)
-            
-            # Validate required fields
-            required_fields = ["script_text", "voice_over_text", "narrative_description"]
-            for field in required_fields:
-                if field not in script_data:
-                    script_data[field] = script_data.get("script_text", "")
-            
-            # Ensure scene design elements exist
-            if "scene_design_elements" not in script_data:
-                script_data["scene_design_elements"] = {
-                    "key_subjects": [],
-                    "scene_setting": script_data.get("narrative_description", ""),
-                    "visual_style_notes": "Standard visual style",
-                    "composition_requirements": "Balanced composition",
-                    "continuity_elements": []
-                }
-            
-            if "narrative_structure" not in script_data:
-                script_data["narrative_structure"] = {
-                    "opening_state": "Scene beginning",
-                    "main_action": script_data.get("narrative_description", ""),
-                    "closing_state": "Scene completion",
-                    "story_function": "Narrative progression"
-                }
-                
-            if "audio_design" not in script_data:
-                script_data["audio_design"] = {
-                    "background_music_style": script_data.get("background_music_style", "ambient"),
-                    "sound_effects": script_data.get("sound_effects", []),
-                    "audio_pacing": "moderate"
-                }
-            
-            if "content_development_arc" not in script_data:
-                script_data["content_development_arc"] = {
-                    "scene_concept_duration": "based on content complexity",
-                    "narrative_progression": script_data.get("narrative_description", ""),
-                    "emotional_journey": script_data.get("emotional_tone", "neutral"),
-                    "action_sequence": "scene actions"
-                }
-            
-            return script_data
-            
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse script JSON: {str(e)}")
-            raise AgentError(f"Invalid script format: {str(e)}")
-    
-    def _generate_fallback_script_from_data(self, scene_data: SceneData) -> Dict[str, Any]:
-        """Generate fallback script when AI generation fails"""
-        
-        return {
-            "script_text": scene_data.description or f"Scene {scene_data.scene_number}",
-            "voice_over_text": scene_data.description or f"Scene {scene_data.scene_number}",
-            "narrative_description": scene_data.visual_description or scene_data.description or "",
-            "content_development_arc": {
-                "scene_concept_duration": f"Dynamic duration for scene {scene_data.scene_number}",
-                "narrative_progression": scene_data.description or "Scene progression",
-                "emotional_journey": scene_data.mood_and_atmosphere or "neutral emotional flow",
-                "action_sequence": "Basic scene actions",
-                "scene_transition": "Standard transition to next scene"
-            },
-            "scene_design_elements": {
-                "key_subjects": scene_data.props_and_objects or [],
-                "scene_setting": scene_data.description or "Scene environment",
-                "visual_style_notes": scene_data.mood_and_atmosphere or "neutral visual style",
-                "composition_requirements": "Balanced composition with clear focus",
-                "continuity_elements": scene_data.props_and_objects or []
-            },
-            "narrative_structure": {
-                "opening_state": f"Scene {scene_data.scene_number} beginning context",
-                "main_action": scene_data.description or "Basic scene action",
-                "closing_state": f"Scene {scene_data.scene_number} completion",
-                "story_function": "Sequential narrative progression"
-            },
-            "audio_design": {
-                "background_music_style": "ambient",
-                "sound_effects": [],
-                "audio_pacing": "moderate"
-            },
-            "pacing_and_timing": {
-                "narrative_tempo": "medium",
-                "key_timing_moments": [],
-                "transition_timing": "standard"
-            },
-            "emotional_tone": scene_data.mood_and_atmosphere or "neutral",
-            "key_words": []
-        }
-    
-    async def _generate_overall_narrative_from_state(
+            self.logger.error(f"ScriptWriter execution failed: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_state_updated": False,
+                "fallback_applied": True,
+                "results": []
+            }
+
+    async def _batch_generate_scripts(
         self, 
         scenes: List[SceneData], 
-        concept_plan: Dict[str, Any]
+        concept_plan: Dict[str, Any],
+        workflow_state: WorkflowState,
+        task: Task
     ) -> Dict[str, Any]:
-        """Generate overall narrative structure for the video"""
+        """批量生成场景脚本"""
         
-        scenes_summary = []
-        for scene_data in scenes:
-            scenes_summary.append({
-                "scene_number": scene_data.scene_number,
-                "title": scene_data.title,
-                "duration": scene_data.duration,
-                "script": scene_data.script_text[:200] if scene_data.script_text else "",
-                "narrative": scene_data.narrative_description[:200] if scene_data.narrative_description else ""
-            })
+        # 筛选需要脚本的场景
+        scenes_needing_scripts = [
+            scene for scene in scenes 
+            if not scene.script_text or len(scene.script_text.strip()) < 50
+        ]
         
-        # 使用新的提示词模板系统 - 整体叙事结构
-        narrative_prompt = self.render_prompt(
-            "overall_narrative_structure",
-            concept_overview=concept_plan.get('overview', ''),
-            total_scenes=len(scenes),
-            scenes_summary=json.dumps(scenes_summary, indent=2)
-        )
-        
-        try:
-            # 使用AI配置管理器获取适合的模型
-            from ..core.ai_config import get_ai_config
-            ai_config_manager = get_ai_config()
-            script_model = ai_config_manager.get_model_for_agent("script_writer")
-            model_config = ai_config_manager.get_model_config(script_model)
-            
-            # 🚀 Phase 1.3 - 使用原子性叙事结构生成工具
-            response = await self.use_tool(
-                tool_name="script_generation",
-                action="generate_narrative_structure",
-                parameters={
-                    "scenes": scenes,
-                    "concept_plan": concept_plan,
-                    "model": script_model,
-                    "temperature": model_config.temperature if model_config else 0.6,
-                    "max_tokens": model_config.max_tokens if model_config else 800
-                }
-            )
-            
-            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
-            if not response.success:
-                raise Exception(f"Narrative structure generation failed: {response.error}")
-            
-            # 从ToolOutput中提取AI响应结果
-            ai_result = response.result
-            if not ai_result or "content" not in ai_result:
-                raise Exception("Invalid response from narrative structure generation tool")
-            
-            return json.loads(ai_result["content"].strip())
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to generate overall narrative: {str(e)}")
+        if not scenes_needing_scripts:
             return {
-                "story_arc": "Standard progression",
-                "main_message": concept_plan.get("overview", ""),
-                "narrative_flow": "Sequential scene progression"
+                "success": True,
+                "message": "所有场景脚本已完成",
+                "scenes_generated": 0,
+                "workflow_state_updated": False
             }
-    
-    def _calculate_reading_time(self, script_results: List[Dict]) -> int:
-        """Calculate estimated reading time in seconds"""
-        
-        total_words = sum(
-            len(script["script"]["script_text"].split()) 
-            for script in script_results
-        )
-        
-        # Average reading speed: 150-160 words per minute for voice-over
-        words_per_second = 2.5
-        return int(total_words / words_per_second)
-    
-    def _extract_themes(self, script_results: List[Dict]) -> List[str]:
-        """Extract main themes from all scripts"""
-        
-        themes = set()
-        
-        for script_result in script_results:
-            script = script_result["script"]
-            
-            # Extract keywords
-            keywords = script.get("key_words", [])
-            themes.update(keywords)
-            
-            # Extract from emotional tones
-            emotional_tone = script.get("emotional_tone", "")
-            if emotional_tone:
-                themes.add(emotional_tone)
-        
-        return list(themes)[:10]  # Return top 10 themes
-    
-    def _generate_voice_instructions(self, concept_plan: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate voice-over instructions for the entire video"""
-        
-        return {
-            "overall_tone": concept_plan.get("mood_and_tone", "professional"),
-            "pace": "moderate",
-            "style": "conversational and engaging",
-            "target_audience": concept_plan.get("target_audience", "general"),
-            "pronunciation_notes": [],
-            "emphasis_points": concept_plan.get("key_messages", []),
-            "pauses_and_timing": "Natural pauses between scenes"
-        }
-    
-    async def _analyze_and_set_scene_continuity(
-        self, 
-        workflow_state: WorkflowState, 
-        overall_narrative: Dict[str, Any],
-        execution: AgentExecution
-    ) -> None:
-        """
-        分析所有场景的连续性需求并设置连续性策略
-        基于完整脚本 + 整体叙事判断场景间的连续性
-        """
         
         try:
-            scenes = workflow_state.scenes
-            if not scenes or len(scenes) <= 1:
-                return
+            self.logger.info(f"开始批量生成{len(scenes_needing_scripts)}个场景脚本")
             
-            self.logger.info(f"🔗 开始分析 {len(scenes)} 个场景的连续性")
-            
-            # 调用连续性分析工具
-            continuity_analysis = await self.use_tool(
-                "scene_continuity_analysis_tool",
-                "analyze_all_scenes_continuity", 
+            # 准备批量生成参数
+            batch_scenes = [
                 {
+                    "scene_number": scene.scene_number,
+                    "title": scene.title,
+                    "duration": scene.duration,
+                    "narrative_description": scene.narrative_description
+                } for scene in scenes_needing_scripts
+            ]
+            
+            # 逐场景生成脚本（使用 script_generation 工具的 generate_scene_script 动作）
+            scripts_map: Dict[str, Any] = {}
+            intelligent_style = concept_plan.get('intelligent_style_design', {})
+            for scene in scenes_needing_scripts:
+                try:
+                    tool_params = {
+                        "scene_data": {
+                            "scene_number": scene.scene_number,
+                            "visual_description": scene.visual_description,
+                            "narrative_description": scene.narrative_description,
+                            "duration": scene.duration,
+                        },
+                        "intelligent_style_design": intelligent_style,
+                        "context": {
+                            "previous_scene": "",
+                            "narrative_arc": concept_plan.get('genre_and_theme', {}).get('theme', '')
+                        }
+                    }
+                    one = await self.use_tool(
+                        "script_generation",
+                        "generate_scene_script",
+                        tool_params
+                    )
+                    payload = getattr(one, 'result', one)
+                    if isinstance(payload, dict):
+                        # 归一化结果
+                        scripts_map[str(scene.scene_number)] = {
+                            "script_text": payload.get("script_text", payload.get("content", "")),
+                            "narrative_description": payload.get("narrative_description", scene.narrative_description),
+                            "background_music_style": payload.get("background_music_style", ""),
+                            "sound_effects": payload.get("sound_effects", [])
+                        }
+                except Exception as se:
+                    self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {se}")
+            script_results = {"success": True, "scripts": scripts_map}
+            
+            # 连续性分析（可选），调用统一的 analyze_all_scenes_continuity
+            try:
+                cont_params = {
                     "scenes": [
                         {
-                            "scene_number": scene.scene_number,
-                            "title": scene.title,
-                            "description": scene.description,
-                            "script_text": scene.script_text,
-                            "narrative_description": scene.narrative_description,
-                            "mood_and_atmosphere": scene.mood_and_atmosphere
-                        }
-                        for scene in scenes
+                            "scene_number": s["scene_number"],
+                            "title": s.get("title", ""),
+                            "description": s.get("narrative_description", "") or "",
+                            "script_text": scripts_map.get(str(s["scene_number"])) and scripts_map[str(s["scene_number"])].get("script_text", "") or "",
+                            "narrative_description": s.get("narrative_description", "") or "",
+                            "mood_and_atmosphere": ""
+                        } for s in batch_scenes
                     ],
-                    "overall_narrative": overall_narrative.get("story_arc", ""),
-                    "narrative_flow": overall_narrative.get("narrative_flow", ""),
-                    "main_message": overall_narrative.get("main_message", "")
+                    "overall_narrative": concept_plan.get('overview', ''),
+                    "narrative_flow": concept_plan.get('genre_and_theme', {}).get('theme', ''),
+                    "main_message": ":".join(concept_plan.get('key_messages', [])) if concept_plan.get('key_messages') else ""
                 }
-            )
-            
-            # 处理分析结果
-            if hasattr(continuity_analysis, 'result'):
-                analysis_result = continuity_analysis.result
-            else:
-                analysis_result = continuity_analysis
-                
-            if not isinstance(analysis_result, dict):
-                self.logger.warning(f"Unexpected continuity analysis result type: {type(analysis_result)}")
-                return
-                
-            # 应用连续性策略到各个场景
-            continuity_decisions = analysis_result.get("continuity_decisions", {})
-            
-            for scene in scenes:
-                scene_key = str(scene.scene_number)
-                if scene_key in continuity_decisions:
-                    decision = continuity_decisions[scene_key]
-                    
-                    # 设置图像生成策略
-                    scene.image_generation_strategy = decision.get("strategy", "new")
-                    
-                    # 设置依赖关系
-                    if decision.get("strategy") == "continue_from_previous" and scene.scene_number > 1:
-                        scene.depends_on_scene = scene.scene_number - 1
-                        scene.continuity_reason = decision.get("reason", "")
-                        scene.continuity_confidence = decision.get("confidence", 0.8)
-                        
-                        self.logger.info(
-                            f"🔗 Scene {scene.scene_number} 设置连续性策略: "
-                            f"continue_from_scene_{scene.depends_on_scene} "
-                            f"(confidence: {scene.continuity_confidence})"
+                cont_res = await self.use_tool(
+                    "scene_continuity_analysis_tool",
+                    "analyze_all_scenes_continuity",
+                    cont_params
+                )
+                continuity_analysis = getattr(cont_res, 'result', cont_res)
+            except Exception as e:
+                self.logger.warning(f"连续性分析失败，继续脚本生成: {e}")
+                continuity_analysis = {"warning": "连续性分析失败"}
+
+            # 更新workflow_state
+            generated_count = 0
+            # 标准化回合结果：供编排器统计 success/failed
+            generation_results: List[Dict[str, Any]] = []
+            if script_results and script_results.get("success") and script_results.get("scripts"):
+                for scene in scenes_needing_scripts:
+                    scene_script_data = script_results["scripts"].get(str(scene.scene_number))
+                    if scene_script_data:
+                        workflow_state.update_scene(
+                            scene.scene_number,
+                            script_text=scene_script_data.get("script_text", ""),
+                            voice_over_text=scene_script_data.get("script_text", ""),
+                            narrative_description=scene_script_data.get("narrative_description", scene.narrative_description),
+                            background_music_style=scene_script_data.get("background_music_style", ""),
+                            sound_effects=scene_script_data.get("sound_effects", [])
                         )
+                        generated_count += 1
+                        generation_results.append({
+                            "scene_number": scene.scene_number,
+                            "success": True,
+                            "prompt_text": scene_script_data.get("script_text", "")[:120] or "script_generated",
+                        })
                     else:
-                        scene.depends_on_scene = None
-                        scene.continuity_reason = decision.get("reason", "Independent scene")
-                        scene.continuity_confidence = decision.get("confidence", 0.9)
-                        
-                        self.logger.info(
-                            f"🆕 Scene {scene.scene_number} 设置独立生成策略: new"
-                        )
-                        
-            self.logger.info(f"🔗 场景连续性分析完成")
+                        generation_results.append({
+                            "scene_number": scene.scene_number,
+                            "success": False,
+                            "error": "script_generation_failed_or_empty"
+                        })
+            else:
+                # 工具层未返回结构化脚本映射时，按尝试的场景全部视为失败
+                for scene in scenes_needing_scripts:
+                    generation_results.append({
+                        "scene_number": scene.scene_number,
+                        "success": False,
+                        "error": "no_scripts_map"
+                    })
+
+            # 将连续性分析结果写回到 WorkflowState.scenes（用于 Image/Video 连续性处理）
+            try:
+                decisions = (continuity_analysis or {}).get("continuity_decisions", {}) if isinstance(continuity_analysis, dict) else {}
+                if decisions:
+                    # 遍历所有场景，依据决策落地字段
+                    for sc in getattr(workflow_state, 'scenes', []) or []:
+                        sn = getattr(sc, 'scene_number', None)
+                        if not sn:
+                            continue
+                        key = str(sn)
+                        d = decisions.get(key)
+                        if not isinstance(d, dict):
+                            # 对缺失决策的场景，保持现状，不强行覆盖
+                            continue
+                        strategy = d.get("strategy", "new")
+                        reason = d.get("reason", "")
+                        try:
+                            confidence = float(d.get("confidence", 0.8))
+                        except Exception:
+                            confidence = 0.8
+
+                        if strategy == "continue_from_previous" and sn > 1:
+                            depends = sn - 1
+                            workflow_state.update_scene(
+                                sn,
+                                depends_on_scene=depends,
+                                requires_continuity_from=depends,
+                                continuity_reason=reason,
+                                continuity_confidence=confidence,
+                                image_generation_strategy="continue_from_previous",
+                            )
+                        else:
+                            # 标记为独立生成；清理依赖
+                            workflow_state.update_scene(
+                                sn,
+                                depends_on_scene=None,
+                                requires_continuity_from=None,
+                                continuity_reason=reason,
+                                continuity_confidence=confidence,
+                                image_generation_strategy="new",
+                            )
+                    self.logger.info("✅ 连续性决策已写回 WorkflowState.scenes")
+            except Exception as ce:
+                self.logger.warning(f"连续性结果写回失败：{ce}")
+
+            self.logger.info(f"批量脚本生成完成: {generated_count}/{len(scenes_needing_scripts)}")
+            
+            return {
+                "success": True,
+                "message": f"批量生成{generated_count}个场景脚本",
+                "scenes_generated": generated_count,
+                "script_results": script_results,
+                "continuity_analysis": continuity_analysis,
+                "generation_results": generation_results,
+                "workflow_state_updated": generated_count > 0,
+                "total_scenes": len(scenes_needing_scripts)
+            }
             
         except Exception as e:
-            self.logger.error(f"Scene continuity analysis failed: {e}")
-            # 不抛出异常，使用默认策略（所有场景独立生成）
-            for scene in workflow_state.scenes:
-                scene.image_generation_strategy = "new"
-                scene.depends_on_scene = None
+            self.logger.error(f"批量脚本生成失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "scenes_generated": 0,
+                "workflow_state_updated": False
+            }
+
+    def _estimate_scene_count(self, input_data: Dict[str, Any]) -> int:
+        """估算场景数量用于动态超时"""
+        try:
+            workflow_state_id = input_data.get("workflow_state_id")
+            if workflow_state_id:
+                from ..core.workflow_state import workflow_manager
+                ws = workflow_manager.get_workflow(workflow_state_id)
+                if ws and getattr(ws, 'scenes', None):
+                    return len(ws.scenes)
+            return 6  # 默认估算
+        except:
+            return 6

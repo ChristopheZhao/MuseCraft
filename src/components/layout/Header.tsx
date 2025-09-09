@@ -2,9 +2,10 @@
 
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useI18n } from '@/i18n/I18nProvider';
 import { 
   Menu, 
-  X, 
+  ChevronLeft,
   Settings, 
   Bell, 
   User, 
@@ -14,6 +15,7 @@ import {
 
 const Header: React.FC = () => {
   const { ui, setSidebarCollapsed, addNotification } = useAppStore();
+  const { t, lang, setLang } = useI18n();
   const { sidebarCollapsed, notifications } = ui;
 
   const unreadCount = notifications.filter(n => n.type === 'info').length;
@@ -25,48 +27,49 @@ const Header: React.FC = () => {
   const handleNotificationClick = () => {
     addNotification({
       type: 'info',
-      title: 'Notifications',
-      message: 'No new notifications',
+      title: t('header.notifications'),
+      message: t('header.noNotifications'),
       autoClose: 3000,
     });
   };
 
   return (
-    <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 shadow-sm">
+    <header className="h-16 bg-white/90 backdrop-blur border-b border-gray-200 flex items-center justify-between px-6 shadow-sm">
       {/* Left Section */}
       <div className="flex items-center space-x-4">
         <button
           onClick={handleToggleSidebar}
           className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
-          aria-label="Toggle sidebar"
+          aria-label={sidebarCollapsed ? t('header.toggleSidebar.expand') : t('header.toggleSidebar.collapse')}
+          title={sidebarCollapsed ? t('header.toggleSidebar.expand') : t('header.toggleSidebar.collapse')}
         >
           {sidebarCollapsed ? (
             <Menu className="w-5 h-5 text-gray-600" />
           ) : (
-            <X className="w-5 h-5 text-gray-600" />
+            <ChevronLeft className="w-5 h-5 text-gray-600" />
           )}
         </button>
         
         <div className="flex items-center space-x-2">
-          <div className="p-2 bg-primary-500 rounded-lg">
+          <div className="p-2 bg-gradient-to-br from-primary-500 to-accent-500 rounded-lg shadow-card">
             <Video className="w-6 h-6 text-white" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-gray-900">
-              VideoMaker AI
+              {t('brand.name')}
             </h1>
             <p className="text-xs text-gray-500">
-              Intelligent Video Generation Platform
+              {t('brand.tagline')}
             </p>
           </div>
         </div>
       </div>
 
       {/* Center Section - Status Indicator */}
-      <div className="hidden lg:flex items-center space-x-2 px-4 py-2 bg-gray-50 rounded-full">
-        <Zap className="w-4 h-4 text-green-500" />
+      <div className="hidden lg:flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-emerald-50 to-green-50 rounded-full border border-green-200">
+        <Zap className="w-4 h-4 text-green-600" />
         <span className="text-sm font-medium text-gray-700">
-          System Ready
+          {t('status.ready')}
         </span>
         <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
       </div>
@@ -77,7 +80,8 @@ const Header: React.FC = () => {
         <button
           onClick={handleNotificationClick}
           className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors"
-          aria-label="Notifications"
+          aria-label={t('header.notifications')}
+          title={t('header.notifications')}
         >
           <Bell className="w-5 h-5 text-gray-600" />
           {unreadCount > 0 && (
@@ -87,10 +91,23 @@ const Header: React.FC = () => {
           )}
         </button>
 
+        {/* Language Toggle */}
+        <div className="hidden md:flex items-center">
+          <button
+            onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+            className="px-3 py-1 text-xs rounded-full border border-gray-200 hover:bg-gray-100 text-gray-600"
+            aria-label={t('header.language')}
+            title={t('header.language')}
+          >
+            {lang === 'zh' ? '中文' : 'EN'}
+          </button>
+        </div>
+
         {/* Settings */}
         <button
           className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
-          aria-label="Settings"
+          aria-label={t('header.settings')}
+          title={t('header.settings')}
         >
           <Settings className="w-5 h-5 text-gray-600" />
         </button>
@@ -99,7 +116,7 @@ const Header: React.FC = () => {
         <div className="flex items-center space-x-3 pl-3 border-l border-gray-200">
           <div className="hidden sm:block text-right">
             <p className="text-sm font-medium text-gray-900">John Doe</p>
-            <p className="text-xs text-gray-500">Pro Plan</p>
+            <p className="text-xs text-gray-500">{t('user.plan.pro')}</p>
           </div>
           <button className="p-1 rounded-full bg-primary-100 hover:bg-primary-200 transition-colors">
             <User className="w-6 h-6 text-primary-600" />

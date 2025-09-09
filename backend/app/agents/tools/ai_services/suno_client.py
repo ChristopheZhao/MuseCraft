@@ -66,7 +66,17 @@ class SunoClientTool(AsyncTool):
         
         self.api_key = api_key
         self.base_url = self.config.get("base_url", settings.SUNO_BASE_URL)
-        self.timeout = self.config.get("timeout", 120)
+        # 使用系统音频生成超时作为默认工具超时，提升稳健性
+        try:
+            default_audio_timeout = int(getattr(settings, 'AUDIO_GENERATION_TOOL_TIMEOUT', 240))
+        except Exception:
+            default_audio_timeout = 240
+        self.timeout = int(self.config.get("timeout", default_audio_timeout))
+        # 写回到配置，确保 BaseTool 的超时解析链条可读到
+        try:
+            self.config["timeout"] = self.timeout
+        except Exception:
+            pass
         
         # 标记是否功能可用
         self._functional = bool(api_key)
@@ -134,6 +144,15 @@ class SunoClientTool(AsyncTool):
                     "title": {
                         "type": "string",
                         "description": "音乐标题（可选）"
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["V3_5", "V4", "V4_5"],
+                        "description": "Suno 模型版本，影响长度限制（默认 V3_5）"
+                    },
+                    "negativeTags": {
+                        "type": "string",
+                        "description": "要排除的风格或特征（可选）"
                     }
                 },
                 "required": ["description"]
@@ -141,12 +160,15 @@ class SunoClientTool(AsyncTool):
             "generate_custom_music": {
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "详细的音乐生成提示"},
-                    "custom_mode": {"type": "boolean", "default": True},
-                    "title": {"type": "string"},
-                    "tags": {"type": "string", "description": "音乐标签，例如：'ambient, electronic, chill'"}
-                },
-                "required": ["prompt"]
+                    "prompt": {"type": "string", "description": "音乐生成提示（customMode=false 时为必填，limit=400）"},
+                    "custom_mode": {"type": "boolean", "default": True, "description": "自定义模式（默认 True）"},
+                    "title": {"type": "string", "description": "标题（customMode=true 时必填，≤80）"},
+                    "style": {"type": "string", "description": "风格关键词（customMode=true 时必填，长度由模型决定）"},
+                    "instrumental": {"type": "boolean", "description": "是否纯音乐（影响必填项）"},
+                    "model": {"type": "string", "enum": ["V3_5", "V4", "V4_5"], "description": "模型版本，影响长度限制（必填）"},
+                    "tags": {"type": "string", "description": "音乐标签，例如：'ambient, electronic, chill'"},
+                    "negativeTags": {"type": "string", "description": "要排除的风格或特征（可选）"}
+                }
             },
             "get_generation_status": {
                 "type": "object",
@@ -190,7 +212,8 @@ class SunoClientTool(AsyncTool):
             duration = params.get("duration", self.default_duration)
             instrumental = params.get("instrumental", True)
             title = params.get("title", "Background Music")
-            
+            model = params.get("model", "V3_5")
+
             # 构建优化的提示词
             enhanced_prompt = self._build_background_music_prompt(
                 description, mood, style, instrumental
@@ -215,14 +238,51 @@ class SunoClientTool(AsyncTool):
             
             # 将时长提示加入enhanced_prompt
             enhanced_prompt_with_duration = f"{enhanced_prompt}, {duration_hint}"
+
+            # -------- 参数与长度校验（依据官方规则）--------
+            custom_mode = True
+            prompt_limit, style_limit = self._get_model_limits(model, custom_mode)
+            title_limit = 80
+
+            # 必填项校验
+            if custom_mode:
+                if instrumental:
+                    if not style:
+                        raise ToolValidationError("style is required when customMode=true and instrumental=true")
+                    if not title:
+                        raise ToolValidationError("title is required when customMode=true and instrumental=true")
+                else:
+                    if not style:
+                        raise ToolValidationError("style is required when customMode=true and instrumental=false")
+                    if not title:
+                        raise ToolValidationError("title is required when customMode=true and instrumental=false")
+                    if not enhanced_prompt_with_duration:
+                        raise ToolValidationError("prompt is required when customMode=true and instrumental=false")
+
+            # 长度限制：不做静默截断，直接报错，便于定位问题
+            if len(enhanced_prompt_with_duration) > prompt_limit:
+                raise ToolValidationError(
+                    f"prompt exceeds limit: {len(enhanced_prompt_with_duration)}/{prompt_limit} (model={model})"
+                )
+            # style 字段仅使用传入的风格关键词；其他修饰已进 prompt
+            style_value = style or ""
+            if len(style_value) > style_limit:
+                raise ToolValidationError(
+                    f"style exceeds limit: {len(style_value)}/{style_limit} (model={model})"
+                )
+            if title and len(title) > title_limit:
+                raise ToolValidationError(
+                    f"title exceeds limit: {len(title)}/{title_limit}"
+                )
             
             payload = {
                 "prompt": enhanced_prompt_with_duration,
-                "customMode": True,  # 注意：官方API使用customMode而不是custom_mode
+                "customMode": True,  # 官方字段
                 "title": title,
-                "style": f"{style}, background music, instrumental, {mood}".strip(", "),
+                # style 仅使用风格关键词，避免超限；mood/instrumental 已进入 prompt
+                "style": style_value,
                 "instrumental": instrumental,
-                "model": "V3_5",  # 使用官方推荐的模型版本
+                "model": model,
             }
             
             # API要求必须提供callBackUrl，但在开发环境我们使用虚拟URL然后用轮询获取结果
@@ -409,7 +469,7 @@ class SunoClientTool(AsyncTool):
         if instrumental:
             prompt_elements.append("instrumental only, no vocals, no lyrics")
         
-        # 添加背景音乐特定要求
+        # 添加背景音乐特定要求（进入 prompt，而非 style 字段）
         background_music_specs = [
             "suitable for video soundtrack",
             "non-distracting",
@@ -421,29 +481,74 @@ class SunoClientTool(AsyncTool):
         prompt_elements.extend(background_music_specs)
         
         enhanced_prompt = ", ".join(prompt_elements)
-        
-        # 限制提示词长度
-        if len(enhanced_prompt) > 400:
-            enhanced_prompt = enhanced_prompt[:397] + "..."
-        
         return enhanced_prompt
     
     async def _generate_custom_music(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成自定义音乐"""
         try:
-            payload = {
-                "prompt": params["prompt"],
-                "custom_mode": params.get("custom_mode", True),
-                "title": params.get("title", "Custom Music"),
-                "tags": params.get("tags", "custom"),
-                "wait_audio": True
-            }
+            # 读取参数
+            custom_mode = params.get("custom_mode", True)
+            instrumental = params.get("instrumental", False)
+            model = params.get("model", "V3_5")
+            prompt = params.get("prompt", "")
+            title = params.get("title", "")
+            style = params.get("style", "")
+            tags = params.get("tags", "custom")
+
+            # 规则校验（不做静默截断）
+            prompt_limit, style_limit = self._get_model_limits(model, custom_mode)
+            if custom_mode:
+                if instrumental:
+                    if not (style and title):
+                        raise ToolValidationError("customMode=true & instrumental=true requires style and title")
+                else:
+                    if not (style and title and prompt):
+                        raise ToolValidationError("customMode=true & instrumental=false requires style, title and prompt")
+                if prompt and len(prompt) > prompt_limit:
+                    raise ToolValidationError(f"prompt exceeds limit: {len(prompt)}/{prompt_limit} (model={model})")
+                if style and len(style) > style_limit:
+                    raise ToolValidationError(f"style exceeds limit: {len(style)}/{style_limit} (model={model})")
+                if title and len(title) > 80:
+                    raise ToolValidationError(f"title exceeds limit: {len(title)}/80")
+                payload = {
+                    "prompt": prompt,
+                    "customMode": True,
+                    "title": title,
+                    "style": style,
+                    "instrumental": instrumental,
+                    "model": model,
+                    "tags": tags,
+                    "wait_audio": True
+                }
+            else:
+                # 非自定义模式：只需要 prompt 且不超过 400，其它参数必须为空
+                if not prompt:
+                    raise ToolValidationError("prompt is required when customMode=false")
+                if len(prompt) > prompt_limit:
+                    raise ToolValidationError(f"prompt exceeds non-custom limit: {len(prompt)}/{prompt_limit}")
+                for k in ("title", "style", "tags", "instrumental"):
+                    if params.get(k):
+                        raise ToolValidationError(f"'{k}' must be empty when customMode=false")
+                payload = {
+                    "prompt": prompt,
+                    "customMode": False,
+                    "wait_audio": True
+                }
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
             
+            # 自定义模式需要回调URL；在开发环境下提供本地URL并使用轮询
+            callback_task_id = str(uuid.uuid4())
+            is_dev_environment = "localhost" in settings.PUBLIC_API_URL or "127.0.0.1" in settings.PUBLIC_API_URL
+            if custom_mode:
+                if not is_dev_environment and self.config.get("use_callback", True):
+                    payload["callBackUrl"] = await self._generate_callback_url(callback_task_id)
+                else:
+                    payload["callBackUrl"] = f"http://localhost:8000/api/v1/callbacks/suno/{callback_task_id}"
+
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
                     f"{self.base_url}/music/custom",
@@ -457,13 +562,24 @@ class SunoClientTool(AsyncTool):
                 
                 result = response.json()
                 
+                # 若 custom_mode=true 且在开发环境，尝试轮询获取音频链接
+                audio_url = result.get("audio_url", "")
+                api_task_id = result.get("id", "") or result.get("taskId", "")
+                if custom_mode and (is_dev_environment or not self.config.get("use_callback", True)):
+                    try:
+                        if api_task_id:
+                            polled = await self._poll_generation_status(api_task_id)
+                            audio_url = polled.get("audio_url", audio_url)
+                    except Exception as e:
+                        self.logger.warning(f"Custom music polling failed: {e}")
+
                 return {
-                    "audio_url": result.get("audio_url", ""),
-                    "task_id": result.get("id", ""),
-                    "title": payload["title"],
-                    "prompt_used": params["prompt"],
-                    "generation_mode": "custom",
-                    "tags": payload["tags"]
+                    "audio_url": audio_url,
+                    "task_id": api_task_id or callback_task_id,
+                    "title": payload.get("title", ""),
+                    "prompt_used": payload.get("prompt", ""),
+                    "generation_mode": "custom" if custom_mode else "non_custom",
+                    "tags": payload.get("tags", "")
                 }
                 
         except Exception as e:
@@ -604,6 +720,20 @@ class SunoClientTool(AsyncTool):
                 
         except Exception as e:
             raise ToolError(f"List generations failed: {str(e)}", self.metadata.name)
+
+    def _get_model_limits(self, model: str, custom_mode: bool) -> (int, int):
+        """根据官方规则返回 (prompt_limit, style_limit)。custom_mode=False 时 style_limit 无意义。"""
+        m = (model or "").upper()
+        if custom_mode:
+            if m in ("V3_5", "V4"):
+                return 3000, 200
+            elif m in ("V4_5", "V4_5PLUS"):
+                return 5000, 1000
+            # 未知模型采用保守默认
+            return 3000, 200
+        else:
+            # 非自定义模式仅限制 prompt=400
+            return 400, 0
     
     def _validate_action_parameters(self, action: str, parameters: Dict[str, Any]):
         """验证操作参数"""
@@ -616,8 +746,42 @@ class SunoClientTool(AsyncTool):
                 raise ToolValidationError("duration must be between 10 and 300 seconds")
         
         elif action == "generate_custom_music":
-            if not parameters.get("prompt"):
-                raise ToolValidationError("prompt is required for custom music generation")
+            # customMode 规则：
+            custom_mode = parameters.get("custom_mode", True)
+            instrumental = parameters.get("instrumental", False)
+            model = parameters.get("model", "V3_5")
+
+            prompt = parameters.get("prompt", "")
+            title = parameters.get("title", "")
+            style = parameters.get("style", "")
+
+            prompt_limit, style_limit = self._get_model_limits(model, custom_mode)
+
+            if custom_mode:
+                # 必填约束
+                if instrumental:
+                    if not (style and title):
+                        raise ToolValidationError("customMode=true & instrumental=true requires style and title")
+                else:
+                    if not (style and title and prompt):
+                        raise ToolValidationError("customMode=true & instrumental=false requires style, title and prompt")
+                # 长度约束
+                if prompt and len(prompt) > prompt_limit:
+                    raise ToolValidationError(f"prompt exceeds limit: {len(prompt)}/{prompt_limit} (model={model})")
+                if style and len(style) > style_limit:
+                    raise ToolValidationError(f"style exceeds limit: {len(style)}/{style_limit} (model={model})")
+                if title and len(title) > 80:
+                    raise ToolValidationError(f"title exceeds limit: {len(title)}/80")
+            else:
+                # 非自定义模式：只需要 prompt，其他参数应为空
+                if not prompt:
+                    raise ToolValidationError("prompt is required when customMode=false")
+                if len(prompt) > prompt_limit:  # 400
+                    raise ToolValidationError(f"prompt exceeds non-custom limit: {len(prompt)}/{prompt_limit}")
+                # 其它参数需为空
+                for k in ("title", "style", "tags", "instrumental"):
+                    if parameters.get(k):
+                        raise ToolValidationError(f"'{k}' must be empty when customMode=false")
         
         elif action == "get_generation_status":
             if not parameters.get("task_id"):

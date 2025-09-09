@@ -107,9 +107,9 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             await self._update_progress(execution, 30, "Rendering prompt", db)
             
             # Render the prompt template
-            rendered_prompt = await self.render_prompt(
-                template_name="concept_planner",
-                variables=template_variables
+            rendered_prompt = self.render_prompt(
+                "concept_planner",
+                **template_variables
             )
             
             # Update progress

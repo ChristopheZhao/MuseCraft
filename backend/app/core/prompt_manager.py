@@ -115,9 +115,14 @@ class PromptManager:
             config_path: 配置文件根目录路径
         """
         if config_path is None:
-            # 默认配置路径
-            current_dir = Path(__file__).parent.parent.parent
-            config_path = current_dir / "config" / "prompts"
+            # 默认配置路径优先使用 app/config/prompts，其次兼容 legacy backend/config/prompts
+            app_root = Path(__file__).parent.parent  # backend/app
+            app_cfg = app_root / "config" / "prompts"
+            legacy_cfg = app_root.parent / "config" / "prompts"  # backend/config/prompts
+            if app_cfg.exists():
+                config_path = app_cfg
+            else:
+                config_path = legacy_cfg
         
         self.config_path = Path(config_path)
         self.logger = logging.getLogger("prompt_manager")
@@ -139,20 +144,24 @@ class PromptManager:
     def _load_all_configs(self):
         """加载所有配置文件"""
         try:
-            # 加载agents目录下的配置
-            agents_path = self.config_path / "agents"
-            if agents_path.exists():
-                for yaml_file in agents_path.glob("*.yaml"):
-                    self._load_config_file(yaml_file)
-            
-            # 加载templates目录下的配置  
-            templates_path = self.config_path / "templates"
-            if templates_path.exists():
-                for yaml_file in templates_path.glob("*.yaml"):
-                    self._load_config_file(yaml_file)
-                    
-            self.logger.info(f"Loaded {len(self._configs)} prompt configurations")
-            
+            # 首选当前 config_path
+            for sub in ("agents", "templates"):
+                p = self.config_path / sub
+                if p.exists():
+                    for yaml_file in p.glob("*.yaml"):
+                        self._load_config_file(yaml_file)
+            # 兼容加载 legacy 目录（避免遗漏），但不覆盖已有同名配置
+            legacy_root = (Path(__file__).parent.parent.parent / "config" / "prompts")
+            if legacy_root.resolve() != self.config_path.resolve():
+                for sub in ("agents", "templates"):
+                    p = legacy_root / sub
+                    if p.exists():
+                        for yaml_file in p.glob("*.yaml"):
+                            name = yaml_file.stem
+                            if name not in self._configs:
+                                self._load_config_file(yaml_file)
+            self.logger.info(f"Loaded {len(self._configs)} prompt configurations from {self.config_path}")
+
         except Exception as e:
             self.logger.error(f"Failed to load prompt configurations: {e}")
             raise
@@ -202,6 +211,13 @@ class PromptManager:
         Returns:
             PromptConfig对象或None
         """
+        # 兼容：允许传入带路径的名称（如 "agents/image_generator"），仅取文件名部分作为配置名
+        try:
+            import os
+            if isinstance(config_name, str) and ("/" in config_name or "\\" in config_name):
+                config_name = os.path.basename(config_name)
+        except Exception:
+            pass
         # 自动重载检查
         if auto_reload and self._check_file_changed(config_name):
             self.reload_config(config_name)

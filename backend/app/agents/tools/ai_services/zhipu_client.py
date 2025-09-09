@@ -130,6 +130,12 @@ class ZhipuClientTool(AsyncTool):
         ]
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
+        # 动态读取视频能力（时长选项）以避免写死
+        try:
+            from ....core.video_config_manager import get_video_config
+            _vcaps = get_video_config().get_current_provider_config().duration_capabilities
+        except Exception:
+            _vcaps = [5, 10]
         schemas = {
             "chat_completion": {
                 "type": "object",
@@ -181,7 +187,7 @@ class ZhipuClientTool(AsyncTool):
                     "first_frame_image": {"type": "string", "description": "首帧图片URL（CogVideoX-3首尾帧模式）"},
                     "last_frame_image": {"type": "string", "description": "尾帧图片URL（CogVideoX-3首尾帧模式）"},
                     "model": {"type": "string", "enum": self.video_models},
-                    "duration": {"type": "integer", "description": "视频时长（秒），CogVideoX-3支持5或10秒", "enum": [5, 10]}
+                    "duration": {"type": "integer", "description": "视频时长（秒），取值受当前提供商能力限制", "enum": _vcaps}
                 },
                 "required": ["prompt"]
             },
@@ -265,6 +271,12 @@ class ZhipuClientTool(AsyncTool):
                 "top_p": params.get("top_p", 0.7),
                 "stream": params.get("stream", False)
             }
+            # 透传 thinking 配置（不强制关闭）
+            if "thinking" in params:
+                payload["thinking"] = params["thinking"]
+            # 透传 do_sample（如调用方提供）
+            if "do_sample" in params:
+                payload["do_sample"] = params["do_sample"]
             
             # 添加 response_format 参数支持
             if "response_format" in params:
@@ -287,7 +299,24 @@ class ZhipuClientTool(AsyncTool):
                     raise ToolError(f"Zhipu AI API error: {response.status_code} - {error_detail}", self.metadata.name)
                 
                 result = response.json()
-                
+
+                # 提前提取关键字段用于调试日志
+                try:
+                    choice0 = (result.get("choices") or [{}])[0]
+                    message = choice0.get("message") or {}
+                    content = message.get("content", "")
+                    finish_reason = choice0.get("finish_reason", "")
+                    content_len = len(content) if isinstance(content, str) else 0
+                    # 记录一次关键调试信息，帮助定位“空内容”场景
+                    self.logger.info(
+                        f"Chat completion parsed: model={result.get('model')}, "
+                        f"finish_reason={finish_reason}, content_len={content_len}, "
+                        f"content_preview={repr((content or '')[:80])}"
+                    )
+                except Exception:
+                    # 忽略调试日志异常，避免影响主流程
+                    pass
+
                 return {
                     "content": result["choices"][0]["message"]["content"],
                     "model": result["model"],

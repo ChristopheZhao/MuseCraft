@@ -15,12 +15,15 @@ import {
   Zap,
   AlertCircle,
   ArrowRight,
-  Sparkles
+  Sparkles,
+  Database
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useI18n } from '@/i18n/I18nProvider';
 
 const AgentOrchestrator: React.FC = () => {
   const { agents, currentRequest } = useAppStore();
+  const { t } = useI18n();
 
   const getAgentIcon = (type: Agent['type']) => {
     const iconProps = { className: "w-6 h-6" };
@@ -88,11 +91,9 @@ const AgentOrchestrator: React.FC = () => {
           <Brain className="w-8 h-8 text-gray-400" />
         </div>
         <h3 className="text-lg font-medium text-gray-900 mb-2">
-          AI Agents Ready
+          {t('orch.title')}
         </h3>
-        <p className="text-gray-600">
-          Submit a video request to see the agents in action
-        </p>
+        <p className="text-gray-600">{t('orch.empty')}</p>
       </div>
     );
   }
@@ -103,15 +104,29 @@ const AgentOrchestrator: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900">
-            AI Agent Orchestration
+            {t('orch.title')}
           </h3>
           <p className="text-sm text-gray-600">
-            Multi-agent collaboration for {currentRequest.title}
+            {t('orch.subtitle')}{currentRequest.title}
           </p>
         </div>
-        <div className="flex items-center space-x-2 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span>Active</span>
+        <div className="flex items-center gap-3">
+          {/* Single mode: Multi‑Agent */}
+          <div className="hidden md:flex items-center text-xs px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-200">
+            {t('orch.mode.multi')}
+          </div>
+
+          {/* Memory pill */}
+          <div className="hidden md:flex items-center space-x-2 px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-sm border border-indigo-200">
+            <Database className="w-4 h-4" />
+            <span>{t('orch.memory')}</span>
+          </div>
+
+          {/* Active pill */}
+          <div className="flex items-center space-x-2 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
+            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <span>{t('orch.active')}</span>
+          </div>
         </div>
       </div>
 
@@ -187,7 +202,7 @@ const AgentOrchestrator: React.FC = () => {
                 {/* Estimated Time */}
                 {agent.estimatedTime && agent.status === 'working' && (
                   <div className="mt-2 text-xs text-gray-500">
-                    ~{agent.estimatedTime}s remaining
+                    ~{agent.estimatedTime}s 剩余
                   </div>
                 )}
               </div>
@@ -221,7 +236,7 @@ const AgentOrchestrator: React.FC = () => {
         {agents.filter(agent => agent.status !== 'idle').map((agent) => (
           <div
             key={`details-${agent.id}`}
-            className="p-4 bg-white border border-gray-200 rounded-lg"
+            className="p-4 bg-white/90 backdrop-blur border border-gray-200 rounded-lg shadow-card"
           >
             <div className="flex items-center space-x-3 mb-3">
               <div className="flex-shrink-0">
@@ -246,9 +261,7 @@ const AgentOrchestrator: React.FC = () => {
 
             {agent.currentTask && (
               <div className="mb-3">
-                <p className="text-xs font-medium text-gray-700 mb-1">
-                  Current Task:
-                </p>
+                <p className="text-xs font-medium text-gray-700 mb-1">{t('orch.currentTask')}：</p>
                 <p className="text-sm text-gray-600">
                   {agent.currentTask}
                 </p>
@@ -258,7 +271,7 @@ const AgentOrchestrator: React.FC = () => {
             {agent.progress > 0 && (
               <div className="mb-3">
                 <div className="flex justify-between text-xs text-gray-600 mb-1">
-                  <span>Progress</span>
+                  <span>{t('common.progress')}</span>
                   <span>{agent.progress}%</span>
                 </div>
                 <div className="w-full bg-gray-200 rounded-full h-2">

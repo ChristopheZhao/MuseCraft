@@ -29,6 +29,11 @@ except ImportError:
     MINIO_AVAILABLE = False
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
+try:
+    # Prefer project config for local storage path
+    from ....core.config import settings as _app_settings
+except Exception:
+    _app_settings = None
 
 
 class FileStorageTool(AsyncTool):
@@ -76,8 +81,16 @@ class FileStorageTool(AsyncTool):
         """初始化文件存储工具"""
         self.storage_type = self.config.get("storage_type", "local")  # local, s3, minio
         
-        # 本地存储配置
-        self.local_storage_dir = self.config.get("local_storage_dir", "/tmp/video_storage")
+        # 本地存储配置：默认使用应用配置的 TEMP_PATH（更贴合项目目录），可被工具config覆盖
+        default_local_dir = None
+        try:
+            if _app_settings is not None and getattr(_app_settings, 'TEMP_PATH', None):
+                default_local_dir = _app_settings.TEMP_PATH
+        except Exception:
+            default_local_dir = None
+        if not default_local_dir:
+            default_local_dir = "/tmp/video_storage"
+        self.local_storage_dir = self.config.get("local_storage_dir", default_local_dir)
         self.max_file_size = self.config.get("max_file_size", 500 * 1024 * 1024)  # 500MB
         
         # 创建本地存储目录
@@ -131,6 +144,12 @@ class FileStorageTool(AsyncTool):
             secret_key=self.minio_secret_key,
             secure=self.minio_secure
         )
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """存储工具不对 FC 暴露，避免模型直接操作存储。
+        调用应由业务复合工具或Agent代码内注入。
+        """
+        return {"expose": False, "allowed_actions": []}
     
     def get_available_actions(self) -> List[str]:
         return [
@@ -388,39 +407,38 @@ class FileStorageTool(AsyncTool):
             metadata = params.get("metadata", {})
             
             # 下载文件到临时位置
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                
-                # 获取文件信息
-                content_type = response.headers.get("content-type", "application/octet-stream")
-                content_length = response.headers.get("content-length")
-                
-                if content_length and int(content_length) > self.max_file_size:
-                    raise ToolError(f"File too large: {content_length} bytes", self.metadata.name)
-                
-                # 生成临时文件
-                temp_file = os.path.join(self.local_storage_dir, f"temp_{uuid.uuid4()}")
-                
-                try:
-                    with open(temp_file, 'wb') as f:
-                        f.write(response.content)
-                    
-                    # 上传临时文件
-                    upload_params = {
-                        "file_path": temp_file,
-                        "destination_key": destination_key,
-                        "content_type": content_type,
-                        "metadata": {**metadata, "source_url": url}
-                    }
-                    
-                    result = await self._upload_file(upload_params)
-                    
-                finally:
-                    # 清理临时文件
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                
+            # 可配置超时：默认120s，避免大文件或慢速网络超时报错
+            try:
+                from ....core.config import settings as _app_settings
+                http_timeout = int(getattr(_app_settings, 'FILE_STORAGE_HTTP_TIMEOUT', 120))
+            except Exception:
+                http_timeout = 120
+
+            timeout = httpx.Timeout(timeout=http_timeout)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # 流式下载，边下边写，防止一次性读入内存
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "application/octet-stream")
+                    content_length = response.headers.get("content-length")
+                    if content_length and int(content_length) > self.max_file_size:
+                        raise ToolError(f"File too large: {content_length} bytes", self.metadata.name)
+
+                    temp_file = os.path.join(self.local_storage_dir, f"temp_{uuid.uuid4()}")
+                    try:
+                        with open(temp_file, 'wb') as f:
+                            async for chunk in response.aiter_bytes():
+                                f.write(chunk)
+                        upload_params = {
+                            "file_path": temp_file,
+                            "destination_key": destination_key,
+                            "content_type": content_type,
+                            "metadata": {**metadata, "source_url": url}
+                        }
+                        result = await self._upload_file(upload_params)
+                    finally:
+                        if os.path.exists(temp_file):
+                            os.unlink(temp_file)
                 return result
                 
         except Exception as e:

@@ -102,11 +102,23 @@ class SceneDurationCalculator:
             # 防止单个场景过短
             duration = average_duration * 0.4
         
-        # 7. 最终时长范围限制
-        min_duration = settings.MIN_SCENE_DURATION  # 最短时长
-        max_duration = min(settings.MAX_SCENE_DURATION, total_video_duration * 0.4)  # 最长时长或总时长的40%
+        # 7. 最终时长范围限制 - 使用新的配置系统
+        from ...core.video_config_manager import get_video_config
+        video_config = get_video_config()
+        provider_config = video_config.get_current_provider_config()
         
-        return max(min_duration, min(duration, max_duration))
+        # 从当前提供商配置获取duration能力
+        duration_capabilities = provider_config.duration_capabilities or [5, 10]  # 默认支持5s和10s
+        
+        # 选择最接近的支持时长
+        if duration_capabilities:
+            best_match = min(duration_capabilities, key=lambda x: abs(x - duration))
+            return best_match
+        else:
+            # 如果没有配置能力，使用传统范围限制
+            min_duration = 3.0  # 最短时长
+            max_duration = min(15.0, total_video_duration * 0.4)  # 最长时长或总时长的40%
+            return max(min_duration, min(duration, max_duration))
     
     @classmethod
     def _analyze_scene_complexity(cls, scene_data: Dict[str, Any]) -> SceneComplexity:

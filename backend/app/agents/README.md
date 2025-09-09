@@ -138,6 +138,16 @@ agents/
 - 支持模拟和依赖注入
 - 完整的单元测试覆盖
 
+### 5. 思维链与Tokens（设计原则）
+- 分类先验：按 Agent 职能划分是否启用 thinking，而非在代码里写启发式规则。
+  - 规划类（开启 thinking）：概念/场景规划、叙事结构设计、任务拆解与策略决策、跨工具编排。
+  - 执行类（关闭 thinking）：一步到位的生成/转换/增强、落地输出（如一行提示词）、媒体/文件处理。
+- 双档 tokens：为 thinking/非 thinking 分别配置默认 `max_tokens`（全局配置统一管理），避免到处硬编码。
+  - 示例：`LLM_MAX_TOKENS_STANDARD`、`LLM_MAX_TOKENS_THINKING`（可由环境覆盖）。
+- Agent 级配置：每个 Agent 选择其默认模式（thinking/standard）；调用点可显式覆盖但不改变默认。
+- 输出约束：即使开启 thinking，最终“落地输出”建议只在 `message.content` 返回，避免 reasoning 吃满配额导致空内容。
+- 日志与观测：记录 `finish_reason` 与 tokens 使用的摘要信号；不持久化 reasoning 全量文本。
+
 ## 🔧 核心概念
 
 ### Agent

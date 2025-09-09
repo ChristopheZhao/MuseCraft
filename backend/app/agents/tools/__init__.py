@@ -23,6 +23,7 @@ from .ai_services.quality_analysis_tool import QualityAnalysisTool
 # Video Processing Tools
 from .video_processing.ffmpeg_tool import FFmpegTool
 from .video_processing.minimax_video_tool import MiniMaxVideoTool
+from .media_processing.audio_processor import AudioProcessorTool
 
 # Storage Tools
 from .storage.file_storage_tool import FileStorageTool
@@ -30,6 +31,10 @@ from .storage.oss_storage_tool import OSSStorageTool
 
 # Video Composition Tools
 from .video_composition.video_composer_tool import VideoComposerTool
+from .video_processing.final_frame_tool import FinalFrameTool
+from .video_processing.scene_continuity_preparation_tool import SceneContinuityPreparationTool
+from .memory_tool import MemoryTool
+from .orchestrator_control_tool import OrchestratorControlTool
 
 # Tool registry instance
 tool_registry = get_tool_registry()
@@ -47,6 +52,7 @@ def register_default_tools():
     # Register video processing tools
     tool_registry.register_tool(FFmpegTool)
     tool_registry.register_tool(MiniMaxVideoTool)
+    tool_registry.register_tool(AudioProcessorTool)
     
     # Register storage tools
     tool_registry.register_tool(FileStorageTool)
@@ -54,6 +60,8 @@ def register_default_tools():
     
     # Register video composition tools
     tool_registry.register_tool(VideoComposerTool)
+    tool_registry.register_tool(FinalFrameTool)
+    tool_registry.register_tool(SceneContinuityPreparationTool)
     
     # Register new MAS tools
     tool_registry.register_tool(VideoGenerationTool)
@@ -63,6 +71,10 @@ def register_default_tools():
     tool_registry.register_tool(ScriptGenerationTool)
     tool_registry.register_tool(ImageGenerationTool)
     tool_registry.register_tool(QualityAnalysisTool)
+    # Register shared memory capability
+    tool_registry.register_tool(MemoryTool)
+    # Register orchestrator control
+    tool_registry.register_tool(OrchestratorControlTool)
 
 __all__ = [
     # Base classes
@@ -104,6 +116,10 @@ __all__ = [
     
     # Video Composition Tools
     "VideoComposerTool",
+    "FinalFrameTool", 
+    "SceneContinuityPreparationTool",
+    "MemoryTool",
+    "OrchestratorControlTool",
     
     # Functions
     "register_default_tools"

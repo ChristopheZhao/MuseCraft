@@ -319,8 +319,21 @@ class DataPersistenceService:
     def _update_scene_from_data(self, scene: Scene, scene_data: SceneData):
         """从SceneData更新Scene模型"""
         
-        # 基本属性
-        scene.scene_type = SceneType(scene_data.scene_type) if scene_data.scene_type else SceneType.MAIN_CONTENT
+        # 基本属性 - 安全的scene_type转换
+        try:
+            if scene_data.scene_type:
+                # 尝试直接转换为SceneType enum
+                if hasattr(SceneType, scene_data.scene_type.upper()):
+                    scene.scene_type = SceneType(scene_data.scene_type)
+                else:
+                    # 如果不是有效的enum值，使用智能映射
+                    scene.scene_type = self._safe_map_scene_type(scene_data.scene_type)
+            else:
+                scene.scene_type = SceneType.MAIN_CONTENT
+        except (ValueError, AttributeError) as e:
+            # 如果转换失败，记录警告并使用默认值
+            self.logger.warning(f"无效的scene_type值 '{scene_data.scene_type}'，使用默认值 'main_content': {str(e)}")
+            scene.scene_type = SceneType.MAIN_CONTENT
         scene.title = scene_data.title
         scene.description = scene_data.description
         scene.duration = scene_data.duration
@@ -352,6 +365,75 @@ class DataPersistenceService:
         scene.quality_score = scene_data.quality_score
         scene.quality_issues = scene_data.quality_issues
         scene.quality_suggestions = scene_data.quality_suggestions
+    
+    def _safe_map_scene_type(self, scene_type_str: str) -> SceneType:
+        """安全的scene_type映射，处理中英文场景类型"""
+        if not scene_type_str:
+            return SceneType.MAIN_CONTENT
+        
+        scene_type_lower = scene_type_str.lower().strip()
+        
+        # English mappings
+        english_mapping = {
+            "intro": SceneType.INTRO,
+            "introduction": SceneType.INTRO,
+            "opening": SceneType.INTRO,
+            "main_content": SceneType.MAIN_CONTENT,
+            "main": SceneType.MAIN_CONTENT,
+            "content": SceneType.MAIN_CONTENT,
+            "body": SceneType.MAIN_CONTENT,
+            "transition": SceneType.TRANSITION,
+            "bridge": SceneType.TRANSITION,
+            "outro": SceneType.OUTRO,
+            "conclusion": SceneType.OUTRO,
+            "ending": SceneType.OUTRO,
+            "background": SceneType.BACKGROUND
+        }
+        
+        # Chinese mappings for common scenario types
+        chinese_mapping = {
+            # 开始/起始/引入相关
+            "修炼起始": SceneType.INTRO,
+            "开始": SceneType.INTRO,
+            "起始": SceneType.INTRO,
+            "引入": SceneType.INTRO,
+            "初始": SceneType.INTRO,
+            "开场": SceneType.INTRO,
+            # 主要内容/发展/过程
+            "能量爆发": SceneType.MAIN_CONTENT,
+            "主要内容": SceneType.MAIN_CONTENT,
+            "发展": SceneType.MAIN_CONTENT,
+            "过程": SceneType.MAIN_CONTENT,
+            "进行": SceneType.MAIN_CONTENT,
+            "演进": SceneType.MAIN_CONTENT,
+            "修炼过程": SceneType.MAIN_CONTENT,
+            # 突破/成功/结论/高潮
+            "突破成功": SceneType.OUTRO,
+            "突破": SceneType.OUTRO,
+            "成功": SceneType.OUTRO,
+            "完成": SceneType.OUTRO,
+            "结束": SceneType.OUTRO,
+            "结论": SceneType.OUTRO,
+            "收尾": SceneType.OUTRO,
+            # 过渡
+            "过渡": SceneType.TRANSITION,
+            "转场": SceneType.TRANSITION,
+            "衔接": SceneType.TRANSITION,
+            # 背景
+            "背景": SceneType.BACKGROUND,
+            "环境": SceneType.BACKGROUND
+        }
+        
+        # Try English mapping first
+        if scene_type_lower in english_mapping:
+            return english_mapping[scene_type_lower]
+        
+        # Try Chinese mapping
+        if scene_type_str in chinese_mapping:
+            return chinese_mapping[scene_type_str]
+        
+        # Default fallback
+        return SceneType.MAIN_CONTENT
     
     async def _persist_resources(self, task: Task, workflow_state: WorkflowState, db: Session) -> List[Dict[str, Any]]:
         """持久化资源文件记录"""

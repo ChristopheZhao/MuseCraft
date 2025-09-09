@@ -18,9 +18,11 @@ import {
 import FileUploadZone from '../ui/FileUploadZone';
 import StyleSelector from './StyleSelector';
 import ParameterControls from './ParameterControls';
+import { useI18n } from '@/i18n/I18nProvider';
 
 const VideoRequestForm: React.FC = () => {
   const { setCurrentRequest, setCurrentStep, addNotification } = useAppStore();
+  const { t } = useI18n();
   
   const [formData, setFormData] = useState({
     title: '',
@@ -33,7 +35,7 @@ const VideoRequestForm: React.FC = () => {
       voice: 'sarah',
       speed: 1.0,
       pitch: 1.0,
-      language: 'en-US',
+      language: 'zh-CN',
     },
     musicEnabled: true,
     musicSettings: {
@@ -73,8 +75,8 @@ const VideoRequestForm: React.FC = () => {
       console.log('❌ Validation failed: Missing title');
       addNotification({
         type: 'error',
-        title: 'Validation Error',
-        message: 'Please provide a title for your video',
+        title: t('validation.error'),
+        message: t('validation.titleRequired'),
         autoClose: 5000,
       });
       return;
@@ -84,8 +86,8 @@ const VideoRequestForm: React.FC = () => {
       console.log('❌ Validation failed: Missing description');
       addNotification({
         type: 'error',
-        title: 'Validation Error',
-        message: 'Please provide a description for your video',
+        title: t('validation.error'),
+        message: t('validation.descriptionRequired'),
         autoClose: 5000,
       });
       return;
@@ -149,19 +151,19 @@ const VideoRequestForm: React.FC = () => {
       
       addNotification({
         type: 'error',
-        title: 'Submission Failed',
-        message: error instanceof Error ? error.message : 'Failed to submit request',
+        title: t('notify.submitFailed.title'),
+        message: error instanceof Error ? error.message : t('notify.submitFailed.msg'),
         autoClose: 8000,
       });
     }
   };
 
   const tabs = [
-    { id: 'basic', label: 'Basic Info', icon: FileText },
-    { id: 'style', label: 'Style', icon: Sparkles },
-    { id: 'voice', label: 'Voice', icon: Mic },
-    { id: 'music', label: 'Music', icon: Music },
-    { id: 'advanced', label: 'Advanced', icon: Settings },
+    { id: 'basic', label: t('tabs.basic'), icon: FileText },
+    { id: 'style', label: t('tabs.style'), icon: Sparkles },
+    { id: 'voice', label: t('tabs.voice'), icon: Mic },
+    { id: 'music', label: t('tabs.music'), icon: Music },
+    { id: 'advanced', label: t('tabs.advanced'), icon: Settings },
   ];
 
   return (
@@ -169,10 +171,10 @@ const VideoRequestForm: React.FC = () => {
       {/* Header */}
       <div className="mb-8">
         <h2 className="text-3xl font-bold text-gray-900 mb-2">
-          Create New Video
+          {t('form.header')}
         </h2>
         <p className="text-gray-600">
-          Provide details about your video requirements and let our AI agents create amazing content for you.
+          {t('form.subheader')}
         </p>
       </div>
 
@@ -204,13 +206,13 @@ const VideoRequestForm: React.FC = () => {
             {/* Title */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Video Title *
+                {t('form.title')} *
               </label>
               <input
                 type="text"
                 value={formData.title}
                 onChange={(e) => handleInputChange('title', e.target.value)}
-                placeholder="Enter a compelling title for your video"
+                placeholder={t('form.title.placeholder')}
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-colors"
                 required
               />
@@ -219,25 +221,25 @@ const VideoRequestForm: React.FC = () => {
             {/* Description */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Description *
+                {t('form.description')} *
               </label>
               <textarea
                 value={formData.description}
                 onChange={(e) => handleInputChange('description', e.target.value)}
-                placeholder="Describe what you want your video to be about. Be as detailed as possible to get the best results."
+                placeholder={t('form.description.placeholder')}
                 rows={4}
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-colors resize-none"
                 required
               />
               <p className="text-sm text-gray-500 mt-1">
-                {formData.description.length}/500 characters
+                {formData.description.length}/500 {t('form.characters')}
               </p>
             </div>
 
             {/* File Upload */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reference Materials (Optional)
+                {t('form.references')}
               </label>
               <FileUploadZone
                 onFilesSelected={setUploadedFiles}
@@ -251,34 +253,34 @@ const VideoRequestForm: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Duration (seconds)
+                  {t('form.duration')}
                 </label>
                 <select
                   value={formData.duration}
                   onChange={(e) => handleInputChange('duration', parseInt(e.target.value))}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
                 >
-                  <option value={15}>15 seconds</option>
-                  <option value={30}>30 seconds</option>
-                  <option value={60}>1 minute</option>
-                  <option value={90}>1.5 minutes</option>
-                  <option value={120}>2 minutes</option>
+                  <option value={15}>{t('duration.15s')}</option>
+                  <option value={30}>{t('duration.30s')}</option>
+                  <option value={60}>{t('duration.60s')}</option>
+                  <option value={90}>{t('duration.90s')}</option>
+                  <option value={120}>{t('duration.120s')}</option>
                 </select>
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Aspect Ratio
+                  {t('form.aspect')}
                 </label>
                 <select
                   value={formData.aspectRatio}
                   onChange={(e) => handleInputChange('aspectRatio', e.target.value)}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
                 >
-                  <option value="16:9">16:9 (Landscape)</option>
-                  <option value="9:16">9:16 (Portrait/Mobile)</option>
-                  <option value="1:1">1:1 (Square)</option>
-                  <option value="4:3">4:3 (Traditional)</option>
+                  <option value="16:9">{t('aspect.16_9')}</option>
+                  <option value="9:16">{t('aspect.9_16')}</option>
+                  <option value="1:1">{t('aspect.1_1')}</option>
+                  <option value="4:3">{t('aspect.4_3')}</option>
                 </select>
               </div>
             </div>
@@ -321,11 +323,10 @@ const VideoRequestForm: React.FC = () => {
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
               <div className="flex items-center space-x-2 mb-2">
                 <Settings className="w-5 h-5 text-yellow-600" />
-                <h3 className="font-medium text-yellow-800">Advanced Settings</h3>
+                <h3 className="font-medium text-yellow-800">{t('export.advanced')}</h3>
               </div>
               <p className="text-sm text-yellow-700">
-                Advanced configuration options will be available in future updates. 
-                The current settings provide optimal results for most use cases.
+                高级配置项将于后续版本开放；当前设置已针对大多数场景进行优化。
               </p>
             </div>
           </div>
@@ -337,14 +338,14 @@ const VideoRequestForm: React.FC = () => {
             type="button"
             className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
           >
-            Save Draft
+            {t('form.btn.save')}
           </button>
           <button
             type="submit"
             className="px-8 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors flex items-center space-x-2 font-medium"
           >
             <Play className="w-4 h-4" />
-            <span>Generate Video</span>
+            <span>{t('form.btn.generate')}</span>
           </button>
         </div>
       </form>

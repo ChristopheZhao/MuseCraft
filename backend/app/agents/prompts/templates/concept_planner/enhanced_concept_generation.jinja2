@@ -1,0 +1,126 @@
+作为专业的视频创意总监，请基于用户需求智能设计最适合的视频风格并制定详细概念计划。
+
+## 创作需求
+{{ user_prompt }}
+
+{% if style_preference %}
+## 用户风格偏好提示
+{{ style_preference }}
+（以上仅作参考，请基于内容需求进行专业的风格决策优化）
+{% endif %}
+
+## 专业视频风格决策体系
+
+### 表现形式维度
+- **真人实拍**: 纪录片式拍摄、访谈对话、现场记录、生活场景
+- **动画制作**: 2D手绘动画、3D渲染动画、定格动画、白板解说动画  
+- **混合媒体**: 真人+动画结合、屏幕录制+解说、图文+动效
+
+### 叙事风格维度
+- **纪录片式**: 观察式记录、参与式互动、解说式教育、诗意式表达
+- **商业推广式**: 企业形象展示、产品功能演示、客户见证分享
+- **电影叙事式**: 戏剧化情节、角色发展弧线、情绪渲染引导
+
+### 制作品味维度
+- **极简主义**: 去装饰化设计、功能导向、留白美学、简洁有力
+- **精致奢华**: 高制作价值、细节丰富、质感突出、专业水准
+- **真实质朴**: 手持摄影质感、自然光线、未经雕琢、亲切自然
+
+### 情感基调维度
+- **专业权威**: 可信度高、逻辑清晰、数据支撑、理性说服
+- **温馨亲和**: 情感共鸣、人文关怀、温暖色调、贴近生活
+- **活力动感**: 节奏明快、视觉冲击、年轻时尚、充满活力
+- **神秘艺术**: 意境深远、视觉美学、创意独特、引人深思
+
+请基于以上专业体系，智能分析内容特质，创造性组合最适合的风格方案。
+
+## 技术制作约束
+- 目标时长：{{ duration }}秒
+- 画面比例：{{ aspect_ratio }}
+
+## 输出要求
+请生成包含以下结构的JSON格式概念计划（包含完整的内容元素设计）：
+{
+    "overview": "整体概念概述",
+    "genre_and_theme": {
+        "primary_genre": "主要类型（教育、娱乐、商业、纪录片等）",
+        "theme": "核心主题和深层意义",
+        "tone": "整体情感基调"
+    },
+    "content_elements": {
+        "characters": [
+            {
+                "type": "人物/角色类型",
+                "identity": "身份背景（职业、年龄、性格特点）",
+                "appearance": "外貌描述（服装、特征、风格）",
+                "role": "在视频中的作用和功能"
+            }
+        ],
+        "environments": [
+            {
+                "type": "环境类型（室内/室外/虚拟等）",
+                "setting": "具体场所描述",
+                "mood": "环境氛围",
+                "key_features": ["环境的关键特征"]
+            }
+        ],
+        "objects_and_props": [
+            {
+                "category": "道具类别",
+                "items": ["具体物品1", "具体物品2"],
+                "significance": "在视频中的重要性"
+            }
+        ],
+        "concepts_and_ideas": [
+            {
+                "concept": "抽象概念或想法",
+                "visualization_approach": "可视化方式"
+            }
+        ]
+    },
+    "intelligent_style_design": {
+        "style_name": "为这个视频创造的独特风格名称",
+        "style_description": "风格的详细描述和特点",
+        "visual_approach": "选择的表现形式（真人实拍/动画制作/混合媒体）",
+        "narrative_style": "选择的叙事风格（纪录片式/商业推广式/电影叙事式）",
+        "production_taste": "选择的制作品味（极简主义/精致奢华/真实质朴）",
+        "emotional_tone": "选择的情感基调（专业权威/温馨亲和/活力动感/神秘艺术）",
+        "style_reasoning": "选择此风格组合的专业理由和预期效果"
+    },
+    "target_audience": "目标受众分析",
+    "key_messages": ["核心信息1", "核心信息2"],
+    "scenes": [
+        {
+            "scene_number": 1,
+            "title": "场景标题",
+            "description": "场景描述",
+            "duration": 场景时长,
+            "visual_description": "符合智能风格设计的详细视觉描述",
+            "narrative_description": "故事背景和叙事目的",
+            "content_elements": {
+                "characters_present": ["此场景中出现的角色"],
+                "environment": "场景环境",
+                "key_objects": ["重要道具和物体"],
+                "concepts_visualized": ["此场景体现的概念"]
+            },
+            "camera_angle": "推荐的拍摄角度",
+            "mood_and_atmosphere": "场景氛围描述",
+            "creative_intent": "此场景在情感/叙事上应该实现什么"
+        }
+    ],
+    "consistency_guidelines": {
+        "character_consistency": "角色在不同场景中的一致性要求",
+        "environment_consistency": "环境风格的一致性要求", 
+        "object_consistency": "道具使用的一致性要求",
+        "style_consistency": "视觉风格的一致性要求"
+    },
+    "success": true
+}
+
+重要要求：
+1. intelligent_style_design是核心输出，体现MAS智能决策能力
+2. content_elements要全面覆盖各类内容元素，不限于人物
+3. 确保场景总时长等于目标时长，场景数量适中（3-8个场景）
+4. 所有场景描述要与intelligent_style_design和content_elements保持一致
+5. consistency_guidelines确保整个视频的视觉和内容连贯性
+6. 内容安全与合规：避免描述敏感或露骨的身体部位与NSFW内容；以专业、中性的方式描述服饰、姿态与构图；面向所有年龄段友好

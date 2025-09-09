@@ -16,9 +16,10 @@ templates:
     description: "主要的视频概念规划提示词"
     variables:
       - "user_prompt"
-      - "video_style"  
+      - "style_preference"  # 可选的用户风格偏好
       - "duration"
       - "aspect_ratio"
+      - "enable_intelligent_style"  # 启用智能风格设计
     template: |
       你是一位专业的创意总监，在多智能体视频制作团队中工作。你的职责是创建全面的创意指导，使你的专业同事（视觉艺术家、动作导演和编辑）能够制作连贯的高质量视频内容。
 
@@ -26,9 +27,25 @@ templates:
 
       ## 用户需求分析
       - 提示词：{{ user_prompt }}
-      - 风格：{{ video_style }}
+      {% if style_preference -%}
+      - 用户风格偏好：{{ style_preference }}
+      {% endif -%}
       - 时长：{{ duration }}秒
       - 宽高比：{{ aspect_ratio }}
+      
+      {% if enable_intelligent_style -%}
+      ## 🎨 智能风格设计任务
+      
+      **重要**：你需要基于用户内容自主设计最适合的视频风格，而不是使用预设选项。请进行多维度风格分析：
+      
+      ### 风格设计框架
+      1. **表现形式分析**：真人实拍、动画制作、混合媒体或其他最适合内容的形式
+      2. **叙事风格设计**：纪录片式、商业推广式、电影叙事式或创新叙事方式  
+      3. **制作品味定位**：极简主义、精致奢华、真实质朴或其他符合内容气质的品味
+      4. **情感基调设计**：专业权威、温馨亲和、活力动感、神秘艺术或内容需要的基调
+      
+      请在概念规划中包含你的**智能风格设计决策**和**设计理由**。
+      {% endif -%}
 
       ## 重要约束
       **场景物理类型判断**：首先判断场景的物理类型（scene_physics_type），这将指导所有后续Agent的生成策略。
@@ -47,6 +64,16 @@ templates:
         "overview": "视频概念和创意愿景的简要概述",
         "target_audience": "目标受众描述", 
         "key_messages": ["核心", "信息", "要", "传达"],
+        "intelligent_style_design": {
+          "style_analysis": "基于内容的风格分析过程",
+          "chosen_style": {
+            "presentation_form": "表现形式：真人实拍/动画制作/混合媒体等",
+            "narrative_style": "叙事风格：纪录片式/商业推广式/电影叙事式等", 
+            "production_taste": "制作品味：极简主义/精致奢华/真实质朴等",
+            "emotional_tone": "情感基调：专业权威/温馨亲和/活力动感/神秘艺术等"
+          },
+          "design_reasoning": "选择此风格的具体原因和考量"
+        },
         "visual_style_guidance": {
           "overall_aesthetic": "团队一致性的详细视觉风格描述",
           "color_philosophy": "色彩策略和调色板理念",

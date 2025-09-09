@@ -30,27 +30,30 @@ class ConceptGenerationTool(BaseTool):
                 dependencies=[]  # 🚀 移除工具依赖，直接使用服务层
             )
         super().__init__(metadata)
-        self._ai_client = None
+        self._llm_service = None
         self._config = config or {}
     
     def _initialize(self):
         """初始化工具特定资源"""
         self.logger.info("🎭 概念生成工具初始化...")
     
-    async def _ensure_ai_client(self):
-        """确保AI客户端可用 - 直接使用服务层"""
-        if not self._ai_client:
+    async def _ensure_llm_service(self):
+        """确保LLM服务可用 - 直接使用ZhipuClientTool（避免ServiceManager依赖）"""
+        if not self._llm_service:
             try:
-                from ....services.ai_client import AIClient
-                self._ai_client = AIClient()
+                from .zhipu_client import ZhipuClientTool
+                self._llm_service = ZhipuClientTool()
+                self._llm_service._initialize()
+                if not self._llm_service._functional:
+                    raise RuntimeError("ZhipuClientTool not functional (check GLM_API_KEY)")
                 self.logger.info("🤖 AI服务客户端初始化成功")
             except Exception as e:
-                self.logger.error(f"AI服务客户端初始化失败: {e}")
+                self.logger.error(f"LLM服务初始化失败: {e}")
                 raise ToolError(f"AI服务不可用: {e}", self.metadata.name)
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行概念生成 - 唯一功能"""
-        await self._ensure_ai_client()
+        await self._ensure_llm_service()
         
         parameters = tool_input.parameters
         
@@ -62,117 +65,67 @@ class ConceptGenerationTool(BaseTool):
             aspect_ratio=parameters.get("aspect_ratio", "16:9")
         )
         
-        # 调用AI服务
-        response = await self._ai_client.generate_text(
-            prompt=prompt,
-            model=parameters.get("model", "glm-4-plus"),  # 🔧 提供默认模型
-            temperature=parameters.get("temperature", 0.7),
-            max_tokens=parameters.get("max_tokens", 4000),
-            response_format={"type": "json_object"}
-        )
+        # 调用ZhipuClientTool进行概念生成，要求返回JSON对象
+        try:
+            from ..base_tool import ToolInput
+            result = await self._llm_service.execute(ToolInput(
+                action="chat_completion",
+                parameters={
+                    "messages": [{"role": "user", "content": prompt}],
+                    "model": parameters.get("model", "glm-4-plus"),
+                    "temperature": parameters.get("temperature", 0.7),
+                    "max_tokens": parameters.get("max_tokens", 4000),
+                    "response_format": {"type": "json_object"}
+                }
+            ))
+            # ZhipuClientTool返回的是ToolOutput对象，需要检查success并获取result
+            if hasattr(result, 'success') and not result.success:
+                raise ToolError(f"ZhipuClient failed: {result.error}")
+            # result.result包含实际的字典响应
+            actual_result = result.result if hasattr(result, 'result') else result
+            content = (actual_result or {}).get("content", "").strip()
+        except Exception as e:
+            raise ToolError(f"LLM service failed: {str(e)}", self.metadata.name)
+
+        # 🚨 严格处理LLM响应 - 不使用fallback以便问题排查
         
-        # 🔧 修复：解析JSON内容
+        # 检查是否为空响应
+        if not content:
+            raise ToolError("LLM returned empty content - cannot proceed with concept generation", self.metadata.name)
+        
+        # 解析JSON内容
         try:
             import json
-            content = response.get('content', '{}')
             parsed_data = json.loads(content)
+            
+            # 验证关键字段
+            if not parsed_data.get('scenes') or len(parsed_data.get('scenes', [])) == 0:
+                raise ToolError("LLM returned invalid concept data - no scenes generated", self.metadata.name)
             
             self.logger.info(f"🎭 解析概念数据成功，包含 {len(parsed_data.get('scenes', []))} 个场景")
             return parsed_data
             
         except json.JSONDecodeError as e:
-            self.logger.error(f"JSON解析失败: {e}")
-            self.logger.error(f"原始内容: {response.get('content', '')[:200]}")
-            
-            # 返回基础结构，包含空场景列表
-            return {
-                "overview": "JSON解析失败，使用默认概念",
-                "scenes": [],
-                "intelligent_style_design": {},
-                "success": False,
-                "error": str(e)
-            }
+            self.logger.error(f"LLM返回无效JSON: {e}")
+            self.logger.error(f"原始内容: {content[:500]}")
+            raise ToolError(f"LLM returned invalid JSON format: {str(e)}", self.metadata.name)
     
     def _build_concept_prompt(self, user_prompt: str, style_preference: str, duration: int, aspect_ratio: str) -> str:
-        """构建智能风格决策提示词 - MAS核心设计"""
+        """使用模板管理器构建智能风格决策提示词"""
+        from ...prompts.template_manager import get_template_manager
         
-        # 用户风格偏好处理
-        style_hint = ""
-        if style_preference:
-            style_hint = f"""
-## 用户风格偏好提示
-{style_preference}
-（以上仅作参考，请基于内容需求进行专业的风格决策优化）"""
-
-        return f"""
-作为专业的视频创意总监，请基于用户需求智能设计最适合的视频风格并制定详细概念计划。
-
-## 创作需求
-{user_prompt}
-{style_hint}
-
-## 专业视频风格决策体系
-
-### 表现形式维度
-- **真人实拍**: 纪录片式拍摄、访谈对话、现场记录、生活场景
-- **动画制作**: 2D手绘动画、3D渲染动画、定格动画、白板解说动画
-- **混合媒体**: 真人+动画结合、屏幕录制+解说、图文+动效
-
-### 叙事风格维度  
-- **纪录片式**: 观察式记录、参与式互动、解说式教育、诗意式表达
-- **商业推广式**: 企业形象展示、产品功能演示、客户见证分享
-- **电影叙事式**: 戏剧化情节、角色发展弧线、情绪渲染引导
-
-### 制作品味维度
-- **极简主义**: 去装饰化设计、功能导向、留白美学、简洁有力
-- **精致奢华**: 高制作价值、细节丰富、质感突出、专业水准
-- **真实质朴**: 手持摄影质感、自然光线、未经雕琢、亲切自然
-
-### 情感基调维度
-- **专业权威**: 可信度高、逻辑清晰、数据支撑、理性说服
-- **温馨亲和**: 情感共鸣、人文关怀、温暖色调、贴近生活  
-- **活力动感**: 节奏明快、视觉冲击、年轻时尚、充满活力
-- **神秘艺术**: 意境深远、视觉美学、创意独特、引人深思
-
-请基于以上专业体系，智能分析内容特质，创造性组合最适合的风格方案。
-
-## 技术制作约束
-- 目标时长：{duration}秒  
-- 画面比例：{aspect_ratio}
+        template_manager = get_template_manager()
         
-## 输出要求
-请生成包含以下结构的JSON格式概念计划（重点包含智能风格决策）：
-{{
-    "overview": "整体概念概述",
-    "intelligent_style_design": {{
-        "style_name": "为这个视频创造的独特风格名称",
-        "style_description": "风格的详细描述和特点",
-        "visual_approach": "选择的表现形式（真人实拍/动画制作/混合媒体）",
-        "narrative_style": "选择的叙事风格（纪录片式/商业推广式/电影叙事式）",
-        "production_taste": "选择的制作品味（极简主义/精致奢华/真实质朴）",
-        "emotional_tone": "选择的情感基调（专业权威/温馨亲和/活力动感/神秘艺术）",
-        "style_reasoning": "选择此风格组合的专业理由和预期效果"
-    }},
-    "target_audience": "目标受众分析",
-    "key_messages": ["核心信息1", "核心信息2"],
-    "scenes": [
-        {{
-            "scene_number": 1,
-            "title": "场景标题", 
-            "description": "场景描述",
-            "duration": 场景时长,
-            "visual_description": "符合智能风格设计的视觉描述",
-            "mood_and_atmosphere": "氛围描述"
-        }}
-    ],
-    "success": true
-}}
-
-注意：
-1. intelligent_style_design是核心输出，体现MAS智能决策能力
-2. 确保场景总时长等于目标时长，场景数量适中（3-7个场景）  
-3. 所有场景描述要与intelligent_style_design保持一致
-        """
+        # 使用增强的概念生成模板
+        return template_manager.render_template(
+            "enhanced_concept_generation",
+            {
+                "user_prompt": user_prompt,
+                "style_preference": style_preference or "",
+                "duration": duration,
+                "aspect_ratio": aspect_ratio
+            }
+        )
     
     def get_available_actions(self) -> List[str]:
         """获取可用操作 - 只有一个原子性操作"""
@@ -190,8 +143,7 @@ class ConceptGenerationTool(BaseTool):
                     },
                     "style_preference": {
                         "type": "string", 
-                        "description": "可选的用户风格偏好提示（如：我希望温馨一点、要专业一些等）",
-                        "required": false
+                        "description": "可选的用户风格偏好提示（如：我希望温馨一点、要专业一些等）"
                     },
                     "duration": {
                         "type": "integer", 
@@ -226,7 +178,7 @@ class ConceptGenerationTool(BaseTool):
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
         try:
-            await self._ensure_ai_client()
+            await self._ensure_llm_service()
             return {
                 "healthy": True,
                 "service": "concept_generation_tool",
@@ -237,6 +189,5 @@ class ConceptGenerationTool(BaseTool):
     
     async def cleanup(self):
         """清理资源"""
-        if self._ai_client and hasattr(self._ai_client, 'close'):
-            await self._ai_client.close()
+        # 当前通过HTTP客户端按请求构造，无长连资源；保留日志
         self.logger.info("🎭 概念生成工具资源已清理")

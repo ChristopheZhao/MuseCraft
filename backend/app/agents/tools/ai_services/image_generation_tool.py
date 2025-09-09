@@ -7,7 +7,7 @@ import json
 from typing import Dict, Any, List, Optional
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType
-from .zhipu_client import ZhipuClientTool
+from .service_interfaces import get_vlm_service
 
 
 class ImageGenerationTool(AsyncTool):
@@ -35,29 +35,43 @@ class ImageGenerationTool(AsyncTool):
         kwargs.pop('metadata', None)
         metadata = self.get_metadata()
         super().__init__(metadata=metadata, **kwargs)
-        self.zhipu_client = ZhipuClientTool()
+        self._vlm_service = None
     
     def get_available_actions(self) -> List[str]:
+        # 精简对FC暴露的动作：优先复合函数
         return [
+            "generate_with_autoprompt",
             "generate_image",
-            "analyze_image_style",
-            "enhance_prompt",
-            "extract_visual_features"
+            "gen_image_prompt"
         ]
     
     def _initialize(self):
         """初始化工具"""
         pass
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """为业务级图像工具提供默认的 FC 暴露策略"""
+        return {
+            "expose": True,
+            # 优先推荐复合函数
+            "allowed_actions": ["generate_with_autoprompt"]
+        }
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         """获取指定操作的参数架构"""
         base_schema = {
             "type": "object", 
-            "properties": {}
+            "properties": {},
+            # x-examples: 供提示展示，不参与校验
+            "x-examples": []
         }
         
         if action == "generate_image":
             base_schema["properties"] = {
+                "scene_number": {
+                    "type": ["integer", "string"],
+                    "description": "可选：用于对齐多场景批处理的标识"
+                },
                 "prompt": {
                     "type": "string",
                     "description": "图像生成提示词"
@@ -70,14 +84,53 @@ class ImageGenerationTool(AsyncTool):
                     "type": "string",
                     "enum": ["1024x1024", "1024x1792", "1792x1024"],
                     "description": "图像尺寸"
-                },
-                "scene_data": {
-                    "type": "object",
-                    "description": "场景数据，用于生成对应的图像"
                 }
             }
             base_schema["required"] = ["prompt"]
-            
+            base_schema["x-examples"] = [
+                {
+                    "prompt": "超广角镜头，金色夕阳照耀的城市天际线，细节清晰，电影级",
+                    "size": "1024x1024"
+                }
+            ]
+
+        elif action == "gen_image_prompt":
+            base_schema["properties"] = {
+                "scene_number": {
+                    "type": ["integer", "string"],
+                    "description": "可选：用于标识所属场景"
+                },
+                "scene_data": {
+                    "type": "object",
+                    "description": "场景信息（视觉描述/叙事要点/时长等）"
+                },
+                "style_guidance": {
+                    "type": "object",
+                    "description": "风格指导（如画风、构图偏好、色彩基调）"
+                }
+            }
+            base_schema["x-examples"] = [
+                {
+                    "scene_data": {"visual_description": "森林中小木屋，黄昏光影"},
+                    "style_guidance": {"color_tone": "warm", "composition": "wide-angle"}
+                }
+            ]
+        elif action == "generate_with_autoprompt":
+            base_schema["properties"] = {
+                "scene_number": {"type": ["integer", "string"], "description": "可选：用于追踪与持久化命名"},
+                "scene_data": {"type": "object", "description": "场景信息（视觉描述/标题/脚本摘要等）"},
+                "style_guidance": {"type": "object", "description": "风格指导（如画风、构图偏好、色彩基调）"},
+                "fallback_prompt": {"type": "string", "description": "当自动提示失败时使用的回退提示词"},
+                "size": {"type": "string", "enum": ["1024x1024", "1024x1792", "1792x1024"], "description": "图像尺寸"},
+                "persist": {"type": "boolean", "description": "是否持久化到存储（默认 true）"}
+            }
+            base_schema["x-examples"] = [
+                {
+                    "scene_data": {"visual_description": "古堡外夜景，薄雾，灯光从窗内透出"},
+                    "style_guidance": {"style": "cinematic", "color_tone": "cool"},
+                    "size": "1024x1024"
+                }
+            ]
         elif action == "analyze_image_style":
             base_schema["properties"] = {
                 "image_url": {
@@ -89,23 +142,6 @@ class ImageGenerationTool(AsyncTool):
                     "description": "图像路径"
                 }
             }
-            
-        elif action == "enhance_prompt":
-            base_schema["properties"] = {
-                "prompt": {
-                    "type": "string",
-                    "description": "原始提示词"
-                },
-                "target_style": {
-                    "type": "string",
-                    "description": "目标风格"
-                },
-                "focus": {
-                    "type": "string",
-                    "description": "优化重点"
-                }
-            }
-            base_schema["required"] = ["prompt"]
             
         elif action == "extract_visual_features":
             base_schema["properties"] = {
@@ -120,6 +156,11 @@ class ImageGenerationTool(AsyncTool):
             }
         
         return base_schema
+
+    def get_action_stage(self, action: str) -> str:
+        if action == "gen_image_prompt":
+            return "plan"
+        return "act"
     
     async def _execute_impl(self, tool_input) -> Dict[str, Any]:
         """执行图像生成相关操作"""
@@ -129,10 +170,12 @@ class ImageGenerationTool(AsyncTool):
         
         if action == "generate_image":
             return await self._generate_image(parameters)
+        elif action == "gen_image_prompt":
+            return await self._gen_image_prompt(parameters)
+        elif action == "generate_with_autoprompt":
+            return await self._generate_with_autoprompt(parameters)
         elif action == "analyze_image_style":
             return await self._analyze_image_style(parameters)
-        elif action == "enhance_prompt":
-            return await self._enhance_prompt(parameters)
         elif action == "extract_visual_features":
             return await self._extract_visual_features(parameters)
         else:
@@ -141,49 +184,38 @@ class ImageGenerationTool(AsyncTool):
     async def _generate_image(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成图像"""
         
-        prompt = params.get("prompt", "")
+        prompt = (params.get("prompt", "") or "").strip()
         style = params.get("style", "realistic")
         size = params.get("size", "1024x1024")
-        scene_data = params.get("scene_data", {})
         
-        if not prompt and scene_data:
-            # 如果没有直接提示词，从场景数据生成
-            prompt = await self._create_image_prompt_from_scene(scene_data, style)
-        
-        if not prompt:
+        # 轻量提示词质量校验
+        if self._is_prompt_weak(prompt):
             return {
                 "success": False,
-                "error": "缺少图像生成提示词"
+                "error": "PROMPT_TOO_WEAK: 缺少或过短的图像生成提示词"
             }
         
         try:
-            # 使用ZhipuClient的CogView进行图像生成
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="generate_image",
-                parameters={
-                    "prompt": prompt,
-                    "size": size,
-                    "model": "cogview-3"
-                }
+            # 通过供应商无关的服务接口生成图像（当前默认Zhipu实现）
+            if not self._vlm_service:
+                self._vlm_service = get_vlm_service()
+
+            res = await self._vlm_service.image_generation(
+                prompt=prompt,
+                size=size,
+                style="vivid",
+                quality="standard"
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                return {
-                    "success": True,
-                    "image_url": zhipu_result.result.get("image_url", ""),
-                    "image_path": zhipu_result.result.get("image_path", ""),
-                    "generated_prompt": prompt,
-                    "style": style,
-                    "size": size,
-                    "generation_metadata": zhipu_result.result
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"图像生成失败: {zhipu_result.error}"
-                }
+
+            image_url = res.get("image_url") or res.get("url") or ""
+            return {
+                "success": bool(image_url),
+                "image_url": image_url,
+                "generated_prompt": prompt,
+                "style": style,
+                "size": size,
+                "generation_metadata": res
+            }
                 
         except Exception as e:
             return {
@@ -191,53 +223,113 @@ class ImageGenerationTool(AsyncTool):
                 "error": f"图像生成异常: {str(e)}"
             }
     
-    async def _create_image_prompt_from_scene(self, scene_data: Dict[str, Any], style: str) -> str:
-        """从场景数据创建图像生成提示词"""
-        
-        visual_desc = scene_data.get("visual_description", "")
-        content_focus = scene_data.get("content_focus", "")
-        narrative_desc = scene_data.get("narrative_description", "")
-        
-        # 使用LLM优化图像提示词
-        enhance_prompt = f"""基于以下场景信息，生成一个适合AI图像生成的详细提示词：
+    async def _create_image_prompt_from_scene(self, scene_data: Dict[str, Any], style: str, style_guidance: Dict[str, Any] | None = None) -> str:
+        """从场景数据创建图像生成提示词（轻量组合，避免强依赖LLM）。
+        兼容场景字段：优先 visual_description；无则回退 description/title。
+        同时融合 style_guidance: art_style, composition, color_palette, mood。
+        """
+        sd = scene_data or {}
+        # 兼容字段：优先视觉描述
+        visual_desc = (sd.get("visual_description") or sd.get("description") or sd.get("title") or "").strip()
+        content_focus = (sd.get("content_focus") or "").strip()
+        narrative_desc = (sd.get("narrative_description") or "").strip()
+        parts = [p for p in [visual_desc, content_focus, narrative_desc] if p]
+        base = "，".join(parts) if parts else "场景静态画面"
 
-场景信息：
-- 视觉描述：{visual_desc}
-- 内容重点：{content_focus}
-- 叙事描述：{narrative_desc}
+        # 风格融合：支持外部 style 文本与结构化 style_guidance
+        sg = style_guidance or {}
+        art_style = sg.get("art_style") or sg.get("style") or style or ""
+        composition = sg.get("composition") or ""
+        color_palette = sg.get("color_palette") or ""
+        mood = sg.get("mood") or ""
 
-目标风格：{style}
+        style_bits = [
+            f"风格：{art_style}" if art_style else "",
+            f"构图：{composition}" if composition else "",
+            f"配色：{color_palette}" if color_palette else "",
+            f"氛围：{mood}" if mood else "",
+        ]
+        style_text = "，".join([b for b in style_bits if b])
+        tail = "高质量，细节清晰，构图平衡"
+        return f"{base}，{style_text}，{tail}" if style_text else f"{base}，风格：{style}，{tail}"
 
-请生成：
-1. 详细的视觉描述
-2. 适合的构图和镜头角度
-3. 色彩和光影效果
-4. 符合{style}风格的特征
+    async def _generate_with_autoprompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """复合：自动提示词 → 生成 → 可选持久化。"""
+        scene_data = params.get("scene_data") or {}
+        style_guidance = params.get("style_guidance") or {}
+        size = params.get("size", "1024x1024")
+        persist = params.get("persist", True)
+        scene_number = params.get("scene_number")
 
-返回优化后的图像生成提示词（英文，适合AI图像生成）："""
-        
+        style = style_guidance.get("style") or style_guidance.get("name") or "realistic"
+        prompt_text = await self._create_image_prompt_from_scene(scene_data, style, style_guidance)
+        # 观测：记录提示词预览，便于核对与优化（不使用固定模板，仅日志）
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": enhance_prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 500
-                }
-            )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                enhanced_prompt = zhipu_result.result.get("content", "")
-                return enhanced_prompt.strip()
-            else:
-                # Fallback: 使用原始描述
-                return f"{visual_desc}, {content_focus}, {style} style"
-                
+            from ....core.config import settings as _cfg  # lazy import to avoid hard dependency at import time
+            max_chars = int(getattr(_cfg, 'CONTENT_PREVIEW_CHARS', 300))
         except Exception:
-            # Fallback: 使用基本组合
-            return f"{visual_desc}, {content_focus}, {style} style"
+            max_chars = 300
+        preview = (prompt_text or "").replace("\n", " ")[:max_chars]
+        try:
+            self.logger.info(
+                f"🖼️ IMAGE_PROMPT scene={scene_number} len={len(prompt_text or '')} preview={preview}"
+            )
+        except Exception:
+            pass
+        if self._is_prompt_weak(prompt_text) and params.get("fallback_prompt"):
+            prompt_text = params.get("fallback_prompt")
+
+        gen = await self._generate_image({
+            "prompt": prompt_text,
+            "style": style,
+            "size": size,
+            "scene_number": scene_number
+        })
+        if not gen.get("success"):
+            return gen
+
+        image_url = gen.get("image_url")
+        file_path = ""
+        if persist and image_url:
+            from ..tool_registry import get_tool_registry
+            from ..base_tool import ToolInput as TI
+            dest_key = f"images/scene_{scene_number}_image.jpg" if scene_number is not None else "images/autoprompt_image.jpg"
+            # 优先使用本地文件存储工具；失败再尝试 OSS
+            try:
+                storage = get_tool_registry().get_tool("file_storage_tool")
+                res = await storage.execute(TI(action="upload_from_url", parameters={
+                    "url": image_url,
+                    "destination_key": dest_key,
+                    "metadata": {"scene_number": scene_number, "source": "generate_with_autoprompt"}
+                }))
+                payload = getattr(res, 'result', res)
+                if isinstance(payload, dict):
+                    file_path = payload.get("local_path") or payload.get("file_path", "")
+            except Exception:
+                try:
+                    storage = get_tool_registry().get_tool("oss_storage")
+                    res = await storage.execute(TI(action="mirror_from_url", parameters={
+                        "url": image_url,
+                        "remote_path": dest_key,
+                        "public_read": True,
+                        "content_type": "image/jpeg"
+                    }))
+                    payload = getattr(res, 'result', res)
+                    if isinstance(payload, dict):
+                        file_path = payload.get("url", "")
+                except Exception:
+                    # 忽略持久化失败，保留远程URL照常返回
+                    file_path = ""
+
+        return {
+            "success": True,
+            "image_url": image_url,
+            "file_path": file_path,
+            "prompt_text": prompt_text,
+            "style": style,
+            "size": size,
+            "scene_number": scene_number
+        }
     
     async def _analyze_image_style(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """分析图像风格"""
@@ -264,47 +356,29 @@ class ImageGenerationTool(AsyncTool):
 返回JSON格式的分析结果。"""
         
         try:
-            # 使用ZhipuClient的视觉理解功能
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="vision_chat",
-                parameters={
-                    "messages": [
-                        {
-                            "role": "user", 
-                            "content": [
-                                {"type": "text", "text": analysis_prompt},
-                                {"type": "image_url", "image_url": {"url": image_url or image_path}}
-                            ]
-                        }
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 600
-                }
+            if not self._vlm_service:
+                self._vlm_service = get_vlm_service()
+
+            target_image = image_url or image_path
+            res = await self._vlm_service.image_understanding(
+                image_input=target_image,
+                prompt=analysis_prompt,
+                model=None,
+                temperature=0.3
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                analysis_content = zhipu_result.result.get("content", "")
-                try:
-                    style_analysis = json.loads(analysis_content)
-                    return {
-                        "success": True,
-                        "style_analysis": style_analysis
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        "success": True,
-                        "style_analysis": {
-                            "description": analysis_content,
-                            "style_type": "mixed",
-                            "confidence": 0.7
-                        }
-                    }
-            else:
+
+            analysis_content = res.get("analysis", "")
+            try:
+                style_analysis = json.loads(analysis_content)
+                return {"success": True, "style_analysis": style_analysis}
+            except json.JSONDecodeError:
                 return {
-                    "success": False,
-                    "error": f"图像分析失败: {zhipu_result.error}"
+                    "success": True,
+                    "style_analysis": {
+                        "description": analysis_content,
+                        "style_type": "mixed",
+                        "confidence": 0.7
+                    }
                 }
                 
         except Exception as e:
@@ -312,72 +386,58 @@ class ImageGenerationTool(AsyncTool):
                 "success": False,
                 "error": f"图像风格分析异常: {str(e)}"
             }
-    
-    async def _enhance_prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """增强图像生成提示词"""
-        
-        original_prompt = params.get("prompt", "")
-        target_style = params.get("target_style", "realistic")
-        enhancement_focus = params.get("focus", "quality")
-        
-        if not original_prompt:
-            return {
-                "success": False,
-                "error": "需要提供原始提示词"
-            }
-        
-        enhance_request = f"""请优化以下图像生成提示词：
 
-原始提示词：{original_prompt}
-目标风格：{target_style}
-优化重点：{enhancement_focus}
+    # 注意：建议在Agent中通过FC调用 gen_image_prompt 生成提示词，再调用 generate_image。
 
-优化要求：
-1. 增加视觉细节描述
-2. 添加适当的风格关键词
-3. 改进构图和镜头描述
-4. 确保语法正确且适合AI理解
-
-返回优化后的提示词（英文）："""
-        
+    async def _gen_image_prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """为单个场景生成高质量图像提示词（由LLM生成，作为外部能力封装为工具动作）。"""
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": enhance_request}],
-                    "temperature": 0.6,
-                    "max_tokens": 400
-                }
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+
+            scene = params.get("scene_data", {}) or {}
+            style = params.get("style_guidance", {}) or {}
+
+            system = "你是资深动漫画面提示词工程师。请为给定场景生成高质量的图像提示词，突出主体、构图、光影与风格，避免含糊表述。只返回提示词文本。"
+            user_ctx = (
+                f"场景信息：\n"
+                f"- 视觉描述：{scene.get('visual_description','')}\n"
+                f"- 叙事要点：{scene.get('narrative_description','')}\n"
+                f"- 时长：{scene.get('duration','')}\n"
+                f"风格指导：{style}\n"
+                f"请直接输出最终提示词。"
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                enhanced_prompt = zhipu_result.result.get("content", "").strip()
-                # 🔧 修复：如果LLM返回空内容，使用原始提示词
-                if not enhanced_prompt:
-                    enhanced_prompt = original_prompt
-                    self.logger.warning(f"LLM返回空的增强提示词，使用原始提示词: {original_prompt[:50]}...")
-                
-                return {
-                    "success": True,
-                    "original_prompt": original_prompt,
-                    "enhanced_prompt": enhanced_prompt,
-                    "enhancement_notes": f"针对{target_style}风格和{enhancement_focus}进行优化"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"提示词优化失败: {zhipu_result.error}",
-                    "original_prompt": original_prompt
-                }
-                
-        except Exception as e:
+
+            res = await llm.chat_completion(
+                messages=[{"role":"system","content":system},{"role":"user","content":user_ctx}],
+                temperature=0.3
+            )
+            prompt = (res.get("content") or "").strip()
+            if not prompt:
+                return {"success": False, "error": "未生成提示词"}
             return {
-                "success": False,
-                "error": f"提示词增强异常: {str(e)}",
-                "original_prompt": original_prompt
+                "success": True,
+                "prompt_text": prompt,
+                "scene_number": params.get("scene_number")
             }
+        except Exception as e:
+            return {"success": False, "error": f"提示词建议失败: {str(e)}"}
+
+    def _is_prompt_weak(self, prompt: str) -> bool:
+        """极轻量提示词质量判断：
+        - 长度不足（<30字符）视为弱；
+        - 在较短（<50字符）时若包含多项口号式词汇也视为弱。
+        仅作为底线兜底，避免在Agent中硬编码流程。
+        """
+        p = (prompt or "").strip()
+        if len(p) < 30:
+            return True
+        weak_markers = ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]
+        if len(p) < 50:
+            hits = sum(1 for w in weak_markers if w in p)
+            if hits >= 2:
+                return True
+        return False
     
     async def _extract_visual_features(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """提取图像视觉特征"""
@@ -418,7 +478,7 @@ class ImageGenerationTool(AsyncTool):
                         }
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 500
+                    "max_tokens": settings.VISUAL_FEATURES_EXTRACTION_MAX_TOKENS
                 }
             )
             zhipu_result = await self.zhipu_client.execute(zhipu_input)

@@ -3,13 +3,12 @@ Video Composer Agent - Combines individual video clips into final video
 """
 import asyncio
 import os
-import subprocess
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Scene, Resource, ResourceType
-from ..services.file_storage import FileStorageService
+ 
 from ..core.config import settings
 
 
@@ -19,14 +18,14 @@ class VideoComposerAgent(BaseAgent):
     with transitions, audio, and effects
     """
     
-    def __init__(self):
+    def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.VIDEO_COMPOSER,
             agent_name="video_composer",
             timeout_seconds=600,  # 10 minutes for video composition
-            max_retries=2
+            max_retries=2,
+            llms=llms
         )
-        self.file_storage = FileStorageService()
     
     async def _execute_impl(
         self, 
@@ -55,13 +54,36 @@ class VideoComposerAgent(BaseAgent):
         if not scenes_data:
             raise AgentError("No scenes found in workflow state")
         
+        # 确保本地可用的媒体：
+        # - 若只有 video_url 无 video_path，则拉取到本地并写回 scene.video_path
+        # - 若只有 image_url/first_frame_url/last_frame_url 无对应路径，则拉取到本地并写回
+        try:
+            await self._ensure_local_media_files(workflow_state_id, scenes_data)
+        except Exception as e:
+            self.logger.warning(f"ensure_local_media_files failed (non-fatal): {e}")
+
         # Filter scenes with successful video generation  
         successful_scenes = [scene for scene in scenes_data if scene.video_path or scene.video_url]
         
-        # 降级处理：如果没有成功的视频，尝试创建图像轮播
+        # 无视频片段：不再创建图片轮播，返回阶段性状态，由 orchestrator 决策后续动作
         if not successful_scenes:
-            self.logger.warning("No successful video clips found, creating image slideshow as fallback")
-            return await self._create_image_slideshow(scenes_data, workflow_state_id, execution, db)
+            self.logger.warning("No successful video clips found; returning partial/blocked state to orchestrator")
+            pending = [getattr(sc, 'scene_number', None) for sc in scenes_data if not (getattr(sc, 'video_path', None) or getattr(sc, 'video_url', None))]
+            summary = {
+                "total_scenes": len(scenes_data),
+                "generated_successfully": 0,
+                "generation_failed": 0,
+                "pending": len([p for p in pending if p is not None]),
+                "pending_ids": [p for p in pending if p is not None][:8],
+            }
+            await self._update_progress(execution, 30, "No videos available for composition", db)
+            return {
+                "composition_state": "blocked",
+                "loop_end_reason": "no_videos_available",
+                "subtask_state": "partial",
+                "summary": summary,
+                "workflow_state_id": workflow_state_id
+            }
         
         await self._update_progress(execution, 20, "Preparing composition timeline", db)
         
@@ -79,9 +101,27 @@ class VideoComposerAgent(BaseAgent):
         
         await self._update_progress(execution, 85, "Saving final video", db)
         
-        # Update workflow state with final video information
+        # Update workflow state with final video information（测试阶段不上传至 OSS，仅使用本地/通用存储获取URL）
         workflow_state.final_video_path = final_video_path
-        workflow_state.final_video_url = self.file_storage.get_public_url(final_video_path) if final_video_path else ""
+        workflow_state.final_video_url = ""
+        if final_video_path:
+            try:
+                upload = await self.use_tool(
+                    "file_storage_tool",
+                    "upload_file",
+                    {
+                        "file_path": final_video_path,
+                        "destination_key": f"final_videos/final_{execution.id}.mp4",
+                        "content_type": "video/mp4",
+                        "public": True,
+                        "metadata": {"workflow_state_id": workflow_state_id}
+                    }
+                )
+                payload = getattr(upload, 'result', upload)
+                if isinstance(payload, dict):
+                    workflow_state.final_video_url = payload.get("url", "")
+            except Exception as e:
+                self.logger.warning(f"File storage upload failed: {e}")
         
         await self._update_progress(execution, 95, "Generating video metadata", db)
         
@@ -93,6 +133,7 @@ class VideoComposerAgent(BaseAgent):
         # Update workflow state with metadata
         workflow_state.video_metadata = video_metadata
         
+        # 标准化输出以便编排器进行策略决策（避免不必要的重复执行）
         output_data = {
             "final_video_url": workflow_state.final_video_url,
             "final_video_path": final_video_path,
@@ -102,7 +143,22 @@ class VideoComposerAgent(BaseAgent):
             "composition_summary": self._create_composition_summary_from_data(
                 composition_timeline, video_metadata
             ),
-            "workflow_state_id": workflow_state_id  # 传递给下一个Agent
+            "workflow_state_id": workflow_state_id,  # 传递给下一个Agent
+            # 统一的子任务状态与摘要
+            "subtask_state": "complete",
+            "loop_end_reason": "natural_complete",
+            "summary": {
+                "total_scenes": len(scenes_data),
+                "generated_successfully": len(successful_scenes),
+                "generation_failed": 0,
+                "pending": 0,
+                "pending_ids": []
+            },
+            "react_metadata": {
+                "success": True,
+                "completion_type": "task_complete",
+                "agent": self.agent_name
+            }
         }
         
         await self._update_progress(execution, 100, "Video composition completed", db)
@@ -136,6 +192,35 @@ class VideoComposerAgent(BaseAgent):
                 image_path = scene.last_frame_path
             elif scene.image_path:
                 image_path = scene.image_path
+            else:
+                # 若本地路径均为空，但存在远程URL，尝试拉取
+                remote_url = None
+                if getattr(scene, 'first_frame_url', None):
+                    remote_url = scene.first_frame_url
+                elif getattr(scene, 'last_frame_url', None):
+                    remote_url = scene.last_frame_url
+                elif getattr(scene, 'image_url', None):
+                    remote_url = scene.image_url
+                if remote_url:
+                    try:
+                        stored = await self.use_tool(
+                            "file_storage_tool",
+                            "upload_from_url",
+                            {"url": remote_url, "destination_key": f"images/scene_{scene.scene_number}.jpg", "metadata": {"scene_number": scene.scene_number}}
+                            )
+                        payload = getattr(stored, 'result', stored)
+                        if isinstance(payload, dict):
+                            image_path = payload.get("file_path") or payload.get("local_path")
+                            # 尝试写回 WorkflowState 场景
+                            try:
+                                from ..core.workflow_state import workflow_manager
+                                wf = workflow_manager.get_workflow(workflow_state_id)
+                                if wf:
+                                    wf.update_scene(scene.scene_number, image_path=image_path)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        self.logger.warning(f"download image url failed for scene {scene.scene_number}: {e}")
             
             if image_path:
                 available_images.append({
@@ -193,16 +278,75 @@ class VideoComposerAgent(BaseAgent):
                 return await self._create_static_video_fallback(available_images[0], workflow_state_id)
             else:
                 raise AgentError(f"Complete composition failure: {str(e)}")
+
+    async def _ensure_local_media_files(self, workflow_state_id: str, scenes_data: List) -> None:
+        """确保视频/图像存在本地路径（根据URL拉取并写回WorkflowState）。"""
+        # 工具依赖：file_storage_tool
+        if "file_storage_tool" not in self._available_tools:
+            return
+        from ..core.workflow_state import workflow_manager
+        wf = workflow_manager.get_workflow(workflow_state_id)
+        for scene in scenes_data:
+            # 处理视频
+            if (not getattr(scene, 'video_path', None)) and getattr(scene, 'video_url', None):
+                try:
+                    stored = await self.use_tool(
+                        "file_storage_tool",
+                        "upload_from_url",
+                        {"url": scene.video_url, "destination_key": f"videos/scene_{scene.scene_number}.mp4", "metadata": {"scene_number": scene.scene_number}}
+                    )
+                    payload = getattr(stored, 'result', stored)
+                    if isinstance(payload, dict):
+                        vp = payload.get("file_path") or payload.get("local_path")
+                        scene.video_path = vp
+                        if wf:
+                            wf.update_scene(scene.scene_number, video_path=vp)
+                except Exception as e:
+                    self.logger.warning(f"download video url failed for scene {scene.scene_number}: {e}")
+            # 处理图片路径（让降级更稳健）
+            if (not getattr(scene, 'image_path', None)) and getattr(scene, 'image_url', None):
+                try:
+                    stored = await self.use_tool(
+                        "file_storage_tool",
+                        "upload_from_url",
+                        {"url": scene.image_url, "destination_key": f"images/scene_{scene.scene_number}.jpg", "metadata": {"scene_number": scene.scene_number}}
+                    )
+                    payload = getattr(stored, 'result', stored)
+                    if isinstance(payload, dict):
+                        ip = payload.get("file_path") or payload.get("local_path")
+                        scene.image_path = ip
+                        if wf:
+                            wf.update_scene(scene.scene_number, image_path=ip)
+                except Exception as e:
+                    self.logger.warning(f"download image url failed for scene {scene.scene_number}: {e}")
     
     async def _create_slideshow_with_ffmpeg(self, images: List[Dict], total_duration: float) -> Dict[str, Any]:
         """使用FFmpeg创建图像轮播"""
         
+        # 生成输出文件名
+        import uuid
+        from pathlib import Path
+        slideshow_filename = f"slideshow_{uuid.uuid4().hex[:8]}.mp4"
+        
+        # 提取图像路径列表
+        image_paths = []
+        duration_per_image = total_duration / len(images) if images else 3.0
+        
+        for img in images:
+            if isinstance(img, dict) and "image_path" in img:
+                image_paths.append(img["image_path"])
+            elif isinstance(img, str):
+                image_paths.append(img)
+        
+        if not image_paths:
+            raise ValueError("No valid image paths found for slideshow creation")
+        
         # 构建简单的轮播配置
         slideshow_config = {
-            "images": images,
-            "total_duration": total_duration,
-            "transition_type": "fade",
-            "transition_duration": settings.TRANSITION_DURATION
+            "images": image_paths,  # 传递图像路径列表而不是完整的元数据
+            "output_filename": slideshow_filename,  # 添加必需的output_filename参数
+            "duration_per_image": duration_per_image,  # 每张图片的时长
+            "transition_effect": "fade"  # 转场效果
         }
         
         try:
@@ -790,117 +934,60 @@ class VideoComposerAgent(BaseAgent):
         
         try:
             final_video_filename = f"final_video_{execution.id}.mp4"
-            final_video_path = self.file_storage.get_output_path(final_video_filename)
-            
+
             # 收集所有有效的视频文件路径
             valid_video_paths = []
             for entry in timeline:
                 video_path = entry.get("video_path")
-                if video_path and os.path.exists(video_path):
+                if video_path:
                     valid_video_paths.append(video_path)
                     self.logger.info(f"📹 Adding scene {entry.get('scene_number')} video: {video_path}")
                 else:
-                    self.logger.warning(f"⚠️ Scene {entry.get('scene_number')} video not found: {video_path}")
-            
+                    self.logger.warning(f"⚠️ Scene {entry.get('scene_number')} has no video_path")
+
             if not valid_video_paths:
                 self.logger.error("No valid video files found for composition")
                 return ""
-            
+
             if len(valid_video_paths) == 1:
-                # 只有一个视频，直接复制
-                import shutil
-                shutil.copy(valid_video_paths[0], final_video_path)
-                self.logger.info(f"🎬 Single video composition: copied {valid_video_paths[0]}")
-                return final_video_path
-            
-            # 多个视频，使用FFmpeg合成
-            self.logger.info(f"🎬 Composing {len(valid_video_paths)} videos into final video")
-            success = await self._ffmpeg_concat_videos(valid_video_paths, final_video_path)
-            
-            if success and os.path.exists(final_video_path):
-                self.logger.info(f"✅ Video composition successful: {final_video_path}")
-                return final_video_path
-            else:
-                self.logger.error("❌ Video composition failed")
-                return ""
-            
+                # 单视频：不做本地复制，直接返回路径（后续由存储工具上传返回URL）
+                self.logger.info(f"🎬 Single video composition passthrough: {valid_video_paths[0]}")
+                return valid_video_paths[0]
+
+            # 多视频：通过ffmpeg工具合并
+            self.logger.info(f"🎬 Composing {len(valid_video_paths)} videos via ffmpeg_tool.merge_videos")
+            merge = await self.use_tool(
+                "ffmpeg_tool",
+                "merge_videos",
+                {
+                    "video_clips": valid_video_paths,
+                    "output_filename": final_video_filename
+                }
+            )
+            payload = getattr(merge, 'result', merge)
+            out_path = payload.get("output_path") if isinstance(payload, dict) else None
+            if out_path:
+                self.logger.info(f"✅ Video composition successful: {out_path}")
+                return out_path
+            self.logger.error("❌ Video composition failed: ffmpeg_tool returned no output_path")
+            return ""
         except Exception as e:
             self.logger.error(f"Failed to compose final video: {str(e)}")
             return ""
     
     async def _ffmpeg_concat_videos(self, video_paths: List[str], output_path: str) -> bool:
-        """Use FFmpeg to concatenate multiple videos"""
-        
+        """Use tool to concatenate multiple videos (kept for backward compatibility)."""
         try:
-            # 检查FFmpeg是否可用
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-version",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL
-                )
-                await process.communicate()
-                if process.returncode != 0:
-                    raise FileNotFoundError("FFmpeg not working")
-            except (FileNotFoundError, OSError):
-                self.logger.error("❌ FFmpeg is required for video composition but not found!")
-                self.logger.error("Please install FFmpeg: sudo apt install ffmpeg (Ubuntu/Debian) or download from https://ffmpeg.org/")
-                raise AgentError("FFmpeg is required for video composition. Please install FFmpeg and try again.")
-            
-            # 创建临时的concat文件列表
-            import tempfile
-            concat_file_path = None
-            
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                concat_file_path = f.name
-                for video_path in video_paths:
-                    # 确保使用绝对路径
-                    abs_path = os.path.abspath(video_path)
-                    f.write(f"file '{abs_path}'\n")
-            
-            self.logger.info(f"🔧 Created concat file: {concat_file_path}")
-            
-            # 构建FFmpeg命令
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",  # -y 覆盖输出文件
-                "-f", "concat", 
-                "-safe", "0",
-                "-i", concat_file_path,
-                "-c", "copy",  # 复制流，不重新编码（更快）
-                output_path
-            ]
-            
-            self.logger.info(f"🎬 Running FFmpeg: {' '.join(ffmpeg_cmd)}")
-            
-            # 执行FFmpeg命令
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            merge = await self.use_tool(
+                "ffmpeg_tool",
+                "merge_videos",
+                {"video_clips": video_paths, "output_filename": os.path.basename(output_path)}
             )
-            
-            stdout, stderr = await process.communicate()
-            
-            # 清理临时文件
-            if concat_file_path and os.path.exists(concat_file_path):
-                os.unlink(concat_file_path)
-            
-            if process.returncode == 0:
-                self.logger.info("✅ FFmpeg concatenation successful")
-                return True
-            else:
-                error_msg = stderr.decode() if stderr else "Unknown FFmpeg error"
-                self.logger.error(f"❌ FFmpeg failed (return code {process.returncode}): {error_msg}")
-                return False
-                
+            payload = getattr(merge, 'result', merge)
+            out_path = payload.get("output_path") if isinstance(payload, dict) else None
+            return bool(out_path)
         except Exception as e:
-            self.logger.error(f"❌ FFmpeg concatenation failed: {str(e)}")
-            # 清理临时文件
-            if concat_file_path and os.path.exists(concat_file_path):
-                try:
-                    os.unlink(concat_file_path)
-                except:
-                    pass
+            self.logger.error(f"❌ Tool-based concatenation failed: {e}")
             return False
     
     async def _generate_video_metadata_from_data(

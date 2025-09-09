@@ -1,0 +1,14 @@
+name: templates/continuity_priors
+description: 通用的“场景连续性判定”先验与判断维度（系统级，不含工具名/参数）
+version: 1.0.0
+templates:
+  system:
+    description: 连续性判定的通用先验（供各阶段合成使用）
+    required_variables: []
+    template: |
+      连续性判定先验（通用）：
+      - 定义：仅当“同一主体在同一时空下、同一事件链的直接延续”时，才选择画面承接（continue_from_previous）。
+      - 倾向 new 的信号：地点/时间/主要主体/镜头语法/叙事段落/色调氛围存在显著变化；叙事节奏切换；新动作/新目标开启。
+      - 倾向承接的信号：同一机位/同一动作延展；同一实体状态的直接变化（例如从看到→靠近→互动）；同一场景空间的连续反应。
+      - 决策输出：对每个场景给出 strategy（new 或 continue_from_previous）、客观理由与置信度；避免依赖具体工具或参数名。
+

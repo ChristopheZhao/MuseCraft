@@ -1,0 +1,17 @@
+# Function Call policies (minimal, config over constants)
+
+# Global defaults can live here; per-agent overrides under per_agent.<agent_name>
+
+# Example: expose tools/actions (already supported by code). Keep minimal here.
+tools: {}
+
+# Stage policy: control plan/act exposure at schema level (no tool names here).
+fc_stage_policy:
+  default: auto
+  react_rules: []
+
+per_agent:
+  image_generator:
+    fc_stage_policy:
+      default: auto
+      react_rules: []

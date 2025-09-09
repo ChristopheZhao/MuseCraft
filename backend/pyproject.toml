@@ -55,6 +55,7 @@ dependencies = [
     "tenacity==8.2.3",
     "jinja2==3.1.2",
     "pyyaml==6.0.1",
+    "psutil==5.9.8",
     "pymysql>=1.1.1",
     "aiomysql>=0.2.0",
     "watchdog>=4.0.2",

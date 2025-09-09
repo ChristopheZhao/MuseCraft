@@ -18,7 +18,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const { sidebarCollapsed, modal } = ui;
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="h-screen flex flex-col bg-gradient-to-br from-[#0ea5e912] via-white to-[#d946ef12]">
       {/* Header */}
       <Header />
       

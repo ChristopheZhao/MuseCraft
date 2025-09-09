@@ -4,6 +4,7 @@ import React, { useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Upload, X, File, Image as ImageIcon, Video, FileText } from 'lucide-react';
 import { cn, formatFileSize, getFileType } from '@/lib/utils';
+import { useI18n } from '@/i18n/I18nProvider';
 
 interface FileUploadZoneProps {
   onFilesSelected: (files: File[]) => void;
@@ -21,6 +22,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
   className,
 }) => {
   const [selectedFiles, setSelectedFiles] = React.useState<File[]>([]);
+  const { t } = useI18n();
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newFiles = [...selectedFiles, ...acceptedFiles].slice(0, maxFiles);
@@ -72,15 +74,15 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
         
         {isDragActive ? (
           <p className="text-primary-600 font-medium">
-            Drop the files here...
+            {t('upload.dropHere')}
           </p>
         ) : (
           <div>
             <p className="text-gray-600 font-medium mb-2">
-              Drag & drop files here, or click to select
+              {t('upload.dragDrop')}
             </p>
             <p className="text-sm text-gray-500">
-              Supports images, videos, and documents (max {formatFileSize(maxSize)} per file)
+              {t('upload.supports.prefix')}{formatFileSize(maxSize)}{t('upload.supports.suffix')}
             </p>
           </div>
         )}
@@ -90,7 +92,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
       {fileRejections.length > 0 && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-3">
           <h4 className="text-sm font-medium text-red-800 mb-2">
-            Some files were rejected:
+            {t('upload.rejected')}
           </h4>
           <ul className="text-sm text-red-700 space-y-1">
             {fileRejections.map(({ file, errors }) => (
@@ -106,7 +108,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
       {selectedFiles.length > 0 && (
         <div className="space-y-2">
           <h4 className="text-sm font-medium text-gray-700">
-            Selected Files ({selectedFiles.length}/{maxFiles})
+            {t('upload.selectedFiles')} ({selectedFiles.length}/{maxFiles})
           </h4>
           <div className="space-y-2">
             {selectedFiles.map((file, index) => (
@@ -126,7 +128,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
                 <button
                   onClick={() => removeFile(index)}
                   className="p-1 text-gray-400 hover:text-red-500 transition-colors"
-                  aria-label={`Remove ${file.name}`}
+                  aria-label={`${t('upload.remove')} ${file.name}`}
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -139,10 +141,10 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
       {/* Upload Limits Info */}
       <div className="text-xs text-gray-500 space-y-1">
         <p>
-          • Maximum {maxFiles} files, {formatFileSize(maxSize)} per file
+          • 最多 {maxFiles} 个文件，每个不超过 {formatFileSize(maxSize)}
         </p>
         <p>
-          • Supported formats: Images (JPG, PNG, GIF), Videos (MP4, MOV), Documents (PDF, DOC)
+          {t('upload.formats')}
         </p>
       </div>
     </div>

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
-from ..services.file_storage import FileStorageService
+ 
 from ..core.config import settings
 
 
@@ -17,15 +17,16 @@ class AudioGeneratorAgent(BaseAgent):
     Audio Generator Agent creates background music and audio tracks for videos
     """
     
-    def __init__(self):
+    def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.AUDIO_GENERATOR,
             agent_name="audio_generator",
             timeout_seconds=600,  # 10 minutes for audio generation
             max_retries=2,
-            tools=["suno_client"]  # 注册Suno AI工具
+            # 明确声明所需工具：生成音乐 + 持久化 + 媒体合成/处理
+            tools=["suno_client", "file_storage_tool", "ffmpeg_tool", "audio_processor"],
+            llms=llms
         )
-        self.file_storage = FileStorageService()
         
         # 记录视频的实际时长用于音频匹配
         self._target_video_duration = None
@@ -129,7 +130,23 @@ class AudioGeneratorAgent(BaseAgent):
         # Update final video path if audio composition was successful
         if final_video_with_audio_path:
             workflow_state.final_video_path = final_video_with_audio_path
-            workflow_state.final_video_url = self.file_storage.get_public_url(final_video_with_audio_path)
+            try:
+                upload = await self.use_tool(
+                    "file_storage_tool",
+                    "upload_file",
+                    {
+                        "file_path": final_video_with_audio_path,
+                        "destination_key": f"final_videos/final_with_audio_{execution.id}.mp4",
+                        "content_type": "video/mp4",
+                        "public": True,
+                        "metadata": {"execution_id": execution.id}
+                    }
+                )
+                payload = getattr(upload, 'result', upload)
+                if isinstance(payload, dict):
+                    workflow_state.final_video_url = payload.get("url", "")
+            except Exception as e:
+                self.logger.warning(f"Failed to upload composed video: {e}")
         
         # Generate audio summary
         audio_summary = self._create_audio_summary(music_result, len(scenes_data))
@@ -428,10 +445,18 @@ class AudioGeneratorAgent(BaseAgent):
             safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
             filename = f"{safe_title}_{task_id}.mp3"
             
-            # Download and save audio file
-            file_path = await self.file_storage.download_and_save_audio(
-                audio_url, filename
+            # Download via storage tool and persist locally
+            upload = await self.use_tool(
+                "file_storage_tool",
+                "upload_from_url",
+                {
+                    "url": audio_url,
+                    "destination_key": f"audio/{filename}",
+                    "metadata": {"task_id": task_id, "source": "audio_generation"}
+                }
             )
+            payload = getattr(upload, 'result', upload)
+            file_path = payload.get("local_path") if isinstance(payload, dict) else ""
             
             self.logger.info(f"Saved background music: {file_path}")
             return file_path
@@ -469,134 +494,83 @@ class AudioGeneratorAgent(BaseAgent):
         target_duration: float,
         task_id: int
     ) -> str:
-        """调整音频时长以匹配视频时长"""
-        
+        """使用音频处理工具调整音频时长以匹配视频时长"""
         try:
-            # 检查是否有FFmpeg可用（简单检查）
-            import subprocess
-            subprocess.run(["ffmpeg", "-version"], 
-                         capture_output=True, check=True)
-            
-            # 生成调整后的文件路径
-            base_name = os.path.splitext(os.path.basename(original_path))[0]
-            output_dir = os.path.dirname(original_path)
-            adjusted_path = os.path.join(output_dir, f"{base_name}_adjusted_{int(target_duration)}s.mp3")
-            
-            # 获取原始音频时长
-            duration_cmd = [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration", 
-                "-of", "csv=p=0",
-                original_path
-            ]
-            
-            result = subprocess.run(duration_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise Exception("Could not determine original audio duration")
-            
-            original_duration = float(result.stdout.strip())
-            self.logger.info(f"🎵 Original audio duration: {original_duration:.1f}s, target: {target_duration:.1f}s")
-            
-            # 选择处理方法
-            if original_duration > target_duration:
-                # 音频太长，需要裁剪
-                await self._trim_audio_to_duration(original_path, target_duration, adjusted_path)
-                self.logger.info(f"🎵 Audio trimmed to {target_duration:.1f}s")
-            
-            elif original_duration < target_duration:
-                # 音频太短，需要循环
-                await self._loop_audio_to_duration(original_path, target_duration, adjusted_path)
-                self.logger.info(f"🎵 Audio looped to {target_duration:.1f}s")
-            
-            else:
-                # 时长匹配，只添加淡入淡出
-                await self._add_fade_to_audio(original_path, adjusted_path)
-                self.logger.info(f"🎵 Added fade effects to audio")
-            
-            # 验证调整后的文件
-            if os.path.exists(adjusted_path):
-                return adjusted_path
-            else:
-                raise Exception("Adjusted audio file was not created")
-                
+            result = await self.use_tool(
+                "audio_processor",
+                "adjust_duration",
+                {
+                    "input_path": original_path,
+                    "target_duration": float(target_duration),
+                    "method": "loop",
+                    "fade_in": float(getattr(settings, 'AUDIO_FADE_IN_DURATION', 1.0)),
+                    "fade_out": float(getattr(settings, 'AUDIO_FADE_OUT_DURATION', 1.0))
+                }
+            )
+            payload = getattr(result, 'result', result)
+            if isinstance(payload, dict) and payload.get("output_path"):
+                return payload["output_path"]
+            return original_path
         except Exception as e:
-            self.logger.error(f"Audio duration adjustment failed: {str(e)}")
-            return None
+            self.logger.error(f"Audio duration adjustment failed: {e}")
+            return original_path
     
     async def _trim_audio_to_duration(self, input_path: str, duration: float, output_path: str):
-        """裁剪音频到指定时长"""
-        import subprocess
-        
-        # 添加淡出效果
-        fade_out_start = max(0, duration - settings.AUDIO_FADE_OUT_DURATION)
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-t", str(duration),
-            "-af", f"afade=t=out:st={fade_out_start}:d={settings.AUDIO_FADE_OUT_DURATION}",
-            "-c:a", "libmp3lame",
-            output_path
-        ]
-        
-        process = subprocess.run(cmd, capture_output=True)
-        if process.returncode != 0:
-            raise Exception(f"FFmpeg trim failed: {process.stderr.decode()}")
+        """裁剪音频到指定时长（改为调用 audio_processor 工具）"""
+        try:
+            result = await self.use_tool(
+                "audio_processor",
+                "adjust_duration",
+                {
+                    "input_path": input_path,
+                    "target_duration": float(duration),
+                    "method": "trim",
+                    "output_path": output_path,
+                    "fade_out": float(getattr(settings, 'AUDIO_FADE_OUT_DURATION', 1.0))
+                }
+            )
+            if hasattr(result, 'success') and not result.success:
+                raise Exception(getattr(result, 'error', 'audio_processor.adjust_duration failed'))
+        except Exception as e:
+            raise Exception(f"Audio trim failed via tool: {e}")
     
     async def _loop_audio_to_duration(self, input_path: str, duration: float, output_path: str):
-        """循环音频到指定时长"""
-        import subprocess
-        
-        # 计算需要循环的次数
-        result = subprocess.run([
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0", input_path
-        ], capture_output=True, text=True)
-        
-        original_duration = float(result.stdout.strip())
-        loop_count = int(duration / original_duration) + 1
-        
-        # 创建循环音频并添加淡入淡出
-        cmd = [
-            "ffmpeg", "-y",
-            "-stream_loop", str(loop_count),
-            "-i", input_path,
-            "-t", str(duration),
-            "-af", f"afade=t=in:ss=0:d={settings.AUDIO_FADE_IN_DURATION},afade=t=out:st={duration-settings.AUDIO_FADE_OUT_DURATION}:d={settings.AUDIO_FADE_OUT_DURATION}",
-            "-c:a", "libmp3lame",
-            output_path
-        ]
-        
-        process = subprocess.run(cmd, capture_output=True)
-        if process.returncode != 0:
-            raise Exception(f"FFmpeg loop failed: {process.stderr.decode()}")
+        """循环音频到指定时长（改为调用 audio_processor 工具）"""
+        try:
+            result = await self.use_tool(
+                "audio_processor",
+                "adjust_duration",
+                {
+                    "input_path": input_path,
+                    "target_duration": float(duration),
+                    "method": "loop",
+                    "output_path": output_path,
+                    "fade_in": float(getattr(settings, 'AUDIO_FADE_IN_DURATION', 1.0)),
+                    "fade_out": float(getattr(settings, 'AUDIO_FADE_OUT_DURATION', 1.0))
+                }
+            )
+            if hasattr(result, 'success') and not result.success:
+                raise Exception(getattr(result, 'error', 'audio_processor.adjust_duration failed'))
+        except Exception as e:
+            raise Exception(f"Audio loop failed via tool: {e}")
     
     async def _add_fade_to_audio(self, input_path: str, output_path: str):
-        """为音频添加淡入淡出效果"""
-        import subprocess
-        
-        # 获取音频时长
-        result = subprocess.run([
-            "ffprobe", "-v", "quiet", 
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0", input_path
-        ], capture_output=True, text=True)
-        
-        duration = float(result.stdout.strip())
-        fade_out_start = max(0, duration - settings.AUDIO_FADE_OUT_DURATION)
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-af", f"afade=t=in:ss=0:d={settings.AUDIO_FADE_IN_DURATION},afade=t=out:st={fade_out_start}:d={settings.AUDIO_FADE_OUT_DURATION}",
-            "-c:a", "libmp3lame",
-            output_path
-        ]
-        
-        process = subprocess.run(cmd, capture_output=True)
-        if process.returncode != 0:
-            raise Exception(f"FFmpeg fade failed: {process.stderr.decode()}")
+        """为音频添加淡入淡出效果（改为调用 audio_processor 工具）"""
+        try:
+            result = await self.use_tool(
+                "audio_processor",
+                "add_fade_effects",
+                {
+                    "input_path": input_path,
+                    "fade_in": float(getattr(settings, 'AUDIO_FADE_IN_DURATION', 1.0)),
+                    "fade_out": float(getattr(settings, 'AUDIO_FADE_OUT_DURATION', 1.0)),
+                    "output_path": output_path
+                }
+            )
+            if hasattr(result, 'success') and not result.success:
+                raise Exception(getattr(result, 'error', 'audio_processor.add_fade_effects failed'))
+        except Exception as e:
+            raise Exception(f"Audio fade processing failed via tool: {e}")
 
     async def _create_placeholder_audio(self, duration: int) -> Dict[str, Any]:
         """Create placeholder audio information when generation fails"""
@@ -614,27 +588,21 @@ class AudioGeneratorAgent(BaseAgent):
         }
     
     async def _get_video_duration(self, video_path: str) -> float:
-        """Get accurate video duration using FFprobe"""
-        
+        """通过 ffmpeg_tool 获取视频时长"""
         try:
-            import subprocess
-            
-            cmd = [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
-                video_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            duration = float(result.stdout.strip())
-            
-            self.logger.info(f"🎥 Detected video duration: {duration:.1f}s")
-            return duration
-            
+            info = await self.use_tool(
+                "ffmpeg_tool",
+                "get_video_info",
+                {"file_path": video_path}
+            )
+            payload = getattr(info, 'result', info)
+            dur = float(payload.get("duration")) if isinstance(payload, dict) and payload.get("duration") is not None else None
+            if dur:
+                self.logger.info(f"🎥 Detected video duration: {dur:.1f}s")
+                return dur
+            raise ValueError("duration missing")
         except Exception as e:
             self.logger.warning(f"Failed to get video duration: {e}, using fallback")
-            # Fallback: return 30 seconds as default
             return 30.0
     
     async def _generate_background_music_for_video(
@@ -726,54 +694,29 @@ class AudioGeneratorAgent(BaseAgent):
         video_duration: float,
         execution: AgentExecution
     ) -> str:
-        """Compose final video with background music using FFmpeg"""
-        
+        """使用 ffmpeg_tool 合成视频与背景音乐，返回输出路径"""
         try:
-            # Generate output filename
             output_filename = f"final_video_with_audio_{execution.id}.mp4"
-            output_path = self.file_storage.get_output_path(output_filename)
-            
-            self.logger.info(f"🎵 Composing video with background music: {video_duration:.1f}s")
-            
-            # Build FFmpeg command to merge video and audio
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",  # -y to overwrite output
-                "-i", video_path,    # Input video
-                "-i", audio_path,    # Input audio
-                "-c:v", "copy",      # Copy video stream (no re-encoding)
-                "-c:a", "aac",       # Re-encode audio to AAC
-                "-map", "0:v:0",     # Map first video stream
-                "-map", "1:a:0",     # Map first audio stream
-                "-shortest",         # End when shortest input ends
-                "-movflags", "+faststart",  # Optimize for streaming
-                output_path
-            ]
-            
-            self.logger.info(f"🎬 Running FFmpeg: {' '.join(ffmpeg_cmd)}")
-            
-            # Execute FFmpeg command
-            import subprocess
-            process = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True,
-                text=True
+            result = await self.use_tool(
+                "ffmpeg_tool",
+                "add_audio",
+                {
+                    "video_file": video_path,
+                    "audio_file": audio_path,
+                    "output_filename": output_filename
+                }
             )
-            
-            if process.returncode != 0:
-                error_msg = process.stderr if process.stderr else "Unknown FFmpeg error"
-                self.logger.error(f"FFmpeg audio composition error: {error_msg}")
-                raise Exception(f"FFmpeg audio composition failed: {error_msg}")
-            
-            # Verify output file exists
-            if not os.path.exists(output_path):
-                raise Exception("Final video with audio file was not created")
-            
-            self.logger.info(f"✅ Video with background music created: {output_path}")
-            return output_path
-            
+            payload = getattr(result, 'result', result)
+            # ffmpeg_tool.add_audio 返回键名可能为 output_file（与其他动作对齐），做兼容
+            out_path = None
+            if isinstance(payload, dict):
+                out_path = payload.get("output_path") or payload.get("output_file")
+            if out_path and os.path.exists(out_path):
+                self.logger.info(f"✅ Video with background music created: {out_path}")
+                return out_path
+            raise Exception("ffmpeg_tool.add_audio returned no output_path")
         except Exception as e:
             self.logger.error(f"Video audio composition failed: {str(e)}")
-            # Return original video path as fallback
             return video_path
     
     async def _create_audio_only_result(
@@ -804,29 +747,34 @@ class AudioGeneratorAgent(BaseAgent):
         await self._update_progress(execution, 70, "Processing and saving audio files", db)
         
         # Save and process music file
-        audio_files = await self._save_music_file(music_result, workflow_state_id)
+        # 使用执行记录中的 task_id 保存文件，并生成可公开访问的 URL
+        music_path = await self._save_music_file(music_result, execution.task_id, execution)
+        music_url = self.file_storage.get_public_url(music_path) if music_path else ""
         
         await self._update_progress(execution, 90, "Creating audio summary", db)
         
         # Create audio summary and metadata
-        audio_summary = self._create_audio_summary(music_result, audio_files)
+        audio_summary = self._create_audio_summary(music_result, len(scenes_data))
         
         # Store audio file info in workflow state
-        workflow_state.background_audio_path = audio_files.get("background_music_path", "")
-        workflow_state.background_audio_url = audio_files.get("background_music_url", "")
+        workflow_state.background_audio_path = music_path or ""
+        workflow_state.background_audio_url = music_url or ""
         
         # Prepare output data for audio-only result
         output_data = {
             "audio_generation_type": "audio_only",
             "final_video_path": "",  # No video available
             "final_video_url": "",
-            "background_audio_path": audio_files.get("background_music_path", ""),
-            "background_audio_url": audio_files.get("background_music_url", ""), 
+            "background_audio_path": music_path or "",
+            "background_audio_url": music_url or "", 
             "audio_duration": music_result.get("duration", 30),
             "audio_summary": audio_summary,
             "music_style": music_result.get("style", "ambient"),
             "music_mood": music_result.get("mood", "neutral"),
-            "audio_files": audio_files,
+            "audio_files": {
+                "background_music_path": music_path or "",
+                "background_music_url": music_url or ""
+            },
             "workflow_state_id": workflow_state_id,
             "fallback_reason": "no_final_video_available"
         }

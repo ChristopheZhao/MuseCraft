@@ -18,6 +18,7 @@ import {
   Heart
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useI18n } from '@/i18n/I18nProvider';
 
 interface VideoPlayerProps {
   src?: string;
@@ -34,7 +35,7 @@ interface VideoPlayerProps {
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
   src,
   poster,
-  title = 'Generated Video',
+  title = undefined,
   duration = 0,
   className,
   autoPlay = false,
@@ -42,6 +43,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onTimeUpdate,
   onEnded,
 }) => {
+  const { t } = useI18n();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -180,10 +182,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
             <Play className="w-8 h-8 text-gray-400" />
           </div>
-          <h3 className="text-white font-medium mb-2">No Video Available</h3>
-          <p className="text-gray-400 text-sm">
-            Video will appear here once generation is complete
-          </p>
+          <h3 className="text-white font-medium mb-2">{t('player.noVideoTitle')}</h3>
+          <p className="text-gray-400 text-sm">{t('player.noVideoDesc')}</p>
         </div>
       </div>
     );
@@ -224,9 +224,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       >
         {/* Top Controls */}
         <div className="absolute top-4 left-4 right-4 flex items-center justify-between pointer-events-auto">
-          <h3 className="text-white font-medium truncate mr-4">
-            {title}
-          </h3>
+          <h3 className="text-white font-medium truncate mr-4">{title || t('player.defaultTitle')}</h3>
           <div className="flex items-center space-x-2">
             <button className="p-2 text-white/80 hover:text-white transition-colors">
               <Heart className="w-5 h-5" />

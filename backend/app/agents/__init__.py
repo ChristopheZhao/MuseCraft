@@ -2,6 +2,7 @@
 Agents package for video generation workflow
 """
 from .base import BaseAgent, AgentError, AgentTimeoutError
+from .react_agent import ReActAgent
 from .orchestrator import OrchestratorAgent
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
@@ -13,6 +14,7 @@ from .quality_checker import QualityCheckerAgent
 
 __all__ = [
     "BaseAgent", "AgentError", "AgentTimeoutError",
+    "ReActAgent",
     "OrchestratorAgent",
     "ConceptPlannerAgent",
     "ScriptWriterAgent", 

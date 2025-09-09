@@ -3,6 +3,7 @@ Orchestrator Agent - Coordinates the entire video generation workflow
 现在使用WorkflowState内存管理，避免数据库中断问题
 """
 import asyncio
+import os
 import logging
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ from .video_generator import VideoGeneratorAgent
 from .audio_generator import AudioGeneratorAgent
 from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
+from .tools.tool_registry import get_tool_registry
+from ..core.config import settings
 
 
 class OrchestratorAgent(BaseAgent):
@@ -28,23 +31,47 @@ class OrchestratorAgent(BaseAgent):
     """
     
     def __init__(self):
+        import os
+        from .utils.llm_policy import LLMPolicyManager
+        policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
+        self._llm_policy = LLMPolicyManager(policy_file)
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="orchestrator",
-            timeout_seconds=1800,  # 30 minutes total workflow timeout
-            max_retries=1
+            timeout_seconds=getattr(settings, 'ORCHESTRATOR_TIMEOUT_SECONDS', 1800),
+            max_retries=1,
+            llms=self._llm_policy.build_llms_for_agent('orchestrator')
         )
         
         # Initialize all specialized agents
         self.agents = {
-            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(),
-            AgentType.SCRIPT_WRITER: ScriptWriterAgent(),
-            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(),
-            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(),
-            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(),
-            AgentType.VIDEO_COMPOSER: VideoComposerAgent(),
-            AgentType.QUALITY_CHECKER: QualityCheckerAgent()
+            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(llms=self._llm_policy.build_llms_for_agent('concept_planner')),
+            AgentType.SCRIPT_WRITER: ScriptWriterAgent(llms=self._llm_policy.build_llms_for_agent('script_writer')),
+            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('image_generator')),
+            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('video_generator')),
+            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('audio_generator')),
+            AgentType.VIDEO_COMPOSER: VideoComposerAgent(llms=self._llm_policy.build_llms_for_agent('video_composer')),
+            AgentType.QUALITY_CHECKER: QualityCheckerAgent(llms=self._llm_policy.build_llms_for_agent('quality_checker'))
         }
+
+        # Per-step repeat counters for policy decisions
+        self._step_repeat_counts: Dict[AgentType, int] = {}
+
+        # 打印每个Agent的LLM注入摘要，便于排查：role -> provider/model
+        try:
+            for atype, agent in self.agents.items():
+                roles = {}
+                llms = getattr(agent, "_llms", {}) or {}
+                for role, handle in llms.items():
+                    try:
+                        provider = getattr(handle._service, 'get_provider_name', lambda: 'unknown')()
+                        model = getattr(handle, '_model', None) or 'default'
+                        roles[role] = f"{provider}/{model}"
+                    except Exception:
+                        roles[role] = "unknown"
+                self.logger.info(f"LLM injected for {atype.value}: {roles}")
+        except Exception:
+            pass
         
         # Define workflow execution order
         self.workflow_order = [
@@ -56,7 +83,7 @@ class OrchestratorAgent(BaseAgent):
             AgentType.AUDIO_GENERATOR,  # 音频生成：基于完整视频生成匹配音乐
             AgentType.QUALITY_CHECKER
         ]
-    
+
     async def _execute_impl(
         self, 
         task: Task, 
@@ -140,7 +167,90 @@ class OrchestratorAgent(BaseAgent):
                     # Store results and prepare input for next agent
                     workflow_results[agent_type.value] = agent_output
                     workflow_data.update(agent_output)
+
+                    # Orchestrator policy-first decision; LLM provides optional advice
+                    try:
+                        # Policy decision based on subtask_state + repeat budget
+                        policy_decision = None
+                        st = (agent_output.get("subtask_state") or "").strip().lower() if isinstance(agent_output, dict) else ""
+                        summary = agent_output.get("summary") if isinstance(agent_output, dict) else {}
+                        pending_cnt = 0
+                        try:
+                            pending_cnt = int(summary.get("pending") or 0) if isinstance(summary, dict) else 0
+                        except Exception:
+                            pending_cnt = 0
+                        max_repeat = getattr(settings, 'ORCHESTRATOR_MAX_REPEAT_PER_STEP', 1)
+                        cnt = self._step_repeat_counts.get(agent_type, 0)
+                        if st == "complete":
+                            policy_decision = "proceed_next"
+                        elif st in ("partial", "blocked"):
+                            policy_decision = "repeat_agent" if (cnt < max_repeat and pending_cnt > 0) else "proceed_next"
+                        elif st == "max_iter_reached":
+                            policy_decision = "proceed_next"
+                        elif st == "error":
+                            policy_decision = "repeat_agent" if (cnt < max_repeat) else "halt_workflow"
+
+                        # If not determinable from policy, ask LLM; otherwise prefer policy
+                        decision = policy_decision or await self._decide_next_step_llm(
+                            current_agent=agent_type,
+                            agent_output=agent_output,
+                            workflow_state=workflow_state
+                        )
+                        if decision == "repeat_agent":
+                            self.logger.info(f"🔁 Orchestrator LLM decided to repeat {agent.agent_name}")
+                            # Repeat with limit
+                            if cnt < max_repeat:
+                                self._step_repeat_counts[agent_type] = cnt + 1
+                                agent_output = await agent.execute(
+                                    task=task,
+                                    input_data=agent_input,
+                                    db=db,
+                                    execution_order=step_index + 1
+                                )
+                                workflow_results[agent_type.value] = agent_output
+                                workflow_data.update(agent_output)
+                            else:
+                                self.logger.warning(f"⚠️ Repeat limit reached for {agent.agent_name} (max={max_repeat}); proceeding to next step")
+                        elif decision == "halt_workflow":
+                            raise AgentError("Workflow halted by orchestrator LLM decision")
+                        else:
+                            self.logger.info(f"➡️ Orchestrator LLM decided to proceed to next step")
+                    except Exception as ce:
+                        # If LLM decision fails, proceed sequentially
+                        self.logger.warning(f"⚠️ Orchestrator decision failed: {ce}. Proceeding sequentially.")
                     
+                    # Handoff final results to WF (only when agent reports completion via final_* fields)
+                    try:
+                        finals = agent_output.get("final_completed_scenes") if isinstance(agent_output, dict) else None
+                        if finals and isinstance(finals, list):
+                            wf_id = workflow_state.task_id
+                            wf = workflow_manager.get_workflow(wf_id)
+                            committed = 0
+                            for rec in finals:
+                                if not isinstance(rec, dict):
+                                    continue
+                                sn = rec.get("scene_number")
+                                if sn is None:
+                                    continue
+                                # 支持图像或视频两类产物
+                                iu = rec.get("image_url") or ""
+                                ip = rec.get("image_path") or ""
+                                vu = rec.get("video_url") or ""
+                                vp = rec.get("video_path") or ""
+                                pt = rec.get("prompt_text") or ""
+                                try:
+                                    if iu or ip:
+                                        wf.update_scene(int(sn), image_url=iu, image_path=ip, image_prompt=pt)
+                                        committed += 1
+                                    if vu or vp:
+                                        wf.update_scene(int(sn), video_url=vu, video_path=vp, video_prompt=pt)
+                                        committed += 1
+                                except Exception:
+                                    continue
+                            self.logger.info(f"WF_COMMIT: agent={agent.agent_name} scenes={len(finals)} committed={committed}")
+                    except Exception as _wf_err:
+                        self.logger.warning(f"WF_COMMIT_WARN: {str(_wf_err)}")
+
                     # Handle memory storage if this agent produced memory data
                     if agent_type == AgentType.CONCEPT_PLANNER:
                         self.logger.info("🧠 DEBUG: About to store creative guidance from ConceptPlanner")
@@ -246,6 +356,94 @@ class OrchestratorAgent(BaseAgent):
             await self._send_workflow_failure(task, error_msg)
             
             raise AgentError(error_msg) from e
+
+    async def _decide_next_step_llm(self, current_agent: AgentType, agent_output: Dict[str, Any], workflow_state: WorkflowState) -> str:
+        """Use a lightweight LLM + orchestrator_control tool to decide next step.
+        Returns: 'proceed_next' | 'repeat_agent' | 'halt_workflow'
+        """
+        # Build observation (concise)
+        summary = agent_output.get("summary") or {}
+        meta = agent_output.get("react_metadata") or {}
+        gen_results = agent_output.get("generation_results") or []
+        success_count = sum(1 for r in gen_results if isinstance(r, dict) and r.get("success"))
+        fail_count = sum(1 for r in gen_results if isinstance(r, dict) and not r.get("success"))
+
+        # 使用模板生成系统指令（保持中立，不暴露工具/参数名）
+        # 使用统一提示体系：优先读取 YAML 中 orchestrator 的系统指令；如不可用则回退到简短中立文案
+        # Render decision prompts from templates
+        pm = self.prompt_manager
+        try:
+            agent_sys = self.get_system_instructions() or {}
+            pr = agent_sys.get("primary_role") or "工作流编排器"
+        except Exception:
+            pr = "工作流编排器"
+        sys_content = pm.render_template(
+            "agents/orchestrator",
+            "decision_system",
+            variables={"primary_role": pr},
+            use_cache=True,
+            auto_reload=False,
+        )
+        import json as _json
+        user_content = pm.render_template(
+            "agents/orchestrator",
+            "decision_user",
+            variables={
+                "agent_name": current_agent.value,
+                "meta_json": _json.dumps(meta, ensure_ascii=False),
+                "summary_json": _json.dumps(summary, ensure_ascii=False),
+                "success_count": success_count,
+                "fail_count": fail_count,
+            },
+            use_cache=True,
+            auto_reload=False,
+        )
+        sys_msg = {"role": "system", "content": sys_content}
+        user_msg = {"role": "user", "content": user_content}
+
+        # Use a light model for orchestration
+        model_name = getattr(settings, 'ORCHESTRATOR_DECISION_MODEL', 'glm-4.5-air')
+        result = await self.llm_function_call(
+            messages=[sys_msg, user_msg],
+            context_description="Workflow step decision",
+            model=model_name,
+            temperature=0.2
+        )
+
+        if result.get("approach") == "function_call_plan" and result.get("tool_calls"):
+            exec_res = await self.execute_tool_calls(result["tool_calls"])  # 执行控制动作
+            for call in exec_res:
+                tool_name = call.get("tool") or ""
+                if tool_name == "orchestrator_control_repeat_agent" and call.get("success"):
+                    return "repeat_agent"
+                if tool_name == "orchestrator_control_halt_workflow" and call.get("success"):
+                    return "halt_workflow"
+                if tool_name == "orchestrator_control_proceed_next" and call.get("success"):
+                    return "proceed_next"
+        # 无工具可用：尝试解析严格 JSON 文本决策
+        if result.get("approach") == "text_response":
+            try:
+                content = (result.get("content") or "").strip()
+                import json as _json
+                data = _json.loads(content) if content else {}
+                decision = str(data.get("decision") or "").strip()
+                rationale = str(data.get("rationale") or "").strip()
+                subtask_state = str(data.get("subtask_state") or "").strip()
+                loop_end_reason = str(data.get("loop_end_reason") or "").strip()
+                # 记录一次可观测诊断，但不影响决策落地
+                try:
+                    self.logger.info(
+                        f"ORCH_DECISION_JSON: decision={decision} state={subtask_state} reason={loop_end_reason} rationale={rationale[:120]}"
+                    )
+                except Exception:
+                    pass
+                if decision in ("repeat_agent", "proceed_next", "halt_workflow"):
+                    return decision
+            except Exception:
+                # 解析失败走默认
+                pass
+        # Default fallback: proceed
+        return "proceed_next"
     
     def _get_workflow_status_for_agent(self, agent_type: AgentType) -> WorkflowStatus:
         """根据Agent类型获取对应的WorkflowStatus"""
@@ -290,6 +488,34 @@ class OrchestratorAgent(BaseAgent):
         
         # Default: retry on timeout and temporary errors
         return "timeout" in error_type or "temporary" in error_type
+
+    def _is_image_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+        """Gate condition for image generation step completion."""
+        meta = agent_output.get("react_metadata") or {}
+        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
+            return True
+        summary = agent_output.get("summary") or {}
+        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
+            return True
+        results = agent_output.get("generation_results") or []
+        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
+            return True
+        self.logger.warning("Image step not completed: no task_complete and no successful results")
+        return False
+
+    def _is_video_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+        """Gate condition for video generation step completion."""
+        meta = agent_output.get("react_metadata") or {}
+        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
+            return True
+        summary = agent_output.get("summary") or {}
+        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
+            return True
+        results = agent_output.get("generation_results") or []
+        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
+            return True
+        self.logger.warning("Video step not completed: no task_complete and no successful results")
+        return False
     
     async def _send_workflow_completion(self, task: Task, results: Dict[str, Any]):
         """Send workflow completion notification via WebSocket"""
