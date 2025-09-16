@@ -9,7 +9,7 @@ A comprehensive backend API for AI-powered short video generation using multi-ag
   - Script Writer: Generates detailed scripts and voice-over text
   - Image Generator: Creates visual assets using AI image generation
   - Video Generator: Generates video clips from images and prompts
-  - Video Composer: Combines clips into final video with transitions
+  - Video Composer: Combines clips into final video with transitions; can be re-entered to add audio/subtitles later
   - Quality Checker: Validates output quality and compliance
 
 - **Real-time Communication**: WebSocket support for live progress updates
@@ -146,6 +146,11 @@ MINIMAX_API_KEY=your_minimax_key     # MiniMax abab-video
 # File Storage
 STORAGE_TYPE=local
 MAX_FILE_SIZE=100  # MB
+
+# Audio mixing strategy (defaults shown)
+AUDIO_MIXING_MODE=composer   # composer | agent
+AUDIO_FADE_IN_DURATION=1.0
+AUDIO_FADE_OUT_DURATION=1.0
 ```
 
 ### AI Service Configuration
@@ -200,8 +205,36 @@ Sequential execution of agents in a fixed order:
 2. **Script Writer**: Generates scripts and narratives for each scene
 3. **Image Generator**: Creates visual assets using AI image generation
 4. **Video Generator**: Converts images to video clips with motion
-5. **Video Composer**: Combines clips into final video with transitions
-6. **Quality Checker**: Validates output quality and compliance
+5. **Video Composer**: Combines clips into final video with transitions (video-only)
+6. **Audio Generator**: Generates, analyzes and aligns background music (delivers aligned BGM asset)
+7. **Video Composer (re-entry)**: Adds background music onto final video (and later VO/SRT)
+8. **Quality Checker**: Validates output quality and compliance
+
+Notes:
+- In composer mode (default), AudioAgent does not mix audio into video; Composer performs the mixing.
+- Audio alignment is enforced by analysis + smart adjust to ensure exact match with video duration and smooth fade-out.
+
+## Audio Mixing Architecture (Composer-first)
+
+- Goals
+  - AudioAgent 专注“专业配乐交付”：观测 → 规划 → 生成 → 分析 → 智能对齐；输出等长、可用的 BGM 资产。
+  - VideoComposerAgent 统一“装配”：先视频拼接（video-only），随后多次可重入添加 BGM/配音/字幕等。
+  - Orchestrator 在关键节点多次调用 Composer，保证每步仅做当前所需的最小合成工作。
+
+- Tools (supplier-agnostic)
+  - `suno_client`：中立的配乐生成工具（自由文本风格/情绪）。
+  - `audio_analysis_tool`（新增）：时长/静音窗口/候选截断点分析（ffmpeg/ffprobe）。
+  - `audio_processor`（扩展）：`adjust_duration_smart` 与 `apply_edit_plan` 执行智能对齐（trim/loop/crossfade/fade）。
+  - `ffmpeg_tool`：Composer `add_bgm` 混流导出。
+
+## Integration Tests (Audio)
+
+- `backend/tests/integration/test_audio_mixing.py`：AudioAgent 产 BGM → Composer `add_bgm` 混流 → 断言最终视频存在。
+- `backend/tests/integration/test_audio_smart_truncation.py`：过长 BGM → 分析+编辑计划对齐 → Composer 混流 → 断言最终视频存在。
+
+Run:
+- `uv run pytest -k "audio_mixing or smart_truncation" -q`
+- Tests are skipped automatically when ffmpeg/ffprobe is missing.
 
 ### ReAct Mode
 Iterative reasoning-acting pattern with dynamic strategy adjustment:

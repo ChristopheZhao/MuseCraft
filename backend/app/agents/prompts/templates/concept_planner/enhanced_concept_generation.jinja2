@@ -50,10 +50,22 @@
     "content_elements": {
         "characters": [
             {
-                "type": "人物/角色类型",
-                "identity": "身份背景（职业、年龄、性格特点）",
-                "appearance": "外貌描述（服装、特征、风格）",
-                "role": "在视频中的作用和功能"
+                "canonical_name": "角色规范名（全流程一致引用）",
+                "display_name": "展示名（可选）",
+                "aliases": ["别名1", "别名2"],
+                "type": "角色类型（人类/动物/吉祥物/机器人/物体/抽象概念等）",
+                "species_or_breed": "物种/品种（如小熊猫/柯基/人类等，可选）",
+                "archetype_or_identity": "原型/身份设定（如小红帽/航海家/守护者，可选）",
+                "abstract_traits": [
+                    "3-5条高层特征（外形/色彩/形状/气质/功能）"
+                ],
+                "visual_identity": [
+                    "可选：标识元素（颜色/形状/符号/材质/纹理等）"
+                ],
+                "signature_outfit_or_props": [
+                    "可选：标志性服饰/道具（如红斗篷、篮子、护目镜、冲浪板）"
+                ],
+                "role": "在叙事中的功能与关系（如主角/搭档/信息提供者/情绪承载等)"
             }
         ],
         "environments": [
@@ -98,7 +110,7 @@
             "visual_description": "符合智能风格设计的详细视觉描述",
             "narrative_description": "故事背景和叙事目的",
             "content_elements": {
-                "characters_present": ["此场景中出现的角色"],
+                "characters_present": ["此场景出现的角色（优先使用 display_name 保留本地语言；若无再使用 canonical_name）"],
                 "environment": "场景环境",
                 "key_objects": ["重要道具和物体"],
                 "concepts_visualized": ["此场景体现的概念"]
@@ -109,7 +121,7 @@
         }
     ],
     "consistency_guidelines": {
-        "character_consistency": "角色在不同场景中的一致性要求",
+        "character_consistency": "角色一致性要求：保持核心特征与标识元素（关键外形/配色/形状/比例/标志性符号）在各场景一致；若存在变化（形态变化/换装/强调特征），需在对应场景显式说明变化点与目的",
         "environment_consistency": "环境风格的一致性要求", 
         "object_consistency": "道具使用的一致性要求",
         "style_consistency": "视觉风格的一致性要求"

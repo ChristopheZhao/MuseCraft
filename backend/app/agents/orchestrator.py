@@ -100,7 +100,8 @@ class OrchestratorAgent(BaseAgent):
             user_prompt=input_data.get("user_prompt", ""),
             style_preference=input_data.get("style_preference"),
             duration=input_data.get("duration", 30),
-            aspect_ratio=input_data.get("aspect_ratio", "16:9")
+            aspect_ratio=input_data.get("aspect_ratio", "16:9"),
+            resolution=input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION
         )
         
         self.logger.info(f"🚀 开始工作流执行，WorkflowState ID: {workflow_state.task_id}")
@@ -112,6 +113,8 @@ class OrchestratorAgent(BaseAgent):
         db.commit()
         
         workflow_data = input_data.copy()
+        workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
+        workflow_data.setdefault("target_resolution", workflow_data.get("resolution"))
         # 不能直接传递 WorkflowState 对象，因为它不能JSON序列化
         # 将 workflow_state_id 传递给 Agent，Agent内部通过 workflow_manager 获取状态
         workflow_data["workflow_state_id"] = workflow_state.task_id
@@ -167,6 +170,30 @@ class OrchestratorAgent(BaseAgent):
                     # Store results and prepare input for next agent
                     workflow_results[agent_type.value] = agent_output
                     workflow_data.update(agent_output)
+
+                    # Composer re-entry: after AudioAgent, add BGM if in composer mode
+                    try:
+                        mixing_mode = getattr(settings, 'AUDIO_MIXING_MODE', 'composer')
+                    except Exception:
+                        mixing_mode = 'composer'
+                    if agent_type == AgentType.AUDIO_GENERATOR and mixing_mode == 'composer':
+                        try:
+                            self.logger.info("🎼 Scheduling composer to add background music")
+                            comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
+                            comp_input = {
+                                "workflow_state_id": workflow_state.task_id,
+                                "add_bgm": True
+                            }
+                            comp_out = await comp_agent.execute(
+                                task=task,
+                                input_data=comp_input,
+                                db=db,
+                                execution_order=step_index + 1
+                            )
+                            workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_bgm"] = comp_out
+                            workflow_data.update(comp_out)
+                        except Exception as e:
+                            self.logger.warning(f"Composer add_bgm failed: {e}")
 
                     # Orchestrator policy-first decision; LLM provides optional advice
                     try:
@@ -264,6 +291,41 @@ class OrchestratorAgent(BaseAgent):
                         self.logger.info(f"🧠 DEBUG: No memory storage needed for {agent_type.value}")
                     
                     self.logger.info(f"Completed workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
+
+                    # Lightweight WS signals for coarse-grained UI sync
+                    try:
+                        if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(agent_output):
+                            summary = agent_output.get("summary") or {}
+                            images_cnt = 0
+                            try:
+                                images_cnt = int(summary.get("generated_successfully") or 0)
+                            except Exception:
+                                images_cnt = len(agent_output.get("final_completed_scenes") or [])
+                            await self.websocket_manager.broadcast_to_task(
+                                str(task.task_id),
+                                {
+                                    "type": "image_assets_ready",
+                                    "task_id": str(task.task_id),
+                                    "images_count": images_cnt,
+                                }
+                            )
+                        if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(agent_output):
+                            summary = agent_output.get("summary") or {}
+                            videos_cnt = 0
+                            try:
+                                videos_cnt = int(summary.get("generated_successfully") or 0)
+                            except Exception:
+                                videos_cnt = len(agent_output.get("final_completed_scenes") or [])
+                            await self.websocket_manager.broadcast_to_task(
+                                str(task.task_id),
+                                {
+                                    "type": "video_assets_ready",
+                                    "task_id": str(task.task_id),
+                                    "videos_count": videos_cnt,
+                                }
+                            )
+                    except Exception as _ws_sig_err:
+                        self.logger.warning(f"WS coarse signal failed: {str(_ws_sig_err)}")
                     
                 except Exception as e:
                     error_msg = f"Workflow failed at step {step_index + 1} ({agent.agent_name}): {str(e)}"
@@ -407,7 +469,9 @@ class OrchestratorAgent(BaseAgent):
             messages=[sys_msg, user_msg],
             context_description="Workflow step decision",
             model=model_name,
-            temperature=0.2
+            temperature=0.2,
+            # 统一使用结构化 JSON 回执，降低长尾解析风险
+            response_format={"type": "json_object"}
         )
 
         if result.get("approach") == "function_call_plan" and result.get("tool_calls"):
@@ -620,7 +684,7 @@ class OrchestratorAgent(BaseAgent):
             agent_input = workflow_data.copy()
             
             # 如果是需要创意指导的Agent，从记忆服务获取并添加到上下文
-            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR]:
+            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
                 
                 # 获取整体创意指导
                 overall_guidance = await global_memory_service.retrieve_creative_guidance(
@@ -649,7 +713,38 @@ class OrchestratorAgent(BaseAgent):
                                 scene_guidances[f"scene_{scene_number}"] = scene_guidance.get("scene_guidance", {})
                     
                     agent_input["scene_guidances"] = scene_guidances
-                    
+
+                    # 音频专用：注入时间线与总时长（从 WorkflowState 读取），便于音频对齐
+                    if agent_type == AgentType.AUDIO_GENERATOR:
+                        try:
+                            from ..core.workflow_state import workflow_manager
+                            wf = workflow_manager.get_workflow(workflow_id)
+                            timeline = []
+                            total_duration = 0.0
+                            if wf:
+                                for sc in getattr(wf, 'scenes', []) or []:
+                                    try:
+                                        sn = int(getattr(sc, 'scene_number', 0) or 0)
+                                    except Exception:
+                                        sn = 0
+                                    if not sn:
+                                        continue
+                                    dur = float(getattr(sc, 'duration', 0.0) or 0.0)
+                                    st = float(getattr(sc, 'start_time', 0.0) or 0.0)
+                                    ed = float(getattr(sc, 'end_time', st + dur) or (st + dur))
+                                    total_duration += dur
+                                    timeline.append({
+                                        "scene_number": sn,
+                                        "start": st,
+                                        "end": ed,
+                                        "duration": dur,
+                                        "mood": getattr(sc, 'mood_and_atmosphere', ''),
+                                    })
+                            agent_input["audio_timeline"] = timeline
+                            agent_input["audio_total_duration"] = total_duration
+                        except Exception as _e:
+                            self.logger.warning(f"AUDIO_CTX_WARN: failed to inject timeline: {_e}")
+
                     self.logger.info(f"🧠 Orchestrator prepared creative context for {agent_type.value} with {len(scene_guidances)} scene guidances")
                 else:
                     self.logger.warning(f"⚠️ No creative guidance available for {agent_type.value}")

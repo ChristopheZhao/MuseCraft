@@ -201,7 +201,9 @@ class ReActOrchestratorAgent(BaseAgent):
         fc = await self.llm_function_call(
             messages=[{"role": "user", "content": msg}],
             context_description="编排决策：继续/重复/中止",
-            temperature=0.2
+            temperature=0.2,
+            # 统一强约束JSON，保证结构化决策
+            response_format={"type": "json_object"}
         )
         if fc.get("approach") == "function_call_plan" and fc.get("tool_calls"):
             exec_res = await self.execute_tool_calls(fc["tool_calls"])

@@ -28,6 +28,7 @@ const VideoRequestForm: React.FC = () => {
     title: '',
     description: '',
     duration: 30,
+    resolution: '720p',
     aspectRatio: '16:9' as AspectRatio,
     style: null as VideoStyle | null,
     voiceEnabled: true,
@@ -94,6 +95,7 @@ const VideoRequestForm: React.FC = () => {
     }
 
     try {
+      setCurrentStep('processing');
       console.log('✅ Validation passed, submitting form with data:', formData);
       console.log('📡 About to call ApiClient.createTask...');
       
@@ -102,6 +104,7 @@ const VideoRequestForm: React.FC = () => {
         user_prompt: `${formData.title}\n\n${formData.description}`,
         video_style: formData.style?.id || 'professional',
         duration: formData.duration,
+        resolution: formData.resolution,
         aspect_ratio: formData.aspectRatio,
         session_id: undefined, // Can be used for tracking
       });
@@ -120,6 +123,7 @@ const VideoRequestForm: React.FC = () => {
           category: 'corporate',
         },
         duration: formData.duration,
+        resolution: formData.resolution,
         aspectRatio: formData.aspectRatio,
         voiceSettings: {
           enabled: formData.voiceEnabled,
@@ -155,6 +159,7 @@ const VideoRequestForm: React.FC = () => {
         message: error instanceof Error ? error.message : t('notify.submitFailed.msg'),
         autoClose: 8000,
       });
+      setCurrentStep('input');
     }
   };
 
@@ -167,7 +172,7 @@ const VideoRequestForm: React.FC = () => {
   ];
 
   return (
-    <div className="w-full max-w-4xl mx-auto p-6">
+    <div className="w-full p-6">
       {/* Header */}
       <div className="mb-8">
         <h2 className="text-3xl font-bold text-gray-900 mb-2">
@@ -250,7 +255,7 @@ const VideoRequestForm: React.FC = () => {
             </div>
 
             {/* Duration & Aspect Ratio */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   {t('form.duration')}
@@ -262,10 +267,25 @@ const VideoRequestForm: React.FC = () => {
                 >
                   <option value={15}>{t('duration.15s')}</option>
                   <option value={30}>{t('duration.30s')}</option>
+                  <option value={45}>{t('duration.45s')}</option>
                   <option value={60}>{t('duration.60s')}</option>
-                  <option value={90}>{t('duration.90s')}</option>
-                  <option value={120}>{t('duration.120s')}</option>
+                  <option value={80}>{t('duration.80s')}</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  {t('form.resolution')}
+                </label>
+                <select
+                  value={formData.resolution}
+                  onChange={(e) => handleInputChange('resolution', e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                >
+                  <option value="720p">{t('resolution.720p')}</option>
+                  <option value="1080p">{t('resolution.1080p')}</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">{t('resolution.hint')}</p>
               </div>
 
               <div>

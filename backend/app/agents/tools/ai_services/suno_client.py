@@ -110,6 +110,15 @@ class SunoClientTool(AsyncTool):
             "get_generation_status",
             "list_generations"
         ]
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        """默认对 FC 暴露安全的合成动作，便于 ReAct 在音频代理中直接调用。
+        不暴露状态查询/列表动作给 LLM，减少噪音。
+        """
+        return {
+            "expose": True,
+            "allowed_actions": ["generate_background_music"]
+        }
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         schemas = {
@@ -121,14 +130,12 @@ class SunoClientTool(AsyncTool):
                         "description": "音乐描述，例如：'轻松愉快的背景音乐，适合旅行视频'"
                     },
                     "mood": {
-                        "type": "string", 
-                        "enum": self.mood_types,
-                        "description": "音乐情绪"
+                        "type": "string",
+                        "description": "音乐情绪（自由文本，参与提示词构造；例如 calm/epic/mysterious）"
                     },
                     "style": {
-                        "type": "string", 
-                        "enum": self.music_styles,
-                        "description": "音乐风格"
+                        "type": "string",
+                        "description": "音乐风格/体裁（自定义字符串；customMode=true 时必填；长度限制随模型）"
                     },
                     "duration": {
                         "type": "integer", 
@@ -740,10 +747,16 @@ class SunoClientTool(AsyncTool):
         if action == "generate_background_music":
             if not parameters.get("description"):
                 raise ToolValidationError("description is required for background music generation")
-            
-            duration = parameters.get("duration", 30)
-            if not (10 <= duration <= 300):
-                raise ToolValidationError("duration must be between 10 and 300 seconds")
+            # Suno 并不支持精确 duration 参数控制；这里将其视为提示词的“倾向”而非硬约束。
+            # 若传入范围外，仅记录提示，不再抛错，由上层在 prompt 中构造时长 hint，并在生成后用处理工具对齐精确时长。
+            try:
+                duration = int(parameters.get("duration", 30))
+                if not (10 <= duration <= 300):
+                    self.logger.info(
+                        f"Suno duration hint out of recommended range: {duration}; proceeding as hint only"
+                    )
+            except Exception:
+                pass
         
         elif action == "generate_custom_music":
             # customMode 规则：

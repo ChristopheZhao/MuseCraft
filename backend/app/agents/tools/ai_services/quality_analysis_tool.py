@@ -62,11 +62,24 @@ class QualityAnalysisTool(BaseTool):
         )
         
         # 调用AI服务
+        # 从 ai_config 读取工具模型映射（参数可覆盖）
+        try:
+            from ....core.ai_config import get_ai_config
+            ai_cfg = get_ai_config()
+            cfg_model = ai_cfg.get_model_for_tool("quality_analysis_tool")
+            mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+        except Exception:
+            cfg_model = None
+            mcfg = None
+        req_model = parameters.get("model") or cfg_model
+        req_temp = parameters.get("temperature", (mcfg.temperature if mcfg and getattr(mcfg, 'temperature', None) is not None else 0.3))
+        req_max_tokens = parameters.get("max_tokens", (mcfg.max_tokens if mcfg and getattr(mcfg, 'max_tokens', None) is not None else 500))
+
         response = await self._ai_client.generate_text(
             prompt=prompt,
-            model=parameters.get("model"),
-            temperature=parameters.get("temperature", 0.3),  # 分析类任务用较低温度
-            max_tokens=parameters.get("max_tokens", 500)
+            model=req_model,
+            temperature=req_temp,
+            max_tokens=int(req_max_tokens)
         )
         
         return response

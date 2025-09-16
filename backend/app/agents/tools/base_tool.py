@@ -344,13 +344,22 @@ class BaseTool(ABC):
             error_msg = f"Tool {self.metadata.name}:{tool_input.action} failed: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
             
+            # 若为自定义 ToolError，优先使用其 error_code 作为 error_type，便于Agent侧精细判断
+            error_type = type(e).__name__
+            try:
+                from .base_tool import ToolError as _TE  # self import safe
+                if isinstance(e, _TE) and getattr(e, 'error_code', None):
+                    error_type = getattr(e, 'error_code')
+            except Exception:
+                pass
+
             return ToolOutput(
                 success=False,
                 error=error_msg,
                 execution_time=execution_time,
                 metadata={
                     "tool_name": self.metadata.name,
-                    "error_type": type(e).__name__,
+                    "error_type": error_type,
                     "error_details": str(e)
                 }
             )

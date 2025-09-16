@@ -386,31 +386,35 @@ class QualityCheckerAgent(BaseAgent):
                 "resolution": video_metadata.get("resolution", ""),
                 "video_quality": ""  # 占位：可由技术分析结果提供
             }
+            # 供应商解耦：使用统一的 llm_function_call，不依赖特定SDK
+            # 构造系统+用户消息（保持中立，不暴露具体工具名/参数）
+            messages = []
+            try:
+                from ..core.prompt_manager import get_prompt_manager
+                pm = get_prompt_manager()
+                sys_text = pm.render_template("mas_system", "system", variables={}, use_cache=True, auto_reload=False)
+                if isinstance(sys_text, str) and sys_text.strip():
+                    messages.append({"role": "system", "content": sys_text})
+            except Exception:
+                pass
+            # 将视频数据摘要附在提示之后，方便LLM给出更具体建议
+            user_content = analysis_prompt + "\n\n## 视频数据摘要\n" + json.dumps(video_data, ensure_ascii=False)
+            messages.append({"role": "user", "content": user_content})
 
-            # 🚀 Phase 1.3 - 使用原子性质量分析工具
-            response = await self.use_tool(
-                tool_name="quality_analysis_tool",
-                action="analyze_quality",
-                parameters={
-                    "video_data": video_data,
-                    "original_requirements": original_requirements,
-                    "quality_criteria": {},  # 可以从配置中获取
-                    "model": quality_model,
-                    "temperature": model_config.temperature if model_config else 0.3,
-                    "max_tokens": model_config.max_tokens if model_config else 500
-                }
+            resp = await self.llm_function_call(
+                messages=messages,
+                model=quality_model,
+                context_description="Analyze video content quality and output JSON report",
+                temperature=(model_config.temperature if model_config else 0.3),
+                max_tokens=(model_config.max_tokens if model_config else 1000),
+                response_format={"type": "json_object"},
+                thinking={"type": "disabled"}
             )
-            
-            # ✅ 处理ToolOutput格式 - 原子工具返回ToolOutput对象
-            if not response.success:
-                raise Exception(f"Quality analysis failed: {response.error}")
-            
-            # 从ToolOutput中提取AI响应结果
-            ai_result = response.result
-            if not ai_result or "content" not in ai_result:
-                raise Exception("Invalid response from quality analysis tool")
-            
-            return json.loads(ai_result["content"].strip())
+
+            content = (resp.get("content") or "").strip()
+            if not content:
+                raise Exception("Empty content from quality LLM")
+            return json.loads(content)
             
         except Exception as e:
             self.logger.warning(f"AI content analysis failed: {str(e)}")

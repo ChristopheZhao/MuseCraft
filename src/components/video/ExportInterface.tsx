@@ -222,7 +222,8 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
       {/* Format Selection */}
       <div>
         <h4 className="font-medium text-gray-900 mb-4">{t('export.format.choose')}</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {/* Keep cards readable in narrow side panel: max 2 columns */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-2 gap-4">
           {exportFormats.map((format) => {
             const Icon = format.icon;
             return (
@@ -239,7 +240,7 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
                 )}
               >
                 {format.recommended && (
-                  <div className="absolute -top-2 -right-2 bg-primary-500 text-white text-xs px-2 py-1 rounded-full">
+                  <div className="absolute top-2 right-2 bg-primary-500 text-white text-xs px-2 py-1 rounded-full">
                     Recommended
                   </div>
                 )}

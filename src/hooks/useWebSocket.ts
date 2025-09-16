@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { WebSocketMessage, MessageType, Agent, GenerationResult } from '@/types';
+import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { generateId } from '@/lib/utils';
 
 interface UseWebSocketOptions {
@@ -15,8 +16,35 @@ interface UseWebSocketOptions {
 }
 
 export const useWebSocket = (options: UseWebSocketOptions = {}) => {
+  // Resolve WS URL with robust fallbacks to avoid localhost/IPv6 pitfalls
+  const resolveWsUrl = (): string => {
+    // Explicit option takes precedence
+    if (options.url) return options.url;
+    // Env override
+    const envWs = process.env.NEXT_PUBLIC_WS_URL;
+    if (envWs && typeof envWs === 'string') return envWs;
+    // Derive from API URL if provided
+    const envApi = process.env.NEXT_PUBLIC_API_URL;
+    if (envApi && typeof envApi === 'string') {
+      try {
+        const u = new URL(envApi);
+        const scheme = u.protocol === 'https:' ? 'wss' : 'ws';
+        return `${scheme}://${u.host}/api/v1/ws/connect`;
+      } catch {}
+    }
+    // Browser location as last resort; prefer 127.0.0.1 to bypass ::1 issues
+    if (typeof window !== 'undefined') {
+      const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const host = window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname;
+      const port = '8000';
+      return `${scheme}://${host}:${port}/api/v1/ws/connect`;
+    }
+    // Server-side default
+    return 'ws://127.0.0.1:8000/api/v1/ws/connect';
+  };
+
   const {
-    url = 'ws://localhost:8000/api/v1/ws/connect',
+    url = resolveWsUrl(),
     reconnectInterval = 3000,
     maxReconnectAttempts = 5,
     onOpen,
@@ -28,6 +56,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
   const reconnectAttempts = useRef(0);
   const reconnectTimeoutId = useRef<NodeJS.Timeout | null>(null);
   const isManualClose = useRef(false);
+  const isConnecting = useRef(false);
 
   const {
     setWSConnected,
@@ -35,17 +64,30 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     addResult,
     updateResult,
     addNotification,
+    setCurrentStep,
     currentRequest,
   } = useAppStore();
 
   const connect = useCallback(() => {
     try {
+      // Prevent duplicate connections (React StrictMode / double mount)
+      if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        console.log('WebSocket already open/connecting, skip new connect');
+        return;
+      }
+      if (isConnecting.current) {
+        console.log('WebSocket connect already in progress');
+        return;
+      }
+      isConnecting.current = true;
+      console.log('Connecting WebSocket to:', url);
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
         console.log('WebSocket connected');
         setWSConnected(true);
         reconnectAttempts.current = 0;
+        isConnecting.current = false;
         onOpen?.();
 
         addNotification({
@@ -55,19 +97,19 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           autoClose: 3000,
         });
 
-        // Send initial handshake or subscription message
-        if (currentRequest) {
-          sendMessage({
-            type: 'subscribe',
-            data: { requestId: currentRequest.id },
-            timestamp: new Date(),
-          });
+        // Send initial subscription (backend expects subscribe_task)
+        if (currentRequest?.id) {
+          // Backend expects top-level task_id in subscribe_task message
+          ws.current?.send(
+            JSON.stringify({ type: 'subscribe_task', task_id: currentRequest.id, timestamp: new Date() })
+          );
         }
       };
 
       ws.current.onclose = (event) => {
         console.log('WebSocket disconnected', event.code, event.reason);
         setWSConnected(false);
+        isConnecting.current = false;
         onClose?.();
 
         if (!isManualClose.current && reconnectAttempts.current < maxReconnectAttempts) {
@@ -93,14 +135,15 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       };
 
       ws.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        console.warn('WebSocket error (non-fatal in dev):', error);
+        isConnecting.current = false;
         onError?.(error);
         
         addNotification({
-          type: 'error',
-          title: 'Connection Error',
-          message: 'Real-time updates may be unavailable',
-          autoClose: 5000,
+          type: 'warning',
+          title: '实时连接异常',
+          message: '正在重试或使用轮询备选方案',
+          autoClose: 3000,
         });
       };
 
@@ -161,6 +204,38 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
         handleProgressUpdate(message.data);
         break;
       
+      // Backend-native message types
+      case 'agent_progress':
+        handleBackendAgentProgress(message as any);
+        break;
+      case 'workflow_completed':
+        handleWorkflowCompleted(message as any);
+        break;
+      case 'workflow_failed':
+        handleWorkflowFailed(message as any);
+        break;
+      case 'task_notification':
+        handleSystemMessage({ message: message.message, level: message.level || 'info' });
+        break;
+      case 'system_notification':
+        handleSystemMessage({ message: message.message, level: message.level || 'info' });
+        break;
+      case 'connection_established':
+        handleConnectionEstablished(message as any);
+        break;
+      case 'subscription_confirmed':
+        handleSubscriptionConfirmed(message as any);
+        break;
+      case 'concept_plan_ready':
+        handleConceptPlanReady(message as any);
+        break;
+      case 'image_assets_ready':
+        handleImageAssetsReady(message as any);
+        break;
+      case 'video_assets_ready':
+        handleVideoAssetsReady(message as any);
+        break;
+      
       case 'result-ready':
         handleResultReady(message.data);
         break;
@@ -214,6 +289,127 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       currentTask: progressMessage,
     });
   }, [updateAgent]);
+
+  // Map backend agent_progress to frontend update
+  const handleBackendAgentProgress = useCallback((msg: any) => {
+    try {
+      const typeToId: Record<string, string> = {
+        concept_planner: 'concept-generator',
+        script_writer: 'script-writer',
+        image_generator: 'image-generator',
+        video_generator: 'video-generator',
+        audio_generator: 'voice-synthesizer',
+        video_composer: 'video-composer',
+        quality_checker: 'quality-controller',
+      };
+      const agentType = String((msg as any).agent_type || '').toLowerCase();
+      const agentId = typeToId[agentType] || (msg as any).agent_name || agentType || 'unknown-agent';
+      const progress = (msg as any).progress ?? 0;
+      const rawStatus = String((msg as any).status || '').toLowerCase();
+      const status = rawStatus === 'completed'
+        ? 'completed'
+        : rawStatus === 'failed'
+        ? 'error'
+        : 'working';
+      const current_step = (msg as any).current_step || '';
+      updateAgent(agentId, {
+        status,
+        progress,
+        currentTask: current_step,
+      });
+    } catch (e) {
+      console.warn('Failed to handle agent_progress:', e);
+    }
+  }, [updateAgent]);
+
+  // Concept plan ready → update scenesPlanned
+  const handleConceptPlanReady = useCallback((msg: any) => {
+    try {
+      const count = (msg as any).scenes_count ?? ((msg as any).data && (msg as any).data.scenes_count);
+      if (typeof count === 'number') {
+        useAppStore.getState().setScenesPlanned(count);
+      }
+    } catch (e) {
+      console.warn('Failed to handle concept_plan_ready:', e);
+    }
+  }, []);
+
+  const handleImageAssetsReady = useCallback((msg: any) => {
+    try {
+      const count = (msg as any).images_count ?? ((msg as any).data && (msg as any).data.images_count);
+      if (typeof count === 'number') {
+        useAppStore.getState().setImagesGenerated(count);
+      }
+    } catch (e) {
+      console.warn('Failed to handle image_assets_ready:', e);
+    }
+  }, []);
+
+  const handleVideoAssetsReady = useCallback((msg: any) => {
+    try {
+      const count = (msg as any).videos_count ?? ((msg as any).data && (msg as any).data.videos_count);
+      if (typeof count === 'number') {
+        useAppStore.getState().setVideosGenerated(count);
+      }
+    } catch (e) {
+      console.warn('Failed to handle video_assets_ready:', e);
+    }
+  }, []);
+
+  
+
+  const handleWorkflowCompleted = useCallback((msg: any) => {
+    try {
+      // Try to extract final video url/path from results payload
+      const results = (msg && (msg.results || (msg.data && msg.data.results))) || {};
+      const composer = results.video_composer || results['video-composer'] || {};
+      const qc = results.quality_checker || results['quality-checker'] || {};
+      const candidates: Array<string | undefined> = [
+        composer.final_video_url,
+        composer.final_video_path,
+        qc.final_video_url,
+        qc.final_video_path,
+        results.final_video_url,
+      ];
+      const picked = candidates.find((c) => typeof c === 'string' && c.length > 0);
+      const publicUrl = resolvePublicMediaUrl(picked);
+      if (publicUrl) {
+        useAppStore.getState().setFinalVideoUrl(publicUrl);
+      } else if (picked) {
+        useAppStore.getState().setFinalVideoUrl(String(picked));
+      }
+    } catch (e) {
+      // non-fatal
+    }
+
+    addNotification({
+      type: 'success',
+      title: '生成完成',
+      message: '多智能体协作已完成，进入结果预览',
+      autoClose: 5000,
+    });
+    // Switch UI step to review
+    setCurrentStep('review' as any);
+  }, [addNotification, setCurrentStep]);
+
+  const handleWorkflowFailed = useCallback((msg: any) => {
+    addNotification({
+      type: 'error',
+      title: '生成失败',
+      message: msg.error || '多智能体协作执行失败',
+      autoClose: 8000,
+    });
+    setCurrentStep('input' as any);
+  }, [addNotification, setCurrentStep]);
+
+  // Lightweight system messages
+  const handleConnectionEstablished = useCallback((msg: any) => {
+    // no-op; optionally notify or debug log
+  }, []);
+
+  const handleSubscriptionConfirmed = useCallback((msg: any) => {
+    // no-op
+  }, []);
 
   const handleResultReady = useCallback((data: any) => {
     const result: GenerationResult = {
@@ -270,22 +466,21 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     });
   }, [addNotification]);
 
-  // Initialize connection
+  // Initialize connection only when a task exists, to avoid early connect/close noise
   useEffect(() => {
+    if (!currentRequest?.id) return;
     connect();
-    
     return () => {
       disconnect();
     };
-  }, [connect, disconnect]);
+  }, [connect, disconnect, currentRequest?.id]);
 
   // Reconnect when currentRequest changes
   useEffect(() => {
     if (currentRequest && ws.current?.readyState === WebSocket.OPEN) {
-      sendMessage({
-        type: 'subscribe',
-        data: { requestId: currentRequest.id },
-      });
+      ws.current?.send(
+        JSON.stringify({ type: 'subscribe_task', task_id: currentRequest.id, timestamp: new Date() })
+      );
     }
   }, [currentRequest, sendMessage]);
 

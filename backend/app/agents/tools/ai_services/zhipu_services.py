@@ -102,41 +102,89 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
+        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
+        effective_timeout = None
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=headers,
-                    json=payload
+            req_to = kwargs.get("request_timeout")
+            if req_to is not None:
+                effective_timeout = float(req_to)
+            else:
+                # 尝试读取模型级超时
+                if model:
+                    try:
+                        from ....core.ai_config import get_ai_config  # type: ignore
+                        mc = get_ai_config().get_model_config(model)
+                        if mc and getattr(mc, 'timeout', None):
+                            effective_timeout = float(mc.timeout)
+                    except Exception:
+                        pass
+            if effective_timeout is None:
+                effective_timeout = float(self.timeout)
+            else:
+                # 不超过provider默认；也允许更小，以适配回退场景的剩余时间
+                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
+            try:
+                self.logger.info(f"Zhipu.chat_completion using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
+            except Exception:
+                pass
+        except Exception:
+            effective_timeout = float(self.timeout)
+
+        # 统一：遵循系统/进程代理（trust_env=True），使用单一超时；读超时下先同配置重试一次，再按需直连兜底
+        async def _post_once(timeout_val: float, trust_env: bool = True):
+            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions", headers=headers, json=payload
                 )
-                
-                if response.status_code != 200:
-                    error_detail = response.text
-                    raise RuntimeError(f"Zhipu LLM API error: {response.status_code} - {error_detail}")
-                
-                result = response.json()
-                choice = result["choices"][0]
-                msg = choice.get("message", {}) or {}
-                content = msg.get("content")
-                reasoning = msg.get("reasoning_content")
-                try:
-                    # 诊断：记录 content 与 reasoning_content 的长度
-                    clen = len(content or "") if isinstance(content, str) else 0
-                    rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
-                    self.logger.info(f"Zhipu.chat_completion result lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}")
-                except Exception:
-                    pass
-                return {
-                    "content": content,
-                    "reasoning_content": reasoning,
-                    "model": result.get("model"),
-                    "usage": result.get("usage", {}),
-                    "finish_reason": choice.get("finish_reason"),
-                    "provider": self.get_provider_name()
-                }
-                
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Zhipu LLM API error: {resp.status_code} - {resp.text}"
+                    )
+                return resp.json()
+
+        # 简化版：一次按系统代理请求，超时则（可选）再直连一次；不做时间切分
+        try:
+            result = await _post_once(float(effective_timeout), True)
         except httpx.TimeoutException:
-            raise RuntimeError("Zhipu LLM API request timeout")
+            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
+                try:
+                    try:
+                        self.logger.warning(
+                            f"Zhipu.chat_completion proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
+                        )
+                    except Exception:
+                        pass
+                    result = await _post_once(float(effective_timeout), False)
+                except httpx.TimeoutException:
+                    raise RuntimeError("Zhipu LLM API request timeout")
+                except Exception as e2:
+                    raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
+            else:
+                raise RuntimeError("Zhipu LLM API request timeout")
+        except Exception as e:
+            raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e)}")
+
+        # 统一解析返回
+        try:
+            choice = result["choices"][0]
+            msg = choice.get("message", {}) or {}
+            content = msg.get("content")
+            reasoning = msg.get("reasoning_content")
+            try:
+                # 诊断：记录 content 与 reasoning_content 的长度
+                clen = len(content or "") if isinstance(content, str) else 0
+                rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
+                self.logger.info(f"Zhipu.chat_completion result lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}")
+            except Exception:
+                pass
+            return {
+                "content": content,
+                "reasoning_content": reasoning,
+                "model": result.get("model"),
+                "usage": result.get("usage", {}),
+                "finish_reason": choice.get("finish_reason"),
+                "provider": self.get_provider_name()
+            }
         except Exception as e:
             raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e)}")
     
@@ -194,54 +242,96 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
+        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
+        effective_timeout = None
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=headers,
-                    json=payload
+            req_to = kwargs.get("request_timeout")
+            if req_to is not None:
+                effective_timeout = float(req_to)
+            else:
+                if model:
+                    try:
+                        from ....core.ai_config import get_ai_config  # type: ignore
+                        mc = get_ai_config().get_model_config(model)
+                        if mc and getattr(mc, 'timeout', None):
+                            effective_timeout = float(mc.timeout)
+                    except Exception:
+                        pass
+            if effective_timeout is None:
+                effective_timeout = float(self.timeout)
+            else:
+                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
+            try:
+                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
+            except Exception:
+                pass
+        except Exception:
+            effective_timeout = float(self.timeout)
+
+        async def _post_once(timeout_val: float, trust_env: bool = True):
+            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions", headers=headers, json=payload
                 )
-                
-                if response.status_code != 200:
-                    error_detail = response.text
-                    raise RuntimeError(f"Zhipu Function Call API error: {response.status_code} - {error_detail}")
-                
-                result = response.json()
-                choice = result["choices"][0]
-                msg = choice.get("message", {}) or {}
-                content = msg.get("content")
-                reasoning = msg.get("reasoning_content")
-
-                # 统一响应体：无论是否有 tool_calls，都返回 content 与 reasoning_content，便于“计划+执行合一”场景解析 PlanningDecision
-                response_data = {
-                    "model": result.get("model"),
-                    "usage": result.get("usage", {}),
-                    "finish_reason": choice.get("finish_reason"),
-                    "provider": self.get_provider_name(),
-                    "content": content,
-                    "reasoning_content": reasoning,
-                    "has_function_call": False,
-                }
-
-                # Function Call 分支（若存在）
-                if choice.get("finish_reason") == "tool_calls" and msg.get("tool_calls"):
-                    response_data["tool_calls"] = msg.get("tool_calls")
-                    response_data["has_function_call"] = True
-
-                # 统一 lens 日志
-                try:
-                    clen = len(content or "") if isinstance(content, str) else 0
-                    rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
-                    self.logger.info(
-                        f"Zhipu.function_call(text) lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}"
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Zhipu Function Call API error: {resp.status_code} - {resp.text}"
                     )
-                except Exception:
-                    pass
+                return resp.json()
 
-                return response_data
-                
+        # 简化版：一次按系统代理请求，超时则（可选）再直连一次
+        try:
+            result = await _post_once(float(effective_timeout), True)
         except httpx.TimeoutException:
-            raise RuntimeError("Zhipu Function Call API request timeout")
+            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
+                try:
+                    try:
+                        self.logger.warning(
+                            f"Zhipu.function_call proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
+                        )
+                    except Exception:
+                        pass
+                    result = await _post_once(float(effective_timeout), False)
+                except httpx.TimeoutException:
+                    raise RuntimeError("Zhipu Function Call API request timeout")
+                except Exception as e2:
+                    raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
+            else:
+                raise RuntimeError("Zhipu Function Call API request timeout")
+        except Exception as e:
+            raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
+
+        # 统一解析
+        try:
+            choice = result["choices"][0]
+            msg = choice.get("message", {}) or {}
+            content = msg.get("content")
+            reasoning = msg.get("reasoning_content")
+
+            response_data = {
+                "model": result.get("model"),
+                "usage": result.get("usage", {}),
+                "finish_reason": choice.get("finish_reason"),
+                "provider": self.get_provider_name(),
+                "content": content,
+                "reasoning_content": reasoning,
+                "has_function_call": False,
+            }
+
+            if choice.get("finish_reason") == "tool_calls" and msg.get("tool_calls"):
+                response_data["tool_calls"] = msg.get("tool_calls")
+                response_data["has_function_call"] = True
+
+            try:
+                clen = len(content or "") if isinstance(content, str) else 0
+                rlen = len(reasoning or "") if isinstance(reasoning, str) else 0
+                self.logger.info(
+                    f"Zhipu.function_call(text) lens: content={clen} reasoning={rlen} finish_reason={choice.get('finish_reason')}"
+                )
+            except Exception:
+                pass
+
+            return response_data
         except Exception as e:
             raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
     

@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Optional
 import logging
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
-from .zhipu_client import ZhipuClientTool
 
 
 class ScenePlanningTool(AsyncTool):
@@ -47,21 +46,13 @@ class ScenePlanningTool(AsyncTool):
             metadata = self.get_metadata()
         super().__init__(metadata, config)
         
-        # 初始化依赖的服务
-        self.zhipu_client = None
+        # 供应商无关
+        self._llm_service = None
         
     def _initialize(self):
         """初始化场景规划工具"""
-        try:
-            self.zhipu_client = ZhipuClientTool()
-            self.zhipu_client._initialize()
-            self._functional = self.zhipu_client._functional
-        except Exception as e:
-            self.logger.error(f"Failed to initialize zhipu_client: {e}")
-            self._functional = False
-        
-        if not self._functional:
-            self.logger.warning("ScenePlanningTool not functional - zhipu_client unavailable")
+        # 使用统一服务管理（延迟获取）
+        self._functional = True
     
     def get_available_actions(self) -> List[str]:
         return [
@@ -220,13 +211,28 @@ class ScenePlanningTool(AsyncTool):
         
         # 使用Function Call进行智能规划
         try:
-            llm_result = await self.zhipu_client._chat_completion({
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                "model": "glm-4-plus",
-                "temperature": 0.3
-            })
+            # 从 ai_config 读取工具模型映射
+            try:
+                from ....core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                cfg_model = ai_cfg.get_model_for_tool("scene_planning_tool")
+                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+            except Exception:
+                cfg_model = None
+                mcfg = None
+            req_model = cfg_model or None
+            req_temp = 0.3 if not (mcfg and getattr(mcfg, 'temperature', None) is not None) else float(mcfg.temperature)
+
+            # 使用统一 LLM 服务进行 Function Call
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+            llm_result = await llm.function_call(
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                model=req_model,
+                temperature=req_temp
+            )
             
             # 解析Function Call响应
             if llm_result.get("tool_calls"):

@@ -70,7 +70,9 @@ class AudioProcessorTool(AsyncTool):
             "create_loop",
             "add_fade_effects",
             "adjust_volume",
-            "trim_audio"
+            "trim_audio",
+            "adjust_duration_smart",
+            "apply_edit_plan"
         ]
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
@@ -111,6 +113,27 @@ class AudioProcessorTool(AsyncTool):
                     "output_path": {"type": "string", "description": "输出文件路径（可选）"}
                 },
                 "required": ["input_path"]
+            },
+            "adjust_duration_smart": {
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "输入音频文件路径"},
+                    "target_duration": {"type": "number"},
+                    "fade_in": {"type": "number", "default": 0.5},
+                    "fade_out": {"type": "number", "default": 1.0},
+                    "crossfade": {"type": "number", "default": 0.5},
+                    "output_path": {"type": "string"}
+                },
+                "required": ["input_path", "target_duration"]
+            },
+            "apply_edit_plan": {
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string"},
+                    "plan": {"type": "object"},
+                    "output_path": {"type": "string"}
+                },
+                "required": ["input_path", "plan"]
             }
         }
         return schemas.get(action, {})
@@ -129,6 +152,10 @@ class AudioProcessorTool(AsyncTool):
             return await self._create_loop(params)
         elif action == "add_fade_effects":
             return await self._add_fade_effects(params)
+        elif action == "adjust_duration_smart":
+            return await self._adjust_duration_smart(params)
+        elif action == "apply_edit_plan":
+            return await self._apply_edit_plan(params)
         else:
             raise ToolError(f"Unknown action: {action}", self.metadata.name)
     
@@ -289,6 +316,53 @@ class AudioProcessorTool(AsyncTool):
             raise ToolError(f"FFmpeg trim processing failed: {error_msg}", self.metadata.name)
         
         return {"success": True, "method": "trim_with_fade"}
+
+    async def _adjust_duration_smart(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        input_path = params["input_path"]
+        target = float(params["target_duration"])
+        fade_in = float(params.get("fade_in", 0.5))
+        fade_out = float(params.get("fade_out", 1.0))
+        crossfade = float(params.get("crossfade", 0.5))
+        out_path = params.get("output_path")
+        if not out_path:
+            base = os.path.splitext(os.path.basename(input_path))[0]
+            out_path = os.path.join(os.path.dirname(input_path), f"{base}_smart_{int(target)}.mp3")
+        orig = await self._get_audio_duration(input_path)
+        if orig <= 0.0:
+            raise ToolError("unable to read duration", self.metadata.name)
+        if orig > target + 0.1:
+            # trim with fade out at target
+            return await self._trim_audio(input_path, target, out_path, fade_out)
+        elif orig < target - 0.1:
+            # loop to target with crossfade
+            return await self._loop_to_duration(input_path, target, out_path, fade_in, fade_out)
+        else:
+            # already close, just apply subtle fades
+            return await self._add_fade_effects({"input_path": input_path, "fade_in": fade_in, "fade_out": fade_out, "output_path": out_path})
+
+    async def _apply_edit_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        input_path = params["input_path"]
+        plan = params.get("plan") or {}
+        out_path = params.get("output_path")
+        method = (plan.get("method") or "trim").lower()
+        fade_out = float(plan.get("fade_out", 1.0))
+        if not out_path:
+            base = os.path.splitext(os.path.basename(input_path))[0]
+            out_path = os.path.join(os.path.dirname(input_path), f"{base}_edit.mp3")
+        if method == "trim":
+            cut_at = float(plan.get("cut_at") or 0)
+            if cut_at <= 0:
+                raise ToolError("invalid cut_at in plan", self.metadata.name)
+            return await self._trim_audio(input_path, cut_at, out_path, fade_out)
+        # fallback to smart adjust
+        td = float(plan.get("target_duration") or 0)
+        if td <= 0:
+            td = await self._get_audio_duration(input_path)
+        return await self._adjust_duration_smart({
+            "input_path": input_path,
+            "target_duration": td,
+            "output_path": out_path
+        })
     
     async def _add_fade_effects(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """添加淡入淡出效果"""

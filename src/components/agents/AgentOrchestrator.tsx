@@ -101,7 +101,7 @@ const AgentOrchestrator: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white/80 backdrop-blur border-b border-gray-100 flex items-center justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900">
             {t('orch.title')}
@@ -131,7 +131,7 @@ const AgentOrchestrator: React.FC = () => {
       </div>
 
       {/* Agent Flow Visualization */}
-      <div className="relative">
+      <div className="relative mt-4">
         {/* Connection Lines */}
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-full h-0.5 bg-gray-200">

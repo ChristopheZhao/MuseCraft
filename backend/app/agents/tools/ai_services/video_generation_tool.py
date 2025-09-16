@@ -271,12 +271,24 @@ class VideoGenerationTool(AsyncTool):
         
         # 使用Function Call进行智能决策
         try:
+            # 从 ai_config 读取工具模型映射
+            try:
+                from ....core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                cfg_model = ai_cfg.get_model_for_tool("video_generation_tool")
+                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+            except Exception:
+                cfg_model = None
+                mcfg = None
+            req_model = cfg_model or None
+            req_temp = 0.3 if not (mcfg and getattr(mcfg, 'temperature', None) is not None) else float(mcfg.temperature)
+
             llm_result = await self.llm_service.function_call(
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
-                model="glm-4-plus",
-                temperature=0.3
+                model=req_model,
+                temperature=req_temp
             )
             
             # 解析Function Call响应
@@ -303,11 +315,22 @@ class VideoGenerationTool(AsyncTool):
     async def _build_enhanced_prompt(self, scene_data: Dict[str, Any], optimal_params: Dict[str, Any]) -> str:
         """构建增强的视频生成提示词"""
         
-        base_prompt = f"""
-{scene_data.get('visual_description', '')}
-{scene_data.get('script_text', '')}
-{scene_data.get('narrative_description', '')}
-"""
+        # 合成基础描述
+        base_lines = [
+            scene_data.get('visual_description', ''),
+            scene_data.get('script_text', ''),
+            scene_data.get('narrative_description', '')
+        ]
+        # 追加角色一致性语义（若有）
+        chars = scene_data.get('character_descriptions') or []
+        if not chars:
+            names = scene_data.get('characters_present') or []
+            if names:
+                chars = ["、".join(names)]
+        if chars:
+            base_lines.append("角色设定：" + "；".join(chars))
+
+        base_prompt = "\n".join([l for l in base_lines if l])
         
         # 根据选择的时长调整提示词风格
         duration = optimal_params["duration"]

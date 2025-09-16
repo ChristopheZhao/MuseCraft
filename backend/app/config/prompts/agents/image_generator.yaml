@@ -96,6 +96,7 @@ templates:
       - 可以在同一响应中使用函数调用表达执行动作（这不属于“文本”），且仅当 intent == "execute" 时，必须对所选对象发起执行调用。
       - 不得出现任何工具名/供应商名/参数名。
       - selected_units 必须来自 observation_json.scenes/pending_scenes 的编号集合。
+      - 语义一致性：当当轮观测包含全局风格指导（style_guidance）或 per-scene 角色事实（characters_map）时，请在执行阶段保持风格与角色的一致性（名称/核心特征），不要重命名或遗漏；当事实缺失时不臆造。角色设定应优先使用简明描述与本地化展示名（若存在），避免仅使用英文ID或罗马拼写。
 
       已有计划：
       - plan_digest：{{ plan_digest }}

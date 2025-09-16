@@ -52,6 +52,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout>();
@@ -66,8 +67,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onTimeUpdate?.(time);
     };
 
-    const handleLoadStart = () => setIsLoading(true);
+    const handleLoadStart = () => {
+      setHasError(false);
+      setIsLoading(true);
+    };
     const handleLoadedData = () => setIsLoading(false);
+    const handleError = () => {
+      // Stop the spinner and surface a friendly error state
+      setIsLoading(false);
+      setHasError(true);
+      setIsPlaying(false);
+    };
     const handleEnded = () => {
       setIsPlaying(false);
       onEnded?.();
@@ -77,12 +87,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     video.addEventListener('loadstart', handleLoadStart);
     video.addEventListener('loadeddata', handleLoadedData);
     video.addEventListener('ended', handleEnded);
+    video.addEventListener('error', handleError);
 
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadstart', handleLoadStart);
       video.removeEventListener('loadeddata', handleLoadedData);
       video.removeEventListener('ended', handleEnded);
+      video.removeEventListener('error', handleError);
     };
   }, [onTimeUpdate, onEnded]);
 
@@ -205,6 +217,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         poster={poster}
         className="w-full h-full object-contain"
         autoPlay={autoPlay}
+        preload="metadata"
         onClick={togglePlay}
       />
 
@@ -212,6 +225,33 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
           <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+
+      {/* Error Overlay */}
+      {hasError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-center p-6">
+          <div className="text-white/90 mb-2">视频加载失败</div>
+          <div className="text-white/60 text-sm mb-4">请检查资源地址或稍后重试</div>
+          <button
+            onClick={() => {
+              const v = videoRef.current;
+              if (!v) return;
+              setHasError(false);
+              setIsLoading(true);
+              // Force reload
+              const current = v.src;
+              v.src = '';
+              // next tick
+              setTimeout(() => {
+                v.src = current;
+                v.load();
+              }, 0);
+            }}
+            className="px-3 py-1.5 rounded bg-white/20 hover:bg-white/30 text-white text-sm"
+          >
+            重试
+          </button>
         </div>
       )}
 

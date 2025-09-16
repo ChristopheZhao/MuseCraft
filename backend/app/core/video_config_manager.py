@@ -101,6 +101,20 @@ class VideoConfigManager:
                 resolution_options=["1280x720"],
                 frame_rate_options=[25]
             )
+            ,
+            # Doubao (Volcengine Seedance)
+            "doubao": VideoProviderConfig(
+                provider_name="doubao",
+                model_name="doubao-seedance-1-0-pro-250528",
+                duration_capabilities=getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]),
+                max_duration=10,
+                default_duration=getattr(settings, "DEFAULT_SCENE_DURATION", 5),
+                amplification_ratio=settings.VIDEO_AMPLIFICATION_RATIO,
+                # 豆包支持首/尾帧（由工具按成本选择合适模型：lite-i2v 处理FLF，pro/pronew 处理单图/文本）
+                supports_first_last_frame=True,
+                resolution_options=["1280x720", "1920x1080"],
+                frame_rate_options=[24, 30]
+            )
         }
         
         return providers
@@ -125,7 +139,13 @@ class VideoConfigManager:
         return list(self._providers.keys())
     
     def get_system_duration_capability(self) -> Dict[str, int]:
-        """获取系统级别的总体时长能力"""
+        """获取系统级别的总体时长能力
+
+        计算方法：
+        - 单次最大时长 * 放大倍数 * 最大场景数 作为系统最大可达总时长（组合拼接）
+        - 单次最大时长 * 放大倍数 * 最小场景数 / 最大场景数 作为系统最小建议（保守）
+        最终再与系统配置的 MIN/MAX 进行裁剪。
+        """
         config = self.get_current_provider_config()
         
         # 计算系统总体能力 = 单次最大时长 * 放大倍数 * 场景数量
@@ -135,7 +155,8 @@ class VideoConfigManager:
         amplification = config.amplification_ratio
         
         system_min = single_max * amplification * min_scenes // max_scenes  # 保守估计
-        system_max = single_max * amplification
+        # 支持通过多场景拼接实现更长的总时长能力
+        system_max = single_max * amplification * max_scenes
         
         return {
             "min_duration": max(system_min, settings.SYSTEM_DURATION_CAPABILITY_MIN),

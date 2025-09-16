@@ -16,6 +16,7 @@ class ServiceProvider(Enum):
     RUNWAY = "runway"
     PIKA = "pika"
     MINIMAX = "minimax"
+    DOUBAO = "doubao"
 
 
 class LLMServiceInterface(ABC):
@@ -241,8 +242,36 @@ class ServiceManager:
             self._default_vlm_provider = provider
     
     def get_vlm_service(self, provider: ServiceProvider = None) -> VLMServiceInterface:
-        """获取VLM服务实例"""
-        target_provider = provider or self._default_vlm_provider
+        """获取VLM服务实例（优先环境变量 IMAGE_GENERATION_PROVIDER；其次 ai_config.tool_provider_mapping.image_generation）。"""
+        target_provider = provider
+        if target_provider is None:
+            try:
+                from ....core.config import settings  # type: ignore
+                env_name = getattr(settings, 'IMAGE_GENERATION_PROVIDER', None)
+                if isinstance(env_name, str) and env_name:
+                    name = env_name.strip().lower()
+                    mapping = {
+                        'zhipu': ServiceProvider.ZHIPU,
+                        'doubao': ServiceProvider.DOUBAO,
+                        'openai': ServiceProvider.OPENAI,
+                    }
+                    target_provider = mapping.get(name) or self._default_vlm_provider
+                else:
+                    # 尝试从 ai_config 读取工具提供商映射
+                    try:
+                        from ....core.ai_config import get_ai_config  # type: ignore
+                        ai_cfg = get_ai_config()
+                        name = (ai_cfg.get_tool_provider('image_generation') or '').strip().lower()
+                        mapping = {
+                            'zhipu': ServiceProvider.ZHIPU,
+                            'doubao': ServiceProvider.DOUBAO,
+                            'openai': ServiceProvider.OPENAI,
+                        }
+                        target_provider = mapping.get(name) or self._default_vlm_provider
+                    except Exception:
+                        target_provider = self._default_vlm_provider
+            except Exception:
+                target_provider = self._default_vlm_provider
         
         if target_provider not in self._vlm_services:
             raise ValueError(f"VLM Provider {target_provider} not available")
@@ -265,9 +294,47 @@ class ServiceManager:
             self._default_video_provider = provider
     
     def get_video_service(self, provider: ServiceProvider = None) -> VideoModelServiceInterface:
-        """获取视频服务实例"""
-        target_provider = provider or self._default_video_provider
-        
+        """获取视频服务实例（优先环境 VIDEO_GENERATION_PROVIDER；其次 ai_config.tool_provider_mapping.video_generation_tool）。"""
+        # 允许通过环境变量/配置覆盖默认 provider（与 VideoConfigManager 的 provider 一致）
+        target_provider = provider
+        if target_provider is None:
+            try:
+                # 延迟导入，避免循环依赖
+                from ....core.config import settings  # type: ignore
+                env_name = getattr(settings, 'VIDEO_GENERATION_PROVIDER', None)
+                if isinstance(env_name, str) and env_name:
+                    # 将字符串映射到枚举值
+                    name = env_name.strip().lower()
+                    mapping = {
+                        'zhipu': ServiceProvider.ZHIPU,
+                        'openai': ServiceProvider.OPENAI,
+                        'anthropic': ServiceProvider.ANTHROPIC,
+                        'stability': ServiceProvider.STABILITY,
+                        'runway': ServiceProvider.RUNWAY,
+                        'pika': ServiceProvider.PIKA,
+                        'minimax': ServiceProvider.MINIMAX,
+                        'doubao': ServiceProvider.DOUBAO,
+                    }
+                    target_provider = mapping.get(name) or self._default_video_provider
+                else:
+                    # 尝试从 ai_config 读取工具提供商映射
+                    try:
+                        from ....core.ai_config import get_ai_config  # type: ignore
+                        ai_cfg = get_ai_config()
+                        name = (ai_cfg.get_tool_provider('video_generation_tool') or '').strip().lower()
+                        mapping = {
+                            'zhipu': ServiceProvider.ZHIPU,
+                            'doubao': ServiceProvider.DOUBAO,
+                            'runway': ServiceProvider.RUNWAY,
+                            'pika': ServiceProvider.PIKA,
+                            'minimax': ServiceProvider.MINIMAX,
+                        }
+                        target_provider = mapping.get(name) or self._default_video_provider
+                    except Exception:
+                        target_provider = self._default_video_provider
+            except Exception:
+                target_provider = self._default_video_provider
+
         if target_provider not in self._video_services:
             raise ValueError(f"Video Provider {target_provider} not available")
         
@@ -341,27 +408,45 @@ def _initialize_default_services():
     """初始化默认AI服务"""
     manager = get_service_manager()
     
-    # 注册zhipu服务（当前唯一实现）
+    # 注册zhipu服务
     try:
         from .zhipu_services import ZhipuLLMService, ZhipuVLMService, ZhipuVideoService
-        
-        # 注册LLM服务
-        zhipu_llm = ZhipuLLMService()
+        # 从 ai_config 注入 provider 级超时/默认模型，避免服务内使用硬默认
+        zhipu_llm_cfg = {}
+        try:
+            from ....core.ai_config import get_ai_config  # type: ignore
+            ai_cfg = get_ai_config()
+            pcfg = ai_cfg.get_provider_config('zhipu')
+            if pcfg:
+                if getattr(pcfg, 'timeout', None):
+                    zhipu_llm_cfg['timeout'] = int(pcfg.timeout)
+                if getattr(pcfg, 'default_model', None):
+                    zhipu_llm_cfg['default_model'] = pcfg.default_model
+        except Exception:
+            pass
+        zhipu_llm = ZhipuLLMService(config=zhipu_llm_cfg)
         if zhipu_llm.is_available():
             manager.register_llm_service(ServiceProvider.ZHIPU, zhipu_llm)
-        
-        # 注册VLM服务
         zhipu_vlm = ZhipuVLMService()
         if zhipu_vlm.is_available():
             manager.register_vlm_service(ServiceProvider.ZHIPU, zhipu_vlm)
-        
-        # 注册视频服务
         zhipu_video = ZhipuVideoService()
         if zhipu_video.is_available():
             manager.register_video_service(ServiceProvider.ZHIPU, zhipu_video)
-            
     except ImportError as e:
         print(f"Warning: Failed to initialize Zhipu services: {e}")
+
+    # 注册Doubao（可选）
+    try:
+        from .doubao_services import DoubaoVideoService, DoubaoVLMService
+        doubao_video = DoubaoVideoService()
+        if doubao_video.is_available():
+            manager.register_video_service(ServiceProvider.DOUBAO, doubao_video)
+        doubao_vlm = DoubaoVLMService()
+        if doubao_vlm.is_available():
+            manager.register_vlm_service(ServiceProvider.DOUBAO, doubao_vlm)
+    except Exception as e:
+        print(f"Warning: Failed to initialize Doubao services: {e}")
     
     # 未来可以注册更多供应商
     # try:

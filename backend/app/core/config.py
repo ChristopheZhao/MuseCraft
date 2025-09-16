@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     GENERATED_PATH: str = config("GENERATED_PATH", default="./storage/generated")
     TEMP_PATH: str = config("TEMP_PATH", default="./storage/temp")
     MAX_FILE_SIZE: int = config("MAX_FILE_SIZE", default=100, cast=int)  # MB
+    # File download/upload robustness
+    FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=120, cast=int)
+    FILE_STORAGE_TOOL_TIMEOUT: int = config("FILE_STORAGE_TOOL_TIMEOUT", default=120, cast=int)
+    FILE_STORAGE_DOWNLOAD_RETRIES: int = config("FILE_STORAGE_DOWNLOAD_RETRIES", default=3, cast=int)
     
     # AWS S3 Settings
     AWS_ACCESS_KEY_ID: Optional[str] = config("AWS_ACCESS_KEY_ID", default=None)
@@ -93,6 +97,35 @@ class Settings(BaseSettings):
     GLM_DEFAULT_MODEL: str = config("GLM_DEFAULT_MODEL", default="glm-4-plus")
     DOUBAO_API_KEY: Optional[str] = config("DOUBAO_API_KEY", default=None)
     DOUBAO_BASE_URL: str = config("DOUBAO_BASE_URL", default="https://ark.cn-beijing.volces.com")
+    # Doubao (Volcengine) Video/Image API path overrides (tenant-specific gateways)
+    # For contents-based task gateway (recommended for Seedance video):
+    #   DOUBAO_VIDEO_CREATE_PATH=/api/v3/contents/generations/tasks
+    #   DOUBAO_VIDEO_QUERY_PATH=/api/v3/contents/generations/tasks/{task_id}
+    # For legacy videos gateway (if your tenant uses it):
+    #   DOUBAO_VIDEO_CREATE_PATH=/api/v3/videos/generations
+    #   DOUBAO_VIDEO_QUERY_PATH=/api/v3/videos/generations/{task_id}
+    DOUBAO_VIDEO_CREATE_PATH: str = config(
+        "DOUBAO_VIDEO_CREATE_PATH",
+        default="/api/v3/contents/generations/tasks",
+    )
+    DOUBAO_VIDEO_QUERY_PATH: str = config(
+        "DOUBAO_VIDEO_QUERY_PATH",
+        default="/api/v3/contents/generations/tasks/{task_id}",
+    )
+    # Optional: model overrides per mode (text-to-video, single image-to-video, first/last frame)
+    # Recommended defaults (can be overridden per tenant):
+    # - PRO (text-to-video, and supports first-frame i2v): doubao-seedance-1-0-pro-250528
+    # - Lite i2v (first/last-frame and reference image): doubao-seedance-1-0-lite-i2v-250428
+    # - Lite t2v: doubao-seedance-1-0-lite-t2v-250428
+    DOUBAO_T2V_MODEL: str = config("DOUBAO_T2V_MODEL", default="doubao-seedance-1-0-pro-250528")
+    # doubao-seedance-1-0-lite-i2v-250428
+    DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
+    # doubao-seedance-1-0-pro-250528
+    # DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-pro-250528")
+    DOUBAO_I2V_SINGLE_ALTER_MODEL: str = config("DOUBAO_I2V_SINGLE_ALTER_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
+    DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
+    # Doubao image generation (Seedream)
+    DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
     
     # Image Generation APIs
     MIDJOURNEY_API_KEY: Optional[str] = config("MIDJOURNEY_API_KEY", default=None)
@@ -160,15 +193,18 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = config("LOG_LEVEL", default="DEBUG")
     LOG_FORMAT: str = config("LOG_FORMAT", default="json")
     
-    # Video Generation System Configuration
-    VIDEO_GENERATION_PROVIDER: str = config("VIDEO_GENERATION_PROVIDER", default="cogvideox-3")
+    # Video Generation System Configuration,support cogvideox-3, doubao
+    VIDEO_GENERATION_PROVIDER: str = config("VIDEO_GENERATION_PROVIDER", default="doubao")
+    # Image Generation System Configuration,support zhipu, doubao
+    IMAGE_GENERATION_PROVIDER: str = config("IMAGE_GENERATION_PROVIDER", default="doubao")
     VIDEO_DURATION_CAPABILITIES: List[int] = [5, 10]  # Available duration options for current provider
+    DEFAULT_VIDEO_RESOLUTION: str = config("DEFAULT_VIDEO_RESOLUTION", default="1280x720")
     VIDEO_AMPLIFICATION_RATIO: int = config("VIDEO_AMPLIFICATION_RATIO", default=4, cast=int)  # 4x to create 20-40s videos
-    SYSTEM_DURATION_CAPABILITY_MIN: int = config("SYSTEM_DURATION_CAPABILITY_MIN", default=20, cast=int)  # seconds
-    SYSTEM_DURATION_CAPABILITY_MAX: int = config("SYSTEM_DURATION_CAPABILITY_MAX", default=60, cast=int)  # seconds
+    SYSTEM_DURATION_CAPABILITY_MIN: int = config("SYSTEM_DURATION_CAPABILITY_MIN", default=15, cast=int)  # seconds
+    SYSTEM_DURATION_CAPABILITY_MAX: int = config("SYSTEM_DURATION_CAPABILITY_MAX", default=80, cast=int)  # seconds
     # Scene Planning Configuration - MAS系统场景数量约束
     SCENE_COUNT_RANGE_MIN: int = config("SCENE_COUNT_RANGE_MIN", default=3, cast=int)  # MAS最小价值体现
-    SCENE_COUNT_RANGE_MAX: int = config("SCENE_COUNT_RANGE_MAX", default=7, cast=int)  # 成本控制考虑
+    SCENE_COUNT_RANGE_MAX: int = config("SCENE_COUNT_RANGE_MAX", default=10, cast=int)  # 成本控制考虑
     
     # Frame Generation Configuration
     FIRST_FRAME_GENERATION_MODE: str = config("FIRST_FRAME_GENERATION_MODE", default="static_snapshot")
@@ -189,6 +225,16 @@ class Settings(BaseSettings):
     # Global LLM token tiers (standard vs thinking)
     LLM_MAX_TOKENS_STANDARD: int = config("LLM_MAX_TOKENS_STANDARD", default=12800, cast=int)
     LLM_MAX_TOKENS_THINKING: int = config("LLM_MAX_TOKENS_THINKING", default=20000, cast=int)
+    # LLM回退超时策略（配置优先，避免代码常量）
+    LLM_PRIMARY_TIMEOUT_RATIO: float = config("LLM_PRIMARY_TIMEOUT_RATIO", default=0.5, cast=float)  # 主调占Agent超时比例
+    LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)
+    LLM_FALLBACK_TIMEOUT_MAX: int = config("LLM_FALLBACK_TIMEOUT_MAX", default=90, cast=int)
+    LLM_REQUEST_SAFETY_MARGIN: int = config("LLM_REQUEST_SAFETY_MARGIN", default=5, cast=int)
+
+    # Audio mixing strategy
+    AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # composer | agent
+    AUDIO_FADE_IN_DURATION: float = config("AUDIO_FADE_IN_DURATION", default=1.0, cast=float)
+    AUDIO_FADE_OUT_DURATION: float = config("AUDIO_FADE_OUT_DURATION", default=1.0, cast=float)
     # Image/Video analysis + prompt generation token budgets
     IMAGE_PROMPT_FROM_SCENE_MAX_TOKENS: int = config("IMAGE_PROMPT_FROM_SCENE_MAX_TOKENS", default=7168, cast=int)
     IMAGE_STYLE_ANALYSIS_MAX_TOKENS: int = config("IMAGE_STYLE_ANALYSIS_MAX_TOKENS", default=7168, cast=int)
@@ -230,6 +276,8 @@ class Settings(BaseSettings):
     IMAGE_GENERATOR_MAX_ITERATIONS: int = 10   # 图像生成Agent最大迭代次数
     ORCHESTRATOR_MAX_ITERATIONS: int = 10     # 编排Agent最大迭代次数
     ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
+    # Concept Planner agent-level timeout（配置化，避免代码常量）
+    CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=240, cast=int)
     
     # Video continuity persistence (domain policy)
     VIDEO_PERSIST_LAST_FRAME: bool = config("VIDEO_PERSIST_LAST_FRAME", default=False, cast=bool)
@@ -264,7 +312,11 @@ class Settings(BaseSettings):
     IMAGE_GENERATION_TOOL_TIMEOUT: int = config("IMAGE_GENERATION_TOOL_TIMEOUT", default=180, cast=int)
     AUDIO_GENERATION_TOOL_TIMEOUT: int = config("AUDIO_GENERATION_TOOL_TIMEOUT", default=240, cast=int)
     # HTTP下载类（如从第三方拉取音频/视频到本地）超时，供 file_storage_tool 使用
-    FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=240, cast=int)
+    FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=300, cast=int)
+    # 保持网络通用性：不增加客户端网络相关配置，统一遵循系统/进程代理
+    NETWORK_DIRECT_FALLBACK_ON_TIMEOUT: bool = config(
+        "NETWORK_DIRECT_FALLBACK_ON_TIMEOUT", default=False, cast=bool
+    )  # 超时后是否做一次“绕过系统代理”的直连重试（默认关闭，保持供应商/环境无关）
     # Agent-level end-to-end timeouts
     VIDEO_GENERATOR_TIMEOUT_SECONDS: int = config("VIDEO_GENERATOR_TIMEOUT_SECONDS", default=1800, cast=int)
     

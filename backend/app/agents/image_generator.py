@@ -61,14 +61,34 @@ class ImageGeneratorAgent(ReActAgent):
         scenes_to_generate = []
         scenes_to_skip = []
         
+        # 准备概念层 per-scene 角色出现映射（作为固定记忆，不做文本匹配）
+        concept_scene_map = {}
+        try:
+            cp = concept_plan or {}
+            for s in (cp.get('scenes') or []):
+                try:
+                    sn = int(s.get('scene_number')) if s.get('scene_number') is not None else None
+                except Exception:
+                    sn = None
+                if sn is None:
+                    continue
+                present = (((s.get('content_elements') or {}).get('characters_present')) or [])
+                concept_scene_map[sn] = present
+        except Exception:
+            concept_scene_map = {}
+
         for scene in scenes_data:
             image_strategy = getattr(scene, 'image_generation_strategy', 'new')
             if image_strategy == 'new':
+                present = getattr(scene, 'characters_present', []) or concept_scene_map.get(getattr(scene, 'scene_number', None)) or []
+                descs = getattr(scene, 'character_descriptions', []) or []
                 scenes_to_generate.append({
                     "scene_number": scene.scene_number,
                     "title": getattr(scene, 'title', ''),
                     "visual_description": getattr(scene, 'visual_description', ''),
-                    "duration": getattr(scene, 'duration', 0)
+                    "duration": getattr(scene, 'duration', 0),
+                    "characters_present": present,
+                    "character_descriptions": descs,
                 })
             else:
                 scenes_to_skip.append({
@@ -119,14 +139,33 @@ class ImageGeneratorAgent(ReActAgent):
         scenes_data = getattr(ws_obj, 'scenes', [])
 
         scenes_to_generate = []
+        # 概念层 per-scene 角色出现（固定记忆）
+        concept_scene_map = {}
+        try:
+            cp = concept_plan or {}
+            for s in (cp.get('scenes') or []):
+                try:
+                    sn = int(s.get('scene_number')) if s.get('scene_number') is not None else None
+                except Exception:
+                    sn = None
+                if sn is None:
+                    continue
+                present = (((s.get('content_elements') or {}).get('characters_present')) or [])
+                concept_scene_map[sn] = present
+        except Exception:
+            concept_scene_map = {}
         scenes_to_skip = []
         for scene in scenes_data:
             if getattr(scene, 'image_generation_strategy', 'new') == 'new':
+                present = getattr(scene, 'characters_present', []) or concept_scene_map.get(getattr(scene, 'scene_number', None)) or []
+                descs = getattr(scene, 'character_descriptions', []) or []
                 scenes_to_generate.append({
                     "scene_number": scene.scene_number,
                     "title": getattr(scene, 'title', ''),
                     "visual_description": getattr(scene, 'visual_description', ''),
-                    "duration": getattr(scene, 'duration', 0)
+                    "duration": getattr(scene, 'duration', 0),
+                    "characters_present": present,
+                    "character_descriptions": descs,
                 })
             else:
                 scenes_to_skip.append({
@@ -180,6 +219,49 @@ class ImageGeneratorAgent(ReActAgent):
         self.iteration_context["working_state"] = working_state
         return working_state
 
+    def get_observation_schema(self) -> Dict[str, Any]:
+        """覆盖基座的通用Schema：
+        - scene_number 收紧为整数或仅由数字组成的字符串，避免空串/非数字进入。
+        仅用于LLM结构化观测提示与本地校验提示，不改变ReActAgent的运行逻辑。
+        """
+        return {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "object",
+                    "properties": {
+                        "total": {"type": "integer"},
+                        "ready": {"type": "integer"},
+                        "pending": {"type": "integer"},
+                        "completed": {"type": "integer"},
+                        "failed": {"type": "integer"}
+                    },
+                    "required": ["total", "ready", "pending", "completed", "failed"]
+                },
+                "scenes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_number": {
+                                "oneOf": [
+                                    {"type": "integer"},
+                                    {"type": "string", "pattern": "^[0-9]+$"}
+                                ]
+                            },
+                            "status": {"type": "string", "enum": ["ready", "pending", "completed", "failed"]},
+                            "missing": {"type": "array", "items": {"type": "string"}},
+                            "depends_on_scene": {"type": ["integer", "string", "null"]},
+                            "rationale": {"type": "string"}
+                        },
+                        "required": ["scene_number", "status"]
+                    }
+                },
+                "notes": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["summary", "scenes"]
+        }
+
     async def _observe_current_state(
         self,
         input_data: Dict[str, Any],
@@ -214,16 +296,13 @@ class ImageGeneratorAgent(ReActAgent):
                 # 兼容/归一化：用 scenes[].status 统计 pending，以防LLM填充不一致
                 try:
                     # 将 ready 视为“可执行的待处理”，与 pending 一起计入待办
-                    pending_ids = [
+                    pending_ids_raw = [
                         it.get('scene_number')
                         for it in (obs.get('scenes') or [])
-                        if (
-                            isinstance(it, dict)
-                            and (it.get('status') in ("pending", "ready"))
-                        )
+                        if (isinstance(it, dict) and (it.get('status') in ("pending", "ready")))
                     ]
                 except Exception:
-                    pending_ids = []
+                    pending_ids_raw = []
                 # 仅用于日志观测：ready 集合（不参与 pending 统计）
                 try:
                     ready_ids = [
@@ -247,34 +326,56 @@ class ImageGeneratorAgent(ReActAgent):
                     scenes_catalog = {int(s.get('scene_number')): s for s in (ctx.get("scenes_to_generate", []) or [])}
                 except Exception:
                     scenes_catalog = {}
-                pending_scenes = []
-                for sid in pending_ids:
+                # 过滤无效ID与已完成/失败ID，避免重复执行
+                try:
+                    ws_local = dict(self.iteration_context.get("working_state", {}) or {})
+                    comp_list = ws_local.get('completed_scenes') or []
+                    if isinstance(comp_list, dict):
+                        completed_set = {int(k) for k in comp_list.keys() if str(k).isdigit()}
+                    else:
+                        completed_set = {int(x.get('scene_number')) for x in comp_list if isinstance(x, dict) and str(x.get('scene_number')).isdigit()}
+                    fail_list = ws_local.get('failed_scenes') or []
+                    failed_set = {int(x.get('scene_number')) for x in fail_list if isinstance(x, dict) and str(x.get('scene_number')).isdigit()}
+                except Exception:
+                    completed_set, failed_set = set(), set()
+
+                pending_ids_sanitized: list[int] = []
+                for sid in pending_ids_raw:
                     try:
-                        rec = scenes_catalog.get(int(sid))
-                        if rec:
-                            pending_scenes.append(rec)
-                        else:
-                            pending_scenes.append({"scene_number": sid})
+                        sid_int = int(sid)
                     except Exception:
-                        pending_scenes.append({"scene_number": sid})
+                        # 跳过空/非法 scene 标识，避免构造幽灵任务
+                        continue
+                    if sid_int in completed_set or sid_int in failed_set:
+                        # LLM 观测可能误判；以本地事实为准，从待办中剔除
+                        continue
+                    pending_ids_sanitized.append(sid_int)
+
+                pending_scenes: list[dict] = []
+                for sid_int in pending_ids_sanitized:
+                    rec = scenes_catalog.get(sid_int)
+                    if rec:
+                        pending_scenes.append(rec)
+                    else:
+                        pending_scenes.append({"scene_number": sid_int})
                 # 输出观测日志（以包含 ready 的“可执行待办”计数为准）
                 try:
                     self.logger.info(
-                        f"OBS_STATE: ready={len(ready_ids) or int(sm.get('ready',0))} pending={len(pending_ids)} "
+                        f"OBS_STATE: ready={len(ready_ids) or int(sm.get('ready',0))} pending={len(pending_ids_sanitized)} "
                         f"completed={int(sm.get('completed',0))} failed={int(sm.get('failed',0))}"
                     )
                     if ready_ids:
                         self.logger.info(f"OBS_STATE: ready_ids={ready_ids}")
-                    if pending_ids:
-                        self.logger.info(f"OBS_STATE: pending_ids={pending_ids}")
+                    if pending_ids_sanitized:
+                        self.logger.info(f"OBS_STATE: pending_ids={pending_ids_sanitized}")
                 except Exception:
                     pass
                 # 写出一致的任务状态
                 obs_out = dict(obs)
                 obs_out["pending_scenes"] = pending_scenes
                 # 统一：pending 计数包含 ready+pending
-                obs_out.setdefault('summary', {})['pending'] = len(pending_ids)
-                obs_out["task_status"] = "completed" if len(pending_ids) == 0 else "in_progress"
+                obs_out.setdefault('summary', {})['pending'] = len(pending_ids_sanitized)
+                obs_out["task_status"] = "completed" if len(pending_ids_sanitized) == 0 else "in_progress"
                 return obs_out
         except Exception as e:
             self.logger.warning(f"结构化观察失败，使用本地兜底：{e}")
@@ -690,7 +791,94 @@ class ImageGeneratorAgent(ReActAgent):
         if not observation:
             # 兜底：从 working_state 推导最小观察
             observation = {"summary": {}, "scenes": [], "pending_scenes": scenes_batch}
-        observation_json = json.dumps(observation, ensure_ascii=False)
+        # 将全局风格指导与角色事实并入观测，作为FC的“中立事实”输入
+        try:
+            obs_aug = dict(observation)
+            ctx = (self.iteration_context.get("working_state", {}) or {}).get("context", {}) or {}
+            # 风格指导：来自 intelligent_style（概念决策），作为高层抽象存在
+            obs_aug["style_guidance"] = style_guidance or ctx.get("intelligent_style", {}) or {}
+            # 角色事实：从 scenes_to_generate / WF.scene / concept_plan 提取
+            char_map = {}
+            try:
+                scenes_cat = {int(s.get('scene_number')): s for s in (ctx.get('scenes_to_generate') or []) if isinstance(s, dict) and s.get('scene_number') is not None}
+            except Exception:
+                scenes_cat = {}
+            # WF 优先
+            try:
+                wf_id = ctx.get('workflow_state_id')
+                if wf_id:
+                    from ..core.workflow_state import workflow_manager
+                    wf = workflow_manager.get_workflow(wf_id)
+                else:
+                    wf = None
+            except Exception:
+                wf = None
+            batch_ids = [s.get('scene_number') for s in (scenes_batch or []) if isinstance(s, dict)]
+            for sid in batch_ids:
+                try:
+                    sn = int(sid) if sid is not None else None
+                except Exception:
+                    sn = None
+                if sn is None:
+                    continue
+                names = []
+                descs = []
+                if wf:
+                    try:
+                        sc = wf.get_scene(sn)
+                        if sc:
+                            n = list(getattr(sc, 'characters_present', []) or [])
+                            d = list(getattr(sc, 'character_descriptions', []) or [])
+                            if n:
+                                names = [str(x) for x in n if str(x).strip()]
+                            if d:
+                                descs = [str(x) for x in d if str(x).strip()]
+                    except Exception:
+                        pass
+                if (not names) and scenes_cat.get(sn):
+                    try:
+                        n = list(scenes_cat[sn].get('characters_present') or [])
+                        if n:
+                            names = [str(x) for x in n if str(x).strip()]
+                        d = list(scenes_cat[sn].get('character_descriptions') or [])
+                        if d:
+                            descs = [str(x) for x in d if str(x).strip()]
+                    except Exception:
+                        pass
+                if not names:
+                    try:
+                        cp = ctx.get('concept_plan') or {}
+                        for sdef in (cp.get('scenes') or []):
+                            sid2 = int(sdef.get('scene_number')) if sdef.get('scene_number') is not None else None
+                            if sid2 == sn:
+                                nn = (((sdef.get('content_elements') or {}).get('characters_present')) or [])
+                                if nn:
+                                    names = [str(x) for x in nn if str(x).strip()]
+                                break
+                    except Exception:
+                        pass
+                if names or descs:
+                    char_map[sn] = {"names": names, "descriptions": descs}
+            obs_aug["characters_map"] = char_map
+            observation_json = json.dumps(obs_aug, ensure_ascii=False)
+        except Exception:
+            observation_json = json.dumps(observation, ensure_ascii=False)
+        # 适度诊断：DEBUG 级别输出可见的风格/角色事实摘要（不打印大对象）
+        try:
+            import logging as _lg
+            if self.logger.isEnabledFor(_lg.DEBUG):
+                try:
+                    obs_preview = json.loads(observation_json)
+                except Exception:
+                    obs_preview = {}
+                ch_map = obs_preview.get('characters_map') or {}
+                ch_cnt = len(ch_map) if isinstance(ch_map, dict) else 0
+                has_style = bool(obs_preview.get('style_guidance'))
+                self.logger.debug(
+                    f"FC_FACTS(image): style={'yes' if has_style else 'no'}, roles_scenes={ch_cnt}"
+                )
+        except Exception:
+            pass
 
         variables = {
             "plan_digest": plan_digest,
@@ -871,20 +1059,68 @@ class ImageGeneratorAgent(ReActAgent):
             for k, v in (delta.get('prepared_prompts') or {}).items():
                 avail_prompts[str(k)] = v
 
-            # 合并完成/失败
-            completed_scenes = list(ws.get("completed_scenes", []) or [])
+            # 去重合并完成/失败：以 scene_number 为键构建映射，优先保留含产物的记录
+            prev_completed = ws.get("completed_scenes", []) or []
+            completed_map: Dict[int, Dict[str, Any]] = {}
+            if isinstance(prev_completed, dict):
+                # 兼容：若此前为映射，直接拷贝
+                for k, v in prev_completed.items():
+                    try:
+                        completed_map[int(k)] = v
+                    except Exception:
+                        continue
+            else:
+                for it in prev_completed:
+                    if not isinstance(it, dict):
+                        continue
+                    sn = it.get('scene_number')
+                    try:
+                        sn_int = int(sn) if sn is not None else None
+                    except Exception:
+                        sn_int = None
+                    if sn_int is None:
+                        continue
+                    existing = completed_map.get(sn_int)
+                    if existing is None:
+                        completed_map[sn_int] = it
+                    else:
+                        # 若新旧都存在，保留包含本地路径/URL的较优者
+                        def _score(x: Dict[str, Any]) -> int:
+                            return int(bool(x.get('image_url'))) + int(bool(x.get('image_path') or x.get('file_path')))
+                        if _score(it) >= _score(existing):
+                            completed_map[sn_int] = it
+
             failed_scenes = list(ws.get("failed_scenes", []) or [])
             artifact_keys = set(delta.get('artifact_scenes') or set())
+
             for r in generation_results or []:
                 if not r.get('success'):
                     failed_scenes.append(r)
                     continue
                 sn = r.get('scene_number')
-                if sn is not None and (str(sn) in artifact_keys or sn in artifact_keys):
-                    completed_scenes.append(r)
+                try:
+                    sn_int = int(sn) if sn is not None else None
+                except Exception:
+                    sn_int = None
+                if sn_int is None:
+                    continue
+                # 以产物证据或增量标记为准
+                has_artifact = bool(r.get('image_url') or r.get('image_path') or r.get('file_path'))
+                in_delta = (str(sn_int) in artifact_keys) or (sn_int in artifact_keys)
+                if has_artifact or in_delta:
+                    prev = completed_map.get(sn_int)
+                    if prev is None:
+                        completed_map[sn_int] = r
+                    else:
+                        # 保留包含产物的更优记录
+                        def _score(x: Dict[str, Any]) -> int:
+                            return int(bool(x.get('image_url'))) + int(bool(x.get('image_path') or x.get('file_path')))
+                        if _score(r) >= _score(prev):
+                            completed_map[sn_int] = r
 
-            completed_scene_numbers = {s.get("scene_number") for s in completed_scenes}
-            failed_scene_numbers = {s.get("scene_number") for s in failed_scenes}
+            completed_list = list(completed_map.values())
+            completed_scene_numbers = set(completed_map.keys())
+            failed_scene_numbers = {s.get("scene_number") for s in failed_scenes if isinstance(s, dict)}
             remaining_scenes = [
                 s for s in scenes_to_generate
                 if s.get("scene_number") not in completed_scene_numbers
@@ -898,7 +1134,7 @@ class ImageGeneratorAgent(ReActAgent):
             )
             return {
                 'context_updates': {
-                    'completed_scenes': completed_scenes,
+                    'completed_scenes': completed_list,
                     'failed_scenes': failed_scenes,
                     'available_prompts': avail_prompts,
                 },
@@ -957,8 +1193,12 @@ class ImageGeneratorAgent(ReActAgent):
             self.iteration_context['working_state'] = ws
             # 诊断：输出内部完成键集合
             try:
-                keys = [int(it.get('scene_number')) for it in (completed_list or []) if isinstance(it, dict) and it.get('scene_number') is not None]
-                self.logger.info(f"REFLECT_DIAG: completed_internal_keys={sorted(keys)}")
+                keys = sorted({
+                    int(it.get('scene_number'))
+                    for it in (completed_list or [])
+                    if isinstance(it, dict) and it.get('scene_number') is not None and str(it.get('scene_number')).isdigit()
+                })
+                self.logger.info(f"REFLECT_DIAG: completed_internal_keys={keys}")
             except Exception:
                 pass
         except Exception:

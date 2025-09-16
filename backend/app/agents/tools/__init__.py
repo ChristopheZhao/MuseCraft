@@ -19,11 +19,13 @@ from .ai_services.intelligent_scene_planning_tool import IntelligentScenePlannin
 from .ai_services.script_generation_tool import ScriptGenerationTool
 from .ai_services.image_generation_tool import ImageGenerationTool
 from .ai_services.quality_analysis_tool import QualityAnalysisTool
+from .ai_services.role_analysis_tool import RoleAnalysisTool
 
 # Video Processing Tools
 from .video_processing.ffmpeg_tool import FFmpegTool
 from .video_processing.minimax_video_tool import MiniMaxVideoTool
 from .media_processing.audio_processor import AudioProcessorTool
+from .media_processing.audio_analysis_tool import AudioAnalysisTool
 
 # Storage Tools
 from .storage.file_storage_tool import FileStorageTool
@@ -53,6 +55,7 @@ def register_default_tools():
     tool_registry.register_tool(FFmpegTool)
     tool_registry.register_tool(MiniMaxVideoTool)
     tool_registry.register_tool(AudioProcessorTool)
+    tool_registry.register_tool(AudioAnalysisTool)
     
     # Register storage tools
     tool_registry.register_tool(FileStorageTool)
@@ -71,6 +74,7 @@ def register_default_tools():
     tool_registry.register_tool(ScriptGenerationTool)
     tool_registry.register_tool(ImageGenerationTool)
     tool_registry.register_tool(QualityAnalysisTool)
+    tool_registry.register_tool(RoleAnalysisTool)
     # Register shared memory capability
     tool_registry.register_tool(MemoryTool)
     # Register orchestrator control
@@ -105,6 +109,7 @@ __all__ = [
     "ScriptGenerationTool", 
     "ImageGenerationTool",
     "QualityAnalysisTool",
+    "RoleAnalysisTool",
     
     # Video Processing Tools
     "FFmpegTool",

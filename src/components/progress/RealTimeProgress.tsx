@@ -11,7 +11,9 @@ import {
   TrendingUp,
   Activity,
   Timer,
-  Cpu
+  Cpu,
+  Image as ImageIcon,
+  Film
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useI18n } from '@/i18n/I18nProvider';
@@ -26,7 +28,7 @@ interface ProgressMetrics {
 }
 
 const RealTimeProgress: React.FC = () => {
-  const { agents, currentRequest, ui } = useAppStore();
+  const { agents, currentRequest, ui, scenesPlanned, imagesGenerated, videosGenerated } = useAppStore();
   const { t } = useI18n();
   const [metrics, setMetrics] = useState<ProgressMetrics>({
     overallProgress: 0,
@@ -89,8 +91,8 @@ const RealTimeProgress: React.FC = () => {
     { name: t('progress.step.concept'), agent: 'concept-generator', icon: Zap },
     { name: t('progress.step.script'), agent: 'script-writer', icon: CheckCircle },
     { name: t('progress.step.visual'), agent: 'image-generator', icon: CheckCircle },
+    { name: t('progress.step.video'), agent: 'video-generator', icon: CheckCircle },
     { name: t('progress.step.voice'), agent: 'voice-synthesizer', icon: CheckCircle },
-    { name: t('progress.step.video'), agent: 'video-composer', icon: CheckCircle },
     { name: t('progress.step.quality'), agent: 'quality-controller', icon: CheckCircle },
   ];
 
@@ -107,7 +109,7 @@ const RealTimeProgress: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white/80 backdrop-blur border-b border-gray-100 flex items-center justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900">
             {t('progress.title')}
@@ -140,6 +142,9 @@ const RealTimeProgress: React.FC = () => {
             <p className="text-gray-600">
               {metrics.currentPhase}
             </p>
+            {typeof scenesPlanned === 'number' && (
+              <p className="text-gray-600 mt-1">已规划场景：{scenesPlanned}</p>
+            )}
           </div>
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">
@@ -154,6 +159,18 @@ const RealTimeProgress: React.FC = () => {
                 {metrics.completedTasks}/{metrics.totalTasks} {t('progress.tasks_unit')}
               </span>
             </div>
+            {typeof imagesGenerated === 'number' && (
+              <div className="flex items-center space-x-2">
+                <ImageIcon className="w-5 h-5 text-purple-500" />
+                <span className="text-sm font-medium text-gray-700">图片 {imagesGenerated}</span>
+              </div>
+            )}
+            {typeof videosGenerated === 'number' && (
+              <div className="flex items-center space-x-2">
+                <Film className="w-5 h-5 text-indigo-500" />
+                <span className="text-sm font-medium text-gray-700">视频 {videosGenerated}</span>
+              </div>
+            )}
           </div>
         </div>
 

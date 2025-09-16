@@ -12,6 +12,7 @@ from ....core.database import get_db
 from ....models import Task, TaskStatus, TaskType, Scene, Resource, AgentExecution
 from ....agents import OrchestratorAgent
 from ....services.task_queue import TaskQueueService
+from ....core.config import settings
 
 
 router = APIRouter()
@@ -28,6 +29,7 @@ class TaskCreateRequest(BaseModel):
     user_prompt: str = Field(..., description="User's video generation request")
     style_preference: Optional[str] = Field(None, description="Optional user style preference hint")
     duration: int = Field(default=30, ge=5, le=300, description="Video duration in seconds")
+    resolution: Optional[str] = Field(default=None, description="Preferred output resolution (e.g., 720p, 1080p)")
     aspect_ratio: str = Field(default="16:9", description="Video aspect ratio")
     session_id: Optional[str] = Field(None, description="Session ID for tracking")
 
@@ -100,6 +102,7 @@ async def create_task(
                 "user_prompt": request.user_prompt,
                 "style_preference": request.style_preference,
                 "duration": request.duration,
+                "resolution": request.resolution or settings.DEFAULT_VIDEO_RESOLUTION,
                 "aspect_ratio": request.aspect_ratio
             },
             estimated_duration=request.duration * 10  # Rough estimate: 10 seconds processing per 1 second video

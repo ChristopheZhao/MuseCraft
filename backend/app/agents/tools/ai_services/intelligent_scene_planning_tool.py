@@ -230,10 +230,22 @@ class IntelligentScenePlanningTool(AsyncTool):
         try:
             # 使用LLM进行智能规划
             if self.llm_service:
+                # 从 ai_config 中读取工具模型映射
+                try:
+                    from ....core.ai_config import get_ai_config
+                    ai_cfg = get_ai_config()
+                    cfg_model = ai_cfg.get_model_for_tool("intelligent_scene_planning")
+                    mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+                except Exception:
+                    cfg_model = None
+                    mcfg = None
+                req_model = cfg_model or None
+                req_temp = 0.3 if not (mcfg and getattr(mcfg, 'temperature', None) is not None) else float(mcfg.temperature)
+
                 result = await self.llm_service.function_call(
                     messages=[{"role": "user", "content": planning_prompt}],
-                    temperature=0.3,
-                    model="glm-4-plus",
+                    temperature=req_temp,
+                    model=req_model,
                     response_format={"type": "json_object"}  # ✅ 确保JSON格式输出
                 )
                 

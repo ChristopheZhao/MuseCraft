@@ -119,26 +119,44 @@ class SceneContinuityAnalysisTool(AsyncTool):
                 include_first_scene_context=True, all_scenes=scenes
             )
             
-            # 调用LLM进行分析
-            from .zhipu_client import ZhipuClientTool
-            zhipu_tool = ZhipuClientTool(config=self.config)
-            
-            from ..base_tool import ToolInput
-            result = await zhipu_tool.execute(ToolInput(
-                action="generate_text",
-                parameters={
-                    "prompt": analysis_prompt,
-                    "model": "glm-4-plus",
-                    "temperature": 0.3,
-                    "response_format": {"type": "json_object"}
-                }
-            ))
+            # 调用LLM进行分析（供应商无关）
+            from ..tool_registry import get_tool_registry
+            from ..base_tool import ToolInput as TI
+            # 从 ai_config 中获取工具模型映射（可被参数覆盖）
+            try:
+                from ....core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                cfg_model = ai_cfg.get_model_for_tool("scene_continuity_analysis_tool")
+                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+                provider_name = ai_cfg.get_model_provider(cfg_model) if cfg_model else None
+            except Exception:
+                cfg_model = None
+                mcfg = None
+                provider_name = None
+            req_model = cfg_model or None
+            req_temp = 0.3 if not (mcfg and getattr(mcfg, 'temperature', None) is not None) else float(mcfg.temperature)
+
+            prov_alias = {"zhipu": "zhipu_client", "openai": "openai_client", "kimi": "kimi_client"}
+            provider_tool = prov_alias.get(provider_name or "zhipu", "zhipu_client")
+            provider = get_tool_registry().get_tool(provider_tool)
+
+            # Prefer strict JSON via json_completion
+            result = await provider.execute(TI(action="json_completion", parameters={
+                "prompt": analysis_prompt,
+                "model": req_model,
+                "temperature": req_temp,
+                "max_tokens": 2000
+            }))
             
             # 处理结果
-            if hasattr(result, 'result'):
-                response_content = result.result.get("content", "{}")
-            else:
-                response_content = result.get("content", "{}")
+            payload = getattr(result, 'result', result)
+            response_content = "{}"
+            if isinstance(payload, dict):
+                if payload.get("json_result") is not None:
+                    import json as _json
+                    response_content = _json.dumps(payload.get("json_result"), ensure_ascii=False)
+                else:
+                    response_content = payload.get("content", payload.get("raw_content", "{}"))
             
             # 解析JSON响应
             try:

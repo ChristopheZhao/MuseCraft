@@ -69,31 +69,63 @@ class MemoryWriter:
             # Heuristic mapping for Phase 1
             if task_type == TaskType.SCRIPT_WRITING:
                 # Write scene references (script/voice-over/etc.) as EPISODIC
-                payload = {
-                    "agent_role": "Script Writer - Scene References",
-                    "workflow_id": workflow_id,
-                    "scene_number": scene_number,
-                    "script_text": output.get("script_text") or output.get("script") or "",
-                    "voice_over_text": output.get("voice_over_text") or output.get("voice_over") or "",
-                    "content_development_arc": output.get("content_development_arc") or {},
-                }
-                mem_id = await self._gms.memory_manager.store_memory(
-                    content=payload,
-                    memory_type=MemoryType.EPISODIC,
-                    importance=MemoryImportance.MEDIUM,
-                    tags=["scene_references", f"scene_{scene_number}" if scene_number is not None else "scene_unknown"],
-                    agent_id="script_writer",
-                    task_id=workflow_id,
-                    metadata={"workflow_id": workflow_id, "scene_number": scene_number, "content_type": "scene_references"},
-                )
-                # metrics
-                try:
-                    dur_ms = int((datetime.now().timestamp() - start_ts) * 1000)
-                    await self._mon.record_metric("memory_write_total", 1, MetricType.COUNTER, labels={"task_type": task_type.value})
-                    await self._mon.record_metric("memory_write_duration_ms", dur_ms, MetricType.HISTOGRAM, labels={"task_type": task_type.value})
-                except Exception:
-                    pass
-                return mem_id
+                if (
+                    "script_text" in output
+                    or "voice_over_text" in output
+                    or "content_development_arc" in output
+                ):
+                    payload = {
+                        "agent_role": "Script Writer - Scene References",
+                        "workflow_id": workflow_id,
+                        "scene_number": scene_number,
+                        "script_text": output.get("script_text") or output.get("script") or "",
+                        "voice_over_text": output.get("voice_over_text") or output.get("voice_over") or "",
+                        "content_development_arc": output.get("content_development_arc") or {},
+                    }
+                    mem_id = await self._gms.memory_manager.store_memory(
+                        content=payload,
+                        memory_type=MemoryType.EPISODIC,
+                        importance=MemoryImportance.MEDIUM,
+                        tags=["scene_references", f"scene_{scene_number}" if scene_number is not None else "scene_unknown"],
+                        agent_id="script_writer",
+                        task_id=workflow_id,
+                        metadata={"workflow_id": workflow_id, "scene_number": scene_number, "content_type": "scene_references"},
+                    )
+                    # metrics
+                    try:
+                        dur_ms = int((datetime.now().timestamp() - start_ts) * 1000)
+                        await self._mon.record_metric("memory_write_total", 1, MetricType.COUNTER, labels={"task_type": task_type.value})
+                        await self._mon.record_metric("memory_write_duration_ms", dur_ms, MetricType.HISTOGRAM, labels={"task_type": task_type.value})
+                    except Exception:
+                        pass
+                    return mem_id
+
+                # Write role consistency snapshot (global/per-scene) as EPISODIC when provided
+                if ("roles" in output) or ("per_scene_roles" in output):
+                    payload = {
+                        "agent_role": "Role Consistency - Roles Snapshot",
+                        "workflow_id": workflow_id,
+                        "scene_number": scene_number,
+                        "roles": output.get("roles", []),
+                        "per_scene_roles": output.get("per_scene_roles", {}),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    mem_id = await self._gms.memory_manager.store_memory(
+                        content=payload,
+                        memory_type=MemoryType.EPISODIC,
+                        importance=MemoryImportance.HIGH,
+                        tags=["role_consistency", "roles_snapshot"],
+                        agent_id="script_writer",
+                        task_id=workflow_id,
+                        metadata={"workflow_id": workflow_id, "content_type": "roles_snapshot"},
+                    )
+                    try:
+                        dur_ms = int((datetime.now().timestamp() - start_ts) * 1000)
+                        await self._mon.record_metric("memory_write_total", 1, MetricType.COUNTER, labels={"task_type": task_type.value})
+                        await self._mon.record_metric("memory_write_duration_ms", dur_ms, MetricType.HISTOGRAM, labels={"task_type": task_type.value})
+                    except Exception:
+                        pass
+                    return mem_id
 
             if task_type == TaskType.IMAGE_GENERATION or task_type == TaskType.VIDEO_GENERATION:
                 # Persist lightweight execution metadata if present
