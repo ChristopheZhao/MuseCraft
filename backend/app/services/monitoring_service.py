@@ -83,7 +83,22 @@ class MonitoringService:
         
         # Initialize Redis for metrics storage
         self.redis_client = None
-        self._init_redis()
+        # Safely initialize async Redis from a sync context
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                loop.create_task(self._init_redis())
+            else:
+                asyncio.run(self._init_redis())
+        except Exception as _e:
+            self.logger.warning(f"Redis async init deferred: {_e}")
+            try:
+                self.redis_client = redis.from_url(settings.REDIS_URL)
+            except Exception:
+                self.redis_client = None
         
         # Metrics collection
         self.metrics_buffer: List[Metric] = []

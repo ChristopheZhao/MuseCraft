@@ -209,10 +209,22 @@ class ParameterOptimizationTool(AsyncTool):
             # 使用LLM分析（如果可用的话）
             if self.llm_service:
                 # 直接使用 chat_completion 并强制 JSON 输出，避免依赖 FC 计划文本
+                # 从 ai_config 读取工具模型映射
+                try:
+                    from ....core.ai_config import get_ai_config
+                    ai_cfg = get_ai_config()
+                    cfg_model = ai_cfg.get_model_for_tool("parameter_optimization")
+                    mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+                except Exception:
+                    cfg_model = None
+                    mcfg = None
+                req_model = cfg_model or None
+                req_temp = 0.3 if not (mcfg and getattr(mcfg, 'temperature', None) is not None) else float(mcfg.temperature)
+
                 result = await self.llm_service.chat_completion(
                     messages=[{"role": "user", "content": analysis_prompt}],
-                    temperature=0.3,
-                    model="glm-4-plus",
+                    temperature=req_temp,
+                    model=req_model,
                     response_format={"type": "json_object"}
                 )
                 

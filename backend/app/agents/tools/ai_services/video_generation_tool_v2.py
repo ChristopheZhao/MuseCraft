@@ -102,6 +102,28 @@ class VideoGenerationTool(AsyncTool):
         # 获取当前提供商配置用于动态schema
         provider_config = self.video_config.get_current_provider_config()
         
+        resolution_enum: List[str] = []
+        try:
+            base_resolutions = list(provider_config.resolution_options or [])
+            resolution_enum = list(base_resolutions)
+            alias_candidates = {
+                "480p": "720x480",
+                "720p": "1280x720",
+                "1080p": "1920x1080"
+            }
+            for alias, canonical in alias_candidates.items():
+                if canonical in base_resolutions and alias not in resolution_enum:
+                    resolution_enum.append(alias)
+        except Exception:
+            resolution_enum = []
+        resolution_schema: Dict[str, Any] = {
+            "type": "string",
+            "description": "可选：视频分辨率（如720p/1080p），影响画质与成本"
+        }
+        if resolution_enum:
+            resolution_schema["enum"] = resolution_enum
+        resolution_alias_schema: Dict[str, Any] = dict(resolution_schema)
+        resolution_alias_schema["description"] = "可选：分辨率简写（rs），含义同resolution"
         schemas = {
             "generate_video": {
                 "type": "object",
@@ -123,15 +145,13 @@ class VideoGenerationTool(AsyncTool):
                         "type": "string",
                         "description": "参考图像URL或base64数据（可选）"
                     },
+                    "resolution": resolution_schema,
+                    "rs": resolution_alias_schema,
                     "continuity_frame": {
                         "type": "string", 
                         "description": "场景连续性帧数据（可选，用于场景间的视觉连续性）"
                     },
-                    "model": {
-                        "type": "string",
-                        "enum": [provider_config.model_name],
-                        "description": f"视频生成模型，当前支持：{provider_config.model_name}"
-                    },
+                    # 不暴露模型参数，交由供应商适配层按输入模式自动选型
                     "first_frame_image": {
                         "type": "string",
                         "description": "首帧图像（可选，用于首尾帧模式）"
@@ -139,6 +159,38 @@ class VideoGenerationTool(AsyncTool):
                     "last_frame_image": {
                         "type": "string", 
                         "description": "尾帧图像（可选，用于首尾帧模式）"
+                    },
+                    # 结构化角色/风格/负向约束（可选，用于提示词合并）
+                    "character_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：角色设定列表（将在工具层合并到提示词）"
+                    },
+                    "character_constraints_struct": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "species_or_breed": {"type": "string"},
+                                "archetype_or_identity": {"type": "string"},
+                                "signature_outfit_or_props": {"type": "array", "items": {"type": "string"}},
+                                "key_traits": {"type": "array", "items": {"type": "string"}},
+                                "role": {"type": "string"}
+                            }
+                        },
+                        "description": "可选：结构化角色先验（包含物种/原型/标志道具等），优先使用"
+                    },
+                    "style_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：画风/美学/色彩/构图等风格约束（将在工具层合并到提示词）"
+                    },
+                    "negative_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：需要避免的元素列表（将合并到提示词）"
                     }
                 },
                 "required": ["prompt", "duration"]
@@ -154,8 +206,42 @@ class VideoGenerationTool(AsyncTool):
                     "depends_on_scene": {"type": ["integer", "string", "null"], "description": "可选：依赖的上一场景编号"},
                     "previous_video_url": {"type": "string", "description": "可选：上一场景视频URL；若提供工具将自动抽取尾帧"},
                     "image_url": {"type": "string", "description": "可选：参考图像URL（若无连续性信息）"},
-                    "model": {"type": "string", "enum": [provider_config.model_name], "description": f"视频生成模型，当前支持：{provider_config.model_name}"},
-                    "persist": {"type": "boolean", "description": "是否持久化产物（默认true）"}
+                    # 不暴露模型参数，交由供应商适配层按输入模式自动选型
+                    "persist": {"type": "boolean", "description": "是否持久化产物（默认true）"},
+                    # 结构化角色/风格/负向约束（可选，用于提示词合并）
+                    "character_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：角色设定列表（将在工具层合并到提示词）"
+                    },
+                    "resolution": resolution_schema,
+                    "rs": resolution_alias_schema,
+                    "character_constraints_struct": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "species_or_breed": {"type": "string"},
+                                "archetype_or_identity": {"type": "string"},
+                                "signature_outfit_or_props": {"type": "array", "items": {"type": "string"}},
+                                "key_traits": {"type": "array", "items": {"type": "string"}},
+                                "role": {"type": "string"}
+                            }
+                        },
+                        "description": "可选：结构化角色先验（包含物种/原型/标志道具等），优先使用"
+                    },
+                    "style_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：画风/美学/色彩/构图等风格约束（将在工具层合并到提示词）"
+                    },
+                    "negative_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选：需要避免的元素列表（将合并到提示词）"
+                    }
                 },
                 "required": ["scene_number", "prompt", "duration"]
             },
@@ -254,6 +340,111 @@ class VideoGenerationTool(AsyncTool):
                 raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
 
         prompt = params["prompt"]
+        # 合并结构化角色/风格/负向约束为提示词附加段（供应商无关、集中处理）
+        try:
+            char_cons = params.get("character_constraints") or []
+            char_struct = params.get("character_constraints_struct") or []
+            style_cons = params.get("style_constraints") or []
+            neg_cons = params.get("negative_constraints") or []
+            extra = []
+            # 角色约束（结构化）
+            if isinstance(char_cons, list) and char_cons:
+                if "角色设定" not in prompt:
+                    extra.append("角色设定：" + "；".join([str(x) for x in char_cons if isinstance(x, str) and x.strip()]))
+            # 结构化角色先验（优先）
+            if isinstance(char_struct, list) and char_struct:
+                lines = []
+                for it in char_struct:
+                    if not isinstance(it, dict):
+                        continue
+                    name = it.get('display_name') or it.get('name') or ''
+                    segs = []
+                    if it.get('archetype_or_identity'):
+                        segs.append(f"原型：{it.get('archetype_or_identity')}")
+                    if it.get('species_or_breed'):
+                        segs.append(f"物种：{it.get('species_or_breed')}")
+                    props = it.get('signature_outfit_or_props') or []
+                    if props:
+                        segs.append("标志道具：" + "、".join([str(p) for p in props if isinstance(p, str) and p.strip()]))
+                    traits = it.get('key_traits') or []
+                    if traits:
+                        segs.append("特征：" + "、".join([str(t) for t in traits if isinstance(t, str) and t.strip()]))
+                    role = it.get('role')
+                    if role:
+                        segs.append(f"叙事角色：{role}")
+                    line = (f"{name}：" if name else "") + "；".join(segs)
+                    if line.strip():
+                        lines.append(line)
+                if lines:
+                    extra.append("角色设定：" + "；".join(lines))
+            # 风格约束（优先使用 FC 提供）
+            if isinstance(style_cons, list) and style_cons:
+                extra.append("风格指导：" + "；".join([str(x) for x in style_cons if isinstance(x, str) and x.strip()]))
+            else:
+                # 软兜底（非侵入）：FC 未提供风格、且当前缺少强视觉锚点（T2V场景）时，基于WF概念计划提炼极简风格短语
+                try:
+                    has_continuity = bool(params.get("continuity_frame"))
+                    has_image = bool(params.get("image_url"))
+                    wf_id_fb = params.get("workflow_state_id")
+                    if (not has_continuity) and (not has_image) and wf_id_fb:
+                        from ....core.workflow_state import workflow_manager
+                        wf_fb = workflow_manager.get_workflow(wf_id_fb)
+                        fb_styles: list = []
+                        if wf_fb:
+                            # 优先 concept_plan.intelligent_style_design；回退 WorkflowState.intelligent_style_design
+                            isd = {}
+                            try:
+                                cp = getattr(wf_fb, 'concept_plan', {}) or {}
+                                if isinstance(cp, dict):
+                                    isd = cp.get('intelligent_style_design') or {}
+                            except Exception:
+                                isd = {}
+                            if not isd:
+                                try:
+                                    isd = getattr(wf_fb, 'intelligent_style_design', {}) or {}
+                                except Exception:
+                                    isd = {}
+                            if isinstance(isd, dict) and isd:
+                                # 提取关键信息，去重去空，限制长度
+                                cand = []
+                                for k in ("visual_approach", "narrative_style", "production_taste", "emotional_tone", "style_name"):
+                                    v = isd.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        cand.append(v.strip())
+                                # 合成 1-2 条紧凑短语
+                                if cand:
+                                    line = "，".join(cand)
+                                    if len(line) > 120:
+                                        line = line[:120]
+                                    fb_styles = [line]
+                        if fb_styles:
+                            params["style_constraints"] = fb_styles
+                            extra.append("风格指导：" + "；".join(fb_styles))
+                            try:
+                                self.logger.info(
+                                    f"STYLE_INJECT(generate_video): styles={len(fb_styles)} source=fallback reasons=no_fc_style+t2v"
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            # 负向约束
+            if isinstance(neg_cons, list) and neg_cons:
+                extra.append("避免：" + "；".join([str(x) for x in neg_cons if isinstance(x, str) and x.strip()]))
+            # 合并追加段
+            if extra:
+                try:
+                    self.logger.info(f"CHAR_INJECT(generate_video): chars={len(char_cons or [])} neg={len(neg_cons or [])}")
+                    if char_struct:
+                        self.logger.info(f"CHAR_INJECT_STRUCT(generate_video): items={len(char_struct or [])}")
+                    if style_cons:
+                        self.logger.info(f"STYLE_INJECT(generate_video): styles={len(style_cons or [])} source=fc")
+                except Exception:
+                    pass
+                prompt = (prompt + "\n" + "\n".join(extra)) if prompt else "\n".join(extra)
+                params["prompt"] = prompt
+        except Exception:
+            pass
         duration = params["duration"]
         image_url = params.get("image_url")
         continuity_frame = params.get("continuity_frame")
@@ -271,6 +462,39 @@ class VideoGenerationTool(AsyncTool):
         
         # 统一校验/纠偏：duration 必须在当前 provider 的能力范围内
         provider_config = self.video_config.get_current_provider_config()
+        resolution_requested: Optional[str] = None
+        resolution_applied: Optional[str] = None
+        if "resolution" not in params and params.get("rs") is not None:
+            params["resolution"] = params.get("rs")
+        raw_resolution = params.get("resolution")
+        if raw_resolution is not None:
+            if not isinstance(raw_resolution, str):
+                raw_resolution = str(raw_resolution)
+            raw_resolution = raw_resolution.strip()
+            if raw_resolution:
+                resolution_requested = raw_resolution
+                allowed_resolutions = list(provider_config.resolution_options or [])
+                alias_candidates = {
+                    "480p": "720x480",
+                    "720p": "1280x720",
+                    "1080p": "1920x1080"
+                }
+                alias_map = {
+                    alias: canonical
+                    for alias, canonical in alias_candidates.items()
+                    if canonical in allowed_resolutions
+                }
+                allowed_with_alias = set(allowed_resolutions) | set(alias_map.keys())
+                if allowed_resolutions and raw_resolution not in allowed_with_alias:
+                    raise ToolValidationError(
+                        f"resolution must be one of {sorted(allowed_with_alias)}",
+                        self.metadata.name
+                    )
+                resolution_applied = alias_map.get(raw_resolution, raw_resolution)
+                params["resolution"] = raw_resolution
+            else:
+                params.pop("resolution", None)
+                raw_resolution = None
         allowed = list(provider_config.duration_capabilities or [])
         if isinstance(duration, (int, float)) and allowed:
             # 将 float 转成 int（如 6.0 -> 6）
@@ -288,9 +512,8 @@ class VideoGenerationTool(AsyncTool):
                 except Exception:
                     pass
                 duration = suggestion
-        # 获取默认模型（如果未指定）
-        if not model:
-            model = provider_config.model_name
+        # 模型选择：尊重调用方/适配层的自动选择
+        # 不在工具层强制填充默认模型，留给服务端根据输入模式自动选型
         
         # 记录来源（供应商无关）：单图模式下明确 used_url 来源
         try:
@@ -301,14 +524,39 @@ class VideoGenerationTool(AsyncTool):
                 ("continuity_frame" if (continuity_frame or image_from_cont) else ("reference_image" if image_url else "none"))
             )
             used_url = final_image_input if not (first_frame_image and last_frame_image) else None
+            _model_disp = model if model else "(auto)"
             self.logger.info(
-                f"🎬 Generating video: duration={duration}s, model={model}, mode={pre_mode}, "
+                f"🎬 Generating video: duration={duration}s, model={_model_disp}, mode={pre_mode}, "
                 f"continuity_applied={bool(continuity_frame) or image_from_cont}, image_origin={image_origin}, "
                 f"used_url={(used_url[:120] + '...') if isinstance(used_url, str) else used_url}"
             )
         except Exception:
             self.logger.info(f"🎬 Generating video: duration={duration}s, model={model}")
         
+        # 若参考图像为第三方临时签名/受限域名，先做上云再用，降低 403 风险
+        try:
+            def _needs_rehost(u: Optional[str]) -> bool:
+                if not isinstance(u, str) or not u.startswith(("http://", "https://")):
+                    return False
+                low = u.lower()
+                # Ark/TOS 预签名或者带 X-Tos-* 的查询参数，或其它非自家 OSS 域
+                risky_markers = ["ark-content-generation", "tos-cn-", "x-tos-", "x-tos-algorithm", "x-tos-credential"]
+                return any(m in low for m in risky_markers)
+
+            if isinstance(final_image_input, str) and _needs_rehost(final_image_input):
+                try:
+                    rehosted = await self._rehost_external_image_url(final_image_input)
+                    if isinstance(rehosted, str) and rehosted.startswith("http"):
+                        final_image_input = rehosted
+                        # 标记来源，便于诊断
+                        params['image_rehosted'] = True
+                        self.logger.info("IMAGE_REHOST: external image rehosted to OSS public URL for video generation")
+                except Exception as _e:
+                    # 不中断：若上云失败，保留原URL继续尝试，由服务端判定
+                    self.logger.warning(f"IMAGE_REHOST_SKIP: {_e}")
+        except Exception:
+            pass
+
         try:
             # 调用视频服务生成视频
             result = await self.video_service.generate_video(
@@ -317,16 +565,21 @@ class VideoGenerationTool(AsyncTool):
                 duration=duration,
                 image_url=final_image_input,
                 first_frame_image=first_frame_image,
-                last_frame_image=last_frame_image
+                last_frame_image=last_frame_image,
+                resolution=resolution_applied or params.get("resolution")
             )
             
             # 增强返回结果
             result.update({
                 "tool_used": self.metadata.name,
+                "requested_resolution": resolution_requested,
+                "applied_resolution": resolution_applied or params.get("resolution"),
                 "execution_params": {
                     "prompt": prompt,
                     "duration": duration,
                     "model": model,
+                    "resolution_requested": resolution_requested,
+                    "resolution_applied": resolution_applied or params.get("resolution"),
                     "has_continuity_frame": bool(continuity_frame) or bool(params.get('image_from_continuity')),
                     "has_reference_image": bool(image_url),
                     "generation_mode": self._determine_generation_mode(
@@ -339,17 +592,134 @@ class VideoGenerationTool(AsyncTool):
                     "image_input_url": final_image_input if isinstance(final_image_input, str) else None
                 }
             })
+            # 工具层最小验证：必须产生可访问 video_url，否则标记为失败并将 fallback_reason 透传为 error_type
+            if not isinstance(result, dict) or not result.get('video_url'):
+                status = (result or {}).get('status') if isinstance(result, dict) else None
+                fb_reason = (result or {}).get('fallback_reason') if isinstance(result, dict) else None
+                mdl = (result or {}).get('model') if isinstance(result, dict) else model
+                err_type = str(fb_reason or (status or 'no_video_url'))
+                # 使用 ToolError 的 error_code 让上层拿到明确错误类型（如 provider_timeout）
+                raise ToolError(
+                    message=f"video generation returned no url (status={status}, model={mdl}, fallback_reason={fb_reason})",
+                    tool_name=self.metadata.name,
+                    error_code=err_type
+                )
+            # Provider/model outcome log（仅有URL时记为完成）
+            try:
+                prov = result.get('provider') or provider_config.provider_name
+                mdl = result.get('model') or model
+                gen_mode = result.get('execution_params', {}).get('generation_mode')
+                if result.get('video_url'):
+                    self.logger.info(f"✅ Generation completed: provider={prov} model={mdl} mode={gen_mode}")
+                else:
+                    self.logger.warning(
+                        f"Generation returned no video_url (status={result.get('status')}); provider={prov} model={mdl} mode={gen_mode}"
+                    )
+            except Exception:
+                pass
             
             
             return result
-            
+
         except Exception as e:
+            # 针对 image_url 拉取失败（400/403）的轻量修复重试：上云后重试一次
+            emsg = str(e)
+            try_rehost_retry = False
+            if isinstance(final_image_input, str) and final_image_input.startswith("http"):
+                markers = ["param\":\"image_url\"", "status code: 403", "InvalidParameter", "image_url"]
+                if any(m in emsg for m in markers):
+                    try_rehost_retry = True
+            if try_rehost_retry:
+                try:
+                    oss_url = await self._rehost_external_image_url(final_image_input)
+                    if isinstance(oss_url, str) and oss_url.startswith("http"):
+                        self.logger.warning("RETRY_AFTER_IMAGE_REHOST: re-invoking video generation with OSS URL")
+                        result = await self.video_service.generate_video(
+                            prompt=prompt,
+                            model=model,
+                            duration=duration,
+                            image_url=oss_url,
+                            first_frame_image=first_frame_image,
+                            last_frame_image=last_frame_image,
+                            resolution=resolution_applied or params.get("resolution")
+                        )
+                        # 同样进行最小验证
+                        if not isinstance(result, dict) or not result.get('video_url'):
+                            raise ToolError(
+                                message="video generation returned no url after rehost",
+                                tool_name=self.metadata.name,
+                                error_code="image_url_forbidden"
+                            )
+                        # 附加诊断字段
+                        result.update({"fallback_applied": True, "fallback_reason": "image_url_forbidden", "image_rehosted": True})
+                        return result
+                except Exception as _e:
+                    self.logger.error(f"RETRY_AFTER_IMAGE_REHOST_FAILED: {_e}")
+                    raise ToolError(f"Video generation failed: {str(e)}", self.metadata.name)
+            # 非 image_url 类问题或重试失败：按原样抛出
             self.logger.error(f"Video generation failed: {str(e)}")
             raise ToolError(f"Video generation failed: {str(e)}", self.metadata.name)
+
+    async def _rehost_external_image_url(self, remote_url: str) -> str:
+        """将远程URL下载到本地后上传到自有OSS，返回可公开访问的URL。"""
+        from ..tool_registry import get_tool_registry
+        from ..base_tool import ToolInput as TI
+        registry = get_tool_registry()
+        # 先通过 file_storage_tool 下载到本地临时区
+        file_tool = registry.get_tool("file_storage_tool")
+        # 生成一个稳定的 OSS 目标路径
+        remote_root = getattr(settings, 'OSS_IMAGE_DIR', 'images').strip('/')
+        staging_dir = getattr(settings, 'OSS_STAGING_DIR', 'staging').strip('/')
+        prefix = getattr(settings, 'OSS_VIDEO_INPUT_PREFIX', 'video_generation_input')
+        import time
+        oss_remote_path = f"{remote_root}/{staging_dir}/{prefix}_{int(time.time()*1000)}.jpg"
+        # 先下载
+        dl = await file_tool.execute(TI(action="upload_from_url", parameters={
+            "url": remote_url,
+            "destination_key": f"downloads/{int(time.time()*1000)}.bin",
+            "metadata": {"source": "video_ref_rehost"}
+        }))
+        payload = getattr(dl, 'result', dl)
+        local_path = None
+        if isinstance(payload, dict):
+            local_path = payload.get('local_path') or payload.get('file_path')
+        if not local_path or not isinstance(local_path, str):
+            raise RuntimeError("downloaded file local_path missing")
+        # 上传到 OSS 并返回公开 URL
+        oss_tool = registry.get_tool("oss_storage")
+        up = await oss_tool.execute(TI(action="upload", parameters={
+            "local_path": local_path,
+            "remote_path": oss_remote_path,
+            "public_read": True,
+            "content_type": "image/jpeg"
+        }))
+        up_res = getattr(up, 'result', up)
+        if isinstance(up_res, dict) and up_res.get('url'):
+            return up_res['url']
+        raise RuntimeError("OSS upload did not return url")
 
     async def _generate_with_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """合并连续性准备与生成（确定性）：解析上一场景尾帧 → 生成 → 可选存尾帧。"""
         prompt = params.get("prompt")
+        # 合并结构化角色/负向约束
+        try:
+            char_cons = params.get("character_constraints") or []
+            neg_cons = params.get("negative_constraints") or []
+            extra = []
+            if isinstance(char_cons, list) and char_cons:
+                if not (isinstance(prompt, str) and ("角色设定" in prompt)):
+                    extra.append("角色设定：" + "；".join([str(x) for x in char_cons if isinstance(x, str) and x.strip()]))
+            if isinstance(neg_cons, list) and neg_cons:
+                extra.append("避免：" + "；".join([str(x) for x in neg_cons if isinstance(x, str) and x.strip()]))
+            if extra:
+                try:
+                    self.logger.info(f"CHAR_INJECT(generate_with_continuity): chars={len(char_cons or [])} neg={len(neg_cons or [])}")
+                except Exception:
+                    pass
+                prompt = (prompt + "\n" + "\n".join(extra)) if prompt else "\n".join(extra)
+                params["prompt"] = prompt
+        except Exception:
+            pass
         duration = params.get("duration")
         if not prompt or duration is None:
             raise ToolValidationError("prompt and duration are required", self.metadata.name)
@@ -482,6 +852,55 @@ class VideoGenerationTool(AsyncTool):
                 f"continuity_applied={bool(continuity_frame)}, "
                 f"first_last_injected={bool(next_params.get('first_frame_image') and next_params.get('last_frame_image'))}"
             )
+        except Exception:
+            pass
+        # 记录风格注入诊断（若存在）与最小软兜底
+        try:
+            style_cons_gwc = params.get("style_constraints") or []
+            if isinstance(style_cons_gwc, list) and style_cons_gwc:
+                self.logger.info(f"STYLE_INJECT(generate_with_continuity): styles={len(style_cons_gwc)} source=fc")
+            else:
+                # 软兜底触发条件：无FC风格 + 无连续性帧 + 无参考图（T2V）
+                try:
+                    no_cont = not bool(continuity_frame)
+                    no_img = not bool(params.get("image_url"))
+                    wf_id_fb = params.get("workflow_state_id")
+                    if no_cont and no_img and wf_id_fb:
+                        from ....core.workflow_state import workflow_manager
+                        wf_fb = workflow_manager.get_workflow(wf_id_fb)
+                        fb_styles: list = []
+                        if wf_fb:
+                            isd = {}
+                            try:
+                                cp = getattr(wf_fb, 'concept_plan', {}) or {}
+                                if isinstance(cp, dict):
+                                    isd = cp.get('intelligent_style_design') or {}
+                            except Exception:
+                                isd = {}
+                            if not isd:
+                                try:
+                                    isd = getattr(wf_fb, 'intelligent_style_design', {}) or {}
+                                except Exception:
+                                    isd = {}
+                            if isinstance(isd, dict) and isd:
+                                cand = []
+                                for k in ("visual_approach", "narrative_style", "production_taste", "emotional_tone", "style_name"):
+                                    v = isd.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        cand.append(v.strip())
+                                if cand:
+                                    line = "，".join(cand)
+                                    if len(line) > 120:
+                                        line = line[:120]
+                                    fb_styles = [line]
+                        if fb_styles:
+                            params["style_constraints"] = fb_styles
+                            next_params["style_constraints"] = fb_styles
+                            self.logger.info(
+                                f"STYLE_INJECT(generate_with_continuity): styles={len(fb_styles)} source=fallback reasons=no_fc_style+t2v"
+                            )
+                except Exception:
+                    pass
         except Exception:
             pass
         gen_res = await self._generate_video(next_params)

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..models import Task, AgentExecution, AgentType, AgentStatus
 from ..core.config import settings
 from ..core.database import get_sync_db
-from ..services.websocket import WebSocketManager
+from ..services.websocket import WebSocketManager, websocket_manager
 
 from .tools.tool_registry import get_tool_registry
 from .tools.agent_tool_allocation import get_agent_tools, validate_agent_tools
@@ -48,7 +48,8 @@ class BaseAgent(ABC):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.logger = logging.getLogger(f"agent.{agent_name}")
-        self.websocket_manager = WebSocketManager()
+        # Use global singleton WebSocket manager so broadcasts reach connected clients
+        self.websocket_manager = websocket_manager
         
         # Initialize tool registry
         self.tool_registry = get_tool_registry()
@@ -401,13 +402,24 @@ class BaseAgent(ABC):
                     **kwargs
                 )
             except Exception as e:
-                # 当无工具可用且供应商FC失败时，降级到普通对话接口，避免上游中断
+                # 当无工具可用且供应商FC失败时，通常降级到普通对话接口，避免上游中断；
+                # 但若明显是超时类错误，则直接上抛，让调用方（如ConceptPlanner）执行配置化的备用模型策略。
                 if not tools_schema:
+                    err_str = str(e).lower()
+                    is_timeout_like = (
+                        isinstance(e, asyncio.TimeoutError)
+                        or "timeout" in err_str
+                        or "timed out" in err_str
+                        or "request timeout" in err_str
+                    )
+                    if is_timeout_like:
+                        # 交由上层处理（例如根据 ai_config 切换 fallback 模型），避免重复等待同一供应商
+                        raise
                     try:
                         self.logger.error(f"Function call failed without tools; falling back to chat_completion: {e}")
                     except Exception:
                         pass
-                    # 使用同一服务的 chat_completion 作为降级路径
+                    # 使用同一服务的 chat_completion 作为降级路径（非超时错误）
                     chat_res = await llm_service.chat_completion(
                         messages=complete_messages,
                         model=model,
@@ -513,7 +525,31 @@ class BaseAgent(ABC):
                 }
         
         except Exception as e:
-            self.logger.error(f"Function call failed: {e}")
+            # 统一记录一次错误
+            try:
+                self.logger.error(f"Function call failed: {e}")
+            except Exception:
+                pass
+            # 文本FC（tools=[]）且为“超时类错误”时，上抛给调用方以执行配置化的备用模型策略
+            try:
+                err_str = str(e).lower()
+                is_timeout_like = (
+                    isinstance(e, asyncio.TimeoutError)
+                    or "timeout" in err_str
+                    or "timed out" in err_str
+                    or "request timeout" in err_str
+                )
+                if is_timeout_like:
+                    # 若前面构建了 tools_schema 且为空，认为是 text-only FC
+                    try:
+                        if not tools_schema:
+                            raise
+                    except NameError:
+                        # 未定义 tools_schema 时，不影响默认返回
+                        pass
+            except Exception:
+                # 继续按默认失败返回
+                pass
             return {
                 "success": False,
                 "error": str(e)
@@ -1026,6 +1062,9 @@ class BaseAgent(ABC):
                                 snap['image_url'] = payload.get('image_url')
                             if payload.get('video_url'):
                                 snap['video_url'] = payload.get('video_url')
+                            # 音频产物位置（用于音频代理等场景）
+                            if payload.get('audio_url'):
+                                snap['audio_url'] = payload.get('audio_url')
                             if payload.get('file_path'):
                                 snap['file_path'] = payload.get('file_path')
                         last_round_results.append(snap)

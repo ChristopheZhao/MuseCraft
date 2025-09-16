@@ -288,7 +288,17 @@ class VideoGeneratorAgent(ReActAgent):
             "dependent_scenes": dependent_scenes,
             "workflow_state_id": workflow_state_id,
             "video_config": self.video_config.get_current_provider_config().__dict__,
+            "target_resolution": input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION,
+            # 提前挂入概念计划（若可用），便于执行期读取 per-scene 角色出现
+            "concept_plan": input_data.get("concept_plan")
+                if isinstance(input_data, dict) and input_data.get("concept_plan") is not None
+                else (getattr(workflow_state_obj, 'concept_plan', None) if workflow_state_obj else None),
         }
+
+        try:
+            self.iteration_context['target_resolution'] = task_context.get("target_resolution")
+        except Exception:
+            pass
 
         return {
             "plan": "",
@@ -384,17 +394,18 @@ class VideoGeneratorAgent(ReActAgent):
         failed_scene_numbers = {s.get("scene_number") for s in failed_scenes if isinstance(s, dict)}
 
         # independent scenes pending
+        # 独立场景：失败不做永久排除，允许后续轮次重试
         pending_independent = [
             s for s in independent_scenes
             if s.get("scene_number") not in completed_scene_numbers
-            and s.get("scene_number") not in failed_scene_numbers
         ]
 
         executable_dependent: List[Dict[str, Any]] = []
         pending_dependent: List[Dict[str, Any]] = []
         for s in dependent_scenes:
             sn = s.get("scene_number")
-            if sn in completed_scene_numbers or sn in failed_scene_numbers:
+            # 失败不做永久排除，允许后续轮次重试
+            if sn in completed_scene_numbers:
                 continue
             dep = s.get("depends_on_scene")
             if dep in completed_scene_numbers:
@@ -417,8 +428,9 @@ class VideoGeneratorAgent(ReActAgent):
         except Exception:
             pass
 
+        total_targets = len(scenes_to_generate)
         observation = {
-            "total_scenes": len(scenes_to_generate),
+            "total_scenes": total_targets,
             # 口径统一：completed_count 以内部 inner_react_state 为准
             "completed_count": len(completed_scene_numbers_internal),
             "failed_count": len(failed_scenes),
@@ -426,7 +438,12 @@ class VideoGeneratorAgent(ReActAgent):
             "pending_dependent_count": len(pending_dependent),
             "executable_scenes": executable_scenes,
             "pending_dependent_scenes": pending_dependent,
-            "task_status": "completed" if not executable_scenes and not pending_dependent else "in_progress",
+            # 完成门槛：无可执行且无待依赖，且无失败，且完成数达到目标
+            "task_status": (
+                "completed"
+                if (not executable_scenes and not pending_dependent and len(failed_scenes) == 0 and len(completed_scene_numbers_internal) >= total_targets)
+                else "in_progress"
+            ),
         }
         try:
             self.logger.info(
@@ -826,6 +843,14 @@ class VideoGeneratorAgent(ReActAgent):
             ws = self.iteration_context.get("working_state", {}) or {}
             ctx = ws.get("context", {}) or {}
             wf_id = ctx.get("workflow_state_id") or self.iteration_context.get("workflow_state_id")
+            target_resolution = ctx.get("target_resolution") or self.iteration_context.get("target_resolution")
+            if not target_resolution:
+                try:
+                    src = self.iteration_context.get("source_input") or {}
+                    if isinstance(src, dict):
+                        target_resolution = src.get("resolution")
+                except Exception:
+                    target_resolution = None
             current_batch = ws.get("current_batch") or []
             single_sn = None
             try:
@@ -848,6 +873,8 @@ class VideoGeneratorAgent(ReActAgent):
                                 args['emit_last_frame'] = 'auto'
                             if args.get('scene_number') is None and single_sn is not None:
                                 args['scene_number'] = single_sn
+                            if target_resolution and not args.get('resolution') and not args.get('rs'):
+                                args['resolution'] = target_resolution
                             # 稳定利用已准备的连续性帧：优先注入当前场景的 prepared_last_frames
                             try:
                                 ws_prepared = (self.iteration_context.get('working_state') or {}).get('prepared_last_frames') or {}
@@ -861,6 +888,32 @@ class VideoGeneratorAgent(ReActAgent):
                                         cont_url = ws_prepared.get(sn_val)
                                         if isinstance(cont_url, str) and cont_url and not args.get('image_url'):
                                             args['image_url'] = cont_url
+                            except Exception:
+                                pass
+                            # 回退（仅限非依赖场景）：若仍无 image_url，则读取 WF 场景的参考图像
+                            try:
+                                # 识别是否为连续场景
+                                dep_val = args.get('depends_on_scene')
+                                is_dependent = False
+                                try:
+                                    if dep_val is not None and str(dep_val).isdigit() and int(dep_val) > 0:
+                                        is_dependent = True
+                                except Exception:
+                                    is_dependent = False
+
+                                if (not args.get('image_url')) and (not is_dependent):
+                                    from ..core.workflow_state import workflow_manager
+                                    wf = workflow_manager.get_workflow(wf_id) if wf_id else None
+                                    sn_try = args.get('scene_number')
+                                    try:
+                                        sn_val = int(sn_try) if sn_try is not None else None
+                                    except Exception:
+                                        sn_val = None
+                                    if wf and sn_val is not None:
+                                        sc = wf.get_scene(sn_val)
+                                        iu = getattr(sc, 'image_url', '') if sc else ''
+                                        if isinstance(iu, str) and iu:
+                                            args['image_url'] = iu
                             except Exception:
                                 pass
                             # 可选注入 depends_on_scene（来源于场景清单），便于工具做更精确诊断
@@ -882,6 +935,46 @@ class VideoGeneratorAgent(ReActAgent):
                                                     except Exception:
                                                         args['depends_on_scene'] = dep_v
                                                 break
+                            except Exception:
+                                pass
+
+                            # 结构化参数增强：为该场景追加/补全角色约束（character_constraints），不改变工具/模型选择
+                            try:
+                                wf_id2 = args.get('workflow_state_id') or wf_id
+                                sn2 = args.get('scene_number')
+                                sn2 = int(sn2) if sn2 is not None and str(sn2).isdigit() else None
+                                if wf_id2 and sn2 is not None:
+                                    from ..core.workflow_state import workflow_manager
+                                    wf2 = workflow_manager.get_workflow(wf_id2)
+                                    sc2 = wf2.get_scene(sn2) if wf2 else None
+                                    # 收集角色设定：优先 WF 场景；缺失则从 concept_plan.scenes 获取 per-scene 出现
+                                    descs = []
+                                    names = []
+                                    if sc2 is not None:
+                                        descs = list(getattr(sc2, 'character_descriptions', []) or [])
+                                        names = list(getattr(sc2, 'characters_present', []) or [])
+                                    if not descs:
+                                        # 尝试从 concept_plan 获取 per-scene 出现
+                                        try:
+                                            ctx_ws = self.iteration_context.get('working_state', {}) or {}
+                                            cp = (ctx_ws.get('context', {}) or {}).get('concept_plan') or getattr(wf2, 'concept_plan', {}) or {}
+                                            scene_defs = (cp.get('scenes') or [])
+                                            present = []
+                                            for s in scene_defs:
+                                                try:
+                                                    sid = int(s.get('scene_number')) if s.get('scene_number') is not None else None
+                                                except Exception:
+                                                    sid = None
+                                                if sid == sn2:
+                                                    present = (((s.get('content_elements') or {}).get('characters_present')) or [])
+                                                    break
+                                            names = names or present
+                                            if names and not descs:
+                                                # 若无详细描述，使用名字串联作为简化约束
+                                                descs = ["、".join([str(n) for n in names if isinstance(n, str) and n.strip()])]
+                                        except Exception:
+                                            pass
+                                    # 不在Agent层注入/改写角色先验；仅在观察与模板中提供事实，交由FC按Schema选择。
                             except Exception:
                                 pass
                         # Normalize scene_number to int when possible
@@ -1003,8 +1096,28 @@ class VideoGeneratorAgent(ReActAgent):
         except Exception:
             image_map, video_map = {}, {}
             depends_map, reason_map, conf_map, last_frame_map = {}, {}, {}, {}
-        
-        # 填充就绪批次：将依赖场景的已准备连续性帧写入本轮批次（统一语义：有依赖则需要连续性帧）
+
+        target_resolution = None
+        try:
+            context_info = (workflow_state.get("context") or {})
+            target_resolution = context_info.get("target_resolution") or context_info.get("resolution")
+            if not target_resolution:
+                vc = context_info.get("video_config") or {}
+                target_resolution = vc.get("default_resolution")
+        except Exception:
+            target_resolution = None
+        if not target_resolution:
+            try:
+                src_input = self.iteration_context.get("source_input") or {}
+                if isinstance(src_input, dict):
+                    target_resolution = src_input.get("resolution")
+            except Exception:
+                target_resolution = None
+
+        # 填充就绪批次（避免破坏连续链路）：
+        # - 依赖场景：仅在 prepared_last_frames 命中时注入 image_url（连续性帧）；不要回退到场景自身图像，
+        #   以免误导 LLM 跳过连续性准备，扰乱 DAG 顺序与尾帧链路。
+        # - 非依赖场景：若无连续性帧，可回退使用该场景自身的 image_url（来自 WF 的 image_map），稳定 I2V。
         filled_batch: List[Dict[str, Any]] = []
         try:
             for s in (scenes_batch or []):
@@ -1014,8 +1127,16 @@ class VideoGeneratorAgent(ReActAgent):
                         sn = int(s1.get('scene_number')) if s1.get('scene_number') is not None else None
                     except Exception:
                         sn = None
-                    if sn is not None and sn in prepared_map:
-                        s1['image_url'] = prepared_map[sn]
+                    if sn is not None:
+                        dep = depends_map.get(sn)
+                        # 1) 连续性帧优先（仅在有依赖时注入连续帧）
+                        if sn in prepared_map:
+                            s1['image_url'] = prepared_map[sn]
+                        else:
+                            # 2) 非依赖场景允许回退到场景参考图，避免退化为 T2V
+                            if dep in (None, "", 0):
+                                if sn in image_map:
+                                    s1['image_url'] = image_map[sn]
                 filled_batch.append(s1)
         except Exception:
             filled_batch = list(scenes_batch or [])
@@ -1040,16 +1161,119 @@ class VideoGeneratorAgent(ReActAgent):
             # 始终以 filled_batch 覆盖可执行集合（带入已准备的连续性帧），避免 last_observation 中的过时空 image_url 误导 FC
             obs_aug = dict(obs)
             obs_aug["executable_scenes"] = filled_batch
+            if target_resolution:
+                obs_aug["target_resolution"] = target_resolution
+            # 注入全局风格指导（来自 concept_plan 或 orchestrator 的 creative_guidance），供FC保持风格一致
+            try:
+                style_guidance = {}
+                # 1) 从概念计划读取智能风格设计
+                try:
+                    cp = ctx.get('concept_plan') or {}
+                    if isinstance(cp, dict):
+                        isd = cp.get('intelligent_style_design') or {}
+                        if isinstance(isd, dict) and isd:
+                            style_guidance = isd
+                except Exception:
+                    pass
+                # 2) 回退：从 orchestrator 注入的 creative_guidance 读取
+                if not style_guidance:
+                    try:
+                        src_in = dict(self.iteration_context.get('source_input') or {})
+                        cg = src_in.get('creative_guidance') or {}
+                        if isinstance(cg, dict) and cg:
+                            style_guidance = cg
+                    except Exception:
+                        pass
+                if style_guidance:
+                    obs_aug['style_guidance'] = style_guidance
+            except Exception:
+                pass
+            # 汇入角色一致性“事实”供FC参考（不包含工具/参数名）
+            try:
+                # 角色来源：WF.scene 优先；缺失回退 concept_plan.scenes；再回退 orchestrator.scene_guidances
+                char_names: Dict[int, List[str]] = {}
+                char_descs: Dict[int, List[str]] = {}
+                try:
+                    wf_id = ctx.get("workflow_state_id")
+                    if wf_id:
+                        from ..core.workflow_state import workflow_manager
+                        wf = workflow_manager.get_workflow(wf_id)
+                        for sc in getattr(wf, 'scenes', []) or []:
+                            try:
+                                sn = int(getattr(sc, 'scene_number', 0) or 0)
+                            except Exception:
+                                continue
+                            if not sn:
+                                continue
+                            nms = list(getattr(sc, 'characters_present', []) or [])
+                            dcs = list(getattr(sc, 'character_descriptions', []) or [])
+                            if nms:
+                                char_names[sn] = [str(x) for x in nms if str(x).strip()]
+                            if dcs:
+                                char_descs[sn] = [str(x) for x in dcs if str(x).strip()]
+                except Exception:
+                    pass
+                if not char_names:
+                    try:
+                        cp = ctx.get('concept_plan') or {}
+                        for s in (cp.get('scenes') or []):
+                            try:
+                                sid = int(s.get('scene_number')) if s.get('scene_number') is not None else None
+                            except Exception:
+                                sid = None
+                            if sid is None:
+                                continue
+                            nms = (((s.get('content_elements') or {}).get('characters_present')) or [])
+                            if nms:
+                                char_names[sid] = [str(x) for x in nms if str(x).strip()]
+                    except Exception:
+                        pass
+                if not char_names and not char_descs:
+                    try:
+                        src_in = dict(self.iteration_context.get('source_input') or {})
+                        sgs = src_in.get('scene_guidances') or {}
+                        for k, v in (sgs.items() if isinstance(sgs, dict) else []):
+                            try:
+                                if str(k).startswith('scene_'):
+                                    sid = int(str(k).split('_')[-1])
+                                else:
+                                    sid = None
+                            except Exception:
+                                sid = None
+                            if sid is None:
+                                continue
+                            nms = (v or {}).get('characters_present') or (v or {}).get('characters') or []
+                            if nms:
+                                char_names[sid] = [str(x) for x in nms if str(x).strip()]
+                    except Exception:
+                        pass
+                char_facts = {sn: {"names": char_names.get(sn, []), "descriptions": char_descs.get(sn, [])} for sn in set(list(char_names.keys()) + list(char_descs.keys()))}
+            except Exception:
+                char_facts = {}
+
+            # 对 LLM 暴露的中立事实中，不包含供应商视频直链映射，避免误用/截断导致403；
+            # 仍保留是否已有连续性帧/参考图的事实信号（通过 last_frame_map / prepared_last_frames / image_map 等）。
             obs_aug["facts"] = {
                 "image_map": image_map,
-                "video_map": video_map,
                 "depends_on": depends_map,
                 "continuity_reason": reason_map,
                 "continuity_confidence": conf_map,
                 "last_frame_map": last_frame_map,
                 "prepared_last_frames": prepared_map,
                 "priority_prepared_ids": priority_ids,
+                "characters_map": char_facts,
             }
+            # 适度诊断：DEBUG 级别输出可见的风格/角色事实摘要（不打印大对象）
+            try:
+                if self.logger.isEnabledFor(__import__('logging').DEBUG):
+                    ch_map = ((obs_aug.get('facts') or {}).get('characters_map')) or {}
+                    ch_cnt = len(ch_map) if isinstance(ch_map, dict) else 0
+                    has_style = bool(obs_aug.get('style_guidance'))
+                    self.logger.debug(
+                        f"FC_FACTS(video): style={'yes' if has_style else 'no'}, roles_scenes={ch_cnt}"
+                    )
+            except Exception:
+                pass
             observation_json = _json.dumps(obs_aug, ensure_ascii=False)
             from ..core.prompt_manager import get_prompt_manager
             pm = get_prompt_manager()
@@ -1071,6 +1295,8 @@ class VideoGeneratorAgent(ReActAgent):
         facts_lines.append(
             f"批次候选数量：{len(scenes_batch)}；进度：已完成 {prev_completed}，失败 {prev_failed}。" + (f" 最近反思：{note_str}" if note_str else "")
         )
+        if target_resolution:
+            facts_lines.append(f"目标输出分辨率：{target_resolution}。如需调整，请在响应中说明原因。")
         for s in filled_batch:
             try:
                 sn = s.get("scene_number")
@@ -1080,7 +1306,10 @@ class VideoGeneratorAgent(ReActAgent):
                 if sn in video_map:
                     parts.append("已有视频")
                 elif sn in image_map:
-                    parts.append("有参考图")
+                    # 仅对非依赖场景标注“有参考图”，避免连续场景被误判为已具备参考输入
+                    dep = depends_map.get(sn)
+                    if dep in (None, "", 0):
+                        parts.append("有参考图")
                 # 标注：本场景是否已准备连续性输入（prepared_last_frames）
                 try:
                     if sn in prepared_map:
@@ -1102,29 +1331,28 @@ class VideoGeneratorAgent(ReActAgent):
         return messages
 
     async def _postprocess_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Neutral fallback: collect any successful payload with video_url.
-
-        Avoids hardcoding function names. If a call returns a dict containing
-        a video_url, persist it via storage tool and return a standardized
-        result item. This is only used when the base layer did not already
-        produce last_round_results.
+        """标准化执行结果：
+        - 成功：收集包含 video_url 的项并持久化
+        - 失败：对无产物或调用失败的项返回 success=False，以便反射阶段记录 failed_scenes
         """
         results: List[Dict[str, Any]] = []
         for call in executed_calls or []:
             try:
-                if not call.get("success"):
-                    continue
                 args = call.get("args") or {}
                 payload = call.get("result") or {}
+                fn = call.get('tool') or (call.get('function', {}) or {}).get('name') or ''
+                # 仅处理本代理的视频生成调用
+                if not (isinstance(fn, str) and fn.startswith('video_generation.')):
+                    continue
                 # 兼容 ToolOutput：若为对象则取其 result 字段
                 try:
                     if hasattr(payload, 'result'):
                         payload = getattr(payload, 'result')
                 except Exception:
                     pass
+                scene_num = args.get("scene_number") if isinstance(args, dict) else None
                 if isinstance(payload, dict) and payload.get("video_url"):
-                    scene_num = args.get("scene_number") or payload.get("scene_number")
-                    # 若 scene_number 不是可解析的整数，则置为 None，稍后按批次顺序回填
+                    # 成功路径
                     try:
                         if scene_num is not None:
                             scene_num = int(scene_num)
@@ -1139,9 +1367,26 @@ class VideoGeneratorAgent(ReActAgent):
                         "scene_number": scene_num,
                         "video_url": payload.get("video_url", ""),
                         "video_path": file_path or payload.get("file_path", ""),
-                        "prompt_text": args.get("prompt") or payload.get("prompt_text") or payload.get("prompt") or "",
-                        "duration": args.get("duration") or payload.get("duration") or 5,
+                        "prompt_text": (args.get("prompt") if isinstance(args, dict) else None) or payload.get("prompt_text") or payload.get("prompt") or "",
+                        "duration": (args.get("duration") if isinstance(args, dict) else None) or payload.get("duration") or 5,
                     })
+                else:
+                    # 失败/空产物路径：标记失败，避免无限重试
+                    try:
+                        if scene_num is not None:
+                            err = None
+                            if isinstance(payload, dict):
+                                err = payload.get('error') or payload.get('status') or payload.get('message')
+                            if not err and isinstance(call.get('error'), str):
+                                err = call.get('error')
+                            results.append({
+                                "success": False,
+                                "scene_number": int(scene_num) if str(scene_num).isdigit() else scene_num,
+                                "error": err or "video_generation returned no artifact",
+                                "duration": (args.get("duration") if isinstance(args, dict) else None) or 5,
+                            })
+                    except Exception:
+                        pass
             except Exception:
                 continue
         return results
@@ -1452,10 +1697,10 @@ class VideoGeneratorAgent(ReActAgent):
                         completed_map[sn] = r
 
             completed_scene_numbers = set(completed_map.keys())
-            failed_scene_numbers = {s.get("scene_number") for s in failed_list}
-            remaining = [s for s in scenes_to_generate if s.get("scene_number") not in completed_scene_numbers and s.get("scene_number") not in failed_scene_numbers]
-
-            done = len(remaining) == 0
+            # 完成判定不以“失败排除”作为依据，而是以“完成数达到目标数”为准
+            total_targets = len(scenes_to_generate)
+            remaining = [s for s in scenes_to_generate if s.get("scene_number") not in completed_scene_numbers]
+            done = (len(completed_scene_numbers) >= total_targets)
             summary = (
                 f"processed {len(gen_results)}; newly_completed {delta.get('newly_completed',0)}; "
                 f"newly_prepared {delta.get('newly_prepared',0)}; remaining {len(remaining)}"
@@ -2004,6 +2249,10 @@ class VideoGeneratorAgent(ReActAgent):
                         except Exception:
                             pass
 
+                        # 移除角色约束的自动注入：保持由 LLM 基于可见事实与工具 schema 自主选择
+                        # 说明：角色一致性在 FC 提示中以 facts.characters_map 暴露，且工具 schema 暴露 character_constraints；
+                        #      由 LLM 决定是否在调用中传入，避免代理层硬塞参数。
+
                         # 写回修改后的参数
                         try:
                             if isinstance(raw, str):
@@ -2077,5 +2326,3 @@ class VideoGeneratorAgent(ReActAgent):
                     pass
         except Exception:
             return
-
-

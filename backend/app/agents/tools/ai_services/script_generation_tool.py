@@ -7,14 +7,13 @@ import json
 from typing import Dict, Any, List, Optional
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType
-from .zhipu_client import ZhipuClientTool
 
 
 class ScriptGenerationTool(AsyncTool):
     """
     脚本生成工具 - 封装脚本生成业务逻辑
     
-    基于ZhipuClientTool，提供脚本生成相关的业务功能
+    提供脚本生成相关的业务功能（供应商无关，通过统一服务/注册器调用）
     """
     
     @classmethod
@@ -27,7 +26,7 @@ class ScriptGenerationTool(AsyncTool):
             author="system",
             tags=["脚本生成", "叙事分析", "LLM"],
             capabilities=["场景脚本生成", "叙事结构分析", "对话优化", "脚本连续性检查"],
-            dependencies=["zhipu_client"]
+            dependencies=[]
         )
     
     def __init__(self, **kwargs):
@@ -35,7 +34,7 @@ class ScriptGenerationTool(AsyncTool):
         kwargs.pop('metadata', None)
         metadata = self.get_metadata()
         super().__init__(metadata=metadata, **kwargs)
-        self.zhipu_client = ZhipuClientTool()
+        # 供应商无关，运行时选择provider
     
     def get_available_actions(self) -> List[str]:
         return [
@@ -75,6 +74,15 @@ class ScriptGenerationTool(AsyncTool):
                 "context": {
                     "type": "object",
                     "description": "上下文信息"
+                },
+                # 允许调用方（Agent）通过配置传入模型与token预算
+                "model": {
+                    "type": "string",
+                    "description": "用于脚本生成的模型（来自ai_config映射）"
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "最大token数（来自模型配置），用于替代工具内硬编码"
                 }
             }
             base_schema["required"] = ["scene_data"]
@@ -140,6 +148,25 @@ class ScriptGenerationTool(AsyncTool):
         intelligent_style_design = params.get("intelligent_style_design", {})
         video_style = params.get("video_style", "professional")  # 向后兼容
         context = params.get("context", {})
+
+        # 从参数或全局配置确定模型与token预算（优先 tool_model_mapping，其次 agent 映射）
+        try:
+            from ....core.ai_config import get_ai_config
+            from ....core.config import settings as _settings
+            ai_cfg = get_ai_config()
+            model_name = params.get("model") or ai_cfg.get_model_for_tool("script_generation_tool") or ai_cfg.get_model_for_agent("script_writer")
+            model_cfg = ai_cfg.get_model_config(model_name) if model_name else None
+            req_model = model_name or None
+            # 选择预算：优先参数传入，其次模型配置，最后使用全局standard作为兜底
+            req_max_tokens = params.get("max_tokens")
+            if not (isinstance(req_max_tokens, int) and req_max_tokens > 0):
+                if model_cfg and getattr(model_cfg, 'max_tokens', None):
+                    req_max_tokens = int(model_cfg.max_tokens)
+                else:
+                    req_max_tokens = int(getattr(_settings, 'LLM_MAX_TOKENS_STANDARD', 2048))
+        except Exception:
+            req_model = params.get("model") or None
+            req_max_tokens = params.get("max_tokens") or 1000
         
         # MAS智能风格适配：优先使用intelligent_style_design
         if intelligent_style_design:
@@ -179,27 +206,18 @@ JSON 模板示例：
 """
 
         try:
-            # 使用ZhipuClient生成脚本
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 1000,
-                    "response_format": {"type": "json_object"}
-                }
+            # 使用统一 LLM 服务
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+            res = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=int(req_max_tokens or 1000),
+                model=req_model,
+                response_format={"type": "json_object"}
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if not zhipu_result.success:
-                return {
-                    "success": False,
-                    "error": f"LLM调用失败: {zhipu_result.error}"
-                }
-            
-            # 解析LLM响应
-            llm_content = zhipu_result.result.get("content", "").strip()
+            llm_content = (res.get("content") or "").strip()
+            finish_reason = res.get("finish_reason")
             
             # 解析JSON响应
             try:
@@ -213,7 +231,17 @@ JSON 模板示例：
                 
                 if "success" not in script_data:
                     script_data["success"] = True
-                    
+                # 附带基础元信息，便于上层诊断长度截断等问题
+                script_data.setdefault("_meta", {})
+                try:
+                    script_data["_meta"].update({
+                        "finish_reason": finish_reason,
+                        "model": res.get("model"),
+                        "requested_max_tokens": int(req_max_tokens or 0)
+                    })
+                except Exception:
+                    pass
+                
                 return script_data
                 
             except json.JSONDecodeError:
@@ -225,7 +253,12 @@ JSON 模板示例：
                     "visual_guidance": f"适合{video_style}风格的视觉表现",
                     "emotional_tone": "根据内容自然表达",
                     "keywords": [],
-                    "success": True
+                    "success": True,
+                    "_meta": {
+                        "finish_reason": finish_reason,
+                        "model": req_model,
+                        "requested_max_tokens": int(req_max_tokens or 0)
+                    }
                 }
                 
         except Exception as e:
@@ -266,25 +299,16 @@ JSON 模板示例：
 }}"""
         
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 800,
-                    "response_format": {"type": "json_object"}
-                }
+            # 使用统一 LLM 服务
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+            res = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=800,
+                response_format={"type": "json_object"}
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if not zhipu_result.success:
-                return {
-                    "success": False,
-                    "error": f"叙事结构生成失败: {zhipu_result.error}"
-                }
-            
-            llm_content = zhipu_result.result.get("content", "").strip()
+            llm_content = (res.get("content") or "").strip()
             
             try:
                 narrative_data = json.loads(llm_content)
@@ -327,31 +351,25 @@ JSON 模板示例：
 返回优化后的脚本文本。"""
         
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.5,
-                    "max_tokens": 600
-                }
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+            res = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=600
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                optimized_text = zhipu_result.result.get("content", script_text)
+            optimized_text = (res.get("content") or script_text)
+            if optimized_text:
                 return {
                     "optimized_script": optimized_text,
                     "optimization_notes": "对话语调和流畅度优化",
                     "success": True
                 }
-            else:
-                return {
-                    "optimized_script": script_text,
-                    "optimization_notes": "优化失败，返回原始脚本",
-                    "success": False,
-                    "error": zhipu_result.error
-                }
+            return {
+                "optimized_script": script_text,
+                "optimization_notes": "优化失败，返回原始脚本",
+                "success": False
+            }
                 
         except Exception as e:
             return {
@@ -394,20 +412,16 @@ JSON 模板示例：
 }}"""
         
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 500,
-                    "response_format": {"type": "json_object"}
-                }
+            from .service_interfaces import get_llm_service
+            llm = get_llm_service()
+            res = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=500,
+                response_format={"type": "json_object"}
             )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                llm_content = zhipu_result.result.get("content", "").strip()
+            llm_content = (res.get("content") or "").strip()
+            if llm_content:
                 try:
                     analysis_data = json.loads(llm_content)
                     if "success" not in analysis_data:
@@ -421,14 +435,12 @@ JSON 模板示例：
                         "suggestions": ["基于LLM分析进行优化"],
                         "success": True
                     }
-            else:
-                return {
-                    "continuity_score": 0.5,
-                    "analysis": "连续性分析失败",
-                    "suggestions": ["手动检查脚本连贯性"],
-                    "success": False,
-                    "error": zhipu_result.error
-                }
+            return {
+                "continuity_score": 0.5,
+                "analysis": "连续性分析失败",
+                "suggestions": ["手动检查脚本连贯性"],
+                "success": False
+            }
                 
         except Exception as e:
             return {

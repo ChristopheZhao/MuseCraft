@@ -46,6 +46,9 @@ class AIConfigManager:
         self.providers: Dict[str, ProviderConfig] = {}
         self.models: Dict[str, ModelConfig] = {}
         self.agent_model_mapping: Dict[str, str] = {}
+        self.tool_model_mapping: Dict[str, str] = {}  # 新增：tool -> model 映射
+        self.tool_provider_mapping: Dict[str, str] = {}  # 新增：tool -> provider 映射（如 zhipu/doubao）
+        self.agent_fallback_model_mapping: Dict[str, str] = {}  # 新增：agent -> fallback_model 映射
         self.agent_thinking_mode: Dict[str, str] = {}  # agent -> "thinking" | "standard"
         self._load_default_config()
         self._load_user_config()
@@ -250,11 +253,21 @@ class AIConfigManager:
         
         self.agent_model_mapping = {
             "concept_planner": concept_model,
-            "script_writer": script_model, 
+            "script_writer": script_model,
             "quality_checker": quality_model,
             "audio_generator": concept_model,  # 音频生成也需要理解内容
             "default": concept_model
         }
+
+        # 默认的Agent备用模型映射（用于兜底，不是强制回退链）
+        # - 优先选择同系列的轻量模型
+        if concept_model == "glm-4.5" and "glm-4.5-air" in self.models:
+            self.agent_fallback_model_mapping["concept_planner"] = "glm-4.5-air"
+        elif concept_model == "gpt-4" and "gpt-3.5-turbo" in self.models:
+            self.agent_fallback_model_mapping["concept_planner"] = "gpt-3.5-turbo"
+        else:
+            # 若无轻量同系，则回落到默认（不会生效为同名）
+            self.agent_fallback_model_mapping["concept_planner"] = self.agent_model_mapping.get("default", concept_model)
 
         # 设置默认的Agent思维链模式（先验：规划开、执行关）
         self.agent_thinking_mode = {
@@ -316,29 +329,50 @@ class AIConfigManager:
             # 环境配置覆盖通用配置
             if "agent_model_mapping" in env_config:
                 self.agent_model_mapping.update(env_config["agent_model_mapping"])
+            if "tool_model_mapping" in env_config:
+                self.tool_model_mapping.update(env_config["tool_model_mapping"])
+            if "tool_provider_mapping" in env_config:
+                self.tool_provider_mapping.update(env_config["tool_provider_mapping"])
+            if "agent_fallback_model_mapping" in env_config:
+                self.agent_fallback_model_mapping.update(env_config["agent_fallback_model_mapping"])
         
         # 更新Agent模型映射
         if "agent_model_mapping" in user_config:
             self.agent_model_mapping.update(user_config["agent_model_mapping"])
 
+        # 更新Tool模型映射（可选）
+        if "tool_model_mapping" in user_config:
+            self.tool_model_mapping.update(user_config["tool_model_mapping"])
+
+        # 更新Tool提供商映射（可选）
+        if "tool_provider_mapping" in user_config:
+            self.tool_provider_mapping.update(user_config["tool_provider_mapping"])
+
+        # 更新Agent备用模型映射（可选）
+        if "agent_fallback_model_mapping" in user_config:
+            self.agent_fallback_model_mapping.update(user_config["agent_fallback_model_mapping"])
+
         # 更新Agent思维链默认模式
         if "agent_thinking_mode" in user_config:
             self.agent_thinking_mode.update(user_config["agent_thinking_mode"])
         
-        # 更新提供商配置
+        # 更新提供商配置（若默认未加载该provider，也允许从用户配置创建占位项，便于注入timeout/default_model）
         if "providers" in user_config:
             for provider_name, provider_config in user_config["providers"].items():
-                if provider_name in self.providers:
-                    # 更新现有提供商
-                    existing = self.providers[provider_name]
-                    if "default_model" in provider_config:
-                        existing.default_model = provider_config["default_model"]
-                    if "enabled" in provider_config:
-                        existing.enabled = provider_config["enabled"]
-                    if "timeout" in provider_config:
-                        existing.timeout = provider_config["timeout"]
-                    if "rate_limit" in provider_config:
-                        existing.rate_limit = provider_config["rate_limit"]
+                existing = self.providers.get(provider_name)
+                if existing is None:
+                    # 创建占位ProviderConfig（api_key由各自service从环境变量读取）
+                    existing = ProviderConfig(name=provider_name)
+                    self.providers[provider_name] = existing
+                # 合入用户配置字段
+                if "default_model" in provider_config:
+                    existing.default_model = provider_config["default_model"]
+                if "enabled" in provider_config:
+                    existing.enabled = provider_config["enabled"]
+                if "timeout" in provider_config:
+                    existing.timeout = provider_config["timeout"]
+                if "rate_limit" in provider_config:
+                    existing.rate_limit = provider_config["rate_limit"]
         
         # 更新模型配置
         if "models" in user_config:
@@ -353,11 +387,17 @@ class AIConfigManager:
                         existing.enabled = model_config["enabled"]
                     if "timeout" in model_config:
                         existing.timeout = model_config["timeout"]
+                    if "fallback_model" in model_config:
+                        existing.fallback_model = model_config["fallback_model"]
     
     def get_model_for_agent(self, agent_name: str) -> str:
         """获取Agent应该使用的模型"""
         return self.agent_model_mapping.get(agent_name, self.agent_model_mapping["default"])
     
+    def get_model_for_tool(self, tool_name: str) -> Optional[str]:
+        """获取工具应该使用的模型（如果配置了）"""
+        return self.tool_model_mapping.get(tool_name)
+
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """获取模型配置"""
         return self.models.get(model_name)
@@ -374,6 +414,18 @@ class AIConfigManager:
         """获取模型的提供商"""
         model_config = self.get_model_config(model_name)
         return model_config.provider if model_config else None
+
+    def get_tool_provider(self, tool_name: str) -> Optional[str]:
+        """获取工具建议使用的提供商（如 zhipu/doubao）"""
+        return self.tool_provider_mapping.get(tool_name)
+
+    def get_fallback_model_for_agent(self, agent_name: str) -> Optional[str]:
+        """获取Agent的备用模型：优先显式 agent_fallback_model_mapping，其次当前主模型的 ModelConfig.fallback_model。"""
+        if agent_name in self.agent_fallback_model_mapping:
+            return self.agent_fallback_model_mapping[agent_name]
+        primary = self.get_model_for_agent(agent_name)
+        mc = self.get_model_config(primary) if primary else None
+        return getattr(mc, 'fallback_model', None) if mc else None
     
     def list_available_models(self, capability: Optional[str] = None) -> list:
         """列出可用模型"""

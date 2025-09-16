@@ -9,6 +9,41 @@ import signal
 import time
 from pathlib import Path
 
+# -----------------------------
+# Proxy helper: compose NO_PROXY
+# -----------------------------
+def _build_env_with_no_proxy(extra_hosts=None):
+    """Return env copy with minimally-augmented NO_PROXY.
+
+    - Non-intrusive: only ensures localhost entries are present.
+    - Supplier-agnostic: does NOT hardcode vendor domains.
+    - Optional: users may append more domains via BYPASS_PROXY_DOMAINS.
+    """
+    env = os.environ.copy()
+
+    # Default bypass list (merge without duplicates)
+    defaults = ['localhost', '127.0.0.1', '::1']
+
+    # User-provided domains to bypass (optional)
+    user_extra = env.get('BYPASS_PROXY_DOMAINS', '')
+    user_list = [x.strip() for x in user_extra.split(',') if x.strip()]
+
+    # Call-site extra
+    extra_list = extra_hosts or []
+
+    existing_no_proxy = env.get('NO_PROXY') or env.get('no_proxy') or ''
+    existing_list = [x.strip() for x in existing_no_proxy.split(',') if x.strip()]
+
+    merged = []
+    for host in existing_list + defaults + user_list + extra_list:
+        if host and host not in merged:
+            merged.append(host)
+
+    merged_value = ','.join(merged)
+    env['NO_PROXY'] = merged_value
+    env['no_proxy'] = merged_value
+    return env
+
 # Add the parent directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -168,11 +203,13 @@ def start_celery_worker():
     ]
     
     try:
+        env = _build_env_with_no_proxy()
         process = subprocess.Popen(
             celery_cmd,
             cwd=Path(__file__).parent.parent,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             preexec_fn=os.setsid  # create new process group for clean shutdown
         )
         
@@ -203,11 +240,13 @@ def start_celery_beat():
     ]
     
     try:
+        env = _build_env_with_no_proxy()
         process = subprocess.Popen(
             beat_cmd,
             cwd=Path(__file__).parent.parent,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             preexec_fn=os.setsid
         )
         
@@ -245,18 +284,8 @@ def start_api_server():
         # Limit reload scope to backend app directory for stability on WSL
         api_cmd += ["--reload", "--reload-dir", "app"]
     
-    # 代理处理（精简版）：保留现有代理，仅确保本地地址走直连
-    env = os.environ.copy()
-    no_proxy_defaults = ['localhost', '127.0.0.1', '::1']
-    existing_no_proxy = env.get('NO_PROXY') or env.get('no_proxy') or ''
-    existing_list = [x.strip() for x in existing_no_proxy.split(',') if x.strip()]
-    merged = []
-    for host in existing_list + no_proxy_defaults:
-        if host not in merged:
-            merged.append(host)
-    merged_value = ','.join(merged)
-    env['NO_PROXY'] = merged_value
-    env['no_proxy'] = merged_value
+    # 代理处理：在 NO_PROXY 中加入本地/国内端点，避免代理引起的超时
+    env = _build_env_with_no_proxy()
     
     try:
         # Add debug output
@@ -265,6 +294,7 @@ def start_api_server():
         print("Environment proxy variables after cleanup:")
         for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
             print(f"  {key}: {env.get(key, 'Not set')}")
+        print(f"  NO_PROXY: {env.get('NO_PROXY', 'Not set')}")
 
         follow_logs = os.getenv("FOLLOW_API_LOGS", "0") == "1"
 

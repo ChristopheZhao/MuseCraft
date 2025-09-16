@@ -136,6 +136,48 @@ class SceneContinuityPreparationTool(AsyncTool):
                     memory_scene_number=None
                 )
                 if not final_frame_result.get("success"):
+                    # 覆盖URL失败（如403）：尝试按依赖自动解析（内存/上游视频/last_frame_url）作为兜底
+                    try:
+                        from ....core.workflow_state import workflow_manager
+                        prev_scene_no_fb: Optional[int] = None
+                        current_scene_image_url_fb: str = ""
+                        for wf in workflow_manager.get_active_workflows():
+                            sc = wf.get_scene(scene_number)
+                            if sc is not None:
+                                current_scene_image_url_fb = getattr(sc, 'image_url', '') or ''
+                                depv = getattr(sc, 'depends_on_scene', None)
+                                if isinstance(depv, (int, str)) and str(depv).isdigit():
+                                    prev_scene_no_fb = int(depv)
+                                break
+                        if prev_scene_no_fb is not None:
+                            # 先查内存
+                            alt = await self._extract_final_frame(video_url=None, memory_scene_number=prev_scene_no_fb)
+                            if alt.get('success') and isinstance(alt.get('frame_data'), str):
+                                fd = alt.get('frame_data')
+                                if fd.startswith('http'):
+                                    self.logger.info("♻️  覆盖URL失败，复用内存中的连续性帧URL")
+                                    return {
+                                        "success": True,
+                                        "scene_number": scene_number,
+                                        "image_url": fd,
+                                        "continuity_used": True,
+                                        "processing_type": "continuity_frame_reuse",
+                                        "message": f"场景 {scene_number} 复用上游已存连续性帧"
+                                    }
+                                # 非URL：上传后复用
+                                up = await self._upload_frame_to_oss(fd, scene_number)
+                                if up.get('success'):
+                                    return {
+                                        "success": True,
+                                        "scene_number": scene_number,
+                                        "image_url": up.get('url'),
+                                        "continuity_used": True,
+                                        "processing_type": "continuity_frame_reuse",
+                                        "message": f"场景 {scene_number} 复用上游已存连续性帧（上传后）"
+                                    }
+                        # 仍不可用：保留原有兜底（fallback_image_url 或当前场景 image_url）
+                    except Exception:
+                        pass
                     raise ToolError(
                         f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
                         self.metadata.name

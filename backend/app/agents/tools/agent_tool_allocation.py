@@ -60,6 +60,7 @@ class AgentToolAllocator:
             # 音频生成Agent - 音频创作和处理
             AgentType.AUDIO_GENERATOR: [
                 "suno_client",                 # 背景音乐生成（已注册工具名）
+                "audio_analysis_tool",        # 音频分析（静音/截断点/能量）
                 "audio_processor",             # 音频后处理（时长/淡入淡出/循环）
                 "ffmpeg_tool",                 # 媒体组合（视频加音频）
                 "file_storage_tool"            # 文件持久化/下载

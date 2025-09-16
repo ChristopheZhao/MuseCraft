@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Scene
 from ..core.workflow_state import WorkflowState, SceneData
+from .tools.tool_registry import get_tool_registry
+from .tools.base_tool import ToolInput as TI
 
 
 class ScriptWriterAgent(BaseAgent):
@@ -128,6 +130,17 @@ class ScriptWriterAgent(BaseAgent):
             # 逐场景生成脚本（使用 script_generation 工具的 generate_scene_script 动作）
             scripts_map: Dict[str, Any] = {}
             intelligent_style = concept_plan.get('intelligent_style_design', {})
+            # 读取脚本写作模型与token预算（来自ai_config）
+            try:
+                from ..core.ai_config import get_ai_config
+                from ..core.config import settings as _settings
+                ai_cfg = get_ai_config()
+                script_model = ai_cfg.get_model_for_agent("script_writer")
+                model_cfg = ai_cfg.get_model_config(script_model)
+                max_tokens_budget = int(model_cfg.max_tokens) if model_cfg and getattr(model_cfg, 'max_tokens', None) else int(getattr(_settings, 'LLM_MAX_TOKENS_STANDARD', 2048))
+            except Exception:
+                script_model = None
+                max_tokens_budget = 1500
             for scene in scenes_needing_scripts:
                 try:
                     tool_params = {
@@ -141,7 +154,10 @@ class ScriptWriterAgent(BaseAgent):
                         "context": {
                             "previous_scene": "",
                             "narrative_arc": concept_plan.get('genre_and_theme', {}).get('theme', '')
-                        }
+                        },
+                        # 让工具按配置使用模型和token预算，替代内部默认值
+                        "model": script_model,
+                        "max_tokens": max_tokens_budget,
                     }
                     one = await self.use_tool(
                         "script_generation",
@@ -270,8 +286,349 @@ class ScriptWriterAgent(BaseAgent):
             except Exception as ce:
                 self.logger.warning(f"连续性结果写回失败：{ce}")
 
+            # 角色一致性：基于概念角色库与场景文本，填充每个场景的 characters_present 与 character_descriptions
+            try:
+                # 提取角色库（来自概念规划）
+                # 通用化：优先使用 canonical_name/display_name/aliases，其次回退 identity 解析
+                char_lib = {}
+                try:
+                    chars = ((concept_plan or {}).get('content_elements') or {}).get('characters') or []
+                except Exception:
+                    chars = []
+                import re
+                for c in chars:
+                    # 1) 高层特征优先（抽象且通用）
+                    traits = []
+                    try:
+                        traits = [str(t).strip() for t in (c.get('abstract_traits') or []) if str(t).strip()]
+                    except Exception:
+                        traits = []
+                    # 2) 视觉标识（可选）
+                    vis_ids = []
+                    try:
+                        vis_ids = [str(t).strip() for t in (c.get('visual_identity') or []) if str(t).strip()]
+                    except Exception:
+                        vis_ids = []
+                    # 3) 回退：appearance（字符串或对象）/ background / role
+                    appearance = None
+                    app_raw = c.get('appearance')
+                    if isinstance(app_raw, dict):
+                        # 尝试提取少量抽象要点（而非细节清单）
+                        try:
+                            abstract_bits = [app_raw.get('physique'), app_raw.get('distinguishing_marks')]
+                            palette = app_raw.get('color_palette') or {}
+                            if palette.get('primary'):
+                                abstract_bits.append(f"主色:{palette.get('primary')}")
+                            appearance = '；'.join([str(p) for p in abstract_bits if p])
+                        except Exception:
+                            appearance = None
+                    if not appearance and app_raw is not None:
+                        try:
+                            appearance = str(app_raw).strip()
+                        except Exception:
+                            appearance = None
+                    background = (c.get('background') or '').strip()
+                    role_fn = (c.get('role') or '').strip()
+
+                    # 4) 生成简明描述（限制长度，保持抽象）
+                    parts = []
+                    if traits:
+                        parts.append('，'.join(traits[:5]))
+                    if vis_ids:
+                        parts.append('，'.join(vis_ids[:3]))
+                    if appearance:
+                        parts.append(appearance)
+                    if background and (not parts):
+                        parts.append(background)
+                    if role_fn and (not parts):
+                        parts.append(role_fn)
+                    desc = '；'.join([p for p in parts if p]).strip()
+                    if len(desc) > 120:
+                        desc = desc[:120]
+
+                    # 名称集合：canonical/display/aliases/identity短名（兼容历史）
+                    canonical = (c.get('canonical_name') or '').strip()
+                    display = (c.get('display_name') or '').strip()
+                    aliases = [str(a).strip() for a in (c.get('aliases') or []) if str(a).strip()]
+                    identity = (c.get('identity') or '').strip()
+                    id_short = ''
+                    if identity:
+                        m = re.search(r'“([^”]+)”', identity) or re.search(r'"([^"]+)"', identity)
+                        id_short = m.group(1) if m else (identity[-2:] if len(identity) >= 2 else identity)
+                    names = [canonical, display, id_short] + aliases
+                    names = [n for n in names if n]
+                    for n in names:
+                        if n and desc:
+                            char_lib[n] = desc
+
+                # 基于脚本文本标注每个场景
+                for sc in getattr(workflow_state, 'scenes', []) or []:
+                    try:
+                        text = (getattr(sc, 'script_text', '') or '') + ' ' + (getattr(sc, 'narrative_description', '') or '')
+                        present = []
+                        descs = []
+                        for name, desc in char_lib.items():
+                            if not name:
+                                continue
+                            # 名称包含或近似匹配（前缀/后缀），提升跨语言/缩写鲁棒性
+                            if (name in text) or text.startswith(name) or text.endswith(name):
+                                present.append(name)
+                                descs.append(f"{name}：{desc}")
+                        if present:
+                            workflow_state.update_scene(sc.scene_number, characters_present=present, character_descriptions=descs)
+                    except Exception:
+                        continue
+                self.logger.info("✅ 角色一致性标注已写回 WorkflowState.scenes")
+            except Exception as ce:
+                self.logger.warning(f"角色一致性标注失败（跳过）：{ce}")
+
             self.logger.info(f"批量脚本生成完成: {generated_count}/{len(scenes_needing_scripts)}")
             
+            # role consistency memory sync (concept -> WF.scene)
+            try:
+                cp = concept_plan or {}
+                scene_defs = (cp.get('scenes') or [])
+                if scene_defs:
+                    # build maps from global characters: identity->appearance and short->appearance
+                    name2appearance = {}
+                    short2appearance = {}
+                    for rc in ((cp.get('content_elements') or {}).get('characters') or []):
+                        ident = str((rc.get('identity') or '')).strip()
+                        app = str((rc.get('appearance') or '')).strip()
+                        if ident:
+                            name2appearance[ident] = app or ident
+                            # derive a short display name from quoted alias or tail segments
+                            try:
+                                import re
+                                m = re.search(r'“([^”]+)”', ident) or re.search(r'"([^"]+)"', ident)
+                                short = m.group(1) if m else ''
+                                if not short:
+                                    short = ident[-2:] if len(ident) >= 2 else ident
+                                if short:
+                                    short2appearance[short] = app or ident
+                            except Exception:
+                                pass
+                    # 额外构建名称与特征描述映射：
+                    # - 将场景出现名单标准化为本地化展示名（display_name优先）
+                    # - 为每个角色准备“简明特征摘要”，用于下游生成作为角色设定
+                    canonical_to_display = {}
+                    alias_to_display = {}
+                    char_desc_map = {}
+                    for rc in ((cp.get('content_elements') or {}).get('characters') or []):
+                        cano = str((rc.get('canonical_name') or '')).strip()
+                        disp = str((rc.get('display_name') or '')).strip()
+                        aliases = [str(a).strip() for a in (rc.get('aliases') or []) if str(a).strip()]
+                        # 生成简明特征摘要（不依赖任何供应商）：
+                        parts = []
+                        # 1) 原型/身份与物种/品种（若提供）
+                        arche = str((rc.get('archetype_or_identity') or rc.get('identity') or '')).strip()
+                        if (not arche) and aliases:
+                            # 作为弱回退：若无结构化原型字段，取首个别名作为身份/原型线索
+                            arche = aliases[0]
+                        species = str((rc.get('species_or_breed') or '')).strip()
+                        if arche:
+                            parts.append(f"原型：{arche}")
+                        if species:
+                            parts.append(f"物种：{species}")
+                        try:
+                            traits = [str(t).strip() for t in (rc.get('abstract_traits') or []) if str(t).strip()]
+                        except Exception:
+                            traits = []
+                        try:
+                            vis = [str(v).strip() for v in (rc.get('visual_identity') or []) if str(v).strip()]
+                        except Exception:
+                            vis = []
+                        try:
+                            sig = [str(v).strip() for v in (rc.get('signature_outfit_or_props') or []) if str(v).strip()]
+                        except Exception:
+                            sig = []
+                        role_fn = str((rc.get('role') or '')).strip()
+                        if traits:
+                            parts.append('，'.join(traits[:5]))
+                        if vis:
+                            parts.append('，'.join(vis[:3]))
+                        if sig:
+                            parts.append('，'.join(sig[:2]))
+                        if role_fn:
+                            parts.append(role_fn)
+                        brief = '；'.join([p for p in parts if p]).strip()
+                        # 名称映射
+                        if cano and disp:
+                            canonical_to_display[cano] = disp
+                        for al in aliases:
+                            if disp:
+                                alias_to_display[al] = disp
+                        # 描述映射（多键指向同一摘要）
+                        keys = set([k for k in [cano, disp] + aliases if k])
+                        for k in keys:
+                            if brief:
+                                char_desc_map[k] = brief
+                    # write per-scene presence into WF（名称优先归一到 display_name）
+                    for sdef in scene_defs:
+                        try:
+                            sn = int(sdef.get('scene_number')) if sdef.get('scene_number') is not None else None
+                        except Exception:
+                            sn = None
+                        if sn is None:
+                            continue
+                        present_raw = (((sdef.get('content_elements') or {}).get('characters_present')) or [])
+                        # 将出现名单优先映射为 display_name（若存在），否则保持原样
+                        present = []
+                        for nm in present_raw:
+                            nm_str = str(nm).strip()
+                            if not nm_str:
+                                continue
+                            mapped = canonical_to_display.get(nm_str) or alias_to_display.get(nm_str)
+                            present.append(mapped or nm_str)
+                        # 构建角色特征描述：使用 display 名 + 摘要（若有）
+                        descs = []
+                        for nm in present:
+                            nm_str = str(nm).strip()
+                            if not nm_str:
+                                continue
+                            brief = char_desc_map.get(nm_str) or ''
+                            descs.append(f"{nm_str}：{brief}" if brief else nm_str)
+                        workflow_state.update_scene(sn, characters_present=present, character_descriptions=descs)
+                self.logger.info("✅ 角色记忆已写回（concept→WF.scene）")
+            except Exception as ce:
+                self.logger.warning(f"角色记忆写回失败（跳过）：{ce}")
+
+            # 角色分析工具（结构化）：不改变 Agent 自主性，仅调用工具并将结果写回 WF
+            try:
+                registry = get_tool_registry()
+                role_tool = registry.get_tool("role_analysis_tool")
+                # 组装场景文本
+                scene_payload: List[Dict[str, Any]] = []
+                for sc in getattr(workflow_state, 'scenes', []) or []:
+                    scene_payload.append({
+                        "scene_number": getattr(sc, 'scene_number', None),
+                        "title": getattr(sc, 'title', ''),
+                        "description": getattr(sc, 'description', '') or getattr(sc, 'visual_description', ''),
+                        "narrative_description": getattr(sc, 'narrative_description', ''),
+                        "script_text": getattr(sc, 'script_text', '')
+                    })
+                # 抽取通用风格/场景线索，参数化传入，保持工具通用性
+                style_hint = ""
+                try:
+                    # workflow_state 风格偏好
+                    sw = getattr(workflow_state, 'style_preference', '') or ''
+                    if isinstance(sw, str) and sw.strip():
+                        style_hint = sw.strip()
+                    # 概念计划智能风格设计摘要
+                    if not style_hint and isinstance(concept_plan, dict):
+                        isd = (concept_plan or {}).get('intelligent_style_design') or {}
+                        if isinstance(isd, dict) and isd:
+                            # 尝试拼接关键词/主风格
+                            primary = (isd.get('primary_style') or isd.get('style') or '')
+                            keywords = isd.get('keywords') or isd.get('style_keywords') or []
+                            if isinstance(primary, str) and primary.strip():
+                                style_hint = primary.strip()
+                                if isinstance(keywords, list) and keywords:
+                                    try:
+                                        style_hint = f"{style_hint} | " + ", ".join([str(k) for k in keywords[:5]])
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
+                scenario_hint = ""
+                try:
+                    if isinstance(concept_plan, dict):
+                        overview = (concept_plan.get('overview') or '').strip()
+                        setting = ''
+                        try:
+                            setting = (concept_plan.get('setting') or concept_plan.get('world_setting') or '').strip()
+                        except Exception:
+                            setting = ''
+                        genre = ''
+                        try:
+                            g = (concept_plan.get('genre_and_theme') or {}).get('genre')
+                            genre = g.strip() if isinstance(g, str) else ''
+                        except Exception:
+                            genre = ''
+                        mood = ''
+                        try:
+                            mood = (concept_plan.get('mood_and_tone') or '').strip()
+                        except Exception:
+                            mood = ''
+                        candidates = [overview, setting, genre, mood]
+                        scenario_hint = ' | '.join([c for c in candidates if c])[:240]
+                except Exception:
+                    pass
+
+                res = await role_tool.execute(TI(action="analyze_roles_and_scenes", parameters={
+                    "scenes": scene_payload,
+                    "concept_plan": concept_plan or {},
+                    "target_style": style_hint,
+                    "scenario_hint": scenario_hint
+                }))
+                payload = getattr(res, 'result', res)
+                per_scene = (payload or {}).get('per_scene_roles') or {}
+                global_roles = (payload or {}).get('roles') or []
+                # 合并写回各场景（不覆盖已有，做集合并集）
+                for sc in getattr(workflow_state, 'scenes', []) or []:
+                    sn = getattr(sc, 'scene_number', None)
+                    if sn is None:
+                        continue
+                    key = str(sn)
+                    scene_roles = per_scene.get(key) or []
+                    names: List[str] = []
+                    descs: List[str] = []
+                    for item in scene_roles:
+                        if isinstance(item, str):
+                            names.append(item)
+                        elif isinstance(item, dict):
+                            nm = item.get('display_name') or item.get('name')
+                            if isinstance(nm, str) and nm.strip():
+                                names.append(nm.strip())
+                            parts = []
+                            # 优先使用 visual_description 作为合成描述
+                            vis = item.get('visual_description')
+                            if isinstance(vis, str) and vis.strip():
+                                parts.append(vis.strip())
+                            for k in ("archetype_or_identity", "species_or_breed"):
+                                v = item.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    parts.append(v.strip())
+                            sig = item.get('signature_outfit_or_props') or []
+                            if isinstance(sig, list) and sig:
+                                parts.append("/".join([str(x) for x in sig[:2]]))
+                            traits = item.get('key_traits') or []
+                            if isinstance(traits, list) and traits:
+                                parts.append("/".join([str(x) for x in traits[:3]]))
+                            if parts:
+                                descs.append("；".join(parts))
+                    if names or descs:
+                        merged_names = list(set((getattr(sc, 'characters_present', []) or []) + names))
+                        merged_descs = list(set((getattr(sc, 'character_descriptions', []) or []) + descs))
+                        workflow_state.update_scene(sn, characters_present=merged_names, character_descriptions=merged_descs)
+                self.logger.info("✅ 角色分析结果已写回 WorkflowState.scenes")
+
+                # 将角色一致性快照作为 EPISODIC 记忆写入（无开关，作为系统保障；若记忆不可用则优雅降级）
+                try:
+                    # Prefer workflow_state.task_id; fallback to task.task_id if available
+                    wf_id = (
+                        getattr(workflow_state, 'task_id', None)
+                        or (str(getattr(task, 'task_id', '')) if task else "")
+                        or ""
+                    )
+                    if wf_id:
+                        from ..services.memory_writer import memory_writer
+                        from ..models.task import TaskType
+                        await memory_writer.write(
+                            TaskType.SCRIPT_WRITING,
+                            workflow_id=str(wf_id),
+                            scene_number=None,
+                            output={
+                                "roles": global_roles,
+                                "per_scene_roles": per_scene
+                            }
+                        )
+                        self.logger.info("🧠 角色一致性快照已存入EPISODIC记忆（roles_snapshot）")
+                except Exception as _mw:
+                    self.logger.warning(f"角色一致性快照写入记忆失败（跳过）：{_mw}")
+            except Exception as re:
+                self.logger.warning(f"角色分析执行/写回失败（跳过，不阻断）：{re}")
+
             return {
                 "success": True,
                 "message": f"批量生成{generated_count}个场景脚本",

@@ -6,48 +6,40 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import VideoRequestForm from '@/components/forms/VideoRequestForm';
 import AgentOrchestrator from '@/components/agents/AgentOrchestrator';
 import RealTimeProgress from '@/components/progress/RealTimeProgress';
-import ResultPreview from '@/components/preview/ResultPreview';
 import VideoPlayer from '@/components/video/VideoPlayer';
 import ExportInterface from '@/components/video/ExportInterface';
 import { useI18n } from '@/i18n/I18nProvider';
+import { useTaskPolling } from '@/hooks/useTaskPolling';
+import ResultOverlay from '@/components/video/ResultOverlay';
 
 const HomePage: React.FC = () => {
-  const { ui, currentRequest } = useAppStore();
+  const { ui, currentRequest, finalVideoUrl } = useAppStore();
   const { currentStep } = ui;
   const { t } = useI18n();
 
-  // Initialize WebSocket connection
-  useWebSocket({
-    url: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api/v1/ws/connect',
-  });
+  // Initialize WebSocket connection (URL auto-resolved inside hook)
+  useWebSocket();
+  // Polling fallback when WS is unavailable
+  useTaskPolling();
 
   const renderMainContent = () => {
     switch (currentStep) {
       case 'input':
         return (
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 w-full overflow-auto">
             <VideoRequestForm />
           </div>
         );
 
       case 'processing':
         return (
-          <div className="flex-1 flex flex-col lg:flex-row gap-6 overflow-hidden">
-            {/* Left Column - Agent Status & Progress */}
-            <div className="lg:w-1/2 space-y-6 overflow-auto">
-              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-                <AgentOrchestrator />
-              </div>
-              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-                <RealTimeProgress />
-              </div>
+          <div className="flex-1 flex flex-col gap-6 overflow-auto">
+            {/* Agent Status & Progress (full width) */}
+            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 mt-2">
+              <AgentOrchestrator />
             </div>
-
-            {/* Right Column - Results Preview */}
-            <div className="lg:w-1/2 overflow-auto">
-              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 h-full">
-                <ResultPreview />
-              </div>
+            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
+              <RealTimeProgress />
             </div>
           </div>
         );
@@ -59,15 +51,10 @@ const HomePage: React.FC = () => {
             <div className="lg:w-2/3 space-y-6">
               <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
                 <VideoPlayer
-                  src="/api/video/sample.mp4" // This would be the actual generated video URL
+                  src={finalVideoUrl}
                   title={currentRequest?.title}
                   className="aspect-video"
                 />
-              </div>
-              
-              {/* Final Results Summary */}
-              <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-                <ResultPreview />
               </div>
             </div>
 
@@ -75,7 +62,7 @@ const HomePage: React.FC = () => {
             <div className="lg:w-1/3">
               <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 h-full">
                 <ExportInterface 
-                  videoUrl="/api/video/sample.mp4"
+                  videoUrl={finalVideoUrl}
                 />
               </div>
             </div>
@@ -88,7 +75,7 @@ const HomePage: React.FC = () => {
             {/* Video Player */}
             <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
               <VideoPlayer
-                src="/api/video/sample.mp4"
+                src={finalVideoUrl}
                 title={currentRequest?.title}
                 className="aspect-video max-w-4xl mx-auto"
               />
@@ -96,9 +83,7 @@ const HomePage: React.FC = () => {
 
             {/* Export Interface */}
             <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-              <ExportInterface 
-                videoUrl="/api/video/sample.mp4"
-              />
+              <ExportInterface videoUrl={finalVideoUrl} />
             </div>
           </div>
         );
@@ -113,7 +98,7 @@ const HomePage: React.FC = () => {
   };
 
   return (
-    <div className="h-full flex flex-col p-6 gap-6">
+    <div className="h-full flex-1 w-full flex flex-col p-6 gap-6 relative">
       {/* Step Indicator */}
       <div className="flex items-center justify-center">
         <div className="flex items-center space-x-8">
@@ -162,6 +147,9 @@ const HomePage: React.FC = () => {
 
       {/* Main Content */}
       {renderMainContent()}
+
+      {/* Result overlay (slide-in) */}
+      <ResultOverlay />
     </div>
   );
 };

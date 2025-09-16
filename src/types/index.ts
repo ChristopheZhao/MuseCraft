@@ -13,6 +13,7 @@ export interface VideoRequest {
   description: string;
   style: VideoStyle;
   duration: number;
+  resolution: string;
   aspectRatio: AspectRatio;
   voiceSettings: VoiceSettings;
   musicSettings: MusicSettings;

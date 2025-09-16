@@ -23,7 +23,7 @@ class ConceptPlannerAgent(BaseAgent):
         super().__init__(
             agent_type=AgentType.CONCEPT_PLANNER,
             agent_name="concept_planner",
-            timeout_seconds=120,
+            timeout_seconds=getattr(settings, 'CONCEPT_PLANNER_TIMEOUT_SECONDS', 200),
             max_retries=2,
             llms=llms
             # ConceptPlanner使用LLM原生能力，不需要外部工具
@@ -100,15 +100,75 @@ class ConceptPlannerAgent(BaseAgent):
                 pass
             messages.append({"role": "user", "content": concept_prompt})
             
-            # 使用LLM原生FC能力进行概念生成
-            concept_response = await self.llm_function_call(
-                messages=messages,
-                model=concept_model,
-                context_description=f"Generate intelligent video concept with style design for: {user_prompt[:100]}...",
-                temperature=model_config.temperature if model_config else 0.7,
-                max_tokens=model_config.max_tokens if model_config else 4000,
-                response_format={"type": "json_object"}
-            )
+            # 使用LLM原生FC能力进行概念生成（不做细粒度子超时切分，避免硬编码预算）
+            primary_err = None
+            concept_response = None
+            try:
+                # 传递主调超时（依据全局配置的步骤总时长与主调比例）
+                try:
+                    primary_total = int(getattr(settings, 'CONCEPT_PLANNER_TIMEOUT_SECONDS', 180))
+                    primary_ratio = float(getattr(settings, 'LLM_PRIMARY_TIMEOUT_RATIO', 0.5))
+                    primary_request_timeout = max(5, int(primary_total * primary_ratio))
+                except Exception:
+                    primary_request_timeout = 90
+
+                concept_response = await self.llm_function_call(
+                    messages=messages,
+                    model=concept_model,
+                    context_description=f"Generate intelligent video concept with style design for: {user_prompt[:100]}...",
+                    temperature=model_config.temperature if model_config else 0.7,
+                    max_tokens=model_config.max_tokens if model_config else 4000,
+                    request_timeout=primary_request_timeout,
+                    response_format={"type": "json_object"}
+                )
+            except Exception as e:
+                primary_err = e
+
+            # 判定是否需要回退：
+            # - 出现异常；或
+            # - 返回结构为失败(success=False)；或
+            # - 缺少content字段
+            try:
+                need_fallback = (
+                    primary_err is not None
+                    or (not concept_response)
+                    or (isinstance(concept_response, dict) and not concept_response.get("success", True))
+                    or (isinstance(concept_response, dict) and not concept_response.get("content"))
+                )
+            except Exception:
+                need_fallback = True
+
+            if need_fallback:
+                from ..core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                fallback_model = (
+                    ai_cfg.get_fallback_model_for_agent("concept_planner")
+                    or (model_config.fallback_model if model_config and getattr(model_config, 'fallback_model', None) else None)
+                    or ai_cfg.agent_model_mapping.get("default")
+                )
+                problem = primary_err or (concept_response.get("error") if isinstance(concept_response, dict) else "unknown error")
+                self.logger.warning(
+                    f"ConceptPlanner primary model '{concept_model}' failed or returned invalid content ({problem}); fallback to '{fallback_model}'"
+                )
+                llm = self.get_llm('plan')
+                fb_mc = ai_cfg.get_model_config(fallback_model) if fallback_model else None
+                # 传递回退阶段的超时（依据全局回退上限）
+                try:
+                    fallback_request_timeout = int(getattr(settings, 'LLM_FALLBACK_TIMEOUT_MAX', 60))
+                except Exception:
+                    fallback_request_timeout = 60
+
+                concept_response = await llm.chat_completion(
+                    messages=messages,
+                    model=fallback_model,
+                    temperature=0.5,
+                    max_tokens=min(
+                        getattr(settings, 'LLM_MAX_TOKENS_STANDARD', 8000),
+                        (fb_mc.max_tokens if fb_mc and getattr(fb_mc, 'max_tokens', None) else 4000)
+                    ),
+                    request_timeout=fallback_request_timeout,
+                    response_format={"type": "json_object"}
+                )
             
             # 解析LLM响应
             if not concept_response or "content" not in concept_response:
@@ -167,6 +227,20 @@ class ConceptPlannerAgent(BaseAgent):
                 "key_messages": concept_plan.get("key_messages", []),
                 "workflow_state_id": workflow_state_id
             }
+
+            # Broadcast a lightweight WS signal with planned scenes count (for UI coarse-grained sync)
+            try:
+                await self.websocket_manager.broadcast_to_task(
+                    str(task.task_id),
+                    {
+                        "type": "concept_plan_ready",
+                        "task_id": str(task.task_id),
+                        "scenes_count": len(scenes_data),
+                        "estimated_duration": duration,
+                    }
+                )
+            except Exception as ws_err:
+                self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
             
             await self._update_progress(execution, 100, "Concept planning completed", db)
             

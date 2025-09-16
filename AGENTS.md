@@ -6,6 +6,7 @@ Principles for Agents and Tools
 - Anti-Hardcoding: Do not encode LLM decisions in code via regex or if/else. Express priors and constraints in system/context messages and tool schemas; let the LLM choose within schema.
 - Prompt Neutrality: Prompts must not include tool names, parameter names, or value ranges. Expose capabilities exclusively via tools schema; let validation happen in tools.
 - Fallbacks as System Guarantees: Fail fast on missing capabilities at tool level, provide minimal, safe fallbacks only where explicitly designed. Surface diagnostics early (keys, endpoints, capabilities).
+- Root‑Cause First (TDD mindset): When a failure or mismatch appears, diagnose and fix the root cause before adding case‑specific workarounds. Avoid “for this case only” hardcoding. For LLM JSON outputs that require structure, always request `response_format={"type":"json_object"}` and ensure messages/payloads are JSON‑serializable primitives (no runtime objects). Keep supplier constraints in tool schemas; where a supplier cannot guarantee a constraint (e.g., precise audio duration), treat it as a soft hint and enforce exactness via post‑processing tools. Add small tests/telemetry to prevent regressions and capture fallback_reason when degradation occurs.
 - ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; update workflow state and continuity memory each turn; stop on clear success criteria.
 - Content Safety: Prompts and templates must avoid explicit or sensitive body-part phrasing and NSFW content. Prefer neutral, professional descriptions of attire, posture, and composition.
 - Config over Constants: Enforce constraints via schemas driven by config (e.g., video durations from provider config) and environment (.env) for timeouts and limits.
@@ -23,6 +24,10 @@ Placement
 
 - This AGENTS.md lives in the repo root for Codex CLI compatibility. Keep it principle-level (no implementation details) and reference per-file docs where needed.
 
+Environment
+
+- Use a Linux-compatible shell for local orchestration. WSL2 (Ubuntu) is verified and recommended when developing on Windows; keep tooling aligned with the container/runtime configuration.
+
 ## FC 暴露策略与工具分配（中文补充）
 
 - 工具分配（allocated_tools）用于为 Agent 注入“可用的工具集合”（工具级权限）。
@@ -38,6 +43,16 @@ Placement
 - ReAct 编排的 THINK/PLAN 阶段通过 FC 只暴露“编排控制工具”的极简动作（如继续/重复/中止），避免在编排器中硬编码 if/else。
 - ACT 阶段统一通过 `agent.execute(...)` 调用子 Agent，继承进度/超时/重试/WebSocket/记忆钩子等系统保障。
 - REFLECT 使用事实驱动的完成判定（必需步骤 + 质量阈值或迭代上限），减少对 LLM 文本反思的强依赖。
+
+## Composer 可重入与音频职责
+
+- Composer 是“统一装配者”，可在工作流多阶段被多次调用：
+  - 先做场景视频拼接（video-only）；
+  - AudioAgent 交付等长可用的 BGM 后，Composer 再次执行“加配乐”；
+  - 未来可在 VO/SRT/SFX 就绪后再做多轨混合、响度标准化与 ducking。
+- AudioAgent 的职责：
+  - 观测（总时长/时间线/概念）→ 规划（AudioDesignPlan）→ 生成（供应商无关）→ 分析（静音/能量/候选截断点）→ 智能对齐（裁剪/循环/淡化），交付“等长可用”的音轨。
+  - 不在 Agent 内直接做混流（除非回退模式），混流由 Composer 统一执行。
 
 ## 记忆解耦与可选回写（ReAct 基类）
 

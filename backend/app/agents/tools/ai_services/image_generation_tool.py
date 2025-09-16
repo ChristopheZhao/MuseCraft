@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Dict, Any, List, Optional
 
-from ..base_tool import AsyncTool, ToolMetadata, ToolType
+from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 from .service_interfaces import get_vlm_service
 
 
@@ -82,8 +82,7 @@ class ImageGenerationTool(AsyncTool):
                 },
                 "size": {
                     "type": "string",
-                    "enum": ["1024x1024", "1024x1792", "1792x1024"],
-                    "description": "图像尺寸"
+                    "description": "图像尺寸（自由字符串，如 1024x1024 / 2K / 1K）"
                 }
             }
             base_schema["required"] = ["prompt"]
@@ -185,7 +184,8 @@ class ImageGenerationTool(AsyncTool):
         """生成图像"""
         
         prompt = (params.get("prompt", "") or "").strip()
-        style = params.get("style", "realistic")
+        # 风格改为“按需透传”：无则不默认，避免硬编码偏置
+        style = (params.get("style") or "").strip()
         size = params.get("size", "1024x1024")
         
         # 轻量提示词质量校验
@@ -200,16 +200,20 @@ class ImageGenerationTool(AsyncTool):
             if not self._vlm_service:
                 self._vlm_service = get_vlm_service()
 
-            res = await self._vlm_service.image_generation(
-                prompt=prompt,
-                size=size,
-                style="vivid",
-                quality="standard"
-            )
+            # 构造最小必需参数；仅当上层明确提供 style/quality 时才透传
+            gen_args = {"prompt": prompt, "size": size}
+            if style:
+                gen_args["style"] = style
+            if params.get("quality"):
+                gen_args["quality"] = params["quality"]
+            res = await self._vlm_service.image_generation(**gen_args)
 
             image_url = res.get("image_url") or res.get("url") or ""
+            if not image_url:
+                # 将失败抛出为工具错误，以便上层Agent识别为失败而不是“成功但无产物”导致的重复尝试
+                raise ToolError("image_generation returned no image_url", self.metadata.name)
             return {
-                "success": bool(image_url),
+                "success": True,
                 "image_url": image_url,
                 "generated_prompt": prompt,
                 "style": style,
@@ -233,12 +237,24 @@ class ImageGenerationTool(AsyncTool):
         visual_desc = (sd.get("visual_description") or sd.get("description") or sd.get("title") or "").strip()
         content_focus = (sd.get("content_focus") or "").strip()
         narrative_desc = (sd.get("narrative_description") or "").strip()
+        # 角色注入：若场景标注了 characters_present/character_descriptions，将其作为语义约束追加
+        # 兼容别名：scene_data.characters 视为 character_descriptions 的等价输入
+        chars = sd.get("character_descriptions") or sd.get("characters") or []
+        if not chars:
+            # 回退：仅使用名字
+            names = sd.get("characters_present") or []
+            if names:
+                chars = ["、".join(names)]
+
         parts = [p for p in [visual_desc, content_focus, narrative_desc] if p]
+        if chars:
+            parts.append("角色设定：" + "；".join(chars))
         base = "，".join(parts) if parts else "场景静态画面"
 
         # 风格融合：支持外部 style 文本与结构化 style_guidance
         sg = style_guidance or {}
-        art_style = sg.get("art_style") or sg.get("style") or style or ""
+        # 优先使用结构化的 art_style/风格提示；缺失时不强行回落到 "realistic"，保持风格中立
+        art_style = sg.get("art_style") or sg.get("style") or sg.get("name") or style or ""
         composition = sg.get("composition") or ""
         color_palette = sg.get("color_palette") or ""
         mood = sg.get("mood") or ""
@@ -251,7 +267,8 @@ class ImageGenerationTool(AsyncTool):
         ]
         style_text = "，".join([b for b in style_bits if b])
         tail = "高质量，细节清晰，构图平衡"
-        return f"{base}，{style_text}，{tail}" if style_text else f"{base}，风格：{style}，{tail}"
+        # 若无风格信息则不强加默认风格，避免与用户的动画/绘制意图冲突
+        return f"{base}，{style_text}，{tail}" if style_text else f"{base}，{tail}"
 
     async def _generate_with_autoprompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """复合：自动提示词 → 生成 → 可选持久化。"""
@@ -261,7 +278,8 @@ class ImageGenerationTool(AsyncTool):
         persist = params.get("persist", True)
         scene_number = params.get("scene_number")
 
-        style = style_guidance.get("style") or style_guidance.get("name") or "realistic"
+        # 仅在有显式风格时传递；避免默认强制 realistic
+        style = style_guidance.get("art_style") or style_guidance.get("style") or style_guidance.get("name") or ""
         prompt_text = await self._create_image_prompt_from_scene(scene_data, style, style_guidance)
         # 观测：记录提示词预览，便于核对与优化（不使用固定模板，仅日志）
         try:
@@ -281,12 +299,15 @@ class ImageGenerationTool(AsyncTool):
 
         gen = await self._generate_image({
             "prompt": prompt_text,
-            "style": style,
+            # 风格可选：缺省时不传递，避免下游误导
+            **({"style": style} if style else {}),
             "size": size,
             "scene_number": scene_number
         })
+
         if not gen.get("success"):
-            return gen
+            # 再次保障：若下游未抛异常但返回success=False，也将其视为工具失败
+            raise ToolError(gen.get("error") or "image_generation failed", self.metadata.name)
 
         image_url = gen.get("image_url")
         file_path = ""
@@ -394,6 +415,15 @@ class ImageGenerationTool(AsyncTool):
         try:
             from .service_interfaces import get_llm_service
             llm = get_llm_service()
+            # 从 ai_config 读取工具模型映射
+            try:
+                from ....core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                cfg_model = ai_cfg.get_model_for_tool("image_generation")
+                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+            except Exception:
+                cfg_model = None
+                mcfg = None
 
             scene = params.get("scene_data", {}) or {}
             style = params.get("style_guidance", {}) or {}
@@ -410,7 +440,8 @@ class ImageGenerationTool(AsyncTool):
 
             res = await llm.chat_completion(
                 messages=[{"role":"system","content":system},{"role":"user","content":user_ctx}],
-                temperature=0.3
+                temperature=0.3,
+                model=(cfg_model or None)
             )
             prompt = (res.get("content") or "").strip()
             if not prompt:
@@ -464,50 +495,25 @@ class ImageGenerationTool(AsyncTool):
 返回JSON格式的特征描述。"""
         
         try:
-            from ..base_tool import ToolInput
-            zhipu_input = ToolInput(
-                action="vision_chat",
-                parameters={
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": feature_prompt},
-                                {"type": "image_url", "image_url": {"url": image_url or image_path}}
-                            ]
-                        }
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": settings.VISUAL_FEATURES_EXTRACTION_MAX_TOKENS
-                }
-            )
-            zhipu_result = await self.zhipu_client.execute(zhipu_input)
-            
-            if zhipu_result.success:
-                features_content = zhipu_result.result.get("content", "")
-                try:
-                    visual_features = json.loads(features_content)
-                    return {
-                        "success": True,
-                        "visual_features": visual_features
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        "success": True,
-                        "visual_features": {
-                            "description": features_content,
-                            "extraction_method": "llm_analysis",
-                            "confidence": 0.8
-                        }
-                    }
-            else:
+            # 供应商无关：统一 VLM 图像理解
+            from .service_interfaces import get_vlm_service
+            vlm = get_vlm_service()
+            img_input = image_url or image_path
+            res = await vlm.image_understanding(image_input=img_input, prompt=feature_prompt, model=None, temperature=0.2)
+            content = (res.get("analysis") or res.get("content") or "").strip()
+            if not content:
+                return {"success": False, "error": "视觉特征提取为空"}
+            try:
+                visual_features = json.loads(content)
+                return {"success": True, "visual_features": visual_features}
+            except json.JSONDecodeError:
                 return {
-                    "success": False,
-                    "error": f"特征提取失败: {zhipu_result.error}"
+                    "success": True,
+                    "visual_features": {
+                        "description": content,
+                        "extraction_method": "vlm_analysis",
+                        "confidence": 0.8
+                    }
                 }
-                
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"视觉特征提取异常: {str(e)}"
-            }
+            return {"success": False, "error": f"视觉特征提取异常: {str(e)}"}

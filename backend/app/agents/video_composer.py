@@ -34,7 +34,7 @@ class VideoComposerAgent(BaseAgent):
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """Compose final video from individual scene videos"""
+        """Compose final video from individual scene videos, or add background music if requested"""
         
         # Validate input
         self._validate_input(input_data, ["workflow_state_id"])
@@ -46,6 +46,84 @@ class VideoComposerAgent(BaseAgent):
         workflow_state = workflow_manager.get_workflow(workflow_state_id)
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
+
+        # Branch: add background music onto an existing final video
+        if bool(input_data.get("add_bgm")):
+            await self._update_progress(execution, 10, "Loading final video and background music", db)
+            video_path = getattr(workflow_state, 'final_video_path', '') or ''
+            music_path = getattr(workflow_state, 'background_music_path', '') or ''
+            music_url = getattr(workflow_state, 'background_music_url', '') or ''
+            if (not video_path) or (not os.path.exists(video_path)):
+                raise AgentError("No final video available for audio mixing")
+            if (not music_path) and (not music_url):
+                return {
+                    "subtask_state": "partial",
+                    "loop_end_reason": "bgm_not_ready",
+                    "workflow_state_id": workflow_state_id,
+                }
+            # If only URL available, attempt to download via storage tool
+            if (not music_path) and music_url:
+                try:
+                    up = await self.use_tool(
+                        "file_storage_tool",
+                        "upload_from_url",
+                        {
+                            "url": music_url,
+                            "destination_key": f"audio/bg_for_{execution.id}.mp3",
+                            "metadata": {"workflow_state_id": workflow_state_id, "source": "composer_add_bgm"}
+                        }
+                    )
+                    payload = getattr(up, 'result', up) or {}
+                    music_path = payload.get("local_path", "")
+                except Exception as e:
+                    self.logger.warning(f"Download BGM failed: {e}")
+
+            if not music_path or not os.path.exists(music_path):
+                raise AgentError("Background music not available locally for mixing")
+
+            await self._update_progress(execution, 40, "Adding background music", db)
+            # Mix using ffmpeg_tool
+            try:
+                out_name = f"final_with_bgm_{execution.id}.mp4"
+                res = await self.use_tool(
+                    "ffmpeg_tool",
+                    "add_audio",
+                    {"video_file": video_path, "audio_file": music_path, "output_filename": out_name}
+                )
+                payload = getattr(res, 'result', res) or {}
+                mixed_path = payload.get("output_path") or payload.get("output_file")
+            except Exception as e:
+                raise AgentError(f"ffmpeg add_audio failed: {e}")
+
+            if mixed_path and os.path.exists(mixed_path):
+                workflow_state.final_video_path = mixed_path
+                # Optional: upload for URL
+                try:
+                    up2 = await self.use_tool(
+                        "file_storage_tool",
+                        "upload_file",
+                        {
+                            "file_path": mixed_path,
+                            "destination_key": f"final_videos/final_with_bgm_{execution.id}.mp4",
+                            "content_type": "video/mp4",
+                            "public": True,
+                            "metadata": {"workflow_state_id": workflow_state_id}
+                        }
+                    )
+                    p2 = getattr(up2, 'result', up2)
+                    if isinstance(p2, dict):
+                        workflow_state.final_video_url = p2.get("url", workflow_state.final_video_url)
+                except Exception as e:
+                    self.logger.warning(f"Upload mixed video failed: {e}")
+                await self._update_progress(execution, 95, "Audio mixing completed", db)
+                return {
+                    "final_video_path": mixed_path,
+                    "final_video_url": workflow_state.final_video_url,
+                    "subtask_state": "complete",
+                    "loop_end_reason": "natural_complete",
+                    "workflow_state_id": workflow_state_id
+                }
+            raise AgentError("Audio mixing produced no output")
         
         await self._update_progress(execution, 10, "Loading video clips", db)
         

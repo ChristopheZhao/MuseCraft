@@ -13,6 +13,8 @@ import {
 interface AppState {
   // 当前视频请求
   currentRequest: VideoRequest | null;
+  // 最终合成视频地址（可选，本地路径或URL）
+  finalVideoUrl?: string;
   
   // 智能体状态
   agents: Agent[];
@@ -22,6 +24,12 @@ interface AppState {
   
   // UI状态
   ui: UIState;
+
+  // 概念规划：场景数（粗粒度状态）
+  scenesPlanned: number | null;
+  // 产物计数：图片/视频（粗粒度）
+  imagesGenerated: number | null;
+  videosGenerated: number | null;
   
   // WebSocket连接状态
   wsConnected: boolean;
@@ -38,6 +46,10 @@ interface AppState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   setLoading: (loading: boolean) => void;
   setWSConnected: (connected: boolean) => void;
+  setFinalVideoUrl: (url?: string) => void;
+  setScenesPlanned: (count: number | null) => void;
+  setImagesGenerated: (count: number | null) => void;
+  setVideosGenerated: (count: number | null) => void;
   
   // 重置状态
   reset: () => void;
@@ -80,6 +92,15 @@ const initialAgents: Agent[] = [
     capabilities: ['image-generation', 'visual-design', 'illustration'],
   },
   {
+    id: 'video-generator',
+    name: '视频生成',
+    type: 'video-generator',
+    status: 'idle',
+    progress: 0,
+    description: '根据场景与描述生成视频片段',
+    capabilities: ['video-generation', 'motion-design'],
+  },
+  {
     id: 'voice-synthesizer',
     name: '配音合成',
     type: 'voice-synthesizer',
@@ -113,14 +134,21 @@ export const useAppStore = create<AppState>()(
     subscribeWithSelector((set, get) => ({
       // Initial state
       currentRequest: null,
+      finalVideoUrl: undefined,
       agents: initialAgents,
       results: [],
       ui: initialUIState,
+      scenesPlanned: null,
+      imagesGenerated: null,
+      videosGenerated: null,
       wsConnected: false,
 
       // Actions
       setCurrentRequest: (request) => 
         set({ currentRequest: request }, false, 'setCurrentRequest'),
+
+      setFinalVideoUrl: (url) =>
+        set({ finalVideoUrl: url }, false, 'setFinalVideoUrl'),
 
       updateAgent: (agentId, updates) =>
         set((state) => ({
@@ -194,9 +222,19 @@ export const useAppStore = create<AppState>()(
       setWSConnected: (connected) =>
         set({ wsConnected: connected }, false, 'setWSConnected'),
 
+      setScenesPlanned: (count) =>
+        set({ scenesPlanned: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setScenesPlanned'),
+
+      setImagesGenerated: (count) =>
+        set({ imagesGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setImagesGenerated'),
+
+      setVideosGenerated: (count) =>
+        set({ videosGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setVideosGenerated'),
+
       reset: () =>
         set({
           currentRequest: null,
+          finalVideoUrl: undefined,
           agents: initialAgents,
           results: [],
           ui: initialUIState,

@@ -167,7 +167,25 @@ class EnhancedAIClient:
         
         # Initialize Redis for caching and coordination
         self.redis_client = None
-        self._init_redis()
+        # Safely initialize async Redis from a sync context
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                loop.create_task(self._init_redis())
+            else:
+                # No running loop yet; run a short init synchronously
+                asyncio.run(self._init_redis())
+        except Exception as _e:
+            # Defer initialization gracefully; client will be None until first use
+            self.logger.warning(f"Redis async init deferred: {_e}")
+            try:
+                # Provide a lazy client without ping to avoid loud warnings
+                self.redis_client = redis.from_url(settings.REDIS_URL)
+            except Exception:
+                self.redis_client = None
         
         # Service configurations
         self.service_configs = self._initialize_service_configs()

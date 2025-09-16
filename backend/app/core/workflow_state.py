@@ -10,6 +10,8 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .config import settings
+
 
 class WorkflowStatus(Enum):
     INITIALIZING = "initializing"
@@ -45,6 +47,8 @@ class SceneData:
     lighting_style: str = "natural"
     art_style: str = "realistic"
     character_descriptions: List[str] = field(default_factory=list)
+    # 每场景出现的角色（用于一致性注入）
+    characters_present: List[str] = field(default_factory=list)
     props_and_objects: List[str] = field(default_factory=list)
     color_palette: List[str] = field(default_factory=list)
     
@@ -120,6 +124,7 @@ class WorkflowState:
     intelligent_style_design: Dict[str, Any] = field(default_factory=dict)  # MAS智能风格设计结果
     duration: int = 30
     aspect_ratio: str = "16:9"
+    resolution: str = settings.DEFAULT_VIDEO_RESOLUTION
     
     # 状态管理
     status: WorkflowStatus = WorkflowStatus.INITIALIZING
@@ -277,6 +282,7 @@ class WorkflowState:
             "current_step": self.current_step,
             "progress_percentage": self.progress_percentage,
             "scenes_count": len(self.scenes),
+            "resolution": self.resolution,
             "errors_count": len(self.errors),
             "warnings_count": len(self.warnings),
             "tokens_used": self.tokens_used,
@@ -297,6 +303,7 @@ class WorkflowState:
             "intelligent_style_design": self.intelligent_style_design,
             "duration": self.duration,
             "aspect_ratio": self.aspect_ratio,
+            "resolution": self.resolution,
             "status": self.status.value,
             "current_step": self.current_step,
             "progress_percentage": self.progress_percentage,
@@ -321,7 +328,7 @@ class WorkflowStateManager:
         self._states: Dict[str, WorkflowState] = {}
     
     def create_workflow(self, user_prompt: str, style_preference: str = None,
-                       duration: int = 30, aspect_ratio: str = "16:9") -> WorkflowState:
+                       duration: int = 30, aspect_ratio: str = "16:9", resolution: str = settings.DEFAULT_VIDEO_RESOLUTION) -> WorkflowState:
         """创建新的工作流状态 - MAS智能风格决策"""
         task_id = str(uuid.uuid4())
         workflow_state = WorkflowState(
@@ -329,7 +336,8 @@ class WorkflowStateManager:
             user_prompt=user_prompt,
             intelligent_style_design={},  # 将由ConceptGenerationTool智能填充
             duration=duration,
-            aspect_ratio=aspect_ratio
+            aspect_ratio=aspect_ratio,
+            resolution=resolution
         )
         # 如果用户提供了风格偏好，暂存起来
         if style_preference:

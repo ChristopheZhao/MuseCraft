@@ -415,31 +415,53 @@ class FileStorageTool(AsyncTool):
                 http_timeout = 120
 
             timeout = httpx.Timeout(timeout=http_timeout)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                # 流式下载，边下边写，防止一次性读入内存
-                async with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "application/octet-stream")
-                    content_length = response.headers.get("content-length")
-                    if content_length and int(content_length) > self.max_file_size:
-                        raise ToolError(f"File too large: {content_length} bytes", self.metadata.name)
+            # 下载重试设置
+            try:
+                from ....core.config import settings as _dl_settings
+                max_retries = int(getattr(_dl_settings, 'FILE_STORAGE_DOWNLOAD_RETRIES', 3))
+            except Exception:
+                max_retries = 3
 
-                    temp_file = os.path.join(self.local_storage_dir, f"temp_{uuid.uuid4()}")
-                    try:
-                        with open(temp_file, 'wb') as f:
-                            async for chunk in response.aiter_bytes():
-                                f.write(chunk)
-                        upload_params = {
-                            "file_path": temp_file,
-                            "destination_key": destination_key,
-                            "content_type": content_type,
-                            "metadata": {**metadata, "source_url": url}
-                        }
-                        result = await self._upload_file(upload_params)
-                    finally:
-                        if os.path.exists(temp_file):
-                            os.unlink(temp_file)
-                return result
+            attempt = 0
+            last_err = None
+            while attempt < max_retries:
+                try:
+                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                        # 流式下载，边下边写，防止一次性读入内存
+                        async with client.stream("GET", url) as response:
+                            response.raise_for_status()
+                            content_type = response.headers.get("content-type", "application/octet-stream")
+                            content_length = response.headers.get("content-length")
+                            if content_length and int(content_length) > self.max_file_size:
+                                raise ToolError(f"File too large: {content_length} bytes", self.metadata.name)
+
+                            temp_file = os.path.join(self.local_storage_dir, f"temp_{uuid.uuid4()}")
+                            try:
+                                with open(temp_file, 'wb') as f:
+                                    async for chunk in response.aiter_bytes():
+                                        f.write(chunk)
+                                upload_params = {
+                                    "file_path": temp_file,
+                                    "destination_key": destination_key,
+                                    "content_type": content_type,
+                                    "metadata": {**metadata, "source_url": url}
+                                }
+                                result = await self._upload_file(upload_params)
+                            finally:
+                                if os.path.exists(temp_file):
+                                    os.unlink(temp_file)
+                    return result
+                except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError) as e:
+                    # 远端关闭/超时等网络波动，退避重试
+                    last_err = e
+                    attempt += 1
+                    backoff = min(3.0, 0.5 * (2 ** (attempt - 1)))
+                    self.logger.warning(f"Download failed (attempt {attempt}/{max_retries}) for URL {url}: {e}")
+                    await asyncio.sleep(backoff)
+                except Exception as e:
+                    raise ToolError(f"URL upload failed: {str(e)}", self.metadata.name)
+
+            raise ToolError(f"URL upload failed after {max_retries} retries: {last_err}", self.metadata.name)
                 
         except Exception as e:
             raise ToolError(f"URL upload failed: {str(e)}", self.metadata.name)

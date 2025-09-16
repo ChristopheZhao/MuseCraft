@@ -30,31 +30,15 @@ class ConceptGenerationTool(BaseTool):
                 dependencies=[]  # 🚀 移除工具依赖，直接使用服务层
             )
         super().__init__(metadata)
-        self._llm_service = None
         self._config = config or {}
     
     def _initialize(self):
         """初始化工具特定资源"""
         self.logger.info("🎭 概念生成工具初始化...")
     
-    async def _ensure_llm_service(self):
-        """确保LLM服务可用 - 直接使用ZhipuClientTool（避免ServiceManager依赖）"""
-        if not self._llm_service:
-            try:
-                from .zhipu_client import ZhipuClientTool
-                self._llm_service = ZhipuClientTool()
-                self._llm_service._initialize()
-                if not self._llm_service._functional:
-                    raise RuntimeError("ZhipuClientTool not functional (check GLM_API_KEY)")
-                self.logger.info("🤖 AI服务客户端初始化成功")
-            except Exception as e:
-                self.logger.error(f"LLM服务初始化失败: {e}")
-                raise ToolError(f"AI服务不可用: {e}", self.metadata.name)
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行概念生成 - 唯一功能"""
-        await self._ensure_llm_service()
-        
         parameters = tool_input.parameters
         
         # 构建概念生成提示词 - MAS智能风格决策
@@ -65,38 +49,55 @@ class ConceptGenerationTool(BaseTool):
             aspect_ratio=parameters.get("aspect_ratio", "16:9")
         )
         
-        # 调用ZhipuClientTool进行概念生成，要求返回JSON对象
+        # 调用LLM进行概念生成，要求返回JSON对象（供应商无关）
         try:
-            from ..base_tool import ToolInput
-            result = await self._llm_service.execute(ToolInput(
-                action="chat_completion",
-                parameters={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "model": parameters.get("model", "glm-4-plus"),
-                    "temperature": parameters.get("temperature", 0.7),
-                    "max_tokens": parameters.get("max_tokens", 4000),
-                    "response_format": {"type": "json_object"}
-                }
-            ))
-            # ZhipuClientTool返回的是ToolOutput对象，需要检查success并获取result
-            if hasattr(result, 'success') and not result.success:
-                raise ToolError(f"ZhipuClient failed: {result.error}")
-            # result.result包含实际的字典响应
-            actual_result = result.result if hasattr(result, 'result') else result
-            content = (actual_result or {}).get("content", "").strip()
+            from ..base_tool import ToolInput as TI
+            from ..tool_registry import get_tool_registry
+            # 从 ai_config 读取工具模型映射（可被参数覆盖）
+            try:
+                from ....core.ai_config import get_ai_config
+                ai_cfg = get_ai_config()
+                cfg_model = ai_cfg.get_model_for_tool("concept_generation_tool")
+                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
+                provider_name = ai_cfg.get_model_provider(cfg_model) if cfg_model else None
+            except Exception:
+                cfg_model = None
+                mcfg = None
+                provider_name = None
+            req_model = parameters.get("model") or cfg_model or None
+            req_temp = parameters.get("temperature", (mcfg.temperature if mcfg and getattr(mcfg, 'temperature', None) is not None else 0.7))
+            req_max_tokens = parameters.get("max_tokens", (mcfg.max_tokens if mcfg and getattr(mcfg, 'max_tokens', None) is not None else 4000))
+            # 选择provider工具
+            prov_alias = {"zhipu": "zhipu_client", "openai": "openai_client", "kimi": "kimi_client"}
+            provider_tool = prov_alias.get(provider_name or "zhipu", "zhipu_client")
+            provider = get_tool_registry().get_tool(provider_tool)
+
+            # 优先使用 json_completion 获取严格JSON
+            exec_res = await provider.execute(TI(action="json_completion", parameters={
+                "prompt": prompt,
+                "model": req_model,
+                "temperature": req_temp,
+                "max_tokens": int(req_max_tokens)
+            }))
+            payload = getattr(exec_res, 'result', exec_res)
+            content = None
+            parsed = None
+            if isinstance(payload, dict):
+                parsed = payload.get("json_result")
+                content = payload.get("content") or payload.get("raw_content")
         except Exception as e:
             raise ToolError(f"LLM service failed: {str(e)}", self.metadata.name)
 
         # 🚨 严格处理LLM响应 - 不使用fallback以便问题排查
         
         # 检查是否为空响应
-        if not content:
+        if parsed is None and not content:
             raise ToolError("LLM returned empty content - cannot proceed with concept generation", self.metadata.name)
         
         # 解析JSON内容
         try:
             import json
-            parsed_data = json.loads(content)
+            parsed_data = parsed if isinstance(parsed, dict) else json.loads(content)
             
             # 验证关键字段
             if not parsed_data.get('scenes') or len(parsed_data.get('scenes', [])) == 0:
