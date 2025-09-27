@@ -252,19 +252,71 @@ class SceneDurationCalculator:
                 scene, suggested_duration
             )
         
-        # 2. 检查总时长
-        total_suggested = sum(scene["suggested_duration"] for scene in scenes)
-        
-        # 3. 如果需要，按比例调整
-        if abs(total_suggested - total_duration) > 1.0:
-            adjustment_ratio = total_duration / total_suggested
-            for scene in scenes:
-                scene["suggested_duration"] *= adjustment_ratio
-                scene["duration_adjusted"] = True
-        
-        # 4. 确保时长为合理值（0.5秒的倍数）
+        # 2. 依据提供商能力离散化并尝试微调，以贴合目标时长
+        from ...core.video_config_manager import get_video_config
+        provider_config = get_video_config().get_current_provider_config()
+        capabilities = sorted(
+            {float(cap) for cap in (provider_config.duration_capabilities or getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10])) if cap}
+        )
+        if not capabilities:
+            capabilities = [5.0, 10.0]
+
+        # 建立当前能力索引，确保 suggested_duration 对应离散值
         for scene in scenes:
-            scene["final_duration"] = round(scene["suggested_duration"] * 2) / 2
+            current = float(scene.get("suggested_duration", capabilities[0]))
+            best = min(capabilities, key=lambda cap: abs(cap - current))
+            scene["suggested_duration"] = best
+            scene["_cap_index"] = capabilities.index(best)
+
+        def _total_duration() -> float:
+            return sum(scene["suggested_duration"] for scene in scenes)
+
+        def _adjust_scene(step: int) -> bool:
+            """Adjust scenes by moving along capability list. step=1 increase, -1 decrease."""
+            changed = False
+            if step > 0:
+                candidates = [scene for scene in scenes if scene["_cap_index"] < len(capabilities) - 1]
+                # 优先扩展当前时长较短的场景（索引低）
+                candidates.sort(key=lambda s: (s["_cap_index"], s.get("scene_number", 0)))
+            else:
+                candidates = [scene for scene in scenes if scene["_cap_index"] > 0]
+                # 优先收缩当前时长较长的场景（索引高）
+                candidates.sort(key=lambda s: (-s["_cap_index"], s.get("scene_number", 0)))
+
+            for scene in candidates:
+                new_index = scene["_cap_index"] + step
+                if new_index < 0 or new_index >= len(capabilities):
+                    continue
+                previous = scene["suggested_duration"]
+                scene["_cap_index"] = new_index
+                scene["suggested_duration"] = capabilities[new_index]
+                scene["duration_adjusted"] = True
+                scene.setdefault("duration_adjustments", []).append({
+                    "from": previous,
+                    "to": scene["suggested_duration"],
+                })
+                return True
+            return changed
+
+        tolerance = min(capabilities[0] / 2.0, 1.0)
+        total_current = _total_duration()
+
+        # 尝试增加时长以贴近目标
+        while total_current + tolerance < total_duration:
+            if not _adjust_scene(step=1):
+                break
+            total_current = _total_duration()
+
+        # 尝试减少时长以贴近目标
+        while total_current - tolerance > total_duration:
+            if not _adjust_scene(step=-1):
+                break
+            total_current = _total_duration()
+
+        # 3. 最终赋值
+        for scene in scenes:
+            scene["final_duration"] = float(scene["suggested_duration"])
+            scene.pop("_cap_index", None)
         
         return scenes
     

@@ -1,0 +1,56 @@
+作为概念规划第四阶段，请基于已生成的骨架、风格与旁白信息，细化以下场景批次。
+
+## 用户需求摘要
+{{ user_prompt_brief }}
+
+## 概念骨架（Skeleton JSON）
+{{ skeleton_json }}
+
+## 风格与内容要素
+{{ style_guidance_json }}
+
+## 旁白与音频策略
+{{ voice_plan_json }}
+
+## 待细化场景批次
+{{ scene_batch_json }}
+
+## 输出要求
+仅输出一个 JSON 对象，包含：
+{
+  "scenes": [
+    {
+      "scene_number": 1,
+      "title": "保持骨架中的标题，可根据需要微调",
+      "description": "叙述场景发生的事件，突出剧情",
+      "visual_description": "镜头、构图、光影、色彩等视觉细节",
+      "narrative_description": "该幕在故事中的作用及情感推进",
+      "duration": 10,
+      "final_duration": 10,
+      "content_elements": {
+        "characters_present": ["引用 content_elements 中的 display_name 或 canonical_name"],
+        "environment": "所处环境描述",
+        "key_objects": ["重要道具"],
+        "concepts_visualized": ["体现的抽象概念"]
+      },
+      "camera_angle": "推荐的机位或运动",
+      "mood_and_atmosphere": "情绪与氛围说明",
+      "creative_intent": "观众应获得的感受或洞察",
+      "voiceover": {
+        "should_narrate": true,
+        "key_messages": ["若需要旁白，列出要点"],
+        "timing_notes": "旁白与画面的配合建议"
+      }
+    }
+  ],
+  "notes": {
+    "consistency": "若发现与既定风格/角色冲突，给出提醒",
+    "duration_adjustment": "若时长与骨架不同，说明原因"
+  }
+}
+
+### 规则
+1. 仅生成批次中列出的场景，保持 `scene_number` 与骨架一致；`duration`/`final_duration` 必须使用 {{ duration_capabilities | map('string') | join('、') }} 秒可选值，并尽量贴合骨架的 `duration_hint`。
+2. 所有角色、环境、道具的命名要与风格/内容要素保持一致；如需新增，请在 `notes.consistency` 中说明。
+3. 若某场景无需旁白，将 `voiceover.should_narrate` 设为 false 并简述理由。
+4. 输出必须是合法 JSON，不要额外注释或说明。

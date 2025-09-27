@@ -114,8 +114,20 @@ class ConceptGenerationTool(BaseTool):
     def _build_concept_prompt(self, user_prompt: str, style_preference: str, duration: int, aspect_ratio: str) -> str:
         """使用模板管理器构建智能风格决策提示词"""
         from ...prompts.template_manager import get_template_manager
+        from ....core.video_config_manager import get_video_config
+        from ....core.config import settings
         
         template_manager = get_template_manager()
+        video_config = get_video_config()
+        provider_config = video_config.get_current_provider_config()
+        raw_capabilities = provider_config.duration_capabilities or getattr(
+            settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]
+        )
+        duration_capabilities = sorted({int(cap) for cap in raw_capabilities if cap}) or [5, 10]
+        scene_count_min = getattr(settings, "SCENE_COUNT_RANGE_MIN", 3)
+        scene_count_max = getattr(settings, "SCENE_COUNT_RANGE_MAX", 10)
+        optimal_scene_count = video_config.calculate_optimal_scene_count(duration)
+        optimal_scene_count = max(scene_count_min, min(optimal_scene_count, scene_count_max))
         
         # 使用增强的概念生成模板
         return template_manager.render_template(
@@ -124,7 +136,11 @@ class ConceptGenerationTool(BaseTool):
                 "user_prompt": user_prompt,
                 "style_preference": style_preference or "",
                 "duration": duration,
-                "aspect_ratio": aspect_ratio
+                "aspect_ratio": aspect_ratio,
+                "duration_capabilities": duration_capabilities,
+                "scene_count_min": scene_count_min,
+                "scene_count_max": scene_count_max,
+                "optimal_scene_count": optimal_scene_count,
             }
         )
     

@@ -3,12 +3,16 @@ Video Composer Agent - Combines individual video clips into final video
 """
 import asyncio
 import os
-from typing import Dict, Any, List
+import shutil
+import wave
+from pathlib import Path
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Scene, Resource, ResourceType
- 
+from ..services.file_storage import FileStorageService
+
 from ..core.config import settings
 
 
@@ -26,6 +30,8 @@ class VideoComposerAgent(BaseAgent):
             max_retries=2,
             llms=llms
         )
+        # Dedicated storage service for managing final deliverables.
+        self.file_storage = FileStorageService()
     
     async def _execute_impl(
         self, 
@@ -46,6 +52,120 @@ class VideoComposerAgent(BaseAgent):
         workflow_state = workflow_manager.get_workflow(workflow_state_id)
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
+
+        # Branch: add voice-over tracks onto an existing final video
+        if bool(input_data.get("add_voiceover")):
+            await self._update_progress(execution, 10, "Loading voice-over assets", db)
+            video_path = getattr(workflow_state, 'final_video_path', '') or ''
+            if (not video_path) or (not os.path.exists(video_path)):
+                raise AgentError("No final video available for voice-over mixing")
+
+            voice_assets = sorted(
+                getattr(workflow_state, 'voice_over_assets', []) or [],
+                key=lambda item: item.get('scene_number', 0)
+            )
+            if not voice_assets:
+                return {
+                    "subtask_state": "partial",
+                    "loop_end_reason": "voiceover_not_ready",
+                    "workflow_state_id": workflow_state_id,
+                }
+
+            scenes_ordered = sorted(workflow_state.scenes, key=lambda s: s.scene_number)
+            if not scenes_ordered:
+                raise AgentError("Workflow has no scene definitions for voice mixing")
+
+            sample_rate = int(workflow_state.voice_settings.get("sample_rate", 16000)) if isinstance(workflow_state.voice_settings, dict) else 16000
+            audio_format = (workflow_state.voice_settings.get("audio_format") if isinstance(workflow_state.voice_settings, dict) else None) or "wav"
+            voice_asset_map = {asset.get("scene_number"): asset for asset in voice_assets}
+
+            segment_paths: List[str] = []
+            for scene in scenes_ordered:
+                duration = float(getattr(scene, "duration", 0.0) or 0.0)
+                if duration <= 0:
+                    continue
+                asset = voice_asset_map.get(scene.scene_number)
+                segments_for_scene = await self._resolve_voice_segment(
+                    asset=asset,
+                    scene=scene,
+                    execution=execution,
+                    sample_rate=sample_rate,
+                    audio_format=audio_format,
+                    workflow_state=workflow_state,
+                )
+                if segments_for_scene:
+                    segment_paths.extend(segments_for_scene)
+
+            if not segment_paths:
+                raise AgentError("No usable voice-over audio files available for mixing")
+
+            await self._update_progress(execution, 40, "Concatenating voice-over track", db)
+            concat = await self.use_tool(
+                "ffmpeg_tool",
+                "concat_audio",
+                {
+                    "audio_files": segment_paths,
+                    "output_filename": f"voice_track_{execution.id}.wav"
+                }
+            )
+            concat_payload = getattr(concat, 'result', concat) or {}
+            voice_track_path = concat_payload.get('output_file')
+            if not voice_track_path or not os.path.exists(voice_track_path):
+                raise AgentError("Failed to build consolidated voice-over track")
+
+            await self._update_progress(execution, 70, "Mixing voice-over into final video", db)
+            mix = await self.use_tool(
+                "ffmpeg_tool",
+                "add_audio",
+                {
+                    "video_file": video_path,
+                    "audio_file": voice_track_path,
+                    "output_filename": f"final_with_voice_{execution.id}.mp4",
+                    "audio_volume": 1.0,
+                    "video_volume": 0.0,
+                    "mix_strategy": "voice_overlay",
+                }
+            )
+            mix_payload = getattr(mix, 'result', mix) or {}
+            mixed_path = mix_payload.get("output_path") or mix_payload.get("output_file")
+            if not mixed_path or not os.path.exists(mixed_path):
+                raise AgentError("Voice-over mixing produced no output")
+
+            stored_path = self._store_final_video_output(
+                mixed_path, execution, suffix="final_with_voice"
+            )
+            publication = await self._publish_final_video(
+                stored_path, execution, workflow_state_id
+            )
+
+            workflow_state.final_video_path = stored_path
+            workflow_state.final_video_url = self._resolve_local_public_url(
+                publication.get("url"),
+                stored_path
+            )
+            workflow_state.final_video_remote_path = publication.get(
+                "remote_path", ""
+            )
+            workflow_state.final_video_storage = publication
+            voice_state = getattr(workflow_state, "voice_mixing_state", {}) or {}
+            voice_state.update(
+                {
+                    "voice_track_path": voice_track_path,
+                    "asset_count": len(segment_paths),
+                    "segments": segment_paths,
+                }
+            )
+            workflow_state.voice_mixing_state = voice_state
+
+            await self._update_progress(execution, 95, "Voice-over mixing completed", db)
+            return {
+                "final_video_path": stored_path,
+                "final_video_url": workflow_state.final_video_url,
+                "voice_track_path": voice_track_path,
+                "subtask_state": "complete",
+                "loop_end_reason": "natural_complete",
+                "workflow_state_id": workflow_state_id
+            }
 
         # Branch: add background music onto an existing final video
         if bool(input_data.get("add_bgm")):
@@ -82,13 +202,57 @@ class VideoComposerAgent(BaseAgent):
                 raise AgentError("Background music not available locally for mixing")
 
             await self._update_progress(execution, 40, "Adding background music", db)
+
+            ducking_params = workflow_state.voice_mixing_state.get("ducking_config") if isinstance(workflow_state.voice_mixing_state, dict) else {}
+            if not ducking_params:
+                ducking_params = {
+                    "threshold": 0.05,
+                    "ratio": 6.0,
+                    "attack": 5.0,
+                    "release": 250.0,
+                    "makeup": 1.0,
+                    "recovery": 2.0,
+                }
+
+            bgm_volume = ducking_params.get("bgm_volume", 0.35)
+            voice_volume = ducking_params.get("voice_volume", 1.0)
+
+            voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
+            voice_assets = getattr(workflow_state, "voice_over_assets", []) or []
+            voice_state = getattr(workflow_state, "voice_mixing_state", {}) or {}
+            voice_track_ready = bool(voice_state.get("voice_track_path"))
+            has_voice_assets = any(
+                bool(asset.get("audio_path") or asset.get("audio_url"))
+                for asset in voice_assets
+                if isinstance(asset, dict)
+            )
+            voice_expected = bool(voice_plan.get("enabled"))
+            ducking_enabled = voice_track_ready or has_voice_assets
+
+            if not ducking_enabled and voice_expected:
+                # 已判定无需配音或配音尚未准备好时，避免触发无效的 ducking 逻辑
+                self.logger.info(
+                    "🎧 Voice plan enabled but no voice track available yet; disable ducking for BGM mix"
+                )
+
+            ducking_flag = ducking_enabled
+
             # Mix using ffmpeg_tool
             try:
                 out_name = f"final_with_bgm_{execution.id}.mp4"
                 res = await self.use_tool(
                     "ffmpeg_tool",
                     "add_audio",
-                    {"video_file": video_path, "audio_file": music_path, "output_filename": out_name}
+                    {
+                        "video_file": video_path,
+                        "audio_file": music_path,
+                        "output_filename": out_name,
+                        "audio_volume": bgm_volume,
+                        "video_volume": voice_volume,
+                        "ducking": ducking_flag,
+                        "ducking_params": ducking_params,
+                        "mix_strategy": "voice_bgm_ducking",
+                    }
                 )
                 payload = getattr(res, 'result', res) or {}
                 mixed_path = payload.get("output_path") or payload.get("output_file")
@@ -96,28 +260,43 @@ class VideoComposerAgent(BaseAgent):
                 raise AgentError(f"ffmpeg add_audio failed: {e}")
 
             if mixed_path and os.path.exists(mixed_path):
-                workflow_state.final_video_path = mixed_path
-                # Optional: upload for URL
-                try:
-                    up2 = await self.use_tool(
-                        "file_storage_tool",
-                        "upload_file",
-                        {
-                            "file_path": mixed_path,
-                            "destination_key": f"final_videos/final_with_bgm_{execution.id}.mp4",
-                            "content_type": "video/mp4",
-                            "public": True,
-                            "metadata": {"workflow_state_id": workflow_state_id}
-                        }
-                    )
-                    p2 = getattr(up2, 'result', up2)
-                    if isinstance(p2, dict):
-                        workflow_state.final_video_url = p2.get("url", workflow_state.final_video_url)
-                except Exception as e:
-                    self.logger.warning(f"Upload mixed video failed: {e}")
+                stored_path = self._store_final_video_output(
+                    mixed_path, execution, suffix="final_with_bgm"
+                )
+                publication = await self._publish_final_video(
+                    stored_path, execution, workflow_state_id
+                )
+
+                workflow_state.final_video_path = stored_path
+                workflow_state.final_video_url = self._resolve_local_public_url(
+                    publication.get("url"),
+                    stored_path
+                )
+                workflow_state.final_video_remote_path = publication.get(
+                    "remote_path", ""
+                )
+                workflow_state.final_video_storage = publication
+
+                voice_state = getattr(workflow_state, "voice_mixing_state", {})
+                if not isinstance(voice_state, dict):
+                    voice_state = {}
+                voice_state.setdefault("bgm_mix", {})
+                voice_state.setdefault("ducking_config", ducking_params)
+                voice_state["voice_required"] = bool(voice_expected)
+                voice_state["voice_track_ready"] = bool(ducking_flag)
+                voice_state["bgm_mix"].update(
+                    {
+                        "bgm_volume": bgm_volume,
+                        "voice_volume": voice_volume,
+                        "ducking": ducking_flag,
+                        "ducking_params": ducking_params,
+                    }
+                )
+                workflow_state.voice_mixing_state = voice_state
+
                 await self._update_progress(execution, 95, "Audio mixing completed", db)
                 return {
-                    "final_video_path": mixed_path,
+                    "final_video_path": stored_path,
                     "final_video_url": workflow_state.final_video_url,
                     "subtask_state": "complete",
                     "loop_end_reason": "natural_complete",
@@ -179,28 +358,22 @@ class VideoComposerAgent(BaseAgent):
         
         await self._update_progress(execution, 85, "Saving final video", db)
         
-        # Update workflow state with final video information（测试阶段不上传至 OSS，仅使用本地/通用存储获取URL）
+        # Update workflow state with final video information and ensure OSS backup
         workflow_state.final_video_path = final_video_path
         workflow_state.final_video_url = ""
+        workflow_state.final_video_remote_path = ""
+        workflow_state.final_video_storage = {}
         if final_video_path:
-            try:
-                upload = await self.use_tool(
-                    "file_storage_tool",
-                    "upload_file",
-                    {
-                        "file_path": final_video_path,
-                        "destination_key": f"final_videos/final_{execution.id}.mp4",
-                        "content_type": "video/mp4",
-                        "public": True,
-                        "metadata": {"workflow_state_id": workflow_state_id}
-                    }
-                )
-                payload = getattr(upload, 'result', upload)
-                if isinstance(payload, dict):
-                    workflow_state.final_video_url = payload.get("url", "")
-            except Exception as e:
-                self.logger.warning(f"File storage upload failed: {e}")
-        
+            publication = await self._publish_final_video(
+                final_video_path, execution, workflow_state_id
+            )
+            workflow_state.final_video_storage = publication
+            workflow_state.final_video_url = self._resolve_local_public_url(
+                publication.get("url"),
+                final_video_path
+            )
+            workflow_state.final_video_remote_path = publication.get("remote_path", "")
+
         await self._update_progress(execution, 95, "Generating video metadata", db)
         
         # Generate video metadata and statistics
@@ -240,8 +413,150 @@ class VideoComposerAgent(BaseAgent):
         }
         
         await self._update_progress(execution, 100, "Video composition completed", db)
-        
+
         return output_data
+
+    async def _resolve_voice_segment(
+        self,
+        asset: Optional[Dict[str, Any]],
+        scene,
+        execution: AgentExecution,
+        sample_rate: int,
+        audio_format: str,
+        workflow_state,
+    ) -> List[str]:
+        target_duration = float(getattr(scene, "duration", 0.0) or 0.0)
+        segments: List[str] = []
+        tolerance = 0.05
+        if asset:
+            local_path = asset.get("local_path") or ""
+            if local_path and not os.path.exists(local_path):
+                local_path = ""
+
+            if not local_path:
+                audio_url = asset.get("audio_url")
+                if audio_url:
+                    try:
+                        dl = await self.use_tool(
+                            "file_storage_tool",
+                            "upload_from_url",
+                            {
+                                "url": audio_url,
+                                "destination_key": f"audio/voiceovers/reused_{execution.id}_{asset.get('scene_number', 0)}.{audio_format}",
+                                "metadata": {"source": "voiceover_mixing", "scene_number": asset.get('scene_number')},
+                            },
+                        )
+                        payload = getattr(dl, "result", dl) or {}
+                        local_path = payload.get("local_path") or ""
+                    except Exception as exc:
+                        self.logger.warning(f"Download voice-over asset failed: {exc}")
+
+            if local_path and os.path.exists(local_path):
+                metadata = asset.get("metadata") or {}
+                spoken_duration = float(metadata.get("spoken_duration_sec", 0.0) or 0.0)
+                clip_duration = float(metadata.get("final_duration_sec", asset.get("duration", 0.0)) or 0.0)
+                if spoken_duration <= 0:
+                    spoken_duration = clip_duration
+
+                if target_duration > 0 and clip_duration > 0 and clip_duration - target_duration > tolerance:
+                    try:
+                        ensure = await self.use_tool(
+                            "audio_processor",
+                            "ensure_duration",
+                            {
+                                "input_path": local_path,
+                                "target_duration": max(target_duration, 0.1),
+                                "tolerance": 0.1,
+                                "allow_shrink": True,
+                                "allow_pad": False,
+                                "sample_rate": sample_rate,
+                                "audio_format": audio_format,
+                            },
+                        )
+                        ensure_payload = getattr(ensure, "result", ensure) or {}
+                        aligned_path = ensure_payload.get("output_path") or local_path
+                        if aligned_path and os.path.exists(aligned_path):
+                            asset["local_path"] = aligned_path
+                            asset["duration"] = ensure_payload.get("final_duration", asset.get("duration"))
+                            metadata["composer_duration_adjusted"] = bool(ensure_payload.get("adjusted"))
+                            asset["metadata"] = metadata
+                            local_path = aligned_path
+                            clip_duration = float(ensure_payload.get("final_duration", target_duration))
+                            spoken_duration = min(spoken_duration, clip_duration)
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"Duration alignment failed for scene {scene.scene_number}: {exc}"
+                        )
+
+                segments.append(local_path)
+
+                if target_duration > 0:
+                    effective_duration = clip_duration if clip_duration > 0 else spoken_duration
+                    if effective_duration <= 0:
+                        effective_duration = target_duration
+                    remainder = target_duration - effective_duration
+                    if remainder > tolerance:
+                        silence_path = self._create_silence_clip(
+                            scene_number=scene.scene_number,
+                            duration=remainder,
+                            sample_rate=sample_rate,
+                            audio_format=audio_format,
+                        )
+                        workflow_state.voice_mixing_state.setdefault("silence_segments", []).append(
+                            {
+                                "scene_number": scene.scene_number,
+                                "duration": remainder,
+                                "path": silence_path,
+                            }
+                        )
+                        segments.append(silence_path)
+
+                return segments
+
+        if target_duration <= tolerance:
+            return []
+
+        silence_path = self._create_silence_clip(
+            scene_number=scene.scene_number,
+            duration=target_duration,
+            sample_rate=sample_rate,
+            audio_format=audio_format,
+        )
+        workflow_state.voice_mixing_state.setdefault("silence_segments", []).append(
+            {
+                "scene_number": scene.scene_number,
+                "duration": target_duration,
+                "path": silence_path,
+            }
+        )
+        self.logger.info(
+            f"Inserted silence segment for scene {scene.scene_number} ({target_duration:.2f}s)"
+        )
+        return [silence_path]
+
+    def _create_silence_clip(
+        self,
+        scene_number: int,
+        duration: float,
+        sample_rate: int,
+        audio_format: str,
+    ) -> str:
+        duration = max(duration, 0.1)
+        silence_root = Path(getattr(settings, "VOICE_OUTPUT_DIR", "./storage/generated/voices"))
+        silence_dir = silence_root / "silence"
+        silence_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"scene_{scene_number}_silence_{int(duration * 1000)}ms.{audio_format or 'wav'}"
+        path = silence_dir / filename
+
+        if not path.exists():
+            n_samples = max(int(round(duration * sample_rate)), 1)
+            with wave.open(str(path), "w") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(b"\x00\x00" * n_samples)
+
+        return str(path)
     
     async def _create_image_slideshow(
         self, 
@@ -1028,9 +1343,15 @@ class VideoComposerAgent(BaseAgent):
                 return ""
 
             if len(valid_video_paths) == 1:
-                # 单视频：不做本地复制，直接返回路径（后续由存储工具上传返回URL）
-                self.logger.info(f"🎬 Single video composition passthrough: {valid_video_paths[0]}")
-                return valid_video_paths[0]
+                source_path = valid_video_paths[0]
+                stored_path = self._store_final_video_output(
+                    source_path,
+                    execution,
+                    suffix="final_video",
+                    move=False
+                )
+                self.logger.info(f"🎬 Single video composition passthrough stored at: {stored_path}")
+                return stored_path
 
             # 多视频：通过ffmpeg工具合并
             self.logger.info(f"🎬 Composing {len(valid_video_paths)} videos via ffmpeg_tool.merge_videos")
@@ -1045,14 +1366,149 @@ class VideoComposerAgent(BaseAgent):
             payload = getattr(merge, 'result', merge)
             out_path = payload.get("output_path") if isinstance(payload, dict) else None
             if out_path:
-                self.logger.info(f"✅ Video composition successful: {out_path}")
-                return out_path
+                stored_path = self._store_final_video_output(
+                    out_path,
+                    execution,
+                    suffix="final_video"
+                )
+                self.logger.info(f"✅ Video composition successful: {stored_path}")
+                return stored_path
             self.logger.error("❌ Video composition failed: ffmpeg_tool returned no output_path")
             return ""
         except Exception as e:
             self.logger.error(f"Failed to compose final video: {str(e)}")
             return ""
-    
+
+    def _store_final_video_output(
+        self,
+        source_path: str,
+        execution: AgentExecution,
+        suffix: str = "final_video",
+        move: bool = True
+    ) -> str:
+        """Persist the composed video into the protected final-output directory."""
+
+        if not source_path or not os.path.exists(source_path):
+            raise AgentError(f"Final video source missing: {source_path}")
+
+        source = Path(source_path)
+        destination_dir = self.file_storage.get_final_output_dir("video")
+        extension = source.suffix or ".mp4"
+
+        candidate = destination_dir / f"{suffix}_{execution.id}{extension}"
+        counter = 1
+        while candidate.exists():
+            candidate = destination_dir / f"{suffix}_{execution.id}_{counter}{extension}"
+            counter += 1
+
+        # Move or copy depending on caller intent.
+        if move:
+            shutil.move(str(source), candidate)
+        else:
+            shutil.copy2(str(source), candidate)
+
+        # Harden permissions to avoid accidental deletion/overwrite.
+        try:
+            candidate.chmod(0o444)
+        except Exception:
+            # Some filesystems (e.g. Windows) may not support POSIX-style chmod.
+            pass
+
+        self.logger.info(f"📦 Final video stored in safeguarded directory: {candidate}")
+        return str(candidate)
+
+    def _build_local_serving_url(self, local_path: str) -> str:
+        """根据本地存储路径生成可通过 FastAPI 静态目录访问的 URL。"""
+
+        if not local_path:
+            return ""
+
+        try:
+            resolved = Path(local_path).resolve()
+            final_root = Path(settings.FINAL_OUTPUT_ROOT).resolve()
+            # 如果资源位于最终输出根目录内，则转换为 /files/outputs 下的相对路径
+            if final_root in resolved.parents or resolved == final_root:
+                relative = resolved.relative_to(final_root)
+                return f"/files/outputs/{relative.as_posix()}"
+        except Exception:
+            # 解析失败直接返回空串，调用方会降级到 file://
+            return ""
+
+        return ""
+
+    def _resolve_local_public_url(self, publication_url: str, local_path: str) -> str:
+        """优先使用已有的发布 URL，否则构建本地静态访问路径。"""
+
+        if publication_url:
+            return publication_url
+
+        local_url = self._build_local_serving_url(local_path)
+        if local_url:
+            return local_url
+
+        return f"file://{local_path}"
+
+    async def _publish_final_video(
+        self,
+        local_path: str,
+        execution: AgentExecution,
+        workflow_state_id: str
+    ) -> Dict[str, Any]:
+        """Upload the final video to remote storage (OSS preferred)."""
+
+        publication: Dict[str, Any] = {
+            "url": "",
+            "remote_path": "",
+            "provider": "",
+            "skipped": False,
+        }
+
+        if "oss_storage" in self._available_tools:
+            try:
+                oss_result = await self.use_tool(
+                    "oss_storage",
+                    "upload",
+                    {
+                        "local_path": local_path,
+                        "remote_path": f"final_videos/{Path(local_path).name}",
+                        "content_type": "video/mp4",
+                        "public_read": True,
+                        "overwrite": True,
+                        "metadata": {
+                            "workflow_state_id": workflow_state_id,
+                            "agent": self.agent_name,
+                            "execution_id": execution.id,
+                        },
+                    },
+                )
+                payload = getattr(oss_result, "result", oss_result) or {}
+                if isinstance(payload, dict):
+                    publication.update(
+                        {
+                            "url": payload.get("url", ""),
+                            "remote_path": payload.get("remote_path", ""),
+                            "provider": "oss",
+                            "skipped": payload.get("skipped", False),
+                        }
+                    )
+                    return publication
+            except Exception as exc:
+                self.logger.warning(f"OSS upload failed for final video: {exc}")
+
+        # Fallback: provide a static-serving URL if possible，若失败再降级到 file://
+        local_url = self._build_local_serving_url(local_path)
+        if not local_url:
+            local_url = f"file://{local_path}"
+
+        publication.update(
+            {
+                "url": local_url,
+                "provider": publication.get("provider") or "local",
+            }
+        )
+
+        return publication
+
     async def _ffmpeg_concat_videos(self, video_paths: List[str], output_path: str) -> bool:
         """Use tool to concatenate multiple videos (kept for backward compatibility)."""
         try:

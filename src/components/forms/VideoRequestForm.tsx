@@ -5,11 +5,10 @@ import { useAppStore } from '@/store/useAppStore';
 import { VideoRequest, VideoStyle, AspectRatio } from '@/types';
 import { generateId } from '@/lib/utils';
 import { ApiClient } from '@/lib/api';
-import { 
-  Upload, 
-  Image, 
-  FileText, 
-  Mic, 
+import {
+  Upload,
+  Image,
+  FileText,
   Music,
   Sparkles,
   Play,
@@ -31,13 +30,6 @@ const VideoRequestForm: React.FC = () => {
     resolution: '720p',
     aspectRatio: '16:9' as AspectRatio,
     style: null as VideoStyle | null,
-    voiceEnabled: true,
-    voiceSettings: {
-      voice: 'sarah',
-      speed: 1.0,
-      pitch: 1.0,
-      language: 'zh-CN',
-    },
     musicEnabled: true,
     musicSettings: {
       genre: 'corporate',
@@ -47,7 +39,7 @@ const VideoRequestForm: React.FC = () => {
   });
 
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
-  const [currentTab, setCurrentTab] = useState<'basic' | 'style' | 'voice' | 'music' | 'advanced'>('basic');
+  const [currentTab, setCurrentTab] = useState<'basic' | 'style' | 'music' | 'advanced'>('basic');
 
   const handleInputChange = (field: string, value: any) => {
     setFormData(prev => ({
@@ -125,10 +117,6 @@ const VideoRequestForm: React.FC = () => {
         duration: formData.duration,
         resolution: formData.resolution,
         aspectRatio: formData.aspectRatio,
-        voiceSettings: {
-          enabled: formData.voiceEnabled,
-          ...formData.voiceSettings,
-        },
         musicSettings: {
           enabled: formData.musicEnabled,
           ...formData.musicSettings,
@@ -166,7 +154,6 @@ const VideoRequestForm: React.FC = () => {
   const tabs = [
     { id: 'basic', label: t('tabs.basic'), icon: FileText },
     { id: 'style', label: t('tabs.style'), icon: Sparkles },
-    { id: 'voice', label: t('tabs.voice'), icon: Mic },
     { id: 'music', label: t('tabs.music'), icon: Music },
     { id: 'advanced', label: t('tabs.advanced'), icon: Settings },
   ];
@@ -315,21 +302,9 @@ const VideoRequestForm: React.FC = () => {
           />
         )}
 
-        {/* Voice Tab */}
-        {currentTab === 'voice' && (
-          <ParameterControls
-            type="voice"
-            enabled={formData.voiceEnabled}
-            settings={formData.voiceSettings}
-            onEnabledChange={(enabled) => handleInputChange('voiceEnabled', enabled)}
-            onSettingsChange={(field, value) => handleNestedChange('voiceSettings', field, value)}
-          />
-        )}
-
         {/* Music Tab */}
         {currentTab === 'music' && (
           <ParameterControls
-            type="music"
             enabled={formData.musicEnabled}
             settings={formData.musicSettings}
             onEnabledChange={(enabled) => handleInputChange('musicEnabled', enabled)}

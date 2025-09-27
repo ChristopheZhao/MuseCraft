@@ -4,7 +4,60 @@ AI模型服务抽象接口 - 按模型类型分层设计
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Union
+from dataclasses import dataclass, field
 from enum import Enum
+
+
+@dataclass
+class PromptCapability:
+    """Provider 提供的提示词限制能力。"""
+
+    max_bytes: Optional[int] = None
+    approx_chinese_chars: Optional[int] = None
+    approx_english_chars: Optional[int] = None
+    description_suffix: Optional[str] = None
+    note: Optional[str] = None
+    enforce: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_metadata(self) -> Dict[str, Any]:
+        """统一导出 schema 需要的元数据。"""
+        metadata = dict(self.extra or {})
+        if self.max_bytes is not None:
+            metadata.setdefault("max_bytes", self.max_bytes)
+        if self.approx_chinese_chars is not None:
+            metadata.setdefault("approx_chinese_chars", self.approx_chinese_chars)
+        if self.approx_english_chars is not None:
+            metadata.setdefault("approx_english_chars", self.approx_english_chars)
+        if self.note:
+            metadata.setdefault("note", self.note)
+        if self.enforce:
+            metadata.setdefault("enforce", True)
+        return metadata
+
+
+@dataclass
+class EnumCapability:
+    """枚举参数的能力约束（如分辨率、比例）。"""
+
+    options: List[str] = field(default_factory=list)
+    aliases: Dict[str, str] = field(default_factory=dict)
+    description_suffix: Optional[str] = None
+    note: Optional[str] = None
+
+    def expand_enum(self) -> List[str]:
+        expanded = list(self.options or [])
+        for alias in self.aliases.keys():
+            if alias not in expanded:
+                expanded.append(alias)
+        return expanded
+
+
+@dataclass
+class VideoCapabilities:
+    prompt: Optional[PromptCapability] = None
+    resolution: Optional[EnumCapability] = None
+    ratio: Optional[EnumCapability] = None
 
 
 class ServiceProvider(Enum):
@@ -71,8 +124,6 @@ class LLMServiceInterface(ABC):
     def is_available(self) -> bool:
         """检查服务是否可用"""
         pass
-
-
 class VLMServiceInterface(ABC):
     """
     VLM服务抽象接口 - 专注视觉理解和图像生成
@@ -183,16 +234,20 @@ class VideoModelServiceInterface(ABC):
     def supports_first_last_frame(self) -> bool:
         """是否支持首尾帧模式"""
         pass
-    
+
     @abstractmethod
     def get_provider_name(self) -> str:
         """获取供应商名称"""
         pass
-    
+
     @abstractmethod
     def is_available(self) -> bool:
         """检查服务是否可用"""
         pass
+
+    def get_capabilities(self) -> "VideoCapabilities":
+        """返回供应商特有的参数约束（默认无额外限制）"""
+        return VideoCapabilities()
 
 
 class ServiceManager:

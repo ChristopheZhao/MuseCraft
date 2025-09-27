@@ -35,7 +35,7 @@ class ReActAgent(BaseAgent, ABC):
         )
         self.max_iterations = max_iterations
         self.iteration_context = {}
-        self.logger.info(f"🔄 {agent_name} initialized as ReAct Agent (max_iterations={max_iterations})")
+        self.logger.info(f"🔄 {agent_name} initialized with iterative loop (max_iterations={max_iterations})")
     
     async def _execute_impl(
         self, 
@@ -59,18 +59,18 @@ class ReActAgent(BaseAgent, ABC):
             "decision_log": []
         }
         
-        self.logger.info(f"🔄 Starting ReAct loop for {self.agent_name} (max_iterations={self.max_iterations})")
+        self.logger.info(f"🔄 Starting iterative loop for {self.agent_name} (max_iterations={self.max_iterations})")
         
         for iteration in range(self.max_iterations):
             iteration_start_progress = 10 + (iteration * 80 // self.max_iterations)
             await self._update_progress(
-                execution, 
-                iteration_start_progress, 
-                f"ReAct iteration {iteration + 1}/{self.max_iterations}",
+                execution,
+                iteration_start_progress,
+                "processing",
                 db
             )
-            
-            self.logger.info(f"🔄 ReAct Iteration {iteration + 1}/{self.max_iterations}")
+
+            self.logger.info(f"🔄 Iteration {iteration + 1}/{self.max_iterations}")
             
             try:
                 # OBSERVE
@@ -248,7 +248,7 @@ class ReActAgent(BaseAgent, ABC):
                         final_result = await self._finalize_success_results(
                             {"contract": contract}, self.iteration_context
                         )
-                        await self._update_progress(execution, 95, "ReAct loop completed", db)
+                        await self._update_progress(execution, 95, "completed", db)
                         return final_result
                     # 继续下一轮
                     continue
@@ -297,7 +297,7 @@ class ReActAgent(BaseAgent, ABC):
                 try:
                     await self._on_iteration_end(iteration_record, task, iteration + 1)
                 except Exception as hook_err:
-                    self.logger.debug(f"ReAct迭代回写钩子失败（忽略）：{hook_err}")
+                    self.logger.debug(f"迭代回写钩子失败（忽略）：{hook_err}")
                 
                 # 更新累积上下文（通用）
                 updates = reflection.get("context_updates", {}) or {}
@@ -338,27 +338,27 @@ class ReActAgent(BaseAgent, ABC):
                 except Exception:
                     pass
 
-                # 移除默认的重复调用阶段收敛，避免在事实未稳定时干预 ReAct 自主迭代
+                # 移除默认的重复调用阶段收敛，避免在事实未稳定时干预迭代自主循环
                 # 若未来需要，可通过策略/环境开关在编排层启用
                 
                 # 检查是否完成任务（以 LLM 回执/子类反思裁决为准，不再做本地守卫）
                 if reflection.get("task_complete", False):
-                    self.logger.info(f"✅ ReAct loop completed successfully after {iteration + 1} iterations")
+                    self.logger.info(f"✅ Iterative loop completed successfully after {iteration + 1} iterations")
                     
                     final_result = await self._finalize_success_results(
                         action_result, self.iteration_context
                     )
                     
-                    await self._update_progress(execution, 95, "ReAct loop completed", db)
+                    await self._update_progress(execution, 95, "completed", db)
                     return final_result
                 
                 # 检查是否需要提前退出
                 if reflection.get("should_stop", False):
-                    self.logger.warning(f"⚠️ ReAct loop stopped early at iteration {iteration + 1}: {reflection.get('stop_reason', 'Unknown')}")
+                    self.logger.warning(f"⚠️ Iterative loop stopped early at iteration {iteration + 1}: {reflection.get('stop_reason', 'Unknown')}")
                     break
                     
             except Exception as e:
-                self.logger.error(f"❌ ReAct iteration {iteration + 1} failed: {e}")
+                self.logger.error(f"❌ Iteration {iteration + 1} failed: {e}")
                 
                 # 记录失败的迭代
                 self.iteration_context["iteration_history"].append({
@@ -373,10 +373,10 @@ class ReActAgent(BaseAgent, ABC):
                     break
         
         # 达到最大迭代次数或提前退出
-        self.logger.warning(f"⚠️ ReAct loop ended after {len(self.iteration_context['iteration_history'])} iterations")
+        self.logger.warning(f"⚠️ Iterative loop ended after {len(self.iteration_context['iteration_history'])} iterations")
         
         final_result = await self._finalize_incomplete_results(self.iteration_context, task)
-        await self._update_progress(execution, 90, "ReAct loop ended", db)
+        await self._update_progress(execution, 90, "processing", db)
         
         return final_result
 
@@ -567,7 +567,7 @@ class ReActAgent(BaseAgent, ABC):
                 }
         else:
             # 所有迭代都失败，返回错误结果
-            raise AgentError(f"ReAct loop failed completely after {len(context['iteration_history'])} iterations")
+            raise AgentError(f"Iterative loop failed completely after {len(context['iteration_history'])} iterations")
     
     async def _handle_iteration_error(
         self, 
@@ -587,7 +587,7 @@ class ReActAgent(BaseAgent, ABC):
         if should_continue:
             self.logger.info(f"🔄 Error in iteration {iteration + 1}, will retry in next iteration")
         else:
-            self.logger.error(f"❌ Error in final iteration {iteration + 1}, stopping ReAct loop")
+            self.logger.error(f"❌ Error in final iteration {iteration + 1}, stopping iterative loop")
         
         return should_continue
     
@@ -668,7 +668,7 @@ class ReActAgent(BaseAgent, ABC):
                 output=output
             )
         except Exception as e:
-            self.logger.debug(f"ReAct迭代回写失败（忽略）：{e}")
+            self.logger.debug(f"迭代回写失败（忽略）：{e}")
     
     # === ReAct专用的辅助方法 ===
     
@@ -895,6 +895,19 @@ class ReActAgent(BaseAgent, ABC):
             enriched = self._inject_after_system(messages, self.build_react_context_messages())
         except Exception:
             enriched = list(messages or [])
+        try:
+            total_len = sum(
+                len(msg.get("content", ""))
+                for msg in enriched
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str)
+            )
+            self.logger.info(
+                "FC_PROMPT_TOTAL[%s]: total_chars=%d",
+                context_description or "",
+                total_len,
+            )
+        except Exception:
+            pass
         fc = await self.llm_function_call(
             messages=enriched,
             context_description=context_description,

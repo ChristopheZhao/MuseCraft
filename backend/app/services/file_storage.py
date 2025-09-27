@@ -30,14 +30,36 @@ class FileStorageService:
     
     def _ensure_directories(self):
         """Ensure all storage directories exist"""
-        directories = [
+        directories = {
             settings.UPLOAD_PATH,
             settings.GENERATED_PATH,
-            settings.TEMP_PATH
-        ]
-        
+            settings.TEMP_PATH,
+            settings.FINAL_OUTPUT_ROOT,
+            settings.FINAL_VIDEO_OUTPUT_PATH,
+            settings.FINAL_AUDIO_OUTPUT_PATH,
+        }
+
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
+            try:
+                # Ensure directories are writable while their contents can later be
+                # tightened (e.g. final assets set as read-only).
+                Path(directory).chmod(0o755)
+            except Exception:
+                # Permission adjustments are best-effort only; ignore failures on
+                # non-POSIX filesystems.
+                pass
+
+    def get_final_output_dir(self, asset_type: str = "video") -> Path:
+        """Return the directory reserved for immutable final deliverables."""
+
+        if asset_type == "audio":
+            target = Path(settings.FINAL_AUDIO_OUTPUT_PATH)
+        else:
+            target = Path(settings.FINAL_VIDEO_OUTPUT_PATH)
+
+        target.mkdir(parents=True, exist_ok=True)
+        return target
     
     async def save_uploaded_file(
         self, 

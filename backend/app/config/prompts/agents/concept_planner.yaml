@@ -36,8 +36,32 @@ templates:
       - 先产出完整可用的初稿；必要时基于事实进行精修与迭代。
       - 信息不足时给出最小可行假设并清晰标注。
       - 完成判据：概念方案结构完整、连贯一致、可执行且能驱动下游生成。
+  skeleton_generation:
+    description: 概念规划第一阶段 - 生成轻量概念骨架与场景蓝本
+    required_variables:
+      [user_prompt, duration, aspect_ratio, duration_capabilities, scene_count_min, scene_count_max, optimal_scene_count]
+    type: jinja2_file
+    template_file: concept_planner/skeleton_concept_generation.jinja2
+  style_elements_generation:
+    description: 概念规划第二阶段 - 智能风格设计与内容要素梳理
+    required_variables:
+      [user_prompt, skeleton_json]
+    type: jinja2_file
+    template_file: concept_planner/style_elements_generation.jinja2
+  voice_plan_generation:
+    description: 概念规划第三阶段 - 旁白与音频策略设计
+    required_variables:
+      [user_prompt, skeleton_json]
+    type: jinja2_file
+    template_file: concept_planner/voice_plan_generation.jinja2
+  scene_detail_batch_generation:
+    description: 概念规划第四阶段 - 按批细化场景描述
+    required_variables:
+      [user_prompt, skeleton_json, style_guidance_json, voice_plan_json, scene_batch_json, duration_capabilities]
+    type: jinja2_file
+    template_file: concept_planner/scene_detail_batch_generation.jinja2
   concept_generation:
-    description: 智能概念生成与风格设计（Jinja2模板）
+    description: 兼容旧流程的增强版概念生成模板
     required_variables: [user_prompt, style_preference, enable_intelligent_style, duration, aspect_ratio]
     type: jinja2_file
     template_file: concept_planner/enhanced_concept_generation.jinja2

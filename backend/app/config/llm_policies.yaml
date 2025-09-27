@@ -24,8 +24,12 @@ agents.video_generator:
     provider: zhipu
     model: glm-4.5
 
+agents.voice_synthesizer:
+  plan:
+    provider: zhipu
+    model: glm-4.5
+
 agents.orchestrator:
   plan:
     provider: zhipu
     model: glm-4.5-air
-

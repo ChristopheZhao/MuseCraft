@@ -1,8 +1,9 @@
 """
 Video Generator Agent - ReAct with autonomous FC parameter selection
 """
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 import json as _json
+import re
 
 from sqlalchemy.orm import Session
 
@@ -230,6 +231,24 @@ class VideoGeneratorAgent(ReActAgent):
             "role": "user",
             "content": "请基于上述信息进行本轮决策：文本部分仅输出严格的 PlanningDecision JSON（不要其他文字/围栏）。"
         })
+        try:
+            system_len = len(sys_text)
+            user_len = len(messages[-1].get("content", ""))
+            observation_len = len(observation_json)
+            total_len = sum(
+                len(msg.get("content", ""))
+                for msg in messages
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str)
+            )
+            self.logger.info(
+                "PLAN_PROMPT_LEN: system=%d user=%d observation_json=%d total=%d",
+                system_len,
+                user_len,
+                observation_len,
+                total_len,
+            )
+        except Exception:
+            pass
         schema = {
             "type": "object",
             "properties": {
@@ -532,6 +551,30 @@ class VideoGeneratorAgent(ReActAgent):
         params = action_plan["parameters"]
         if action == "batch_generate_videos":
             scenes_batch = params.get("scenes_batch", [])
+            # Fallback guard: prompt 已提醒单轮最多选择 N 个场景，但若模型偶尔超出，
+            # 在此裁剪以避免一次性拼接过长上下文。将 VIDEO_GENERATOR_MAX_BATCH 设为 0
+            # 可关闭该兜底，完全按模型输出执行。
+            max_batch_size = max(int(getattr(settings, 'VIDEO_GENERATOR_MAX_BATCH', 0) or 0), 0)
+            if max_batch_size and len(scenes_batch) > max_batch_size:
+                deferred = scenes_batch[max_batch_size:]
+                scenes_batch = scenes_batch[:max_batch_size]
+                params["scenes_batch"] = scenes_batch
+                try:
+                    deferred_ids = []
+                    for s in deferred:
+                        try:
+                            deferred_ids.append(int(s.get('scene_number')))
+                        except Exception:
+                            deferred_ids.append(s.get('scene_number'))
+                    if deferred_ids:
+                        self.logger.info(
+                            "BATCH_LIMIT: truncated to %d scenes (deferred=%s)",
+                            max_batch_size,
+                            deferred_ids,
+                        )
+                        self.iteration_context['diag_last_deferred'] = deferred_ids
+                except Exception:
+                    pass
             try:
                 ws = self.iteration_context.get("working_state") or {}
                 ws["current_batch"] = list(scenes_batch)
@@ -890,6 +933,16 @@ class VideoGeneratorAgent(ReActAgent):
                                             args['image_url'] = cont_url
                             except Exception:
                                 pass
+                            # 若 previous_video_url 实际是图片（尾帧），将其改写为 image_url，避免触发 media_type 警告
+                            try:
+                                prev_video_url = args.get('previous_video_url')
+                                if self._looks_like_image(prev_video_url):
+                                    if not args.get('image_url'):
+                                        args['image_url'] = prev_video_url
+                                    args.pop('previous_video_url', None)
+                            except Exception:
+                                pass
+
                             # 回退（仅限非依赖场景）：若仍无 image_url，则读取 WF 场景的参考图像
                             try:
                                 # 识别是否为连续场景
@@ -938,43 +991,41 @@ class VideoGeneratorAgent(ReActAgent):
                             except Exception:
                                 pass
 
-                            # 结构化参数增强：为该场景追加/补全角色约束（character_constraints），不改变工具/模型选择
+                            # 结构化参数增强：默认补充画风与角色一致性约束
                             try:
+                                # 样式约束：若调用方未提供，则注入概念计划/一致性指引中的画风描述
+                                style_defaults = self._get_style_constraints()
+                                if style_defaults:
+                                    merged_styles = self._merge_string_list(args.get('style_constraints'), style_defaults)
+                                    if merged_styles:
+                                        args['style_constraints'] = merged_styles
+
                                 wf_id2 = args.get('workflow_state_id') or wf_id
-                                sn2 = args.get('scene_number')
-                                sn2 = int(sn2) if sn2 is not None and str(sn2).isdigit() else None
+                                sn2_raw = args.get('scene_number')
+                                sn2 = int(sn2_raw) if sn2_raw is not None and str(sn2_raw).isdigit() else None
                                 if wf_id2 and sn2 is not None:
-                                    from ..core.workflow_state import workflow_manager
-                                    wf2 = workflow_manager.get_workflow(wf_id2)
-                                    sc2 = wf2.get_scene(sn2) if wf2 else None
-                                    # 收集角色设定：优先 WF 场景；缺失则从 concept_plan.scenes 获取 per-scene 出现
-                                    descs = []
-                                    names = []
-                                    if sc2 is not None:
-                                        descs = list(getattr(sc2, 'character_descriptions', []) or [])
-                                        names = list(getattr(sc2, 'characters_present', []) or [])
-                                    if not descs:
-                                        # 尝试从 concept_plan 获取 per-scene 出现
-                                        try:
-                                            ctx_ws = self.iteration_context.get('working_state', {}) or {}
-                                            cp = (ctx_ws.get('context', {}) or {}).get('concept_plan') or getattr(wf2, 'concept_plan', {}) or {}
-                                            scene_defs = (cp.get('scenes') or [])
-                                            present = []
-                                            for s in scene_defs:
-                                                try:
-                                                    sid = int(s.get('scene_number')) if s.get('scene_number') is not None else None
-                                                except Exception:
-                                                    sid = None
-                                                if sid == sn2:
-                                                    present = (((s.get('content_elements') or {}).get('characters_present')) or [])
-                                                    break
-                                            names = names or present
-                                            if names and not descs:
-                                                # 若无详细描述，使用名字串联作为简化约束
-                                                descs = ["、".join([str(n) for n in names if isinstance(n, str) and n.strip()])]
-                                        except Exception:
-                                            pass
-                                    # 不在Agent层注入/改写角色先验；仅在观察与模板中提供事实，交由FC按Schema选择。
+                                    wf_obj2 = self._get_workflow_state_obj(wf_id2)
+                                    concept_plan_local = self._get_concept_plan(wf_obj2)
+                                    char_structs, char_texts = self._get_scene_character_constraints(wf_id2, sn2)
+                                    if char_structs:
+                                        merged_structs = self._merge_struct_list(args.get('character_constraints_struct'), char_structs)
+                                        if merged_structs:
+                                            args['character_constraints_struct'] = merged_structs
+                                    if char_texts:
+                                        merged_text = self._merge_string_list(args.get('character_constraints'), char_texts)
+                                        if merged_text:
+                                            args['character_constraints'] = merged_text
+
+                                    neg_defaults = self._collect_negative_constraints(
+                                        char_structs,
+                                        char_texts,
+                                        concept_plan_local,
+                                        sn2,
+                                    )
+                                    if neg_defaults:
+                                        merged_neg = self._merge_string_list(args.get('negative_constraints'), neg_defaults)
+                                        if merged_neg:
+                                            args['negative_constraints'] = merged_neg
                             except Exception:
                                 pass
                         # Normalize scene_number to int when possible
@@ -1451,6 +1502,571 @@ class VideoGeneratorAgent(ReActAgent):
             return {}
         except Exception:
             return {}
+
+    # === 风格与角色一致性辅助方法 ===
+
+    def _get_style_constraints(self) -> List[str]:
+        cached = self.iteration_context.get('_style_constraints_cache')
+        if cached is not None:
+            return list(cached)
+
+        constraints: List[str] = []
+        concept_plan = self._get_concept_plan()
+
+        try:
+            isd = concept_plan.get('intelligent_style_design', {}) if isinstance(concept_plan, dict) else {}
+            if isinstance(isd, dict):
+                for key in [
+                    'style_name', 'style_description', 'production_taste',
+                    'narrative_style', 'visual_approach', 'emotional_tone'
+                ]:
+                    val = isd.get(key)
+                    if isinstance(val, str) and val.strip():
+                        constraints.append(val.strip())
+            cg = concept_plan.get('consistency_guidelines', {}) if isinstance(concept_plan, dict) else {}
+            if isinstance(cg, dict):
+                for key in ['style_consistency', 'environment_consistency', 'character_consistency', 'object_consistency']:
+                    val = cg.get(key)
+                    if isinstance(val, str) and val.strip():
+                        constraints.append(val.strip())
+        except Exception:
+            pass
+
+        try:
+            source_input = self.iteration_context.get('source_input') or {}
+            creative_guidance = source_input.get('creative_guidance') if isinstance(source_input, dict) else {}
+            if isinstance(creative_guidance, dict):
+                for key in ['style_notes', 'visual_style', 'production_taste']:
+                    val = creative_guidance.get(key)
+                    if isinstance(val, str) and val.strip():
+                        constraints.append(val.strip())
+        except Exception:
+            pass
+
+        merged = self._merge_string_list([], constraints)
+        if len(merged) > 8:
+            merged = merged[:8]
+        self.iteration_context['_style_constraints_cache'] = list(merged)
+        return merged
+
+    def _get_scene_character_constraints(
+        self,
+        workflow_state_id: Optional[str],
+        scene_number: int
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        cache = self.iteration_context.get('_scene_char_cache') or {}
+        wf_key = workflow_state_id or '__default__'
+        wf_cache = cache.get(wf_key) or {}
+        if scene_number in wf_cache:
+            return wf_cache[scene_number]
+
+        wf = self._get_workflow_state_obj(workflow_state_id)
+        concept_plan = self._get_concept_plan(wf)
+        char_defs = self._get_character_definitions(concept_plan, workflow_state_id)
+
+        names: List[str] = []
+        descriptions: List[str] = []
+        scene_structs: List[Dict[str, Any]] = []
+        scene_texts: List[str] = []
+
+        try:
+            if wf:
+                sc = wf.get_scene(scene_number)
+                if sc is not None:
+                    names = [str(n).strip() for n in getattr(sc, 'characters_present', []) or [] if str(n).strip()]
+                    descriptions = [str(d).strip() for d in getattr(sc, 'character_descriptions', []) or [] if str(d).strip()]
+        except Exception:
+            names, descriptions = [], []
+
+        # 若场景缺失，则尝试从概念计划的场景描述中提取
+        if not names:
+            try:
+                sc_defs = (concept_plan.get('scenes') if isinstance(concept_plan, dict) else []) or []
+                for entry in sc_defs:
+                    try:
+                        sid = int(entry.get('scene_number')) if entry.get('scene_number') is not None else None
+                    except Exception:
+                        sid = None
+                    if sid == scene_number:
+                        content_el = entry.get('content_elements') or {}
+                        possible = content_el.get('characters_present') or []
+                        names = [str(n).strip() for n in possible if str(n).strip()]
+                        if not descriptions:
+                            desc = entry.get('narrative_description') or entry.get('visual_description')
+                            if isinstance(desc, str) and desc.strip():
+                                descriptions.append(desc.strip())
+                        break
+            except Exception:
+                pass
+
+        # 组装结构化角色约束
+        pooled_texts: List[str] = list(descriptions)
+        for raw_name in names:
+            defn = self._lookup_character_definition(char_defs, raw_name)
+            struct = self._build_character_struct(defn, raw_name, descriptions)
+            if struct:
+                scene_structs.append(struct)
+            if not pooled_texts and defn:
+                summary = self._summarize_character_definition(defn)
+                if summary:
+                    pooled_texts.append(summary)
+
+        if names and not scene_structs:
+            # 退化：仍构造基础结构描述
+            struct = self._build_character_struct({}, "、".join(names), descriptions)
+            if struct:
+                scene_structs.append(struct)
+
+        candidate_aliases: List[str] = []
+        for struct in scene_structs:
+            display = struct.get('display_name') if isinstance(struct, dict) else None
+            if isinstance(display, str) and display.strip():
+                candidate_aliases.append(display.strip())
+        if not candidate_aliases:
+            candidate_aliases = list(names[:1]) if names else []
+
+        guideline_snippets = self._extract_character_guideline_snippets(
+            concept_plan,
+            candidate_aliases or names,
+            scene_number
+        )
+        scene_texts = self._merge_string_list([], pooled_texts)
+        scene_texts = self._merge_string_list(scene_texts, guideline_snippets)
+        if not scene_texts and names:
+            scene_texts = ["角色：" + "、".join(names)]
+
+        # 缓存结果
+        wf_cache[scene_number] = (scene_structs, scene_texts)
+        cache[wf_key] = wf_cache
+        self.iteration_context['_scene_char_cache'] = cache
+        return scene_structs, scene_texts
+
+    def _merge_string_list(self, existing, additions) -> List[str]:
+        result: List[str] = []
+        seen = set()
+
+        def _iter(source) -> List[str]:
+            if isinstance(source, list):
+                return [str(x) for x in source]
+            if isinstance(source, (str, int, float)):
+                return [str(source)]
+            return []
+
+        for item in _iter(existing):
+            text = item.strip()
+            if text and text not in seen:
+                result.append(text)
+                seen.add(text)
+
+        for item in _iter(additions):
+            text = item.strip()
+            if text and text not in seen:
+                result.append(text)
+                seen.add(text)
+        return result
+
+    def _merge_struct_list(self, existing, additions) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+
+        def _iter_structs(source) -> List[Dict[str, Any]]:
+            if isinstance(source, list):
+                return [obj for obj in source if isinstance(obj, dict)]
+            if isinstance(source, dict):
+                return [source]
+            return []
+
+        for item in _iter_structs(existing) + _iter_structs(additions):
+            signature = self._character_struct_signature(item)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            merged.append(item)
+        return merged
+
+    def _character_struct_signature(self, struct: Dict[str, Any]) -> Tuple:
+        if not isinstance(struct, dict):
+            return tuple()
+        def _tuple(field):
+            val = struct.get(field)
+            if isinstance(val, list):
+                return tuple(str(x) for x in val)
+            if isinstance(val, str):
+                return (val,)
+            return tuple()
+        return (
+            str(struct.get('name', '')),
+            str(struct.get('display_name', '')),
+            str(struct.get('species_or_breed', '')),
+            str(struct.get('archetype_or_identity', '')),
+            _tuple('signature_outfit_or_props'),
+            _tuple('key_traits'),
+            str(struct.get('role', '')),
+        )
+
+    def _get_workflow_state_obj(self, workflow_state_id: Optional[str] = None):
+        cache = self.iteration_context.get('_wf_obj_cache') or {}
+        wf_id = workflow_state_id
+        if not wf_id:
+            try:
+                ws = self.iteration_context.get('working_state', {}) or {}
+                ctx = ws.get('context', {}) or {}
+                wf_id = ctx.get('workflow_state_id') or self.iteration_context.get('workflow_state_id')
+            except Exception:
+                wf_id = None
+        key = wf_id or '__default__'
+        if key in cache:
+            return cache[key]
+        try:
+            if wf_id:
+                from ..core.workflow_state import workflow_manager
+                wf = workflow_manager.get_workflow(wf_id)
+            else:
+                wf = None
+        except Exception:
+            wf = None
+        cache[key] = wf
+        self.iteration_context['_wf_obj_cache'] = cache
+        return wf
+
+    def _get_concept_plan(self, wf=None) -> Dict[str, Any]:
+        cached = self.iteration_context.get('_concept_plan_cache')
+        if cached is not None:
+            return cached if isinstance(cached, dict) else {}
+
+        concept_plan: Dict[str, Any] = {}
+        try:
+            ws = self.iteration_context.get('working_state', {}) or {}
+            ctx = ws.get('context', {}) or {}
+            cp = ctx.get('concept_plan') or {}
+            if isinstance(cp, dict):
+                concept_plan = cp
+        except Exception:
+            concept_plan = {}
+
+        if not concept_plan and wf is not None:
+            try:
+                cp = getattr(wf, 'concept_plan', {}) or {}
+                if isinstance(cp, dict):
+                    concept_plan = cp
+            except Exception:
+                pass
+
+        if not concept_plan:
+            try:
+                src = self.iteration_context.get('source_input') or {}
+                cp = src.get('concept_plan') if isinstance(src, dict) else {}
+                if isinstance(cp, dict):
+                    concept_plan = cp
+            except Exception:
+                pass
+
+        if not isinstance(concept_plan, dict):
+            concept_plan = {}
+        self.iteration_context['_concept_plan_cache'] = concept_plan
+        return concept_plan
+
+    def _get_character_definitions(
+        self,
+        concept_plan: Dict[str, Any],
+        workflow_state_id: Optional[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        cache_all = self.iteration_context.get('_character_def_cache') or {}
+        key = workflow_state_id or '__default__'
+        if key in cache_all:
+            cached = cache_all.get(key)
+            return cached if isinstance(cached, dict) else {}
+
+        mapping: Dict[str, Dict[str, Any]] = {}
+        try:
+            characters = (concept_plan.get('content_elements') or {}).get('characters') or []
+            for entry in characters:
+                if not isinstance(entry, dict):
+                    continue
+                alias_set = set()
+                for key in ['display_name', 'canonical_name', 'name']:
+                    val = entry.get(key)
+                    if isinstance(val, str) and val.strip():
+                        alias_set.add(val)
+                for alias in entry.get('aliases') or []:
+                    if isinstance(alias, str) and alias.strip():
+                        alias_set.add(alias)
+                for alias in list(alias_set):
+                    normalized = self._normalize_name(alias)
+                    if normalized:
+                        mapping[normalized] = entry
+        except Exception:
+            mapping = {}
+
+        cache_all[key] = mapping
+        self.iteration_context['_character_def_cache'] = cache_all
+        return mapping
+
+    def _lookup_character_definition(self, mapping: Dict[str, Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+        if not name:
+            return None
+        norm = self._normalize_name(name)
+        if norm in mapping:
+            return mapping[norm]
+        # 尝试宽松匹配
+        for key, value in mapping.items():
+            if norm in key or key in norm:
+                return value
+        return None
+
+    def _build_character_struct(
+        self,
+        definition: Optional[Dict[str, Any]],
+        fallback_name: str,
+        descriptions: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        name = fallback_name or ''
+        if not definition and not name:
+            return None
+
+        def _as_list(value) -> List[str]:
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if str(v).strip()]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+            return []
+
+        display = name
+        species = ''
+        archetype = ''
+        signature = []
+        traits = []
+        role = ''
+
+        if isinstance(definition, dict):
+            display = definition.get('display_name') or definition.get('canonical_name') or name
+            species = definition.get('species_or_breed') or ''
+            archetype = definition.get('archetype_or_identity') or ''
+            signature = _as_list(definition.get('signature_outfit_or_props'))
+            traits = _as_list(definition.get('key_traits'))
+            role = definition.get('role') or ''
+            visual_identity = _as_list(definition.get('visual_identity'))
+            for item in visual_identity:
+                if item not in traits:
+                    traits.append(item)
+
+        for desc in descriptions or []:
+            if desc and desc not in traits:
+                traits.append(desc)
+
+        signature = list(dict.fromkeys(signature))
+        traits = list(dict.fromkeys(traits))
+
+        defn = definition if isinstance(definition, dict) else {}
+        struct = {
+            'name': defn.get('canonical_name') or defn.get('name') or display,
+            'display_name': display,
+            'species_or_breed': species,
+            'archetype_or_identity': archetype,
+            'signature_outfit_or_props': signature,
+            'key_traits': traits,
+            'role': role,
+        }
+        return struct
+
+    def _summarize_character_definition(self, definition: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(definition, dict):
+            return None
+        parts: List[str] = []
+        display = definition.get('display_name') or definition.get('canonical_name')
+        if display:
+            parts.append(str(display))
+        species = definition.get('species_or_breed')
+        if species:
+            parts.append(f"物种：{species}")
+        archetype = definition.get('archetype_or_identity')
+        if archetype:
+            parts.append(f"原型：{archetype}")
+        traits = definition.get('key_traits') or []
+        if traits:
+            parts.append("特征：" + "、".join([str(t) for t in traits if str(t).strip()]))
+        props = definition.get('signature_outfit_or_props') or []
+        if props:
+            parts.append("标志道具：" + "、".join([str(p) for p in props if str(p).strip()]))
+        return "；".join(parts) if parts else None
+
+    def _normalize_name(self, name: str) -> str:
+        if not isinstance(name, str):
+            return ''
+        return re.sub(r"\s+", "", name).lower()
+
+    def _looks_like_image(self, url: Optional[str]) -> bool:
+        if not isinstance(url, str):
+            return False
+        lowered = url.split('?', 1)[0].lower()
+        return lowered.endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))
+
+    def _get_default_negative_constraints(self) -> List[str]:
+        cached = self.iteration_context.get('_default_negative_constraints')
+        if isinstance(cached, list):
+            return list(cached)
+
+        defaults = [
+            "不要改变角色的物种或身体材质",
+            "不要改变角色的服装、道具或身体比例",
+            "不要新增未在设定中出现的身体特征或装饰",
+        ]
+        self.iteration_context['_default_negative_constraints'] = list(defaults)
+        return list(defaults)
+
+    def _scene_depends_on_previous(self, scene_number: int) -> bool:
+        try:
+            ws = self.iteration_context.get('working_state', {}) or {}
+            ctx = ws.get('context', {}) or {}
+            scenes = ctx.get('scenes_to_generate') or []
+            for entry in scenes:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    sn_val = int(entry.get('scene_number')) if entry.get('scene_number') is not None else None
+                except Exception:
+                    sn_val = None
+                if sn_val is None or sn_val != int(scene_number):
+                    continue
+                dep = entry.get('depends_on_scene')
+                if dep is None:
+                    return False
+                try:
+                    return int(dep) > 0
+                except Exception:
+                    return bool(dep)
+        except Exception:
+            pass
+        return False
+
+    def _collect_negative_constraints(
+        self,
+        char_structs: List[Dict[str, Any]],
+        char_texts: List[str],
+        concept_plan: Dict[str, Any],
+        scene_number: int,
+    ) -> List[str]:
+        constraints: List[str] = []
+        seen: Set[str] = set()
+
+        def _add(sentence: Optional[str]) -> None:
+            if not sentence:
+                return
+            text = str(sentence).strip()
+            if not text:
+                return
+            if len(text) > 160:
+                text = text[:160].rstrip('，；、。,. ') + '...'
+            if text not in seen:
+                constraints.append(text)
+                seen.add(text)
+
+        for base in self._get_default_negative_constraints():
+            _add(base)
+
+        subjects: List[str] = []
+        for struct in char_structs or []:
+            if not isinstance(struct, dict):
+                continue
+            subject = str(struct.get('display_name') or struct.get('name') or '').strip()
+            subject_label = subject or '角色'
+            if subject:
+                subjects.append(subject)
+
+            species = struct.get('species_or_breed')
+            if isinstance(species, str) and species.strip():
+                _add(f"保持{subject_label}的物种设定（{species.strip()}），不要改变")
+
+            archetype = struct.get('archetype_or_identity') or struct.get('role')
+            if isinstance(archetype, str) and archetype.strip():
+                _add(f"保持{subject_label}的身份设定（{archetype.strip()}），不要改变角色定位")
+
+            for trait in struct.get('key_traits') or []:
+                trait_txt = str(trait).strip()
+                if trait_txt:
+                    _add(f"不要改变{subject_label}的特征：{trait_txt}")
+
+            props = [str(p).strip() for p in (struct.get('signature_outfit_or_props') or []) if str(p).strip()]
+            if props:
+                _add(f"保持{subject_label}的标志性道具：{'、'.join(props)}，不要新增或移除")
+
+        for desc in char_texts or []:
+            description = str(desc).strip()
+            if description:
+                _add(f"确保角色外观符合设定：{description}")
+
+        if self._scene_depends_on_previous(scene_number):
+            _add("与上一场景保持角色造型完全一致，包括头部、服饰与体态细节，避免新增或缺失元素")
+
+        if not char_structs and concept_plan:
+            # 回退：使用整体人物一致性指引
+            snippets = self._extract_character_guideline_snippets(concept_plan, subjects or [], scene_number)
+            for snippet in snippets:
+                _add(f"遵循角色一致性指引：{snippet}")
+
+        _add("不要新增未在角色设定中出现的身体细节或装饰")
+
+        return constraints
+
+    def _extract_character_guideline_snippets(
+        self,
+        concept_plan: Dict[str, Any],
+        candidate_names,
+        scene_number: int
+    ) -> List[str]:
+        if not isinstance(concept_plan, dict):
+            return []
+        guidelines = concept_plan.get('consistency_guidelines') or {}
+        if not isinstance(guidelines, dict):
+            return []
+        char_consistency = guidelines.get('character_consistency') or ''
+        if not isinstance(char_consistency, str) or not char_consistency.strip():
+            return []
+
+        names: List[str] = []
+        if isinstance(candidate_names, list):
+            names = [str(n) for n in candidate_names if isinstance(n, str)]
+        elif isinstance(candidate_names, str):
+            names = [candidate_names]
+
+        if not names and isinstance(scene_number, int):
+            try:
+                sc_defs = (concept_plan.get('scenes') or []) if isinstance(concept_plan, dict) else []
+                for entry in sc_defs:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        sid = int(entry.get('scene_number')) if entry.get('scene_number') is not None else None
+                    except Exception:
+                        sid = None
+                    if sid == scene_number:
+                        content_el = entry.get('content_elements') or {}
+                        candidates = content_el.get('characters_present') or []
+                        names = [str(n) for n in candidates if isinstance(n, str)]
+                        break
+            except Exception:
+                pass
+
+        snippets: List[str] = []
+        segments = re.split(r'[；。.!?\n]+', char_consistency)
+        normalized_names = [self._normalize_name(n) for n in names if isinstance(n, str)]
+
+        for seg in segments:
+            snippet = seg.strip()
+            if not snippet:
+                continue
+            if not normalized_names:
+                snippets.append(snippet)
+                continue
+            norm_snippet = self._normalize_name(snippet)
+            for nm in normalized_names:
+                if nm and nm in norm_snippet:
+                    snippets.append(snippet)
+                    break
+
+        if not snippets:
+            snippets = [char_consistency.strip()]
+        return snippets
 
     async def _execute_dependency_wait(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
         pending_scenes = parameters.get("pending_scenes", [])

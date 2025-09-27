@@ -18,6 +18,7 @@ from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
 from .video_generator import VideoGeneratorAgent
 from .audio_generator import AudioGeneratorAgent
+from .voice_synthesizer import VoiceSynthesizerAgent
 from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 from .tools.tool_registry import get_tool_registry
@@ -47,6 +48,7 @@ class OrchestratorAgent(BaseAgent):
         self.agents = {
             AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(llms=self._llm_policy.build_llms_for_agent('concept_planner')),
             AgentType.SCRIPT_WRITER: ScriptWriterAgent(llms=self._llm_policy.build_llms_for_agent('script_writer')),
+            AgentType.VOICE_SYNTHESIZER: VoiceSynthesizerAgent(llms=self._llm_policy.build_llms_for_agent('voice_synthesizer')),
             AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('image_generator')),
             AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('video_generator')),
             AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('audio_generator')),
@@ -79,7 +81,8 @@ class OrchestratorAgent(BaseAgent):
             AgentType.SCRIPT_WRITER,
             AgentType.IMAGE_GENERATOR,
             AgentType.VIDEO_GENERATOR,
-            AgentType.VIDEO_COMPOSER,  # 视频合成：拼接场景视频
+            AgentType.VOICE_SYNTHESIZER,
+            AgentType.VIDEO_COMPOSER,  # 视频合成：拼接场景视频 + 后续语音混流
             AgentType.AUDIO_GENERATOR,  # 音频生成：基于完整视频生成匹配音乐
             AgentType.QUALITY_CHECKER
         ]
@@ -125,6 +128,10 @@ class OrchestratorAgent(BaseAgent):
         try:
             for step_index, agent_type in enumerate(self.workflow_order):
                 agent = self.agents[agent_type]
+
+                if not self._should_run_agent(agent_type, workflow_state):
+                    self.logger.info(f"⏭️ Skipping {agent.agent_name} due to workflow conditions")
+                    continue
                 
                 # Update progress
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
@@ -176,6 +183,25 @@ class OrchestratorAgent(BaseAgent):
                         mixing_mode = getattr(settings, 'AUDIO_MIXING_MODE', 'composer')
                     except Exception:
                         mixing_mode = 'composer'
+                    if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
+                        try:
+                            if getattr(workflow_state, 'voice_over_assets', None):
+                                self.logger.info("🎤 Scheduling composer to add voice-over tracks")
+                                comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
+                                comp_input = {
+                                    "workflow_state_id": workflow_state.task_id,
+                                    "add_voiceover": True
+                                }
+                                comp_out = await comp_agent.execute(
+                                    task=task,
+                                    input_data=comp_input,
+                                    db=db,
+                                    execution_order=step_index + 1
+                                )
+                                workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_voiceover"] = comp_out
+                                workflow_data.update(comp_out)
+                        except Exception as e:
+                            self.logger.warning(f"Composer add_voiceover failed: {e}")
                     if agent_type == AgentType.AUDIO_GENERATOR and mixing_mode == 'composer':
                         try:
                             self.logger.info("🎼 Scheduling composer to add background music")
@@ -192,6 +218,13 @@ class OrchestratorAgent(BaseAgent):
                             )
                             workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_bgm"] = comp_out
                             workflow_data.update(comp_out)
+                            base_result = workflow_results.get(AgentType.VIDEO_COMPOSER.value)
+                            if isinstance(base_result, dict):
+                                merged_result = dict(base_result)
+                                merged_result.update(comp_out or {})
+                                workflow_results[AgentType.VIDEO_COMPOSER.value] = merged_result
+                            else:
+                                workflow_results[AgentType.VIDEO_COMPOSER.value] = comp_out
                         except Exception as e:
                             self.logger.warning(f"Composer add_bgm failed: {e}")
 
@@ -514,6 +547,7 @@ class OrchestratorAgent(BaseAgent):
         status_mapping = {
             AgentType.CONCEPT_PLANNER: WorkflowStatus.CONCEPT_PLANNING,
             AgentType.SCRIPT_WRITER: WorkflowStatus.SCRIPT_WRITING,
+            AgentType.VOICE_SYNTHESIZER: WorkflowStatus.VOICE_SYNTHESIZING,
             AgentType.IMAGE_GENERATOR: WorkflowStatus.IMAGE_GENERATING,
             AgentType.VIDEO_GENERATOR: WorkflowStatus.VIDEO_GENERATING,
             AgentType.VIDEO_COMPOSER: WorkflowStatus.VIDEO_COMPOSING,
@@ -676,6 +710,20 @@ class OrchestratorAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
     
+    def _should_run_agent(self, agent_type: AgentType, workflow_state: WorkflowState) -> bool:
+        if agent_type == AgentType.VOICE_SYNTHESIZER:
+            voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
+            if not voice_plan or not voice_plan.get("enabled"):
+                return False
+            if str(voice_plan.get("mode", "none")).lower() == "none":
+                return False
+            scene_guidance = voice_plan.get("scene_guidance") or []
+            if scene_guidance:
+                return any(bool(g.get("should_narrate", True)) for g in scene_guidance if isinstance(g, dict))
+            # 若缺少逐场景指导，则默认尝试执行，由下游Agent自我校验
+            return True
+        return True
+
     async def _prepare_agent_context(self, workflow_data: Dict[str, Any], agent_type: AgentType, workflow_id: str) -> Dict[str, Any]:
         """为Agent准备包含创意指导的上下文数据"""
         
@@ -748,7 +796,44 @@ class OrchestratorAgent(BaseAgent):
                     self.logger.info(f"🧠 Orchestrator prepared creative context for {agent_type.value} with {len(scene_guidances)} scene guidances")
                 else:
                     self.logger.warning(f"⚠️ No creative guidance available for {agent_type.value}")
-            
+            elif agent_type == AgentType.VOICE_SYNTHESIZER:
+                try:
+                    from ..core.workflow_state import workflow_manager
+
+                    wf = workflow_manager.get_workflow(workflow_id)
+                    if wf:
+                        agent_input.setdefault("voice_plan", getattr(wf, "voice_plan", {}) or {})
+                        agent_input.setdefault("concept_plan", getattr(wf, "concept_plan", {}) or {})
+
+                        scene_payloads: List[Dict[str, Any]] = []
+                        for sc in getattr(wf, "scenes", []) or []:
+                            try:
+                                sn = int(getattr(sc, "scene_number", 0) or 0)
+                            except Exception:
+                                sn = 0
+                            if not sn:
+                                continue
+                            scene_payloads.append(
+                                {
+                                    "scene_number": sn,
+                                    "title": getattr(sc, "title", ""),
+                                    "duration": float(getattr(sc, "duration", 0.0) or 0.0),
+                                    "start_time": float(getattr(sc, "start_time", 0.0) or 0.0),
+                                    "end_time": float(getattr(sc, "end_time", 0.0) or 0.0),
+                                    "narrative_description": getattr(sc, "narrative_description", ""),
+                                    "visual_description": getattr(sc, "visual_description", ""),
+                                    "mood": getattr(sc, "mood_and_atmosphere", ""),
+                                    "video_prompt": getattr(sc, "video_prompt", ""),
+                                    "video_generation_params": getattr(sc, "video_generation_params", {}),
+                                    "video_url": getattr(sc, "video_path", None) or getattr(sc, "video_url", ""),
+                                    "script_text": getattr(sc, "script_text", ""),
+                                }
+                            )
+
+                        agent_input["voice_scenes"] = scene_payloads
+                except Exception as _e:
+                    self.logger.warning(f"VOICE_CTX_WARN: failed to assemble voice context: {_e}")
+
             return agent_input
             
         except Exception as e:

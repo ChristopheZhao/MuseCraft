@@ -90,7 +90,7 @@ class ReActOrchestratorAgent(BaseAgent):
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """Execute ReAct iterative workflow"""
+        """Execute iterative workflow"""
         
         self._current_task = task
         task.status = TaskStatus.IN_PROGRESS
@@ -108,15 +108,15 @@ class ReActOrchestratorAgent(BaseAgent):
         }
         
         try:
-            # 主 ReAct 循环（FC决策）
+            # 主迭代循环（FC决策）
             while workflow_state["iteration_count"] < self.max_iterations:
                 iteration = workflow_state["iteration_count"] + 1
                 
-                self.logger.info(f"🔄 开始 ReAct 迭代 {iteration}")
+                self.logger.info(f"🔄 开始迭代 {iteration}")
                 await self._update_progress(
                     execution, 
                     min(90, iteration * 10), 
-                    f"ReAct iteration {iteration}",
+                    "processing",
                     db
                 )
                 
@@ -169,7 +169,7 @@ class ReActOrchestratorAgent(BaseAgent):
             task.status = TaskStatus.FAILED
             task.add_error(str(e))
             db.commit()
-            raise AgentError(f"ReAct workflow failed: {str(e)}") from e
+            raise AgentError(f"Orchestrator workflow failed: {str(e)}") from e
     
     async def _observe_current_state(self, workflow_state: Dict[str, Any]) -> Dict[str, Any]:
         """OBSERVE: 汇总当前状态（本地计算，不依赖LLM）"""

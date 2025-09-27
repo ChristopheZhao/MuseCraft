@@ -6,6 +6,7 @@ Principles for Agents and Tools
 - Anti-Hardcoding: Do not encode LLM decisions in code via regex or if/else. Express priors and constraints in system/context messages and tool schemas; let the LLM choose within schema.
 - Prompt Neutrality: Prompts must not include tool names, parameter names, or value ranges. Expose capabilities exclusively via tools schema; let validation happen in tools.
 - Fallbacks as System Guarantees: Fail fast on missing capabilities at tool level, provide minimal, safe fallbacks only where explicitly designed. Surface diagnostics early (keys, endpoints, capabilities).
+- Non-Pipeline Autonomy: Agents应以 ReAct 循环和工作流状态驱动决策，而非硬编码的顺序或遍历；即便 orchestrator 暂时使用固定顺序调度，也必须保留按任务特征动态插入/跳过阶段的能力，为后续自主化升级预留空间。
 - Root‑Cause First (TDD mindset): When a failure or mismatch appears, diagnose and fix the root cause before adding case‑specific workarounds. Avoid “for this case only” hardcoding. For LLM JSON outputs that require structure, always request `response_format={"type":"json_object"}` and ensure messages/payloads are JSON‑serializable primitives (no runtime objects). Keep supplier constraints in tool schemas; where a supplier cannot guarantee a constraint (e.g., precise audio duration), treat it as a soft hint and enforce exactness via post‑processing tools. Add small tests/telemetry to prevent regressions and capture fallback_reason when degradation occurs.
 - ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; update workflow state and continuity memory each turn; stop on clear success criteria.
 - Content Safety: Prompts and templates must avoid explicit or sensitive body-part phrasing and NSFW content. Prefer neutral, professional descriptions of attire, posture, and composition.
@@ -43,16 +44,21 @@ Environment
 - ReAct 编排的 THINK/PLAN 阶段通过 FC 只暴露“编排控制工具”的极简动作（如继续/重复/中止），避免在编排器中硬编码 if/else。
 - ACT 阶段统一通过 `agent.execute(...)` 调用子 Agent，继承进度/超时/重试/WebSocket/记忆钩子等系统保障。
 - REFLECT 使用事实驱动的完成判定（必需步骤 + 质量阈值或迭代上限），减少对 LLM 文本反思的强依赖。
+- 当前 orchestrator 虽默认按工作流顺序调度，但内部依然走 ReAct 循环，任何 Agent 都需基于观察→计划→执行→反思决策；固定顺序只是过渡形态，便于随后在策略层按任务特征动态插入/跳过阶段。
 
 ## Composer 可重入与音频职责
 
 - Composer 是“统一装配者”，可在工作流多阶段被多次调用：
   - 先做场景视频拼接（video-only）；
+  - VoiceSynthesizerAgent 交付配音后，Composer 执行 add_voiceover 将旁白混入视频；
   - AudioAgent 交付等长可用的 BGM 后，Composer 再次执行“加配乐”；
-  - 未来可在 VO/SRT/SFX 就绪后再做多轨混合、响度标准化与 ducking。
+  - 未来可在 SRT/SFX 就绪后再做多轨混合、响度标准化与 ducking。
 - AudioAgent 的职责：
   - 观测（总时长/时间线/概念）→ 规划（AudioDesignPlan）→ 生成（供应商无关）→ 分析（静音/能量/候选截断点）→ 智能对齐（裁剪/循环/淡化），交付“等长可用”的音轨。
   - 不在 Agent 内直接做混流（除非回退模式），混流由 Composer 统一执行。
+- VoiceSynthesizer 输出旁白时只做必要裁剪，不再强行把语音填满场景；Composer 根据工作流 `voice_mixing_state.timeline` 自动插入静音片段，保证时间线上声画对齐但保留自然留白。
+- Composer 在混音阶段默认对背景音乐做自动压制（ducking），旁白出现时 BGM 自动降低 6~10 dB（可通过 `ducking_config` 调整），确保视频全流程在无人干预下也能得到清晰的语音与平衡的伴奏。
+- VoiceSynthesizer 会基于 `voice_plan`、场景语气与 `voice_manifest.json` 的分类信息自动筛选音色，必要时再 fallback 到默认音色；若调用方传入 `auto_select=false` 则沿用指定音色。
 
 ## 记忆解耦与可选回写（ReAct 基类）
 

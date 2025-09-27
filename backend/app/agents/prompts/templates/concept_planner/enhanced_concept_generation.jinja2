@@ -9,6 +9,10 @@
 （以上仅作参考，请基于内容需求进行专业的风格决策优化）
 {% endif %}
 
+## 概念草稿参考（来自第一阶段 outline_json）
+{{ outline_json | default('{}') }}
+（请严格在此草稿的基础上细化；若上一阶段缺失，请先自行构建合理蓝图并在最终 JSON 的 `risks` 或 `consistency_guidelines` 中记录差异理由）
+
 ## 专业视频风格决策体系
 
 ### 表现形式维度
@@ -37,6 +41,10 @@
 ## 技术制作约束
 - 目标时长：{{ duration }}秒
 - 画面比例：{{ aspect_ratio }}
+- 单场景可生成时长选项：{{ duration_capabilities | map('string') | join('、') }} 秒
+- 建议的场景数量区间：{{ scene_count_min }} ~ {{ scene_count_max }} 幕（模型可按叙事需要在此范围内自由决策）
+- 参考最优场景数：约 {{ optimal_scene_count }} 幕（仅供参考，最终由你根据叙事逻辑确定）
+- 请确保每个场景的预计时长落在上述生成能力范围内，并通过合理的场景拆分覆盖目标总时长
 
 ## 输出要求
 请生成包含以下结构的JSON格式概念计划（包含完整的内容元素设计）：
@@ -99,6 +107,22 @@
         "emotional_tone": "选择的情感基调（专业权威/温馨亲和/活力动感/神秘艺术）",
         "style_reasoning": "选择此风格组合的专业理由和预期效果"
     },
+    "voice_plan": {
+        "enabled": true,
+        "mode": "narration | storytelling | explainer | none",
+        "persona": "旁白身份或角色设定（如温柔的旅人、睿智的解说者）",
+        "tone_keywords": ["描述语气/节奏/情绪的关键词"],
+        "style_notes": "旁白语言风格与节奏控制提示",
+        "scene_guidance": [
+            {
+                "scene_number": 1,
+                "should_narrate": true,
+                "objective": "此场景旁白要达成的叙事目的",
+                "emotion": "传达的情绪基调",
+                "key_points": ["需要提及的关键信息"]
+            }
+        ]
+    },
     "target_audience": "目标受众分析",
     "key_messages": ["核心信息1", "核心信息2"],
     "scenes": [
@@ -130,9 +154,11 @@
 }
 
 重要要求：
-1. intelligent_style_design是核心输出，体现MAS智能决策能力
-2. content_elements要全面覆盖各类内容元素，不限于人物
-3. 确保场景总时长等于目标时长，场景数量适中（3-8个场景）
-4. 所有场景描述要与intelligent_style_design和content_elements保持一致
-5. consistency_guidelines确保整个视频的视觉和内容连贯性
-6. 内容安全与合规：避免描述敏感或露骨的身体部位与NSFW内容；以专业、中性的方式描述服饰、姿态与构图；面向所有年龄段友好
+1. 第一阶段提供的 `scene_blueprint` 中每一幕必须对应生成一个详细场景，可在必要时合并或细分，但需解释原因；确保总幕数仍在 {{ scene_count_min }}~{{ scene_count_max }} 之间。
+2. `duration` 或 `final_duration` 应优先贴合 blueprint 中的 `duration_hint`，允许在 {{ duration_capabilities | map('string') | join('、') }} 秒可选区间内微调，总和需接近 {{ duration }} 秒。
+3. intelligent_style_design 是核心输出，应呼应 outline 中的 `intelligent_style_hypothesis`，并补充细节与执行指引。
+4. content_elements 要全面覆盖人物、环境、道具、抽象概念，并与各场景引用保持一致。
+5. consistency_guidelines 要结合 outline 中的要点（如情绪、视觉主色、叙事线索），确保场景间的风格连续性。
+6. 内容安全与合规：避免描述敏感或露骨的身体部位与 NSFW 内容；以专业、中性的方式描述服饰、姿态与构图。
+7. voice_plan 要与 outline 中的 `voice_plan_overview` 呼应，明确每幕旁白职责；若无需配音，请将 enabled 设为 false 且 mode 为 "none"。
+8. 所有输出均需为 JSON，无额外自然语言说明；字段缺失时给出 `[]` 或 `{}`，不要省略。

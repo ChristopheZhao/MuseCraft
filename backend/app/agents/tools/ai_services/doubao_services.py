@@ -14,7 +14,14 @@ import logging
 
 import httpx
 
-from .service_interfaces import VideoModelServiceInterface, VLMServiceInterface, ServiceProvider
+from .service_interfaces import (
+    VideoModelServiceInterface,
+    VLMServiceInterface,
+    ServiceProvider,
+    VideoCapabilities,
+    EnumCapability,
+    PromptCapability,
+)
 
 
 def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -73,6 +80,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
             "doubao-seedance-1-0-lite-i2v-250428",
             "doubao-seedance-1-0-lite-t2v-250428",
         ]
+        provider_key = self.config.get("provider_key") or _get_env("DOUBAO_VIDEO_PROVIDER_KEY", "doubao")
+        self.provider_key = str(provider_key).strip() or "doubao"
 
     # Interface impl
     def is_available(self) -> bool:
@@ -94,6 +103,55 @@ class DoubaoVideoService(VideoModelServiceInterface):
     def supports_first_last_frame(self) -> bool:
         # Seedance supports FLF via dedicated model (wan2-1-14b-flf2v)
         return True
+
+    def _get_provider_config(self):
+        try:
+            from ....core.video_config_manager import get_video_config
+            cfg = None
+            if self.provider_key:
+                cfg = get_video_config().get_provider_config(self.provider_key)
+            if cfg is None:
+                cfg = get_video_config().get_current_provider_config()
+            return cfg
+        except Exception:
+            return None
+
+    def get_capabilities(self) -> VideoCapabilities:
+        caps = VideoCapabilities()
+        provider_cfg = self._get_provider_config()
+        if not provider_cfg:
+            return caps
+
+        prompt_limits = provider_cfg.prompt_limits or {}
+        if prompt_limits:
+            caps.prompt = PromptCapability(
+                max_bytes=prompt_limits.get("max_bytes"),
+                approx_chinese_chars=prompt_limits.get("approx_chinese_chars"),
+                approx_english_chars=prompt_limits.get("approx_english_chars"),
+                description_suffix=prompt_limits.get("note"),
+                enforce=bool(prompt_limits.get("enforce", False)),
+                extra={
+                    k: v
+                    for k, v in prompt_limits.items()
+                    if k not in {"approx_chinese_chars", "approx_english_chars", "note", "enforce"}
+                },
+            )
+
+        if provider_cfg.resolution_options:
+            caps.resolution = EnumCapability(
+                options=list(provider_cfg.resolution_options),
+                aliases=dict(provider_cfg.resolution_aliases or {}),
+                description_suffix="支持的分辨率列表",
+            )
+
+        if provider_cfg.ratio_options:
+            caps.ratio = EnumCapability(
+                options=list(provider_cfg.ratio_options),
+                aliases=dict(provider_cfg.ratio_aliases or {}),
+                description_suffix="可选画幅比例",
+            )
+
+        return caps
 
     async def generate_video(
         self,
@@ -153,35 +211,29 @@ class DoubaoVideoService(VideoModelServiceInterface):
                     chosen_model = t2v_model
 
         requested_resolution = kwargs.get("resolution") or kwargs.get("rs")
-        resolution_for_api: Optional[str] = None
-        resolution_canonical: Optional[str] = None
         if isinstance(requested_resolution, (list, tuple, dict)):
             requested_resolution = str(requested_resolution)
         if isinstance(requested_resolution, str):
             requested_resolution = requested_resolution.strip()
         else:
             requested_resolution = None
+
+        provider_cfg = self._get_provider_config()
+        resolution_aliases = dict(getattr(provider_cfg, "resolution_aliases", {}) or {})
+        allowed_resolutions = list(getattr(provider_cfg, "resolution_options", []) or [])
+        canonical_to_alias = {v: k for k, v in resolution_aliases.items()}
+
+        resolution_for_api: Optional[str] = None
+        resolution_canonical: Optional[str] = None
+
         if requested_resolution:
-            resolution_canonical = requested_resolution
-            alias_to_canonical = {
-                "480p": "720x480",
-                "720p": "1280x720",
-                "1080p": "1920x1080"
-            }
-            canonical_to_alias = {v: k for k, v in alias_to_canonical.items()}
-            if requested_resolution in alias_to_canonical:
-                resolution_canonical = alias_to_canonical[requested_resolution]
+            resolution_canonical = resolution_aliases.get(requested_resolution, requested_resolution)
+            if requested_resolution in resolution_aliases:
+                # API 可以直接接受别名（rs=720p），保留原值
                 resolution_for_api = requested_resolution
-            elif requested_resolution in canonical_to_alias:
-                resolution_canonical = requested_resolution
-                resolution_for_api = canonical_to_alias[requested_resolution]
             else:
-                resolution_for_api = requested_resolution
-            try:
-                from ....core.video_config_manager import get_video_config
-                allowed_resolutions = list(get_video_config().get_current_provider_config().resolution_options or [])
-            except Exception:
-                allowed_resolutions = []
+                resolution_for_api = canonical_to_alias.get(requested_resolution, requested_resolution)
+
             if allowed_resolutions and resolution_canonical not in allowed_resolutions:
                 try:
                     self.logger.warning(
@@ -190,8 +242,37 @@ class DoubaoVideoService(VideoModelServiceInterface):
                 except Exception:
                     pass
                 resolution_canonical = allowed_resolutions[0]
-                resolution_for_api = canonical_to_alias.get(resolution_canonical, resolution_for_api or resolution_canonical)
-        
+                resolution_for_api = canonical_to_alias.get(resolution_canonical, resolution_canonical)
+
+        requested_ratio = kwargs.get("ratio") or kwargs.get("rt")
+        if isinstance(requested_ratio, (list, tuple, dict)):
+            requested_ratio = str(requested_ratio)
+        if isinstance(requested_ratio, str):
+            requested_ratio = requested_ratio.strip()
+        else:
+            requested_ratio = None
+
+        ratio_aliases = dict(getattr(provider_cfg, "ratio_aliases", {}) or {})
+        allowed_ratios = list(getattr(provider_cfg, "ratio_options", []) or [])
+        ratio_canonical: Optional[str] = None
+        ratio_for_api: Optional[str] = None
+        ratio_alias_inverse = {v: k for k, v in ratio_aliases.items()}
+
+        if requested_ratio:
+            ratio_canonical = ratio_aliases.get(requested_ratio, requested_ratio)
+            if allowed_ratios and ratio_canonical not in allowed_ratios:
+                try:
+                    self.logger.warning(
+                        f"ratio {requested_ratio} not supported; falling back to {allowed_ratios[0]}"
+                    )
+                except Exception:
+                    pass
+                ratio_canonical = allowed_ratios[0]
+            if requested_ratio in ratio_aliases:
+                ratio_for_api = requested_ratio
+            else:
+                ratio_for_api = ratio_alias_inverse.get(ratio_canonical, ratio_canonical)
+
         # 组装请求头与URL
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -208,6 +289,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
                     text_prompt = f"{text_prompt} --dur {int(duration)}".strip()
                 if resolution_for_api:
                     text_prompt = f"{text_prompt} --rs {resolution_for_api}".strip()
+                if ratio_for_api:
+                    text_prompt = f"{text_prompt} --rt {ratio_for_api}".strip()
                 if text_prompt:
                     content_items.append({"type": "text", "text": text_prompt})
                 if images_payload:
@@ -228,6 +311,9 @@ class DoubaoVideoService(VideoModelServiceInterface):
             if resolution_for_api:
                 pay["rs"] = resolution_for_api
                 pay["resolution"] = resolution_for_api
+            if ratio_for_api:
+                pay["rt"] = ratio_for_api
+                pay["ratio"] = ratio_for_api
             return pay
 
         async def _create_and_poll(model_name: str) -> Dict[str, Any]:
@@ -302,6 +388,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
             "provider": "doubao",
             "resolution": resolution_for_api or resolution_canonical,
             "requested_resolution": requested_resolution,
+            "ratio": ratio_for_api or ratio_canonical,
+            "requested_ratio": requested_ratio,
         }
         if fallback_applied:
             result.update({

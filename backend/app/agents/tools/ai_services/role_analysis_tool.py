@@ -144,6 +144,15 @@ class RoleAnalysisTool(AsyncTool):
         if provider_tool in prov_alias:
             provider_tool = prov_alias[provider_tool]
 
+        thinking_type = (
+            (self.config or {}).get("thinking_type")
+            or os.getenv("ROLE_ANALYSIS_THINKING")
+            or "disabled"
+        )
+        if str(thinking_type).lower() not in {"enabled", "disabled"}:
+            thinking_type = "disabled"
+        thinking_payload = {"type": thinking_type}
+
         registry = get_tool_registry()
         provider = registry.get_tool(provider_tool)
 
@@ -164,12 +173,16 @@ class RoleAnalysisTool(AsyncTool):
             except Exception:
                 max_tokens = 4000
 
-            res = await provider.execute(TI(action="json_completion", parameters={
+            json_params = {
                 "prompt": prompt,
                 **({"model": model} if model else {}),
                 "temperature": temp_cfg,
-                "max_tokens": max_tokens
-            }))
+                "max_tokens": max_tokens,
+            }
+            if provider_tool and provider_tool.lower().startswith("zhipu"):
+                json_params["thinking"] = thinking_payload
+
+            res = await provider.execute(TI(action="json_completion", parameters=json_params))
             # 归一化 json 内容
             payload = getattr(res, 'result', res)
             content = None
@@ -185,13 +198,17 @@ class RoleAnalysisTool(AsyncTool):
             # 兜底：当 content 为空或无法解析为对象时，回退一次 generate_text + response_format
             if not content:
                 try:
-                    res2 = await provider.execute(TI(action="generate_text", parameters={
+                    text_params = {
                         "prompt": prompt,
                         **({"model": model} if model else {}),
                         "temperature": temp_cfg,
                         "max_tokens": max_tokens,
-                        "response_format": {"type": "json_object"}
-                    }))
+                        "response_format": {"type": "json_object"},
+                    }
+                    if provider_tool and provider_tool.lower().startswith("zhipu"):
+                        text_params["thinking"] = thinking_payload
+
+                    res2 = await provider.execute(TI(action="generate_text", parameters=text_params))
                     payload2 = getattr(res2, 'result', res2)
                     content = (payload2 or {}).get("content") if isinstance(payload2, dict) else None
                     # 标记兜底信息（写入 notes）

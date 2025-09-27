@@ -47,10 +47,6 @@ class E2EWorkflowTester:
             "style": "tech",
             "duration": 30,
             "aspect_ratio": "16:9",
-            "voice_settings": {
-                "voice_type": "professional",
-                "speed": 1.0
-            },
             "music_settings": {
                 "genre": "electronic",
                 "volume": 0.3

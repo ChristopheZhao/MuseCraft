@@ -15,7 +15,6 @@ export interface VideoRequest {
   duration: number;
   resolution: string;
   aspectRatio: AspectRatio;
-  voiceSettings: VoiceSettings;
   musicSettings: MusicSettings;
   createdAt: Date;
   updatedAt: Date;
@@ -38,14 +37,6 @@ export type StyleCategory =
   | 'social';
 
 export type AspectRatio = '16:9' | '9:16' | '1:1' | '4:3';
-
-export interface VoiceSettings {
-  enabled: boolean;
-  voice: string;
-  speed: number;
-  pitch: number;
-  language: string;
-}
 
 export interface MusicSettings {
   enabled: boolean;

@@ -65,11 +65,20 @@ class AgentToolAllocator:
                 "ffmpeg_tool",                 # 媒体组合（视频加音频）
                 "file_storage_tool"            # 文件持久化/下载
             ],
+
+            # 配音合成Agent
+            AgentType.VOICE_SYNTHESIZER: [
+                "voice_synth_tool",
+                "audio_processor",
+                "audio_analysis_tool",
+                "file_storage_tool",
+            ],
             
             # 视频合成Agent - 媒体组合和渲染
             AgentType.VIDEO_COMPOSER: [
                 # 使用已注册、可用的工具：ffmpeg 进行合成、file_storage 做本地URL
                 "ffmpeg_tool",
+                "audio_processor",
                 "file_storage_tool"
             ],
             

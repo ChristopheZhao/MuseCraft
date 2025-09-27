@@ -3,7 +3,7 @@ Script Writer Agent - 简化版批量脚本生成
 移除复杂的ReAct接口，直接实现批量处理
 """
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
@@ -100,6 +100,33 @@ class ScriptWriterAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """批量生成场景脚本"""
         
+        voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
+        voice_plan_enabled = True
+        if isinstance(voice_plan, dict):
+            enabled_raw = voice_plan.get("enabled")
+            if isinstance(enabled_raw, str):
+                voice_plan_enabled = enabled_raw.strip().lower() not in {"false", "0", "no", "off"}
+            elif isinstance(enabled_raw, bool):
+                voice_plan_enabled = enabled_raw
+            mode = str(voice_plan.get("mode", "narration")).strip().lower()
+            if mode == "none":
+                voice_plan_enabled = False
+        else:
+            voice_plan_enabled = True
+
+        voice_guidance_map: Dict[int, Dict[str, Any]] = {}
+        if isinstance(voice_plan, dict):
+            for entry in voice_plan.get("scene_guidance", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    sn = int(entry.get("scene_number"))
+                except (TypeError, ValueError):
+                    continue
+                if sn <= 0:
+                    continue
+                voice_guidance_map[sn] = entry
+
         # 筛选需要脚本的场景
         scenes_needing_scripts = [
             scene for scene in scenes 
@@ -129,6 +156,8 @@ class ScriptWriterAgent(BaseAgent):
             
             # 逐场景生成脚本（使用 script_generation 工具的 generate_scene_script 动作）
             scripts_map: Dict[str, Any] = {}
+            hard_failed_voice_scenes: List[Dict[str, Any]] = []
+            warning_voice_scenes: List[Dict[str, Any]] = []
             intelligent_style = concept_plan.get('intelligent_style_design', {})
             # 读取脚本写作模型与token预算（来自ai_config）
             try:
@@ -143,6 +172,41 @@ class ScriptWriterAgent(BaseAgent):
                 max_tokens_budget = 1500
             for scene in scenes_needing_scripts:
                 try:
+                    guidance = voice_guidance_map.get(scene.scene_number)
+                    if guidance:
+                        should_narrate = bool(guidance.get("should_narrate", voice_plan_enabled))
+                    else:
+                        should_narrate = bool(voice_plan_enabled)
+
+                    if should_narrate:
+                        if not guidance:
+                            self.logger.warning(
+                                "Scene %s voice plan 缺少 guidance，跳过旁白规划",
+                                scene.scene_number,
+                            )
+                            should_narrate = False
+
+                    if should_narrate:
+                        pace_tag = str(guidance.get("pace_tag", "")).strip().lower() if guidance else ""
+                        if not pace_tag:
+                            raise AgentError(
+                                f"Scene {scene.scene_number} voice plan 缺少 pace_tag"
+                            )
+                        target_char_count = guidance.get("target_char_count")
+                        if target_char_count is None:
+                            raise AgentError(
+                                f"Scene {scene.scene_number} voice plan 缺少 target_char_count"
+                            )
+                        try:
+                            target_char_count = int(target_char_count)
+                        except (TypeError, ValueError):
+                            raise AgentError(
+                                f"Scene {scene.scene_number} voice plan target_char_count 非法"
+                            )
+                    else:
+                        pace_tag = ""
+                        target_char_count = None
+
                     tool_params = {
                         "scene_data": {
                             "scene_number": scene.scene_number,
@@ -159,6 +223,14 @@ class ScriptWriterAgent(BaseAgent):
                         "model": script_model,
                         "max_tokens": max_tokens_budget,
                     }
+                    tool_params["voice_guidance"] = {
+                        "should_narrate": should_narrate,
+                        "pace_tag": pace_tag,
+                        "target_char_count": target_char_count,
+                        "key_points": guidance.get("key_points", []),
+                        "emotion": guidance.get("emotion", ""),
+                        "objective": guidance.get("objective", ""),
+                    }
                     one = await self.use_tool(
                         "script_generation",
                         "generate_scene_script",
@@ -166,16 +238,61 @@ class ScriptWriterAgent(BaseAgent):
                     )
                     payload = getattr(one, 'result', one)
                     if isinstance(payload, dict):
-                        # 归一化结果
+                        if not payload.get("success", True):
+                            raise AgentError(
+                                f"场景 {scene.scene_number} 脚本生成失败: {payload.get('error', 'unknown error')}"
+                            )
+                        script_section = payload.get("script") if isinstance(payload.get("script"), dict) else {}
+                        voice_line = (
+                            payload.get("voice_over_text")
+                            or payload.get("voice_over")
+                            or script_section.get("voice_over")
+                            or script_section.get("voiceover")
+                        )
+                        if isinstance(voice_line, list):
+                            voice_line = " ".join(str(v).strip() for v in voice_line if str(v).strip())
+                        elif voice_line is not None:
+                            voice_line = str(voice_line).strip()
+
+                        is_valid_voice, warning_msg = self._validate_voice_line(
+                            scene.scene_number, voice_line, tool_params["voice_guidance"]
+                        )
+                        if not is_valid_voice and warning_msg:
+                            warning_voice_scenes.append({
+                                "scene_number": scene.scene_number,
+                                "warning": warning_msg,
+                            })
+                            self.logger.warning(
+                                "场景 %s 旁白字数与规划存在偏差：%s",
+                                scene.scene_number,
+                                warning_msg,
+                            )
                         scripts_map[str(scene.scene_number)] = {
-                            "script_text": payload.get("script_text", payload.get("content", "")),
+                            "script_text": payload.get("script_text", payload.get("content", "") or script_section.get("script_text", "")),
                             "narrative_description": payload.get("narrative_description", scene.narrative_description),
                             "background_music_style": payload.get("background_music_style", ""),
-                            "sound_effects": payload.get("sound_effects", [])
+                            "sound_effects": payload.get("sound_effects", []),
+                            "voice_over_text": voice_line or "",
+                            "voice_guidance": tool_params["voice_guidance"],
                         }
+                except AgentError as ae:
+                    hard_failed_voice_scenes.append({
+                        "scene_number": scene.scene_number,
+                        "reason": str(ae),
+                    })
+                    self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {ae}")
                 except Exception as se:
+                    hard_failed_voice_scenes.append({
+                        "scene_number": scene.scene_number,
+                        "reason": str(se),
+                    })
                     self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {se}")
-            script_results = {"success": True, "scripts": scripts_map}
+            script_results = {
+                "success": True,
+                "scripts": scripts_map,
+                "failed_voice_scenes": hard_failed_voice_scenes,
+                "voice_over_warnings": warning_voice_scenes,
+            }
             
             # 连续性分析（可选），调用统一的 analyze_all_scenes_continuity
             try:
@@ -208,29 +325,46 @@ class ScriptWriterAgent(BaseAgent):
             generated_count = 0
             # 标准化回合结果：供编排器统计 success/failed
             generation_results: List[Dict[str, Any]] = []
-            if script_results and script_results.get("success") and script_results.get("scripts"):
+            if scripts_map:
                 for scene in scenes_needing_scripts:
                     scene_script_data = script_results["scripts"].get(str(scene.scene_number))
                     if scene_script_data:
+                        voice_guidance = scene_script_data.get("voice_guidance", {})
+                        warning_note = next(
+                            (w.get("warning") for w in warning_voice_scenes if w.get("scene_number") == scene.scene_number),
+                            None,
+                        )
                         workflow_state.update_scene(
                             scene.scene_number,
                             script_text=scene_script_data.get("script_text", ""),
-                            voice_over_text=scene_script_data.get("script_text", ""),
+                            voice_over_text=scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
                             narrative_description=scene_script_data.get("narrative_description", scene.narrative_description),
                             background_music_style=scene_script_data.get("background_music_style", ""),
-                            sound_effects=scene_script_data.get("sound_effects", [])
+                            sound_effects=scene_script_data.get("sound_effects", []),
+                            pacing_and_timing={
+                                "pace_tag": voice_guidance.get("pace_tag"),
+                                "target_char_count": voice_guidance.get("target_char_count"),
+                                "should_narrate": voice_guidance.get("should_narrate"),
+                            },
                         )
                         generated_count += 1
-                        generation_results.append({
+                        result_entry = {
                             "scene_number": scene.scene_number,
                             "success": True,
                             "prompt_text": scene_script_data.get("script_text", "")[:120] or "script_generated",
-                        })
+                        }
+                        if warning_note:
+                            result_entry["warning"] = warning_note
+                        generation_results.append(result_entry)
                     else:
+                        failure_reason = next(
+                            (f.get("reason") for f in hard_failed_voice_scenes if f.get("scene_number") == scene.scene_number),
+                            "script_generation_failed_or_empty",
+                        )
                         generation_results.append({
                             "scene_number": scene.scene_number,
                             "success": False,
-                            "error": "script_generation_failed_or_empty"
+                            "error": failure_reason
                         })
             else:
                 # 工具层未返回结构化脚本映射时，按尝试的场景全部视为失败
@@ -629,15 +763,29 @@ class ScriptWriterAgent(BaseAgent):
             except Exception as re:
                 self.logger.warning(f"角色分析执行/写回失败（跳过，不阻断）：{re}")
 
+            overall_success = len(hard_failed_voice_scenes) == 0
+            if hard_failed_voice_scenes:
+                self.logger.error(
+                    "脚本生成存在未通过的旁白场景: %s",
+                    [f.get("scene_number") for f in hard_failed_voice_scenes],
+                )
+            if warning_voice_scenes:
+                self.logger.warning(
+                    "旁白字数与规划存在偏差: %s",
+                    [w.get("scene_number") for w in warning_voice_scenes],
+                )
+
             return {
-                "success": True,
+                "success": overall_success,
                 "message": f"批量生成{generated_count}个场景脚本",
                 "scenes_generated": generated_count,
                 "script_results": script_results,
                 "continuity_analysis": continuity_analysis,
                 "generation_results": generation_results,
                 "workflow_state_updated": generated_count > 0,
-                "total_scenes": len(scenes_needing_scripts)
+                "total_scenes": len(scenes_needing_scripts),
+                "failed_voice_scenes": hard_failed_voice_scenes,
+                "voice_over_warnings": warning_voice_scenes,
             }
             
         except Exception as e:
@@ -648,6 +796,35 @@ class ScriptWriterAgent(BaseAgent):
                 "scenes_generated": 0,
                 "workflow_state_updated": False
             }
+
+    def _validate_voice_line(
+        self,
+        scene_number: int,
+        voice_line: Optional[str],
+        guidance: Dict[str, Any],
+    ) -> Tuple[bool, Optional[str]]:
+        should_narrate = bool(guidance.get("should_narrate", True))
+        if not should_narrate:
+            return True, None
+
+        text = (voice_line or "").strip()
+        if not text:
+            raise AgentError(f"Scene {scene_number} voice_over_text 缺失，脚本生成失败")
+
+        target_char_count = guidance.get("target_char_count")
+        if target_char_count is None:
+            raise AgentError(f"Scene {scene_number} voice plan 缺少 target_char_count")
+        try:
+            target_char_count = int(target_char_count)
+        except (TypeError, ValueError):
+            raise AgentError(f"Scene {scene_number} voice plan target_char_count 非法")
+
+        tolerance = max(6, int(round(target_char_count * 0.2)))
+        diff = abs(len(text) - target_char_count)
+        if diff > tolerance:
+            return False, f"实际 {len(text)} / 目标 {target_char_count}"
+
+        return True, None
 
     def _estimate_scene_count(self, input_data: Dict[str, Any]) -> int:
         """估算场景数量用于动态超时"""

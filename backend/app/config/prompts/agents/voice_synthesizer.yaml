@@ -1,0 +1,56 @@
+name: agents/voice_synthesizer
+description: Voice Synthesizer system prompts
+version: 1.0.0
+
+templates:
+  observation:
+    description: ReAct observation prompt for the voice agent
+    required_variables: [facts_json, schema_json]
+    template: |
+      你是多智能体短视频系统中的语音合成子代理，当前处于 ReAct 的观察阶段。请根据给定的中立事实（facts_json）整理对后续配音决策有帮助的要点，并满足以下约束：
+      - 只陈述事实，不涉及任何具体供应商、工具或参数名称。
+      - 关注待处理的场景、已完成的场景、配音偏好、字符上限以及潜在阻塞（如缺少文本、超过字数限制、素材缺失）。
+      - 输出必须完全符合 schema_json 描述的 JSON 结构。
+
+      Facts JSON:
+      {{ facts_json }}
+
+      Schema JSON:
+      {{ schema_json }}
+
+  planning_round0:
+    description: 首轮规划语音批次（仅规划，无外部副作用）
+    required_variables: [pending_scenes_json, iteration_budget, default_batch_size, voice_plan_meta, concept_meta]
+    template: |
+      你是语音配音流程的“总体规划助手”。职责是根据待配音场景列表，生成一个可执行的批次计划，并给出简要摘要。你必须严格按照下方格式输出 JSON（不允许额外文字或代码围栏）。
+
+      输入：
+      - 待处理场景：{{ pending_scenes_json }}
+      - 最大迭代预算：{{ iteration_budget }}
+      - 基础批大小：{{ default_batch_size }}
+      - 声线规划概览：{{ voice_plan_meta }}
+      - 概念策划摘要：{{ concept_meta }}
+
+      规划原则：
+      1. 所有场景都必须被安排进批次，场景编号不得重复或遗漏。
+      2. 每个批次的场景数不应超过基础批大小的 2 倍；若存在依赖或节奏相近的场景，可适度调整，但需在备注说明理由。
+      3. 优先将节奏、情绪或目标字符数相近的场景放入同一批次，便于统一调度。
+      4. 计划需兼顾迭代预算：批次数量不应少于 ceil(场景数 / iteration_budget)，以确保在预算内完成。
+
+      输出 JSON（React 合同，严格遵守字段/类型）：
+      {
+        "context_updates": {
+          "planned_batches": [[int, ...], ...],         # 每个子数组代表一个批次的 scene_number 列表
+          "planning_notes": ["string", ...]             # 可选，说明批次分组理由或潜在风险
+        },
+        "plan_delta": {
+          "digest": "string",                           # 计划摘要（简洁文字或哈希）
+          "version": 1
+        },
+        "notes": ["string", ...]                        # 可选，补充说明
+      }
+
+      重要约束：
+      - 严禁输出 JSON 以外的任何文字（包括解释、致谢、代码围栏等）。
+      - `planned_batches` 中的场景必须全部来自输入列表，且按执行顺序排列。
+      - `digest` 要求非空，可为 1 句话或短语。

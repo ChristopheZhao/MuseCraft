@@ -12,6 +12,7 @@ class ResourceType(str, enum.Enum):
     IMAGE = "image"
     VIDEO = "video"
     AUDIO = "audio"
+    VOICE_OVER = "voice_over"
     TEXT = "text"
     SCRIPT = "script"
     THUMBNAIL = "thumbnail"
@@ -96,7 +97,16 @@ class Resource(BaseModel):
     
     @property
     def is_audio(self) -> bool:
-        return self.resource_type == ResourceType.AUDIO
+        return self.resource_type in {ResourceType.AUDIO, ResourceType.VOICE_OVER}
+
+    @property
+    def is_voice_over(self) -> bool:
+        if self.resource_type == ResourceType.VOICE_OVER:
+            return True
+        params = self.generation_parameters or {}
+        if isinstance(params, dict) and params.get("audio_role") == "voice_over":
+            return True
+        return False
     
     def update_processing_status(self, status: str, metadata: dict = None):
         """Update processing status and metadata"""

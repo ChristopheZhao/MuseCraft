@@ -40,13 +40,6 @@ export const TaskApiMocks = {
         video_style: 'professional',
         duration: 60,
         aspect_ratio: '16:9',
-        voice_settings: {
-          enabled: true,
-          voice: 'professional-male',
-          speed: 1.0,
-          pitch: 1.0,
-          language: 'en-US'
-        },
         music_settings: {
           enabled: false,
           genre: 'corporate',

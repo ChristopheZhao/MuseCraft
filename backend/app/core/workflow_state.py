@@ -17,6 +17,7 @@ class WorkflowStatus(Enum):
     INITIALIZING = "initializing"
     CONCEPT_PLANNING = "concept_planning"
     SCRIPT_WRITING = "script_writing"
+    VOICE_SYNTHESIZING = "voice_synthesizing"
     IMAGE_GENERATING = "image_generating"
     VIDEO_GENERATING = "video_generating"
     AUDIO_GENERATING = "audio_generating"
@@ -57,6 +58,9 @@ class SceneData:
     voice_over_text: str = ""
     background_music_style: str = ""
     sound_effects: List[str] = field(default_factory=list)
+    voice_over_audio_path: str = ""
+    voice_over_audio_url: str = ""
+    voice_over_audio_metadata: Dict[str, Any] = field(default_factory=dict)
     
     # MAS协作：ScriptWriter为ImageGenerator提供的场景设计
     scene_design_elements: Dict[str, Any] = field(default_factory=dict)  # 新增：场景设计元素
@@ -122,6 +126,8 @@ class WorkflowState:
     user_prompt: str  # 保留用户原始需求 - 视频生成Agent需要完整内容理解
     style_preference: str = ""  # 可选的用户风格偏好提示
     intelligent_style_design: Dict[str, Any] = field(default_factory=dict)  # MAS智能风格设计结果
+    content_elements: Dict[str, Any] = field(default_factory=dict)
+    consistency_hints: Dict[str, Any] = field(default_factory=dict)
     duration: int = 30
     aspect_ratio: str = "16:9"
     resolution: str = settings.DEFAULT_VIDEO_RESOLUTION
@@ -137,6 +143,7 @@ class WorkflowState:
     completed_at: Optional[datetime] = None
     
     # 概念规划结果
+    concept_outline: Dict[str, Any] = field(default_factory=dict)
     concept_plan: Dict[str, Any] = field(default_factory=dict)
     
     # 场景数据
@@ -152,6 +159,8 @@ class WorkflowState:
     # 最终输出
     final_video_path: str = ""
     final_video_url: str = ""
+    final_video_remote_path: str = ""
+    final_video_storage: Dict[str, Any] = field(default_factory=dict)
     video_metadata: Dict[str, Any] = field(default_factory=dict)
     composition_timeline: List[Dict[str, Any]] = field(default_factory=list)
     
@@ -162,6 +171,10 @@ class WorkflowState:
     background_music_duration: float = 0.0
     background_music_style: str = ""
     background_music_generation_params: Dict[str, Any] = field(default_factory=dict)
+    voice_over_assets: List[Dict[str, Any]] = field(default_factory=list)
+    voice_settings: Dict[str, Any] = field(default_factory=dict)
+    voice_plan: Dict[str, Any] = field(default_factory=dict)
+    voice_mixing_state: Dict[str, Any] = field(default_factory=dict)
     
     # 错误和日志
     errors: List[str] = field(default_factory=list)
@@ -260,6 +273,78 @@ class WorkflowState:
             self.background_music_style = music_style
         if music_generation_params:
             self.background_music_generation_params.update(music_generation_params)
+
+    def update_voice_settings(self, voice_settings: Dict[str, Any]):
+        """Update preferred voice synthesis settings."""
+        if not voice_settings:
+            return
+        self.voice_settings.update(voice_settings)
+
+    def register_voice_asset(
+        self,
+        scene_number: int,
+        local_path: str,
+        duration: float,
+        provider: str,
+        voice_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        audio_url: str = "",
+    ):
+        """Store synthesized voice asset metadata for later composition."""
+        asset = {
+            "scene_number": scene_number,
+            "local_path": local_path,
+            "duration": duration,
+            "provider": provider,
+            "voice_id": voice_id,
+            "audio_url": audio_url,
+            "metadata": metadata or {},
+        }
+        narration_text = (metadata or {}).get("narration_text") if isinstance(metadata, dict) else None
+        if narration_text:
+            asset["text"] = narration_text
+        # Replace existing asset for same scene
+        self.voice_over_assets = [a for a in self.voice_over_assets if a.get("scene_number") != scene_number]
+        self.voice_over_assets.append(asset)
+        scene = self.get_scene(scene_number)
+        if scene:
+            scene.voice_over_audio_path = local_path
+            scene.voice_over_audio_url = audio_url
+            scene.voice_over_audio_metadata = metadata or {}
+            if narration_text:
+                scene.voice_over_text = narration_text
+
+        # Maintain a lightweight audio时间线，便于后续混音按真实说话时长排布
+        natural_duration = 0.0
+        if isinstance(metadata, dict):
+            natural_duration = float(metadata.get("spoken_duration_sec", 0.0) or 0.0)
+        scene_duration = duration
+        scene_start = 0.0
+        if scene:
+            scene_duration = float(getattr(scene, "duration", duration) or duration)
+            scene_start = float(getattr(scene, "start_time", 0.0) or 0.0)
+        timeline_entry = {
+            "scene_number": scene_number,
+            "start": scene_start,
+            "end": scene_start + scene_duration,
+            "clip_duration": duration,
+            "natural_spoken_duration": natural_duration if natural_duration > 0 else duration,
+            "audio_path": local_path,
+            "audio_url": audio_url,
+            "provider": provider,
+            "voice_id": voice_id,
+        }
+        coverage_ratio = None
+        if isinstance(metadata, dict):
+            coverage_ratio = metadata.get("speech_coverage_ratio")
+        if coverage_ratio is not None:
+            timeline_entry["speech_coverage_ratio"] = coverage_ratio
+
+        voice_timeline = self.voice_mixing_state.setdefault("timeline", [])
+        voice_timeline = [entry for entry in voice_timeline if entry.get("scene_number") != scene_number]
+        voice_timeline.append(timeline_entry)
+        voice_timeline.sort(key=lambda item: item.get("start", 0.0))
+        self.voice_mixing_state["timeline"] = voice_timeline
     
     def update_tokens(self, tokens: int):
         """更新token使用量"""
@@ -289,6 +374,7 @@ class WorkflowState:
             "api_calls_made": self.api_calls_made,
             "estimated_cost": self.estimated_cost,
             "processing_time": self.processing_time,
+            "voice_assets": len(self.voice_over_assets),
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
@@ -318,6 +404,9 @@ class WorkflowState:
             "api_calls_made": self.api_calls_made,
             "estimated_cost": self.estimated_cost,
             "processing_time": self.processing_time,
+            "voice_over_assets": self.voice_over_assets,
+            "voice_settings": self.voice_settings,
+            "voice_mixing_state": self.voice_mixing_state,
         }
 
 

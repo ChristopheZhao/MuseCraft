@@ -109,26 +109,14 @@ const RealTimeProgress: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white/80 backdrop-blur border-b border-gray-100 flex items-center justify-between">
-        <div>
+      <div className="-mx-6 px-6">
+        <div className="pt-2 pb-3 border-b border-gray-100">
           <h3 className="text-lg font-semibold text-gray-900">
             {t('progress.title')}
           </h3>
           <p className="text-sm text-gray-600">
             {t('progress.subtitle')}{currentRequest.title}
           </p>
-        </div>
-        <div className="flex items-center space-x-4 text-sm">
-          <div className="flex items-center space-x-1 text-gray-600">
-            <Timer className="w-4 h-4" />
-            <span>{formatTime(elapsedTime)} {t('progress.elapsed')}</span>
-          </div>
-          {metrics.estimatedTimeRemaining > 0 && (
-            <div className="flex items-center space-x-1 text-gray-600">
-              <Clock className="w-4 h-4" />
-              <span>~{formatTime(metrics.estimatedTimeRemaining)} {t('progress.remaining')}</span>
-            </div>
-          )}
         </div>
       </div>
 
@@ -333,6 +321,20 @@ const RealTimeProgress: React.FC = () => {
             {Math.max(0, metrics.totalTasks - metrics.completedTasks - metrics.activeAgents)}
           </div>
         </div>
+      </div>
+
+      {/* Runtime footer */}
+      <div className="pt-4 border-t border-gray-100 text-sm text-gray-600 flex flex-wrap gap-4">
+        <div className="flex items-center space-x-2">
+          <Timer className="w-4 h-4" />
+          <span>{formatTime(elapsedTime)} {t('progress.elapsed')}</span>
+        </div>
+        {metrics.estimatedTimeRemaining > 0 && (
+          <div className="flex items-center space-x-2">
+            <Clock className="w-4 h-4" />
+            <span>~{formatTime(metrics.estimatedTimeRemaining)} {t('progress.remaining')}</span>
+          </div>
+        )}
       </div>
     </div>
   );

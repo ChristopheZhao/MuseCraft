@@ -1,7 +1,8 @@
 """
 Application configuration settings
 """
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
+import json
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
@@ -57,6 +58,15 @@ class Settings(BaseSettings):
     UPLOAD_PATH: str = config("UPLOAD_PATH", default="./storage/uploads")
     GENERATED_PATH: str = config("GENERATED_PATH", default="./storage/generated")
     TEMP_PATH: str = config("TEMP_PATH", default="./storage/temp")
+    FINAL_OUTPUT_ROOT: str = config("FINAL_OUTPUT_ROOT", default="./storage/outputs")
+    FINAL_VIDEO_OUTPUT_PATH: str = config(
+        "FINAL_VIDEO_OUTPUT_PATH",
+        default="./storage/outputs/videos"
+    )
+    FINAL_AUDIO_OUTPUT_PATH: str = config(
+        "FINAL_AUDIO_OUTPUT_PATH",
+        default="./storage/outputs/audio"
+    )
     MAX_FILE_SIZE: int = config("MAX_FILE_SIZE", default=100, cast=int)  # MB
     # File download/upload robustness
     FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=120, cast=int)
@@ -143,6 +153,104 @@ class Settings(BaseSettings):
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
     SUNO_BASE_URL: str = config("SUNO_BASE_URL", default="https://api.sunoapi.org")
+
+    # Voice Synthesis configuration
+    VOICE_PRIMARY_PROVIDER: str = config("VOICE_PRIMARY_PROVIDER", default="aliyun")
+    VOICE_PROVIDER_FALLBACKS: List[str] = config("VOICE_PROVIDER_FALLBACKS", default="")
+    VOICE_PROVIDER_CONFIG: Dict[str, Any] = config("VOICE_PROVIDER_CONFIG", default="{}")
+    VOICE_DEFAULT_SAMPLE_RATE: int = config("VOICE_DEFAULT_SAMPLE_RATE", default=16000, cast=int)
+    VOICE_DEFAULT_FORMAT: str = config("VOICE_DEFAULT_FORMAT", default="wav")
+    VOICE_DEFAULT_VOICE_ID: str = config("VOICE_DEFAULT_VOICE_ID", default="zhiyu")
+    VOICE_HTTP_TIMEOUT: int = config("VOICE_HTTP_TIMEOUT", default=30, cast=int)
+    VOICE_OUTPUT_DIR: str = config("VOICE_OUTPUT_DIR", default="./storage/generated/voices")
+    VOICE_MAX_CHARS_PER_REQUEST: int = config("VOICE_MAX_CHARS_PER_REQUEST", default=300, cast=int)
+    VOICE_SYNTHESIZER_MAX_ITERATIONS: int = config(
+        "VOICE_SYNTHESIZER_MAX_ITERATIONS", default=9, cast=int
+    )
+    VOICE_CATALOG_PATH: Optional[str] = config("VOICE_CATALOG_PATH", default=None)
+    VOICE_AUTO_SPEED_MATCH: bool = config("VOICE_AUTO_SPEED_MATCH", default=False, cast=bool)
+    VOICE_MIN_AUTO_SPEED: float = config("VOICE_MIN_AUTO_SPEED", default=0.85, cast=float)
+    VOICE_MAX_AUTO_SPEED: float = config("VOICE_MAX_AUTO_SPEED", default=1.15, cast=float)
+    VOICE_PACE_CHAR_RATES: Dict[str, Any] = config(
+        "VOICE_PACE_CHAR_RATES", default='{"slow":3.0,"medium":4.0,"fast":5.0}'
+    )
+    VOICE_PACE_SPEED_MAP: Dict[str, Any] = config(
+        "VOICE_PACE_SPEED_MAP", default='{"slow":0.9,"medium":1.0,"fast":1.1}'
+    )
+    ALIYUN_TTS_APP_KEY: Optional[str] = config("ALIYUN_TTS_APP_KEY", default=None)
+    ALIYUN_TTS_ACCESS_KEY_ID: Optional[str] = config("ALIYUN_TTS_ACCESS_KEY_ID", default=None)
+    ALIYUN_TTS_ACCESS_KEY_SECRET: Optional[str] = config("ALIYUN_TTS_ACCESS_KEY_SECRET", default=None)
+    ALIYUN_TTS_REGION: str = config("ALIYUN_TTS_REGION", default="cn-shanghai")
+
+    @field_validator("VOICE_PROVIDER_FALLBACKS", mode="before")
+    @classmethod
+    def _parse_voice_provider_fallbacks(cls, value):
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return []
+
+    @field_validator("VOICE_PROVIDER_CONFIG", mode="before")
+    @classmethod
+    def _parse_voice_provider_config(cls, value):
+        if not value:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @field_validator("VOICE_PACE_CHAR_RATES", mode="before")
+    @classmethod
+    def _parse_voice_char_rates(cls, value):
+        if not value:
+            return {}
+        if isinstance(value, dict):
+            return {str(k).lower(): float(v) for k, v in value.items() if cls._is_positive_number(v)}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return {
+                str(k).lower(): float(v)
+                for k, v in parsed.items()
+                if cls._is_positive_number(v)
+            }
+        return {}
+
+    @field_validator("VOICE_PACE_SPEED_MAP", mode="before")
+    @classmethod
+    def _parse_voice_speed_map(cls, value):
+        if not value:
+            return {}
+        if isinstance(value, dict):
+            return {str(k).lower(): float(v) for k, v in value.items() if cls._is_positive_number(v)}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return {
+                str(k).lower(): float(v)
+                for k, v in parsed.items()
+                if cls._is_positive_number(v)
+            }
+        return {}
+
+    @staticmethod
+    def _is_positive_number(value: Any) -> bool:
+        try:
+            return float(value) > 0
+        except (TypeError, ValueError):
+            return False
     
     # Enhanced AI Service Settings
     AI_SERVICE_TIMEOUT: int = config("AI_SERVICE_TIMEOUT", default=120, cast=int)
@@ -191,6 +299,10 @@ class Settings(BaseSettings):
     # Logging Settings
     # LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
     LOG_LEVEL: str = config("LOG_LEVEL", default="DEBUG")
+    MAS_LOG_DIR: str = config("MAS_LOG_DIR", default="./backend/logs/mas")
+    MAS_LOG_LEVEL: str = config("MAS_LOG_LEVEL", default="INFO")
+    MAS_LOG_MAX_BYTES: int = config("MAS_LOG_MAX_BYTES", default=10_485_760, cast=int)
+    MAS_LOG_BACKUP_COUNT: int = config("MAS_LOG_BACKUP_COUNT", default=5, cast=int)
     LOG_FORMAT: str = config("LOG_FORMAT", default="json")
     
     # Video Generation System Configuration,support cogvideox-3, doubao
@@ -200,6 +312,7 @@ class Settings(BaseSettings):
     VIDEO_DURATION_CAPABILITIES: List[int] = [5, 10]  # Available duration options for current provider
     DEFAULT_VIDEO_RESOLUTION: str = config("DEFAULT_VIDEO_RESOLUTION", default="1280x720")
     VIDEO_AMPLIFICATION_RATIO: int = config("VIDEO_AMPLIFICATION_RATIO", default=4, cast=int)  # 4x to create 20-40s videos
+    VIDEO_GENERATOR_MAX_BATCH: int = config("VIDEO_GENERATOR_MAX_BATCH", default=2, cast=int)  # 兜底批量上限；设为0可禁用裁剪
     SYSTEM_DURATION_CAPABILITY_MIN: int = config("SYSTEM_DURATION_CAPABILITY_MIN", default=15, cast=int)  # seconds
     SYSTEM_DURATION_CAPABILITY_MAX: int = config("SYSTEM_DURATION_CAPABILITY_MAX", default=80, cast=int)  # seconds
     # Scene Planning Configuration - MAS系统场景数量约束
@@ -260,6 +373,8 @@ class Settings(BaseSettings):
     MAX_AUDIO_DURATION: float = config("MAX_AUDIO_DURATION", default=300.0, cast=float)  # 最大音频时长
     AUDIO_FADE_IN_DURATION: float = config("AUDIO_FADE_IN_DURATION", default=1.0, cast=float)  # 音频淡入时长
     AUDIO_FADE_OUT_DURATION: float = config("AUDIO_FADE_OUT_DURATION", default=1.0, cast=float)  # 音频淡出时长
+    SUNO_POLL_INTERVAL_SECONDS: int = config("SUNO_POLL_INTERVAL_SECONDS", default=30, cast=int)
+    SUNO_POLL_MAX_ATTEMPTS: int = config("SUNO_POLL_MAX_ATTEMPTS", default=20, cast=int)
     
     # Video Provider Specific Configuration
     COGVIDEOX_DEFAULT_DURATION: int = config("COGVIDEOX_DEFAULT_DURATION", default=5, cast=int)  # CogVideoX默认时长
@@ -315,7 +430,7 @@ class Settings(BaseSettings):
     FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=300, cast=int)
     # 保持网络通用性：不增加客户端网络相关配置，统一遵循系统/进程代理
     NETWORK_DIRECT_FALLBACK_ON_TIMEOUT: bool = config(
-        "NETWORK_DIRECT_FALLBACK_ON_TIMEOUT", default=False, cast=bool
+        "NETWORK_DIRECT_FALLBACK_ON_TIMEOUT", default=True, cast=bool
     )  # 超时后是否做一次“绕过系统代理”的直连重试（默认关闭，保持供应商/环境无关）
     # Agent-level end-to-end timeouts
     VIDEO_GENERATOR_TIMEOUT_SECONDS: int = config("VIDEO_GENERATOR_TIMEOUT_SECONDS", default=1800, cast=int)

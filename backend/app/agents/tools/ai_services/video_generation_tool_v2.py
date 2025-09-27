@@ -97,25 +97,86 @@ class VideoGenerationTool(AsyncTool):
         if action in ("generate_video", "generate_with_continuity"):
             return "act"
         return "plan"
+
+    def _fetch_capabilities(self, log_failure: bool = False):
+        if not self.video_service or not hasattr(self.video_service, "get_capabilities"):
+            return None
+        try:
+            return self.video_service.get_capabilities()
+        except Exception as exc:
+            if log_failure:
+                try:
+                    self.logger.warning("Failed to fetch video capabilities: %s", exc)
+                except Exception:
+                    pass
+            return None
+
+    def _validate_prompt_length(self, prompt: Optional[str], prompt_caps=None):
+        if not prompt or not isinstance(prompt, str):
+            return
+        if prompt_caps is None:
+            caps = self._fetch_capabilities()
+            prompt_caps = getattr(caps, "prompt", None) if caps else None
+        if not prompt_caps or not getattr(prompt_caps, "max_bytes", None):
+            return
+        try:
+            limit = int(prompt_caps.max_bytes)
+        except Exception:
+            limit = prompt_caps.max_bytes
+        if not isinstance(limit, int) or limit <= 0:
+            return
+        prompt_bytes = prompt.encode("utf-8")
+        if len(prompt_bytes) <= limit:
+            return
+        approx_cn = getattr(prompt_caps, "approx_chinese_chars", None)
+        approx_en = getattr(prompt_caps, "approx_english_chars", None)
+        hint_parts = []
+        if approx_cn:
+            hint_parts.append(f"约{approx_cn}个中文字符")
+        if approx_en:
+            hint_parts.append(f"{approx_en}个英文字符")
+        limit_hint = "或".join(hint_parts) if hint_parts else f"{limit}字节"
+        raise ToolValidationError(
+            f"prompt 超过供应商限制（需控制在{limit_hint}以内）",
+            self.metadata.name,
+        )
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         # 获取当前提供商配置用于动态schema
         provider_config = self.video_config.get_current_provider_config()
-        
+
+        capabilities = self._fetch_capabilities(log_failure=True)
+
+        resolution_cap = getattr(capabilities, "resolution", None) if capabilities else None
+        resolution_options = list(provider_config.resolution_options or [])
+        resolution_aliases = dict(getattr(provider_config, "resolution_aliases", {}) or {})
+        if resolution_cap:
+            if resolution_cap.options:
+                resolution_options = list(resolution_cap.options)
+            if resolution_cap.aliases:
+                resolution_aliases = dict(resolution_cap.aliases)
+
+        ratio_cap = getattr(capabilities, "ratio", None) if capabilities else None
+        ratio_options = list(getattr(provider_config, "ratio_options", []) or [])
+        ratio_aliases = dict(getattr(provider_config, "ratio_aliases", {}) or {})
+        if ratio_cap:
+            if ratio_cap.options:
+                ratio_options = list(ratio_cap.options)
+            if ratio_cap.aliases:
+                ratio_aliases = dict(ratio_cap.aliases)
+
         resolution_enum: List[str] = []
         try:
-            base_resolutions = list(provider_config.resolution_options or [])
-            resolution_enum = list(base_resolutions)
-            alias_candidates = {
-                "480p": "720x480",
-                "720p": "1280x720",
-                "1080p": "1920x1080"
-            }
-            for alias, canonical in alias_candidates.items():
-                if canonical in base_resolutions and alias not in resolution_enum:
-                    resolution_enum.append(alias)
+            if resolution_cap:
+                resolution_enum = resolution_cap.expand_enum()
+            else:
+                resolution_enum = list(resolution_options or [])
+                for alias in resolution_aliases.keys():
+                    if alias not in resolution_enum:
+                        resolution_enum.append(alias)
         except Exception:
-            resolution_enum = []
+            resolution_enum = list(resolution_options or [])
+
         resolution_schema: Dict[str, Any] = {
             "type": "string",
             "description": "可选：视频分辨率（如720p/1080p），影响画质与成本"
@@ -123,7 +184,62 @@ class VideoGenerationTool(AsyncTool):
         if resolution_enum:
             resolution_schema["enum"] = resolution_enum
         resolution_alias_schema: Dict[str, Any] = dict(resolution_schema)
-        resolution_alias_schema["description"] = "可选：分辨率简写（rs），含义同resolution"
+        resolution_alias_schema["description"] = "可选：分辨率别名（rs），工具会自动映射为实际尺寸"
+
+        ratio_schema: Dict[str, Any] = {
+            "type": "string",
+            "description": "可选：画幅比例（如16:9/9:16），供应商将自动适配",
+        }
+        ratio_alias_schema: Dict[str, Any] = dict(ratio_schema)
+        ratio_alias_schema["description"] = "可选：画幅比例别名（rt），含义同ratio"
+        ratio_enum: List[str] = []
+        try:
+            if ratio_cap:
+                ratio_enum = ratio_cap.expand_enum()
+            else:
+                ratio_enum = list(ratio_options or [])
+                for alias in ratio_aliases.keys():
+                    if alias not in ratio_enum:
+                        ratio_enum.append(alias)
+        except Exception:
+            ratio_enum = list(ratio_options or [])
+        if ratio_enum:
+            ratio_schema["enum"] = ratio_enum
+            ratio_alias_schema["enum"] = ratio_enum
+
+        prompt_field: Dict[str, Any] = {
+            "type": "string",
+            "description": "视频生成提示词，描述期望的视频内容和动作",
+        }
+        try:
+            prompt_caps = getattr(capabilities, "prompt", None) if capabilities else None
+            if prompt_caps:
+                description_suffix = prompt_caps.description_suffix
+                if not description_suffix:
+                    parts = []
+                    if prompt_caps.approx_chinese_chars and prompt_caps.approx_english_chars:
+                        parts.append(
+                            f"约{prompt_caps.approx_chinese_chars}个中文或{prompt_caps.approx_english_chars}个英文字符以内"
+                        )
+                    elif prompt_caps.approx_chinese_chars:
+                        parts.append(f"约{prompt_caps.approx_chinese_chars}个中文字符以内")
+                    elif prompt_caps.approx_english_chars:
+                        parts.append(f"约{prompt_caps.approx_english_chars}个英文字符以内")
+                    if prompt_caps.note:
+                        parts.append(prompt_caps.note)
+                    if parts:
+                        description_suffix = "，".join(parts)
+                if description_suffix:
+                    prompt_field["description"] += f"（{description_suffix}）"
+                meta = prompt_caps.to_metadata()
+                if meta:
+                    prompt_field["vendorConstraints"] = meta
+        except Exception as exc:
+            try:
+                self.logger.warning("Failed to read provider prompt capabilities: %s", exc)
+            except Exception:
+                pass
+
         schemas = {
             "generate_video": {
                 "type": "object",
@@ -132,10 +248,7 @@ class VideoGenerationTool(AsyncTool):
                         "type": ["integer", "string"],
                         "description": "可选：仅用于管道追踪，不影响生成API"
                     },
-                    "prompt": {
-                        "type": "string",
-                        "description": "视频生成提示词，描述期望的视频内容和动作"
-                    },
+                    "prompt": prompt_field,
                     "duration": {
                         "type": "integer",
                         "enum": provider_config.duration_capabilities,
@@ -147,6 +260,8 @@ class VideoGenerationTool(AsyncTool):
                     },
                     "resolution": resolution_schema,
                     "rs": resolution_alias_schema,
+                    "ratio": ratio_schema,
+                    "rt": ratio_alias_schema,
                     "continuity_frame": {
                         "type": "string", 
                         "description": "场景连续性帧数据（可选，用于场景间的视觉连续性）"
@@ -201,7 +316,7 @@ class VideoGenerationTool(AsyncTool):
                     "scene_number": {"type": ["integer", "string"], "description": "可选：用于管道追踪与尾帧登记"},
                     "emit_last_frame": {"type": "string", "enum": ["auto", "always", "never"], "description": "生成成功后是否自动提取并上传尾帧（auto按DAG出边判断）"},
                     "workflow_state_id": {"type": "string", "description": "可选：在auto模式下用于出边计算"},
-                    "prompt": {"type": "string", "description": "视频生成提示词"},
+                    "prompt": prompt_field,
                     "duration": {"type": "integer", "enum": provider_config.duration_capabilities, "description": f"视频时长（秒），可选：{provider_config.duration_capabilities}"},
                     "depends_on_scene": {"type": ["integer", "string", "null"], "description": "可选：依赖的上一场景编号"},
                     "previous_video_url": {"type": "string", "description": "可选：上一场景视频URL；若提供工具将自动抽取尾帧"},
@@ -216,6 +331,8 @@ class VideoGenerationTool(AsyncTool):
                     },
                     "resolution": resolution_schema,
                     "rs": resolution_alias_schema,
+                    "ratio": ratio_schema,
+                    "rt": ratio_alias_schema,
                     "character_constraints_struct": {
                         "type": "array",
                         "items": {
@@ -339,6 +456,11 @@ class VideoGenerationTool(AsyncTool):
             except Exception:
                 raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
 
+        capabilities = self._fetch_capabilities()
+        prompt_caps = getattr(capabilities, "prompt", None) if capabilities else None
+        resolution_cap = getattr(capabilities, "resolution", None) if capabilities else None
+        ratio_cap = getattr(capabilities, "ratio", None) if capabilities else None
+
         prompt = params["prompt"]
         # 合并结构化角色/风格/负向约束为提示词附加段（供应商无关、集中处理）
         try:
@@ -445,6 +567,23 @@ class VideoGenerationTool(AsyncTool):
                 params["prompt"] = prompt
         except Exception:
             pass
+        try:
+            prompt_bytes_len = len(prompt.encode("utf-8")) if isinstance(prompt, str) else 0
+            self.logger.info(
+                "PROMPT_COMBINED(generate_video): len=%d bytes text=%s",
+                prompt_bytes_len,
+                prompt,
+            )
+        except Exception:
+            pass
+        try:
+            prompt_caps = getattr(capabilities, "prompt", None) if capabilities else None
+            max_bytes = getattr(prompt_caps, "max_bytes", None)
+            enforce = bool(getattr(prompt_caps, "enforce", False))
+        except Exception:
+            max_bytes = None
+            enforce = False
+        self._validate_prompt_length(prompt, prompt_caps)
         duration = params["duration"]
         image_url = params.get("image_url")
         continuity_frame = params.get("continuity_frame")
@@ -473,17 +612,17 @@ class VideoGenerationTool(AsyncTool):
             raw_resolution = raw_resolution.strip()
             if raw_resolution:
                 resolution_requested = raw_resolution
-                allowed_resolutions = list(provider_config.resolution_options or [])
-                alias_candidates = {
-                    "480p": "720x480",
-                    "720p": "1280x720",
-                    "1080p": "1920x1080"
-                }
-                alias_map = {
-                    alias: canonical
-                    for alias, canonical in alias_candidates.items()
-                    if canonical in allowed_resolutions
-                }
+                allowed_resolutions = []
+                if resolution_cap and getattr(resolution_cap, "options", None):
+                    allowed_resolutions = list(resolution_cap.options)
+                else:
+                    allowed_resolutions = list(provider_config.resolution_options or [])
+
+                alias_map: Dict[str, str] = {}
+                if resolution_cap and getattr(resolution_cap, "aliases", None):
+                    alias_map.update(resolution_cap.aliases)
+                alias_map.update(getattr(provider_config, "resolution_aliases", {}) or {})
+
                 allowed_with_alias = set(allowed_resolutions) | set(alias_map.keys())
                 if allowed_resolutions and raw_resolution not in allowed_with_alias:
                     raise ToolValidationError(
@@ -495,6 +634,40 @@ class VideoGenerationTool(AsyncTool):
             else:
                 params.pop("resolution", None)
                 raw_resolution = None
+
+        ratio_requested: Optional[str] = None
+        ratio_applied: Optional[str] = None
+        if "ratio" not in params and params.get("rt") is not None:
+            params["ratio"] = params.get("rt")
+        raw_ratio = params.get("ratio")
+        if raw_ratio is not None:
+            if not isinstance(raw_ratio, str):
+                raw_ratio = str(raw_ratio)
+            raw_ratio = raw_ratio.strip()
+            if raw_ratio:
+                ratio_requested = raw_ratio
+                allowed_ratios = []
+                if ratio_cap and getattr(ratio_cap, "options", None):
+                    allowed_ratios = list(ratio_cap.options)
+                else:
+                    allowed_ratios = list(getattr(provider_config, "ratio_options", []) or [])
+
+                ratio_alias_map: Dict[str, str] = {}
+                if ratio_cap and getattr(ratio_cap, "aliases", None):
+                    ratio_alias_map.update(ratio_cap.aliases)
+                ratio_alias_map.update(getattr(provider_config, "ratio_aliases", {}) or {})
+
+                allowed_ratios_with_alias = set(allowed_ratios) | set(ratio_alias_map.keys())
+                if allowed_ratios and raw_ratio not in allowed_ratios_with_alias:
+                    raise ToolValidationError(
+                        f"ratio must be one of {sorted(allowed_ratios_with_alias)}",
+                        self.metadata.name,
+                    )
+                ratio_applied = ratio_alias_map.get(raw_ratio, raw_ratio)
+                params["ratio"] = raw_ratio
+            else:
+                params.pop("ratio", None)
+                raw_ratio = None
         allowed = list(provider_config.duration_capabilities or [])
         if isinstance(duration, (int, float)) and allowed:
             # 将 float 转成 int（如 6.0 -> 6）
@@ -566,7 +739,8 @@ class VideoGenerationTool(AsyncTool):
                 image_url=final_image_input,
                 first_frame_image=first_frame_image,
                 last_frame_image=last_frame_image,
-                resolution=resolution_applied or params.get("resolution")
+                resolution=resolution_applied or params.get("resolution"),
+                ratio=ratio_applied or params.get("ratio")
             )
             
             # 增强返回结果
@@ -574,12 +748,16 @@ class VideoGenerationTool(AsyncTool):
                 "tool_used": self.metadata.name,
                 "requested_resolution": resolution_requested,
                 "applied_resolution": resolution_applied or params.get("resolution"),
+                "requested_ratio": ratio_requested,
+                "applied_ratio": ratio_applied or params.get("ratio"),
                 "execution_params": {
                     "prompt": prompt,
                     "duration": duration,
                     "model": model,
                     "resolution_requested": resolution_requested,
                     "resolution_applied": resolution_applied or params.get("resolution"),
+                    "ratio_requested": ratio_requested,
+                    "ratio_applied": ratio_applied or params.get("ratio"),
                     "has_continuity_frame": bool(continuity_frame) or bool(params.get('image_from_continuity')),
                     "has_reference_image": bool(image_url),
                     "generation_mode": self._determine_generation_mode(
@@ -701,25 +879,6 @@ class VideoGenerationTool(AsyncTool):
     async def _generate_with_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """合并连续性准备与生成（确定性）：解析上一场景尾帧 → 生成 → 可选存尾帧。"""
         prompt = params.get("prompt")
-        # 合并结构化角色/负向约束
-        try:
-            char_cons = params.get("character_constraints") or []
-            neg_cons = params.get("negative_constraints") or []
-            extra = []
-            if isinstance(char_cons, list) and char_cons:
-                if not (isinstance(prompt, str) and ("角色设定" in prompt)):
-                    extra.append("角色设定：" + "；".join([str(x) for x in char_cons if isinstance(x, str) and x.strip()]))
-            if isinstance(neg_cons, list) and neg_cons:
-                extra.append("避免：" + "；".join([str(x) for x in neg_cons if isinstance(x, str) and x.strip()]))
-            if extra:
-                try:
-                    self.logger.info(f"CHAR_INJECT(generate_with_continuity): chars={len(char_cons or [])} neg={len(neg_cons or [])}")
-                except Exception:
-                    pass
-                prompt = (prompt + "\n" + "\n".join(extra)) if prompt else "\n".join(extra)
-                params["prompt"] = prompt
-        except Exception:
-            pass
         duration = params.get("duration")
         if not prompt or duration is None:
             raise ToolValidationError("prompt and duration are required", self.metadata.name)

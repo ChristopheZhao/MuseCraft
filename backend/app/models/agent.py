@@ -2,10 +2,15 @@
 Agent execution model for tracking agent workflow steps
 """
 import enum
+import logging
 from sqlalchemy import Column, String, Text, JSON, Enum, Integer, ForeignKey, Float, Boolean
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 
 from .base import BaseModel
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentType(str, enum.Enum):
@@ -14,6 +19,7 @@ class AgentType(str, enum.Enum):
     SCRIPT_WRITER = "script_writer"
     IMAGE_GENERATOR = "image_generator"
     VIDEO_GENERATOR = "video_generator"
+    VOICE_SYNTHESIZER = "voice_synthesizer"
     AUDIO_GENERATOR = "audio_generator"
     VIDEO_COMPOSER = "video_composer"
     QUALITY_CHECKER = "quality_checker"
@@ -28,6 +34,39 @@ class AgentStatus(str, enum.Enum):
     RETRYING = "retrying"
 
 
+class AgentTypeString(TypeDecorator):
+    """Persist AgentType enum as VARCHAR while exposing Enum instances."""
+
+    impl = String(50)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, AgentType):
+            return value.value
+        if isinstance(value, str):
+            return value
+        raise ValueError(f"Unsupported agent_type value: {value!r}")
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, AgentType):
+            return value
+        if isinstance(value, str):
+            cleaned = value.strip()
+            try:
+                return AgentType(cleaned)
+            except ValueError:
+                try:
+                    return AgentType(cleaned.lower())
+                except ValueError:
+                    logger.warning("Unknown agent_type value from DB: %s", cleaned)
+                    return cleaned
+        return value
+
+
 class AgentExecution(BaseModel):
     __tablename__ = "agent_executions"
     
@@ -36,7 +75,7 @@ class AgentExecution(BaseModel):
     task = relationship("Task", back_populates="agent_executions")
     
     # Agent information
-    agent_type = Column(Enum(AgentType), nullable=False)
+    agent_type = Column(AgentTypeString(), nullable=False)
     agent_name = Column(String(100), nullable=False)
     agent_version = Column(String(20), default="1.0")
     

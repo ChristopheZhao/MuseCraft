@@ -9,6 +9,7 @@ from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
 from .video_generator import VideoGeneratorAgent
 from .audio_generator import AudioGeneratorAgent
+from .voice_synthesizer import VoiceSynthesizerAgent
 from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 
@@ -20,6 +21,7 @@ __all__ = [
     "ScriptWriterAgent", 
     "ImageGeneratorAgent",
     "VideoGeneratorAgent",
+    "VoiceSynthesizerAgent",
     "AudioGeneratorAgent",
     "VideoComposerAgent",
     "QualityCheckerAgent"

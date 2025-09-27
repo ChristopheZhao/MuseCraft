@@ -68,10 +68,14 @@ backend/storage/generated/*.jpg
 backend/storage/generated/*.jpeg
 backend/storage/generated/*.png
 backend/storage/generated/*.wav
+backend/storage/generated/voices/*
 backend/storage/temp/*
 backend/storage/uploads/*
 backend/storage/generated/legacy/*
 backend/storage/continuity_frames/*
+backend/storage/outputs/*
+!backend/storage/outputs/README.md
+backend/storage/*.sqlite
 backend/storage/*.sqlite-*
 
 # 营销文件

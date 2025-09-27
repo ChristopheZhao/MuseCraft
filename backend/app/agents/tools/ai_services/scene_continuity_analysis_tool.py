@@ -6,6 +6,7 @@ Scene Continuity Analysis Tool - 场景连续性分析工具
 import json
 from typing import Dict, Any, List
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
+from ....core.config import settings
 
 
 class SceneContinuityAnalysisTool(AsyncTool):
@@ -145,7 +146,7 @@ class SceneContinuityAnalysisTool(AsyncTool):
                 "prompt": analysis_prompt,
                 "model": req_model,
                 "temperature": req_temp,
-                "max_tokens": 2000
+                "max_tokens": getattr(settings, "LLM_MAX_TOKENS_STANDARD", 2000)
             }))
             
             # 处理结果
