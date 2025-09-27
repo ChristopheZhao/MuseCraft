@@ -1,0 +1,28 @@
+你是专业视频脚本作家。为以下单个场景生成生产就绪脚本（JSON）。
+
+场景信息：
+- 场景编号：{{ scene_number }}
+- 视觉描述：{{ visual_description }}
+- 叙事描述：{{ narrative_description }}
+- 风格上下文：{{ style_context }}
+- 配音要求：
+{% if should_narrate %}{% if voice_expectations %}{% for item in voice_expectations %}- {{ item }}
+{% endfor %}{% else %}- 保持与剧情契合的自然旁白
+{% endif %}{% else %}- 无旁白需求
+{% endif %}
+
+要求：
+1. 根据场景复杂度选择合适的时长（仅可从{{ duration_capabilities }}中选择）；
+2. 输出脚本文本与可选的叙事/音乐/音效字段；
+3. 若需旁白，生成 1-2 句成品旁白，严禁出现“镜头”“画面”“场景”等制作说明词；
+4. 直接返回 JSON，不要解释性文本。
+
+JSON 模板示例：
+{
+  "duration": 5,
+  "script_text": "……",
+  "narrative_description": "……",
+  "background_music_style": "……",
+  "sound_effects": ["……"],
+  "voice_over_text": "……"
+}

@@ -34,11 +34,24 @@ class DataPersistenceService:
     
     def __init__(self):
         self.logger = self._get_logger()
-    
+
     def _get_logger(self):
         import logging
         return logging.getLogger(__name__)
-    
+
+    def _resolve_voice_resource_type(self) -> ResourceType:
+        """Return a resource type supported by the current DB enum definition."""
+        try:
+            enum_values = getattr(Resource.__table__.c.resource_type.type, "enums", [])
+        except Exception:
+            enum_values = []
+
+        if ResourceType.VOICE_OVER.value in enum_values:
+            return ResourceType.VOICE_OVER
+
+        # 向后兼容未添加 voice_over 的数据库枚举
+        return ResourceType.AUDIO
+
     async def persist_workflow_results(self, workflow_state: WorkflowState, db: Session) -> Dict[str, Any]:
         """
         将工作流状态持久化到数据库
@@ -158,6 +171,8 @@ class DataPersistenceService:
         scene.script_text = self._safe_truncate(scene.script_text, 2000)
         scene.voice_over_text = self._safe_truncate(scene.voice_over_text, 2000)
         scene.background_music_style = self._safe_truncate(scene.background_music_style, 100)  # 关键修复
+        scene.voice_over_audio_path = self._safe_truncate(scene.voice_over_audio_path, 500)
+        scene.voice_over_audio_url = self._safe_truncate(scene.voice_over_audio_url, 500)
         scene.image_prompt = self._safe_truncate(scene.image_prompt, 1000)
         scene.image_url = self._safe_truncate(scene.image_url, 500)
         scene.image_path = self._safe_truncate(scene.image_path, 500)
@@ -172,6 +187,8 @@ class DataPersistenceService:
         scene.sound_effects = self._safe_truncate_list(scene.sound_effects, 15, 100)
         scene.quality_issues = self._safe_truncate_list(scene.quality_issues, 20, 200)
         scene.quality_suggestions = self._safe_truncate_list(scene.quality_suggestions, 10, 200)
+        if isinstance(scene.voice_over_audio_metadata, dict) and len(scene.voice_over_audio_metadata) > 50:
+            scene.voice_over_audio_metadata = dict(list(scene.voice_over_audio_metadata.items())[:50])
         
         # 数值验证
         scene.duration = max(1.0, min(scene.duration, 60.0))
@@ -261,6 +278,8 @@ class DataPersistenceService:
                 "estimated_reading_time": workflow_state.estimated_reading_time,
                 "script_themes": workflow_state.script_themes,
                 "voice_over_instructions": workflow_state.voice_over_instructions,
+                "voice_over_assets": workflow_state.voice_over_assets,
+                "voice_settings": workflow_state.voice_settings,
                 "final_video_path": workflow_state.final_video_path,
                 "final_video_url": workflow_state.final_video_url,
                 "video_metadata": workflow_state.video_metadata,
@@ -486,7 +505,29 @@ class DataPersistenceService:
                     resource_results.append({"type": "video", "scene": scene_data.scene_number, "status": "created"})
                 except Exception as e:
                     self.logger.error(f"❌ 视频资源持久化失败: {str(e)}")
-        
+
+            # 配音资源
+            if scene_data.voice_over_audio_path or scene_data.voice_over_audio_url:
+                try:
+                    voice_metadata = dict(scene_data.voice_over_audio_metadata or {})
+                    voice_metadata.setdefault("audio_role", "voice_over")
+
+                    voice_resource = Resource(
+                        task_id=task.id,
+                        scene_id=scene.id,
+                        filename=f"scene_{scene_data.scene_number}_voice.{(scene_data.voice_over_audio_path or 'tmp.wav').split('.')[-1]}",
+                        file_path=scene_data.voice_over_audio_path or "",
+                        file_url=scene_data.voice_over_audio_url or None,
+                        resource_type=self._resolve_voice_resource_type(),
+                        generation_parameters=voice_metadata,
+                        processing_status="completed" if scene_data.voice_over_audio_path else "pending",
+                        is_generated=True
+                    )
+                    db.add(voice_resource)
+                    resource_results.append({"type": "voice_over", "scene": scene_data.scene_number, "status": "created"})
+                except Exception as e:
+                    self.logger.error(f"❌ 配音资源持久化失败: {str(e)}")
+
         return resource_results
     
     async def _persist_agent_logs(self, task: Task, workflow_state: WorkflowState, db: Session) -> List[Dict[str, Any]]:
@@ -526,6 +567,7 @@ class DataPersistenceService:
             "image_generator": AgentType.IMAGE_GENERATOR,
             "video_generator": AgentType.VIDEO_GENERATOR,
             "video_composer": AgentType.VIDEO_COMPOSER,
+            "voice_synthesizer": AgentType.VOICE_SYNTHESIZER,
             "quality_checker": AgentType.QUALITY_CHECKER
         }
         return mapping.get(agent_name, AgentType.CONCEPT_PLANNER)

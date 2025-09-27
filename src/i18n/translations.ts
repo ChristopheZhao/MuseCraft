@@ -106,7 +106,6 @@ export const zh: Dict = {
   // Tabs & UI labels
   'tabs.basic': '基本信息',
   'tabs.style': '风格',
-  'tabs.voice': '配音',
   'tabs.music': '音乐',
   'tabs.advanced': '高级',
 

@@ -69,6 +69,7 @@ class KimiClientTool(AsyncTool):
             # Kimi K2 系列 (2025年7月发布)
             "kimi-k2",             # Kimi K2 主模型（推荐）
             "kimi-k2-0711-preview", # Kimi K2 预览版
+            "kimi-k2-0905-preview", # Kimi K2 2025年9月预览版
             
             # 传统 moonshot-v1 系列
             "moonshot-v1-8k",      # 8K上下文

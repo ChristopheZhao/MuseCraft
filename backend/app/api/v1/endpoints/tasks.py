@@ -25,6 +25,21 @@ def _val(x):
 
 
 # Pydantic models for request/response
+class VoiceSettings(BaseModel):
+    voice_id: Optional[str] = Field(None, description="Preferred voice identifier (forces selection if auto_select=False)")
+    language: Optional[str] = Field(None, description="Language code")
+    speed: Optional[float] = Field(1.0, ge=0.5, le=1.5, description="Speech rate multiplier")
+    pitch: Optional[float] = Field(1.0, ge=0.5, le=1.5, description="Pitch multiplier")
+    sample_rate: Optional[int] = Field(None, description="Sample rate in Hz")
+    audio_format: Optional[str] = Field(None, description="Audio format, e.g., wav/mp3")
+    style: Optional[str] = Field(None, description="Supplier specific style hint")
+    auto_select: Optional[bool] = Field(True, description="Whether the agent should auto-select the best voice for each scene")
+    preferred_voice_ids: Optional[List[str]] = Field(None, description="Candidate voice ids the agent should prioritise when auto-selecting")
+
+    class Config:
+        extra = "ignore"
+
+
 class TaskCreateRequest(BaseModel):
     user_prompt: str = Field(..., description="User's video generation request")
     style_preference: Optional[str] = Field(None, description="Optional user style preference hint")
@@ -32,6 +47,7 @@ class TaskCreateRequest(BaseModel):
     resolution: Optional[str] = Field(default=None, description="Preferred output resolution (e.g., 720p, 1080p)")
     aspect_ratio: str = Field(default="16:9", description="Video aspect ratio")
     session_id: Optional[str] = Field(None, description="Session ID for tracking")
+    voice_settings: Optional[VoiceSettings] = Field(None, description="Voice synthesis configuration")
 
 
 class TaskResponse(BaseModel):
@@ -103,7 +119,8 @@ async def create_task(
                 "style_preference": request.style_preference,
                 "duration": request.duration,
                 "resolution": request.resolution or settings.DEFAULT_VIDEO_RESOLUTION,
-                "aspect_ratio": request.aspect_ratio
+                "aspect_ratio": request.aspect_ratio,
+                "voice_settings": request.voice_settings.dict(exclude_none=True) if request.voice_settings else None
             },
             estimated_duration=request.duration * 10  # Rough estimate: 10 seconds processing per 1 second video
         )

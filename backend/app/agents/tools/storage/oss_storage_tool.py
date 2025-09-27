@@ -3,12 +3,17 @@
 """
 
 import os
+import re
 import asyncio
 import aiofiles
-from typing import Dict, Any, Optional, List, Union
-from pathlib import Path
-from urllib.parse import urlparse
 import mimetypes
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Union, Tuple
+
+try:
+    from dotenv import dotenv_values
+except Exception:  # pragma: no cover - optional dependency
+    dotenv_values = None
 
 try:
     import oss2
@@ -18,7 +23,14 @@ except ImportError:
     OssError = Exception
 
 from ..base_tool import AsyncTool, ToolInput, ToolError, ToolValidationError, ToolMetadata, ToolType
-from ....core.config import settings
+from ....core.config import settings, root_env_path
+
+
+def _normalize_meta_key(name: str) -> str:
+    """Normalize custom metadata key for OSS (lowercase, digits, hyphen only)."""
+    safe = re.sub(r"[^a-z0-9-]", "-", (name or "").lower())
+    safe = safe.strip('-')
+    return safe or "meta"
 
 
 class OSSStorageTool(AsyncTool):
@@ -56,14 +68,72 @@ class OSSStorageTool(AsyncTool):
         except Exception:
             pass
 
-        # 配置检查（严格：仅使用 OSS_BUCKET_NAME，不做冗余别名）
-        self.access_key_id = getattr(settings, 'OSS_ACCESS_KEY_ID', None)
-        self.access_key_secret = getattr(settings, 'OSS_ACCESS_KEY_SECRET', None)
-        self.endpoint = getattr(settings, 'OSS_ENDPOINT', None)
-        self.bucket_name = getattr(settings, 'OSS_BUCKET_NAME', None)
-        
-        # 工具可以在没有配置时创建，但在使用时会检查
-        self._functional = all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name])
+        # 默认配置
+        self.default_expiry = 3600  # URL有效期1小时
+        self.max_file_size = getattr(settings, 'MAX_FILE_SIZE', 100) * 1024 * 1024  # MB转字节
+
+        # 载入当前配置并初始化客户端
+        self._config_signature: Optional[Tuple[str, str, str, str]] = None
+        self._ensure_client(force=True)
+
+    def _read_runtime_env(self) -> Dict[str, str]:
+        runtime: Dict[str, str] = {}
+        # 优先读取进程环境变量
+        for key in (
+            'OSS_ACCESS_KEY_ID',
+            'OSS_ACCESS_KEY_SECRET',
+            'OSS_ENDPOINT',
+            'OSS_BUCKET_NAME',
+        ):
+            if key in os.environ and os.environ[key]:
+                runtime[key] = os.environ[key]
+
+        # 如果可用，合并 .env 中的最新配置（保持进程环境优先）
+        if dotenv_values and root_env_path and root_env_path.exists():
+            try:
+                file_env = dotenv_values(str(root_env_path)) or {}
+                for key, value in file_env.items():
+                    if key not in runtime and value:
+                        runtime[key] = value
+            except Exception:
+                pass
+
+        return runtime
+
+    def _ensure_client(self, force: bool = False) -> None:
+        """确保 OSS 客户端使用最新配置，必要时重建"""
+        runtime = self._read_runtime_env()
+        key_id = runtime.get('OSS_ACCESS_KEY_ID') or getattr(settings, 'OSS_ACCESS_KEY_ID', None)
+        key_secret = runtime.get('OSS_ACCESS_KEY_SECRET') or getattr(settings, 'OSS_ACCESS_KEY_SECRET', None)
+        endpoint = runtime.get('OSS_ENDPOINT') or getattr(settings, 'OSS_ENDPOINT', None)
+        bucket_name = runtime.get('OSS_BUCKET_NAME') or getattr(settings, 'OSS_BUCKET_NAME', None)
+
+        # 记录当前加载的密钥指纹，便于排查（仅输出哈希，不泄露明文）
+        try:
+            import hashlib
+
+            secret_fingerprint = hashlib.sha1((key_secret or "").encode()).hexdigest()
+            self.logger.info(
+                "OSS_CLIENT_CONFIG key_id=%s endpoint=%s bucket=%s secret_sha1=%s",
+                key_id,
+                endpoint,
+                bucket_name,
+                secret_fingerprint,
+            )
+        except Exception:
+            pass
+
+        signature = (key_id, key_secret, endpoint, bucket_name)
+        if not force and signature == self._config_signature:
+            return
+
+        self.access_key_id = key_id
+        self.access_key_secret = key_secret
+        self.endpoint = endpoint
+        self.bucket_name = bucket_name
+        self._config_signature = signature
+
+        self._functional = all(signature)
 
         if not self._functional:
             missing = []
@@ -77,18 +147,14 @@ class OSSStorageTool(AsyncTool):
                 missing.append('OSS_BUCKET_NAME')
             self.logger.warning(f"OSS configuration incomplete, missing: {', '.join(missing)}")
             return
-            
-        # 初始化OSS客户端
+
         try:
             self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
             self.bucket = oss2.Bucket(self.auth, self.endpoint, self.bucket_name)
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize OSS client: {e}")
-            
-        # 默认配置
-        self.default_expiry = 3600  # URL有效期1小时
-        self.max_file_size = getattr(settings, 'MAX_FILE_SIZE', 100) * 1024 * 1024  # MB转字节
-    
+        except Exception as exc:
+            self.logger.warning(f"Failed to initialize OSS client: {exc}")
+            self._functional = False
+
     def get_available_actions(self) -> List[str]:
         """Get list of available actions"""
         return ["upload", "download", "delete", "list", "get_url", "copy", "move"]
@@ -119,10 +185,13 @@ class OSSStorageTool(AsyncTool):
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行OSS存储操作"""
+        # 检查是否需要刷新客户端配置（支持热更新）
+        self._ensure_client()
+
         # 检查工具是否功能可用
         if not self._functional:
             raise ToolError("OSSStorageTool not functional - configuration incomplete", self.metadata.name)
-        
+
         if not hasattr(self, 'bucket'):
             raise ToolError("OSS not properly configured", self.metadata.name)
             
@@ -164,7 +233,7 @@ class OSSStorageTool(AsyncTool):
         
         try:
             # 运行在线程池中的同步操作
-            def _sync_upload():
+            def _sync_upload(_refresh_only: bool = False):
                 # 幂等：若对象已存在且不覆盖，则返回跳过信息
                 try:
                     if self.bucket.object_exists(remote_path) and not overwrite:
@@ -197,25 +266,46 @@ class OSSStorageTool(AsyncTool):
                         headers['Content-Type'] = mime_type
                 
                 # 设置自定义元数据
-                for key, value in metadata.items():
-                    headers[f'x-oss-meta-{key}'] = str(value)
+                for raw_key, value in metadata.items():
+                    # OSS 限制元数据 key 只能包含小写字母/数字/短横线
+                    meta_key = _normalize_meta_key(str(raw_key))
+                    headers[f'x-oss-meta-{meta_key}'] = str(value)
                 
+                if _refresh_only:
+                    # 仅返回最新构建的头部，供调用方重试时使用
+                    return headers
+
                 if content:
-                    # 上传内容
-                    blob = content
-                    if isinstance(blob, str):
-                        blob = blob.encode('utf-8')
+                    blob = content.encode('utf-8') if isinstance(content, str) else content
                     result = self.bucket.put_object(remote_path, blob, headers=headers)
                 else:
-                    # 上传文件
                     with open(local_path, 'rb') as f:
                         result = self.bucket.put_object(remote_path, f, headers=headers)
 
-                return {"put_object_result": result}
+                return {"put_object_result": result, "__headers__": headers}
             
             # 在线程池中执行同步操作
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _sync_upload)
+            try:
+                result = await loop.run_in_executor(None, _sync_upload)
+            except OssError as e:
+                # 若签名不匹配，尝试刷新客户端配置后重试一次
+                status = getattr(e, 'status', None)
+                code = getattr(getattr(e, 'details', None), 'get', lambda _k, _d=None: None)('Code') if hasattr(e, 'details') else None
+                if status == 403 or (isinstance(code, str) and code == 'SignatureDoesNotMatch'):
+                    try:
+                        self.logger.warning("OSS upload signature mismatch detected, refreshing client and retrying once")
+                    except Exception:
+                        pass
+                    self._ensure_client(force=True)
+                    retry_headers = await loop.run_in_executor(None, lambda: _sync_upload(True))
+                    try:
+                        self.logger.info("OSS_RETRY_HEADERS %s", retry_headers)
+                    except Exception:
+                        pass
+                    result = await loop.run_in_executor(None, _sync_upload)
+                else:
+                    raise
 
             # 若返回为幂等跳过
             if isinstance(result, dict) and result.get("__skipped__"):

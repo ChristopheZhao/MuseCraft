@@ -143,11 +143,19 @@ class ScriptGenerationTool(AsyncTool):
     
     async def _generate_scene_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成场景脚本 - 使用专业提示词模板和LLM智能决策"""
-        
+
         scene_data = params.get("scene_data", {})
         intelligent_style_design = params.get("intelligent_style_design", {})
         video_style = params.get("video_style", "professional")  # 向后兼容
         context = params.get("context", {})
+        voice_guidance = params.get("voice_guidance", {}) or {}
+        should_narrate = bool(voice_guidance.get("should_narrate", True))
+        pace_tag = str(voice_guidance.get("pace_tag", "")).strip().lower()
+        target_char_count = voice_guidance.get("target_char_count")
+        try:
+            target_char_count = int(target_char_count) if target_char_count is not None else None
+        except (TypeError, ValueError):
+            target_char_count = None
 
         # 从参数或全局配置确定模型与token预算（优先 tool_model_mapping，其次 agent 映射）
         try:
@@ -182,28 +190,41 @@ class ScriptGenerationTool(AsyncTool):
         _vcaps = _prov.duration_capabilities
         _default_dur = _prov.default_duration
 
-        prompt = f"""你是专业视频脚本作家。为以下单个场景生成生产就绪脚本（JSON）。
+        voice_expectations: List[str] = []
+        if should_narrate:
+            if pace_tag:
+                voice_expectations.append(f"节奏：{pace_tag}")
+            if target_char_count:
+                voice_expectations.append(f"目标字数：约 {target_char_count} 字（允许±20% 浮动）")
+            emotion = voice_guidance.get("emotion")
+            if emotion:
+                voice_expectations.append(f"情绪：{emotion}")
+            objective = voice_guidance.get("objective")
+            if objective:
+                voice_expectations.append(f"目的：{objective}")
+            key_points = voice_guidance.get("key_points", [])
+            if key_points:
+                voice_expectations.append("包含要点：" + "、".join(str(k) for k in key_points if k))
 
-场景信息：
-- 场景编号：{scene_data.get('scene_number', 1)}
-- 视觉描述：{scene_data.get('visual_description', '')}
-- 叙事描述：{scene_data.get('narrative_description', '')}
-- 风格上下文：{style_context}
+        from ...prompts.template_manager import get_template_manager
 
-要求：
-1. 根据场景复杂度选择合适的时长（仅可从{_vcaps}中选择）；
-2. 输出脚本文本与可选的叙事/音乐/音效字段；
-3. 直接返回 JSON，不要解释性文本。
-
-JSON 模板示例：
-{{
-  "duration": 5,
-  "script_text": "……",
-  "narrative_description": "……",
-  "background_music_style": "……",
-  "sound_effects": ["……"]
-}}
-"""
+        template_manager = get_template_manager("script_writer")
+        duration_caps_str = "、".join(str(int(cap)) for cap in _vcaps)
+        prompt = template_manager.render_template(
+            "scene_script_generation",
+            {
+                "scene_number": scene_data.get("scene_number", 1),
+                "visual_description": scene_data.get("visual_description", ""),
+                "narrative_description": scene_data.get("narrative_description", ""),
+                "style_context": style_context,
+                "duration_capabilities": duration_caps_str,
+                "voice_expectations": voice_expectations,
+                "should_narrate": should_narrate,
+                "target_char_count": target_char_count,
+                "pace_tag": pace_tag,
+                "video_style": video_style,
+            },
+        )
 
         try:
             # 使用统一 LLM 服务
@@ -214,7 +235,8 @@ JSON 模板示例：
                 temperature=0.7,
                 max_tokens=int(req_max_tokens or 1000),
                 model=req_model,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                thinking={"type": "disabled"}
             )
             llm_content = (res.get("content") or "").strip()
             finish_reason = res.get("finish_reason")
@@ -241,25 +263,13 @@ JSON 模板示例：
                     })
                 except Exception:
                     pass
-                
+                if should_narrate and not (script_data.get("voice_over_text") or "voice_over_text" in script_data):
+                    raise ValueError("voice_over_text missing in script_generation response")
+
                 return script_data
-                
-            except json.JSONDecodeError:
-                # 如果JSON解析失败，构建基本响应，默认使用provider默认时长
-                return {
-                    "duration": _default_dur,  # ✅ 遵循离散时长约束
-                    "duration_reasoning": "JSON解析失败，使用默认时长",
-                    "script_text": llm_content,
-                    "visual_guidance": f"适合{video_style}风格的视觉表现",
-                    "emotional_tone": "根据内容自然表达",
-                    "keywords": [],
-                    "success": True,
-                    "_meta": {
-                        "finish_reason": finish_reason,
-                        "model": req_model,
-                        "requested_max_tokens": int(req_max_tokens or 0)
-                    }
-                }
+
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Failed to parse LLM response as JSON: {exc}")
                 
         except Exception as e:
             return {

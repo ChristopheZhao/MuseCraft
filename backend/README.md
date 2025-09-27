@@ -4,9 +4,10 @@ A comprehensive backend API for AI-powered short video generation using multi-ag
 
 ## Features
 
-- **Multi-Agent Workflow**: Orchestrated system with 6 specialized agents
+- **Multi-Agent Workflow**: Orchestrated system with 7 specialized agents
   - Concept Planner: Analyzes requirements and creates video concepts
   - Script Writer: Generates detailed scripts and voice-over text
+  - Voice Synthesizer: Produces per-scene narration using configurable TTS providers
   - Image Generator: Creates visual assets using AI image generation
   - Video Generator: Generates video clips from images and prompts
   - Video Composer: Combines clips into final video with transitions; can be re-entered to add audio/subtitles later
@@ -152,6 +153,13 @@ AUDIO_MIXING_MODE=composer   # composer | agent
 AUDIO_FADE_IN_DURATION=1.0
 AUDIO_FADE_OUT_DURATION=1.0
 ```
+
+## Storage Layout
+
+- `storage/temp`: 临时工件，任务结束后可安全清理。
+- `storage/generated`: 中间资产（场景视频、音频片段等）。
+- `storage/outputs/videos`: 最终交付的成品视频（自动设为只读并同步至 OSS）。
+
 
 ### AI Service Configuration
 

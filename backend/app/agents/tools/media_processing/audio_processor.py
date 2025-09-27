@@ -72,7 +72,8 @@ class AudioProcessorTool(AsyncTool):
             "adjust_volume",
             "trim_audio",
             "adjust_duration_smart",
-            "apply_edit_plan"
+            "apply_edit_plan",
+            "ensure_duration",
         ]
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
@@ -134,10 +135,25 @@ class AudioProcessorTool(AsyncTool):
                     "output_path": {"type": "string"}
                 },
                 "required": ["input_path", "plan"]
-            }
+            },
+            "ensure_duration": {
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "原始音频路径"},
+                    "target_duration": {"type": "number", "description": "目标时长（秒）"},
+                    "tolerance": {"type": "number", "default": 0.15, "description": "允许的误差（秒）"},
+                    "allow_shrink": {"type": "boolean", "default": True, "description": "是否允许裁剪缩短音频"},
+                    "allow_pad": {"type": "boolean", "default": True, "description": "是否允许填充静音"},
+                    "output_path": {"type": "string", "description": "输出路径（可选）"},
+                    "sample_rate": {"type": "integer", "default": 16000, "description": "静音填充时使用的采样率"},
+                    "audio_format": {"type": "string", "default": "wav", "description": "静音填充时使用的格式（仅在需要新文件时）"},
+                    "fade_out": {"type": "number", "default": 0.5, "description": "裁剪时的淡出时长"}
+                },
+                "required": ["input_path", "target_duration"]
+            },
         }
         return schemas.get(action, {})
-    
+
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行音频处理操作"""
         if not self._functional:
@@ -156,6 +172,8 @@ class AudioProcessorTool(AsyncTool):
             return await self._adjust_duration_smart(params)
         elif action == "apply_edit_plan":
             return await self._apply_edit_plan(params)
+        elif action == "ensure_duration":
+            return await self._ensure_duration(params)
         else:
             raise ToolError(f"Unknown action: {action}", self.metadata.name)
     
@@ -182,21 +200,53 @@ class AudioProcessorTool(AsyncTool):
             output_dir = os.path.dirname(input_path)
             output_path = os.path.join(output_dir, f"{base_name}_adjusted_{int(target_duration)}s.mp3")
         
+        tolerance = 0.1  # 允许的最小时长差
+        method_used = method
+
+        target_ext = os.path.splitext(output_path)[1].lstrip(".") or os.path.splitext(input_path)[1].lstrip(".") or "mp3"
+        target_ext = target_ext.lower()
+
         try:
-            if method == "trim" and original_duration > target_duration:
-                # 裁剪音频
-                result = await self._trim_audio(input_path, target_duration, output_path, fade_out)
-            
-            elif method == "loop" and original_duration < target_duration:
-                # 循环音频到目标时长
-                result = await self._loop_to_duration(input_path, target_duration, output_path, fade_in, fade_out)
-            
-            elif method == "stretch":
+            if method == "stretch":
                 # 拉伸/压缩音频（改变播放速度）
                 result = await self._stretch_audio(input_path, target_duration, output_path)
-            
+
+            elif method == "trim":
+                if original_duration > target_duration + tolerance:
+                    result = await self._trim_audio(input_path, target_duration, output_path, fade_out, target_ext)
+                elif original_duration < target_duration - tolerance:
+                    method_used = "loop"
+                    result = await self._loop_to_duration(input_path, target_duration, output_path, fade_in, fade_out)
+                else:
+                    method_used = "fade"
+                    result = await self._add_fade_effects({
+                        "input_path": input_path,
+                        "fade_in": fade_in,
+                        "fade_out": fade_out,
+                        "output_path": output_path
+                    })
+
+            elif method == "loop":
+                if original_duration < target_duration - tolerance:
+                    result = await self._loop_to_duration(input_path, target_duration, output_path, fade_in, fade_out)
+                elif original_duration > target_duration + tolerance:
+                    self.logger.info(
+                        "🔀 Requested loop but source is longer; trimming instead"
+                    )
+                    method_used = "trim"
+                    result = await self._trim_audio(input_path, target_duration, output_path, fade_out, target_ext)
+                else:
+                    method_used = "fade"
+                    result = await self._add_fade_effects({
+                        "input_path": input_path,
+                        "fade_in": fade_in,
+                        "fade_out": fade_out,
+                        "output_path": output_path
+                    })
+
             else:
-                # 时长已经匹配或接近，只添加淡入淡出
+                # 未知方法，退化为淡入淡出
+                method_used = "fade"
                 result = await self._add_fade_effects({
                     "input_path": input_path,
                     "fade_in": fade_in,
@@ -217,7 +267,7 @@ class AudioProcessorTool(AsyncTool):
                     "original_duration": original_duration,
                     "final_duration": final_duration,
                     "target_duration": target_duration,
-                    "method_used": method,
+                    "method_used": method_used,
                     "file_size_kb": file_size // 1024,
                     "duration_match": abs(final_duration - target_duration) < 2.0  # 2秒误差内
                 }
@@ -289,22 +339,44 @@ class AudioProcessorTool(AsyncTool):
                 os.unlink(temp_loop_path)
     
     async def _trim_audio(
-        self, 
-        input_path: str, 
-        duration: float, 
+        self,
+        input_path: str,
+        duration: float,
         output_path: str,
-        fade_out: float = 1.0
+        fade_out: float = 1.0,
+        audio_format: Optional[str] = None,
     ) -> Dict[str, Any]:
         """裁剪音频到指定时长"""
-        
+        ext = (audio_format or os.path.splitext(output_path)[1].lstrip(".") or os.path.splitext(input_path)[1].lstrip("."))
+        ext = (ext or "wav").lower()
+
+        codec_map: Dict[str, List[str]] = {
+            "wav": ["-c:a", "pcm_s16le"],
+            "wave": ["-c:a", "pcm_s16le"],
+            "mp3": ["-c:a", "libmp3lame", "-b:a", "192k"],
+            "m4a": ["-c:a", "aac", "-b:a", "192k"],
+            "aac": ["-c:a", "aac", "-b:a", "192k"],
+            "flac": ["-c:a", "flac"],
+        }
+        if ext not in codec_map:
+            raise ToolError(f"Unsupported audio format for trim: {ext}", self.metadata.name)
+        codec_args = codec_map[ext]
+
+        safe_fade = max(min(fade_out, duration), 0.0)
+        fade_start = max(duration - safe_fade, 0.0)
+
         cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-t", str(duration),
-            "-af", f"afade=t=out:st={duration-fade_out}:d={fade_out}",
-            "-c:a", "libmp3lame",
-            output_path
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-t",
+            str(duration),
         ]
+        if safe_fade > 0:
+            cmd += ["-af", f"afade=t=out:st={fade_start}:d={safe_fade}"]
+        cmd += codec_args
+        cmd.append(output_path)
         
         process = await asyncio.create_subprocess_exec(*cmd,
                                                      stdout=subprocess.PIPE,
@@ -327,12 +399,14 @@ class AudioProcessorTool(AsyncTool):
         if not out_path:
             base = os.path.splitext(os.path.basename(input_path))[0]
             out_path = os.path.join(os.path.dirname(input_path), f"{base}_smart_{int(target)}.mp3")
+        target_ext = os.path.splitext(out_path)[1].lstrip(".") or os.path.splitext(input_path)[1].lstrip(".") or "mp3"
+        target_ext = target_ext.lower()
         orig = await self._get_audio_duration(input_path)
         if orig <= 0.0:
             raise ToolError("unable to read duration", self.metadata.name)
         if orig > target + 0.1:
             # trim with fade out at target
-            return await self._trim_audio(input_path, target, out_path, fade_out)
+            return await self._trim_audio(input_path, target, out_path, fade_out, target_ext)
         elif orig < target - 0.1:
             # loop to target with crossfade
             return await self._loop_to_duration(input_path, target, out_path, fade_in, fade_out)
@@ -353,7 +427,7 @@ class AudioProcessorTool(AsyncTool):
             cut_at = float(plan.get("cut_at") or 0)
             if cut_at <= 0:
                 raise ToolError("invalid cut_at in plan", self.metadata.name)
-            return await self._trim_audio(input_path, cut_at, out_path, fade_out)
+            return await self._trim_audio(input_path, cut_at, out_path, fade_out, target_ext)
         # fallback to smart adjust
         td = float(plan.get("target_duration") or 0)
         if td <= 0:
@@ -363,6 +437,119 @@ class AudioProcessorTool(AsyncTool):
             "target_duration": td,
             "output_path": out_path
         })
+
+    async def _ensure_duration(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        input_path = params["input_path"]
+        target_duration = float(params["target_duration"])
+        tolerance = float(params.get("tolerance", 0.15))
+        allow_shrink = bool(params.get("allow_shrink", True))
+        allow_pad = bool(params.get("allow_pad", True))
+        output_path = params.get("output_path")
+        sample_rate = int(params.get("sample_rate", 16000))
+        audio_format = (params.get("audio_format") or os.path.splitext(input_path)[1].lstrip(".")) or "wav"
+        fade_out = float(params.get("fade_out", 0.5))
+
+        if not os.path.exists(input_path):
+            raise ToolError(f"Input audio file not found: {input_path}", self.metadata.name)
+
+        original_duration = await self._get_audio_duration(input_path)
+        if original_duration <= 0:
+            raise ToolError("Unable to determine audio duration", self.metadata.name)
+
+        if target_duration <= 0:
+            raise ToolError("target_duration must be greater than 0", self.metadata.name)
+
+        duration_diff = target_duration - original_duration
+        if abs(duration_diff) <= tolerance:
+            return {
+                "success": True,
+                "adjusted": False,
+                "output_path": input_path,
+                "original_duration": original_duration,
+                "final_duration": original_duration,
+                "target_duration": target_duration,
+            }
+
+        # Determine output path if adjustment needed
+        if not output_path:
+            base_name, ext = os.path.splitext(os.path.basename(input_path))
+            ext = ext or f".{audio_format}"
+            output_path = os.path.join(
+                os.path.dirname(input_path),
+                f"{base_name}_aligned_{int(target_duration)}s{ext}"
+            )
+
+        adjusted = False
+        if duration_diff < 0 and allow_shrink:
+            # Audio longer than target -> trim with fade out
+            await self._trim_audio(input_path, target_duration, output_path, fade_out, audio_format)
+            adjusted = True
+        elif duration_diff > 0 and allow_pad:
+            await self._pad_audio(input_path, target_duration, output_path, sample_rate, audio_format)
+            adjusted = True
+        else:
+            # Not allowed to modify – return original
+            return {
+                "success": True,
+                "adjusted": False,
+                "output_path": input_path,
+                "original_duration": original_duration,
+                "final_duration": original_duration,
+                "target_duration": target_duration,
+            }
+
+        final_duration = await self._get_audio_duration(output_path)
+        return {
+            "success": True,
+            "adjusted": adjusted,
+            "output_path": output_path,
+            "original_duration": original_duration,
+            "final_duration": final_duration,
+            "target_duration": target_duration,
+        }
+
+    async def _pad_audio(
+        self,
+        input_path: str,
+        target_duration: float,
+        output_path: str,
+        sample_rate: int,
+        audio_format: str,
+    ) -> None:
+        pad_filter = f"apad=pad_dur={max(target_duration, 0):.3f}"
+        ext = audio_format.lower()
+        codec_args: List[str]
+        if ext in {"wav", "wave"}:
+            codec_args = ["-c:a", "pcm_s16le"]
+        elif ext == "mp3":
+            codec_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
+        else:
+            codec_args = ["-c:a", "pcm_s16le"]
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-af",
+            pad_filter,
+            "-ar",
+            str(sample_rate),
+            "-t",
+            str(target_duration),
+            *codec_args,
+            output_path,
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Unknown FFmpeg error"
+            raise ToolError(f"FFmpeg pad processing failed: {error_msg}", self.metadata.name)
     
     async def _add_fade_effects(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """添加淡入淡出效果"""

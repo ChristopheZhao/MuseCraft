@@ -1,0 +1,44 @@
+作为视频概念规划的第一阶段，请根据用户需求生成一个轻量但结构化的概念骨架。
+
+## 用户需求
+{{ user_prompt }}
+
+## 制作约束
+- 目标时长：{{ duration }} 秒
+- 画面比例：{{ aspect_ratio }}
+- 单场景可用时长：{{ duration_capabilities | map('string') | join('、') }} 秒
+- 场景数量建议：{{ scene_count_min }} ~ {{ scene_count_max }} 幕（最优估计：{{ optimal_scene_count }} 幕）
+
+## 输出要求
+仅输出一个 JSON 对象，结构如下：
+{
+  "overview": "2-3 句描述整体故事与视觉体验",
+  "genre_and_theme": {
+    "primary_genre": "主要类型（如娱乐、教育、商业等）",
+    "theme": "核心主题或隐含寓意",
+    "tone": "整体情绪基调"
+  },
+  "target_audience": "目标受众特征（年龄/兴趣/观看场景）",
+  "key_messages": ["不超过4条，每条一句"],
+  "scene_blueprint": [
+    {
+      "scene_number": 1,
+      "title": "场景标题（6-12 字）",
+      "narrative_goal": "该幕要传达的剧情/信息重点",
+      "duration_hint": 10,
+      "key_elements": ["列出 2-3 个重要角色/道具/视觉元素"],
+      "atmosphere": "情绪与光影色彩提示"
+    }
+  ],
+  "voice_plan_overview": {
+    "should_narrate": true,
+    "mode": "narration|storytelling|explainer|none",
+    "high_level_guidance": "旁白整体语气/节奏/语言风格要点"
+  },
+  "risks_or_open_questions": ["若存在信息缺口或执行风险，请列出 1-3 条"]
+}
+
+### 规则
+1. `scene_blueprint` 的时长提示总和需贴近 {{ duration }} 秒，落在可用时长选项内。
+2. 场景数量控制在 {{ scene_count_min }} 至 {{ scene_count_max }} 之间，优先靠近 {{ optimal_scene_count }}。
+3. 语言专业、简洁，无额外解释或总结；确保输出为合法 JSON。

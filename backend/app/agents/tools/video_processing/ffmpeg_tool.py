@@ -7,7 +7,9 @@ import os
 import subprocess
 import tempfile
 import json
+import re
 import asyncio
+import uuid
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 
@@ -105,6 +107,7 @@ class FFmpegTool(AsyncTool):
             "extract_last_frame",
             "extract_frames",
             "create_slideshow",
+            "concat_audio",
             "add_subtitles",
             "add_watermark",
             "adjust_quality",
@@ -186,6 +189,21 @@ class FFmpegTool(AsyncTool):
                     "transition_effect": {"type": "string", "enum": ["fade", "slide", "zoom", "none"]}
                 },
                 "required": ["images", "output_filename"]
+            },
+            "concat_audio": {
+                "type": "object",
+                "properties": {
+                    "audio_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "按时间顺序排列的音频文件路径"
+                    },
+                    "output_filename": {
+                        "type": "string",
+                        "description": "输出文件名，例如 voice_track.wav"
+                    }
+                },
+                "required": ["audio_files"]
             }
         }
         
@@ -222,6 +240,8 @@ class FFmpegTool(AsyncTool):
             return await self._merge_videos(params)
         elif action == "create_transitions":
             return await self._create_transitions(params)
+        elif action == "concat_audio":
+            return await self._concat_audio(params)
         else:
             raise ToolValidationError(f"Unknown action: {action}", self.metadata.name)
     
@@ -277,31 +297,6 @@ class FFmpegTool(AsyncTool):
             
             # 执行命令
             self.logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), 
-                timeout=self.timeout
-            )
-            
-            # 清理临时文件
-            try:
-                os.unlink(temp_file_list)
-            except:
-                pass
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown FFmpeg error"
-                raise ToolError(f"FFmpeg composition failed: {error_msg}", self.metadata.name)
-            
-            # 获取输出文件信息
-            file_size = os.path.getsize(output_path)
-            video_info = await self._get_video_info({"file_path": output_path})
             
             return {
                 "output_file": output_path,
@@ -383,8 +378,13 @@ class FFmpegTool(AsyncTool):
             video_file = params["video_file"]
             audio_file = params["audio_file"]
             output_filename = params["output_filename"]
-            audio_volume = params.get("audio_volume", 0.5)
-            video_volume = params.get("video_volume", 0.3)
+            audio_volume = float(params.get("audio_volume", 0.5))
+            video_volume = float(params.get("video_volume", 0.3))
+            ducking = bool(params.get("ducking", False))
+            ducking_params = params.get("ducking_params") or {}
+            if not isinstance(ducking_params, dict):
+                ducking_params = {}
+            mix_strategy = params.get("mix_strategy", "default")
             
             for file_path in [video_file, audio_file]:
                 if not os.path.exists(file_path):
@@ -393,27 +393,115 @@ class FFmpegTool(AsyncTool):
             output_path = os.path.join(self.output_dir, output_filename)
             
             # 检查视频是否包含音频流
-            def _has_audio_stream(path: str) -> bool:
+            def _resolve_audio_stream_ref(path: str) -> Optional[str]:
                 try:
                     probe = subprocess.run(
-                        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
-                        capture_output=True, text=True, timeout=10
+                        [
+                            "ffprobe",
+                            "-v",
+                            "error",
+                            "-select_streams",
+                            "a",
+                            "-show_entries",
+                            "stream=index",
+                            "-of",
+                            "json",
+                            path,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
                     )
-                    return probe.returncode == 0 and bool((probe.stdout or "").strip())
+                    if probe.returncode != 0:
+                        return None
+                    data = json.loads(probe.stdout or "{}")
+                    indexes = data.get("streams") or []
+                    if not indexes:
+                        return None
+                    first_idx = indexes[0].get("index")
+                    if first_idx is None:
+                        return None
+                    return f"0:{first_idx}"
                 except Exception:
                     # 退化：尝试通过 ffmpeg -i 输出判断
                     try:
                         p = subprocess.run(["ffmpeg", "-i", path], capture_output=True, text=True)
                         out = (p.stderr or "") + (p.stdout or "")
-                        return "Audio:" in out or "Stream #0:1: Audio" in out or ": Audio:" in out
+                        if "Audio:" in out:
+                            # 尝试提取 "Stream #0:x" 格式
+                            import re
+                            match = re.search(r"Stream #0:(\d+).*Audio", out)
+                            if match:
+                                return f"0:{match.group(1)}"
+                            return "0:1"
+                        return None
                     except Exception:
-                        return False
+                        return None
 
-            video_has_audio = _has_audio_stream(video_file)
+            audio_stream_ref = _resolve_audio_stream_ref(video_file)
+            video_has_audio = bool(audio_stream_ref)
 
-            if video_has_audio:
-                # 正常混音：视频原音 + 背景音乐
-                filter_complex = f"[0:a]volume={video_volume}[va];[1:a]volume={audio_volume}[bg];[va][bg]amix=inputs=2:duration=first[a]"
+            # 当需要 ducking 时，若视频没有音轨则降级为普通混音
+            effective_ducking = ducking and video_has_audio
+
+            def _fmt(value: float) -> str:
+                return f"{value:.6f}".rstrip("0").rstrip(".") if isinstance(value, float) else str(value)
+
+            def _build_simple_mix_cmd() -> tuple[list[str], str]:
+                if video_has_audio:
+                    simple_filter = (
+                        f"[{audio_stream_ref}]volume={_fmt(video_volume)}[va];"
+                        f"[1:a]volume={_fmt(audio_volume)}[bg];"
+                        "[va][bg]amix=inputs=2:duration=first[a]"
+                    )
+                    return ([
+                        "ffmpeg", "-y",
+                        "-i", video_file,
+                        "-i", audio_file,
+                        "-filter_complex", simple_filter,
+                        "-map", "0:v",
+                        "-map", "[a]",
+                        "-c:v", "copy",
+                        "-c:a", "aac",
+                        "-shortest",
+                        output_path
+                    ], "voice+bgm amix")
+
+                bg_filter = f"[1:a]volume={_fmt(audio_volume)}[bg]"
+                return ([
+                    "ffmpeg", "-y",
+                    "-i", video_file,
+                    "-i", audio_file,
+                    "-filter_complex", bg_filter,
+                    "-map", "0:v",
+                    "-map", "[bg]",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    output_path
+                ], "bgm only mix")
+
+            fallback_cmd: list[str] | None = None
+            fallback_desc = ""
+
+            if effective_ducking:
+                threshold = float(ducking_params.get("threshold", 0.05))
+                ratio = float(ducking_params.get("ratio", 6.0))
+                attack = float(ducking_params.get("attack", 5.0))
+                release = float(ducking_params.get("release", 250.0))
+                makeup = float(ducking_params.get("makeup", 1.0))
+                if makeup < 1.0:
+                    makeup = 1.0
+                    ducking_params["makeup"] = makeup
+                recovery = float(ducking_params.get("recovery", 2.0))
+
+                filter_complex = (
+                    f"[{audio_stream_ref}]volume={_fmt(video_volume)}[voice];"
+                    f"[1:a]volume={_fmt(audio_volume)}[bg];"
+                    f"[bg][voice]sidechaincompress=threshold={_fmt(threshold)}:ratio={_fmt(ratio)}:"
+                    f"attack={_fmt(attack)}:release={_fmt(release)}:makeup={_fmt(makeup)}[bgduck];"
+                    f"[voice][bgduck]amix=inputs=2:duration=first:dropout_transition={_fmt(recovery)}[a]"
+                )
                 cmd = [
                     "ffmpeg", "-y",
                     "-i", video_file,
@@ -424,44 +512,60 @@ class FFmpegTool(AsyncTool):
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-shortest",
-                    output_path
+                    output_path,
                 ]
+                fallback_cmd, fallback_desc = _build_simple_mix_cmd()
             else:
-                # 视频无音轨：直接将背景音乐作为音频轨
-                filter_complex = f"[1:a]volume={audio_volume}[bg]"
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", video_file,
-                    "-i", audio_file,
-                    "-filter_complex", filter_complex,
-                    "-map", "0:v",
-                    "-map", "[bg]",
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-shortest",
-                    output_path
-                ]
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.timeout
-            )
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown FFmpeg error"
-                raise ToolError(f"Audio mixing failed: {error_msg}", self.metadata.name)
-            
+                cmd, _ = _build_simple_mix_cmd()
+
+            async def _run_ffmpeg(command: list[str]) -> tuple[int, bytes, bytes]:
+                proc = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+                return proc.returncode, out, err
+
+            returncode, stdout, stderr = await _run_ffmpeg(cmd)
+
+            if returncode != 0:
+                stderr_text = (stderr or b"").decode(errors="ignore")
+
+                if effective_ducking and fallback_cmd is not None:
+                    self.logger.warning(
+                        "Audio ducking mix failed (exit %s): %s. Falling back to %s.",
+                        returncode,
+                        stderr_text.strip() or "no stderr",
+                        fallback_desc,
+                    )
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                        except OSError:
+                            pass
+
+                    fallback_rc, fb_stdout, fb_stderr = await _run_ffmpeg(fallback_cmd)
+                    if fallback_rc != 0:
+                        fallback_text = (fb_stderr or b"").decode(errors="ignore")
+                        raise ToolError(
+                            f"Audio mixing failed after fallback: {fallback_text or stderr_text or 'ffmpeg execution error'}",
+                            self.metadata.name
+                        )
+                    effective_ducking = False
+                else:
+                    raise ToolError(
+                        f"Audio mixing failed: {stderr_text or 'ffmpeg execution error'}",
+                        self.metadata.name
+                    )
+
             return {
                 "output_file": output_path,
                 "file_size": os.path.getsize(output_path),
                 "audio_volume": audio_volume,
-                "video_volume": video_volume
+                "video_volume": video_volume,
+                "ducking": effective_ducking,
+                "mix_strategy": mix_strategy,
             }
             
         except Exception as e:
@@ -766,6 +870,60 @@ class FFmpegTool(AsyncTool):
             raise ToolError("Frame extraction timeout", self.metadata.name)
         except Exception as e:
             raise ToolError(f"Extract last frame failed: {str(e)}", self.metadata.name)
+
+    async def _concat_audio(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        audio_files = params.get("audio_files") or []
+        if not audio_files:
+            raise ToolValidationError("audio_files is required for concat_audio", self.metadata.name)
+
+        for file_path in audio_files:
+            if not os.path.exists(file_path):
+                raise ToolError(f"Audio file not found: {file_path}", self.metadata.name)
+
+        output_filename = params.get("output_filename") or f"concat_{uuid.uuid4().hex}.wav"
+        output_path = os.path.join(self.output_dir, output_filename)
+
+        tmp_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", dir=self.temp_dir)
+        try:
+            for file_path in audio_files:
+                tmp_file.write(f"file '{os.path.abspath(file_path)}'\n")
+            tmp_file.flush()
+            tmp_file.close()
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", tmp_file.name,
+                "-c", "copy",
+                output_path
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                error_msg = (stderr or b"").decode(errors="ignore")
+                raise ToolError(f"Audio concat failed: {error_msg}", self.metadata.name)
+
+            file_size = os.path.getsize(output_path)
+            return {
+                "output_file": output_path,
+                "input_files": audio_files,
+                "file_size": file_size,
+            }
+        finally:
+            try:
+                tmp_file.close()
+            except Exception:
+                pass
+            try:
+                os.unlink(tmp_file.name)
+            except Exception:
+                pass
 
     async def _merge_videos(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """拼接多个视频片段为一个视频（无音频混合）。"""

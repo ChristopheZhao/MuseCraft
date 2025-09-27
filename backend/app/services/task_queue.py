@@ -12,6 +12,9 @@ from ..core.config import settings
 from ..core.database import get_sync_db
 from ..models import Task, TaskStatus
 from ..agents import OrchestratorAgent
+from ..core.logging_utils import configure_mas_logging
+
+configure_mas_logging()
 
 
 # Create synchronous database session for Celery tasks

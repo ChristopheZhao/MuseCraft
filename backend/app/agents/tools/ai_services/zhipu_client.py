@@ -10,6 +10,7 @@ import base64
 import io
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
+from ....core.config import settings
 
 
 class ZhipuClientTool(AsyncTool):
@@ -111,7 +112,10 @@ class ZhipuClientTool(AsyncTool):
             self.config.get("default_model") or
             "glm-4.5"
         )
-        self.default_max_tokens = self.config.get("default_max_tokens", 2000)
+        default_max_tokens = self.config.get("default_max_tokens")
+        if default_max_tokens is None:
+            default_max_tokens = settings.LLM_MAX_TOKENS_STANDARD
+        self.default_max_tokens = int(default_max_tokens)
         self.default_temperature = self.config.get("default_temperature", 0.7)
         
         self.logger.info(f"Initialized Zhipu AI client with model: {self.default_model}")
@@ -720,10 +724,13 @@ class ZhipuClientTool(AsyncTool):
                 {"role": "user", "content": prompt}
             ]
             
+            max_tokens = params.get("max_tokens", self.default_max_tokens)
+
             chat_params = {
                 "messages": messages,
                 "model": self.default_model,
-                "temperature": 0.3
+                "temperature": 0.3,
+                "max_tokens": max_tokens
             }
             
             result = await self._chat_completion(chat_params)

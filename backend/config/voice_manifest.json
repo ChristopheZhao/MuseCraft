@@ -1,0 +1,111 @@
+{
+  "voices": [
+    {
+      "id": "siqi",
+      "label": "思琪｜温柔女声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["narration", "general"],
+      "tier": "standard"
+    },
+    {
+      "id": "sicheng",
+      "label": "思诚｜标准男声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["narration", "general"],
+      "tier": "standard"
+    },
+    {
+      "id": "zhixiaomei",
+      "label": "知小妹｜直播女声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["dialogue", "live"],
+      "tier": "standard"
+    },
+    {
+      "id": "zhifeng_emo",
+      "label": "知锋｜多情感男声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["emotional", "narration"],
+      "supports_emotion": true,
+      "tier": "standard"
+    },
+    {
+      "id": "zhimi_emo",
+      "label": "知米｜多情感女声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000],
+      "categories": ["emotional", "commercial"],
+      "supports_emotion": true,
+      "tier": "standard"
+    },
+    {
+      "id": "zhibei_emo",
+      "label": "知贝｜多情感童声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000],
+      "categories": ["child", "emotional"],
+      "supports_emotion": true,
+      "tier": "standard"
+    },
+    {
+      "id": "sitong",
+      "label": "思彤｜儿童童声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["child", "narration"],
+      "tier": "standard"
+    },
+    {
+      "id": "cally",
+      "label": "Cally｜美式英文女声",
+      "language": "en-US",
+      "sample_rates": [8000, 16000],
+      "categories": ["english", "dialogue"],
+      "tier": "standard"
+    },
+    {
+      "id": "eric",
+      "label": "Eric｜英式英文男声",
+      "language": "en-GB",
+      "sample_rates": [8000, 16000],
+      "categories": ["english", "narration"],
+      "tier": "standard"
+    },
+    {
+      "id": "shanshan",
+      "label": "姗姗｜粤语女声",
+      "language": "zh-yue",
+      "sample_rates": [8000, 16000, 24000],
+      "categories": ["dialect", "narration"],
+      "tier": "standard"
+    },
+    {
+      "id": "chuangirl",
+      "label": "小玥｜四川话女声",
+      "language": "zh-sichuan",
+      "sample_rates": [8000, 16000],
+      "categories": ["dialect", "narration"],
+      "tier": "standard"
+    },
+    {
+      "id": "zhijia",
+      "label": "知佳｜超高清女声",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000, 24000, 48000],
+      "categories": ["premium", "narration"],
+      "tier": "premium"
+    },
+    {
+      "id": "zhifei",
+      "label": "知飞｜激昂解说",
+      "language": "zh-CN",
+      "sample_rates": [8000, 16000],
+      "categories": ["promo", "emotional"],
+      "tier": "premium"
+    }
+  ]
+}

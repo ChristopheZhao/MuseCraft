@@ -772,16 +772,16 @@ class MASOrchestrator:
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """🎯 ReAct模式协调 - 推理-行动循环"""
+        """🎯 Iterative协调 - 推理-行动循环"""
         try:
-            self.logger.info("🎯 Starting ReAct mode orchestration")
+            self.logger.info("🎯 Starting iterative mode orchestration")
             
             state.react_iteration = 0
             react_state = state.react_state
             
             while state.react_iteration < state.react_max_iterations:
                 state.react_iteration += 1
-                self.logger.info(f"🎯 ReAct iteration {state.react_iteration}/{state.react_max_iterations}")
+                self.logger.info(f"🎯 Iteration {state.react_iteration}/{state.react_max_iterations}")
                 
                 # 1️⃣ OBSERVE - 观察当前状态
                 observation = await self._observe_current_state(state, input_data)
@@ -804,12 +804,12 @@ class MASOrchestrator:
                 
                 # 检查是否完成
                 if reflection.get("workflow_complete", False):
-                    self.logger.info(f"🎯 ReAct workflow completed in {state.react_iteration} iterations")
+                    self.logger.info(f"🎯 Iterative workflow completed in {state.react_iteration} iterations")
                     break
                 
                 # 检查是否需要调整策略
                 if reflection.get("strategy_adjustment_needed", False):
-                    self.logger.info("🎯 Strategy adjustment triggered in ReAct loop")
+                    self.logger.info("🎯 Strategy adjustment triggered in iterative loop")
                     # 可以实现策略调整逻辑
                 
                 await asyncio.sleep(1)  # 防止过快循环
@@ -829,7 +829,7 @@ class MASOrchestrator:
             return final_result
             
         except Exception as e:
-            self.logger.error(f"❌ ReAct mode orchestration failed: {e}")
+            self.logger.error(f"❌ Iterative mode orchestration failed: {e}")
             raise
     
     async def _observe_current_state(self, state: OrchestratorState, input_data: Dict[str, Any]) -> Dict[str, Any]:

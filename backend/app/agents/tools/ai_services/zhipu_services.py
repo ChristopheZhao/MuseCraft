@@ -8,7 +8,15 @@ import asyncio
 from typing import Dict, Any, List, Optional, Union
 import logging
 
-from .service_interfaces import LLMServiceInterface, VLMServiceInterface, VideoModelServiceInterface, ServiceProvider
+from .service_interfaces import (
+    LLMServiceInterface,
+    VLMServiceInterface,
+    VideoModelServiceInterface,
+    ServiceProvider,
+    PromptCapability,
+    VideoCapabilities,
+    EnumCapability,
+)
 from ....core.config import settings
 
 
@@ -552,6 +560,8 @@ class ZhipuVideoService(VideoModelServiceInterface):
     - CogVideoX, CogVideoX-3 (支持首尾帧模式)
     """
     
+    PROMPT_MAX_BYTES: int = 512
+
     def __init__(self, config: Dict[str, Any] = None):
         self.config = config or {}
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -566,6 +576,10 @@ class ZhipuVideoService(VideoModelServiceInterface):
         # CogVideoX支持的离散时长，从配置读取，避免写死
         self.duration_capabilities = getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10])
         self.supports_first_last = True  # CogVideoX-3支持首尾帧模式
+        provider_key = self.config.get("provider_key") or getattr(settings, "ZHIPU_VIDEO_PROVIDER_KEY", None)
+        if not provider_key or not str(provider_key).strip():
+            provider_key = "cogvideox-3"
+        self.provider_key = str(provider_key).strip()
     
     def _get_api_key(self) -> Optional[str]:
         """获取API密钥（配置 > 环境变量 > settings）"""
@@ -600,6 +614,72 @@ class ZhipuVideoService(VideoModelServiceInterface):
     def supports_first_last_frame(self) -> bool:
         """是否支持首尾帧模式"""
         return self.supports_first_last
+
+    def _get_provider_config(self):
+        try:
+            from ....core.video_config_manager import get_video_config
+
+            cfg = None
+            if self.provider_key:
+                cfg = get_video_config().get_provider_config(self.provider_key)
+            if cfg is None:
+                cfg = get_video_config().get_current_provider_config()
+            return cfg
+        except Exception:
+            return None
+
+    def get_capabilities(self) -> VideoCapabilities:
+        caps = VideoCapabilities()
+        provider_cfg = self._get_provider_config()
+        prompt_limits = getattr(provider_cfg, "prompt_limits", {}) if provider_cfg else {}
+
+        max_bytes = prompt_limits.get("max_bytes") or self.PROMPT_MAX_BYTES
+        approx_cn = prompt_limits.get("approx_chinese_chars")
+        approx_en = prompt_limits.get("approx_english_chars")
+        enforce = bool(prompt_limits.get("enforce", True)) if max_bytes else False
+        note = prompt_limits.get("note")
+
+        if max_bytes:
+            desc_parts: List[str] = []
+            if approx_cn and approx_en:
+                desc_parts.append(f"约{approx_cn}个中文或{approx_en}个英文字符以内")
+            elif approx_cn:
+                desc_parts.append(f"约{approx_cn}个中文字符以内")
+            elif approx_en:
+                desc_parts.append(f"约{approx_en}个英文字符以内")
+            if note and note not in desc_parts:
+                desc_parts.append(note)
+            description_suffix = "，".join(desc_parts) if desc_parts else None
+            extra_meta = {
+                k: v
+                for k, v in prompt_limits.items()
+                if k not in {"approx_chinese_chars", "approx_english_chars", "note", "enforce"}
+            }
+            caps.prompt = PromptCapability(
+                max_bytes=max_bytes,
+                approx_chinese_chars=approx_cn,
+                approx_english_chars=approx_en,
+                description_suffix=description_suffix,
+                note=note,
+                enforce=enforce,
+                extra=extra_meta,
+            )
+
+        if provider_cfg and provider_cfg.resolution_options:
+            caps.resolution = EnumCapability(
+                options=list(provider_cfg.resolution_options),
+                aliases=dict(provider_cfg.resolution_aliases or {}),
+                description_suffix="支持的分辨率列表，别名将自动映射为实际尺寸",
+            )
+
+        if provider_cfg and provider_cfg.ratio_options:
+            caps.ratio = EnumCapability(
+                options=list(provider_cfg.ratio_options),
+                aliases=dict(provider_cfg.ratio_aliases or {}),
+                description_suffix="画幅比例支持列表",
+            )
+
+        return caps
     
     async def generate_video(
         self,
@@ -620,7 +700,37 @@ class ZhipuVideoService(VideoModelServiceInterface):
             "model": model or "cogvideox",
             "prompt": prompt
         }
-        
+
+        provider_cfg = self._get_provider_config()
+        resolution_aliases = dict(getattr(provider_cfg, "resolution_aliases", {}) or {})
+        prompt_limits = getattr(provider_cfg, "prompt_limits", {}) if provider_cfg else {}
+
+        size_param = kwargs.get("resolution") or kwargs.get("size")
+        if isinstance(size_param, str) and size_param.strip():
+            normalized_size = size_param.strip()
+            payload["size"] = resolution_aliases.get(normalized_size, normalized_size)
+
+        target_model = payload["model"]
+        prompt_bytes = prompt.encode("utf-8") if isinstance(prompt, str) else b""
+        limit_bytes = prompt_limits.get("max_bytes") or self.PROMPT_MAX_BYTES
+        approx_cn = prompt_limits.get("approx_chinese_chars")
+        approx_en = prompt_limits.get("approx_english_chars")
+
+        if (
+            target_model in {"cogvideox", "cogvideox-3"}
+            and limit_bytes
+            and len(prompt_bytes) > int(limit_bytes)
+        ):
+            hint_parts: List[str] = []
+            if approx_cn:
+                hint_parts.append(f"约{approx_cn}个中文字符")
+            if approx_en:
+                hint_parts.append(f"{approx_en}个英文字符")
+            hint = "或".join(hint_parts) if hint_parts else f"{limit_bytes}字节"
+            raise RuntimeError(
+                f"Prompt exceeds provider limit ({hint}以内)"
+            )
+
         # 添加视频时长参数
         if duration:
             payload["duration"] = duration

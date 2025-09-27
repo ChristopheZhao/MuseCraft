@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional, Union
 from urllib.parse import urlparse
 import httpx
 import base64
+import asyncio
 
 try:
     import boto3

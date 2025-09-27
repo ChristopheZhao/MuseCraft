@@ -51,13 +51,6 @@ export class MockDataFactory {
       },
       duration: 60,
       aspectRatio: '16:9',
-      voiceSettings: {
-        enabled: true,
-        voice: 'professional-male',
-        speed: 1.0,
-        pitch: 1.0,
-        language: 'en-US'
-      },
       musicSettings: {
         enabled: false,
         genre: 'corporate',

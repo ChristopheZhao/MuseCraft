@@ -4,10 +4,22 @@ Image Generation Tool - 封装图像生成业务逻辑
 
 import asyncio
 import json
+import os
+import tempfile
 from typing import Dict, Any, List, Optional
+
+import httpx
+
+from ....core.config import settings
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 from .service_interfaces import get_vlm_service
+from ....services.prompt_safety import (
+    sanitize_prompt,
+    apply_prompt_safety,
+    get_prompt_safety_advisor,
+    SafetyContext,
+)
 
 
 class ImageGenerationTool(AsyncTool):
@@ -195,10 +207,44 @@ class ImageGenerationTool(AsyncTool):
                 "error": "PROMPT_TOO_WEAK: 缺少或过短的图像生成提示词"
             }
         
+        advisor_meta: Dict[str, Any] = {}
         try:
             # 通过供应商无关的服务接口生成图像（当前默认Zhipu实现）
             if not self._vlm_service:
                 self._vlm_service = get_vlm_service()
+
+            provider_name = None
+            if self._vlm_service and hasattr(self._vlm_service, "get_provider_name"):
+                try:
+                    provider_name = self._vlm_service.get_provider_name()
+                except Exception:
+                    provider_name = None
+
+            safe_prompt, advice = apply_prompt_safety(
+                prompt,
+                SafetyContext(
+                    modality="image",
+                    provider=provider_name,
+                    language="zh",
+                    metadata={
+                        "action": "generate_image",
+                        "scene_number": params.get("scene_number"),
+                    },
+                ),
+            )
+            advisor_meta = advice.metadata
+            sanitized = sanitize_prompt(
+                safe_prompt,
+                {
+                    "modality": "image",
+                    "scene_number": params.get("scene_number"),
+                    "tool": self.metadata.name,
+                    "advisor_layers": advisor_meta.get("applied_layers"),
+                },
+            )
+            prompt = sanitized.text
+            advisor_meta["sanitized_changed"] = sanitized.changed
+            advisor_meta["sanitized_matches"] = sanitized.matches
 
             # 构造最小必需参数；仅当上层明确提供 style/quality 时才透传
             gen_args = {"prompt": prompt, "size": size}
@@ -218,7 +264,8 @@ class ImageGenerationTool(AsyncTool):
                 "generated_prompt": prompt,
                 "style": style,
                 "size": size,
-                "generation_metadata": res
+                "generation_metadata": res,
+                "prompt_safety": advisor_meta,
             }
                 
         except Exception as e:
@@ -310,7 +357,9 @@ class ImageGenerationTool(AsyncTool):
             raise ToolError(gen.get("error") or "image_generation failed", self.metadata.name)
 
         image_url = gen.get("image_url")
+        prompt_text = gen.get("generated_prompt", prompt_text)
         file_path = ""
+        hosted_url = ""
         if persist and image_url:
             from ..tool_registry import get_tool_registry
             from ..base_tool import ToolInput as TI
@@ -326,21 +375,38 @@ class ImageGenerationTool(AsyncTool):
                 payload = getattr(res, 'result', res)
                 if isinstance(payload, dict):
                     file_path = payload.get("local_path") or payload.get("file_path", "")
+                    hosted_candidate = payload.get("url")
+                    if isinstance(hosted_candidate, str) and hosted_candidate.startswith(("http://", "https://")):
+                        hosted_url = hosted_candidate
             except Exception:
-                try:
-                    storage = get_tool_registry().get_tool("oss_storage")
-                    res = await storage.execute(TI(action="mirror_from_url", parameters={
-                        "url": image_url,
-                        "remote_path": dest_key,
-                        "public_read": True,
-                        "content_type": "image/jpeg"
-                    }))
-                    payload = getattr(res, 'result', res)
-                    if isinstance(payload, dict):
-                        file_path = payload.get("url", "")
-                except Exception:
-                    # 忽略持久化失败，保留远程URL照常返回
-                    file_path = ""
+                # 忽略本地落盘失败，继续尝试直接上传到OSS（若可用）
+                file_path = ""
+
+            # 如果配置了 OSS，并且当前还没有公开 URL，则将本地文件上传到 OSS
+            if not hosted_url:
+                local_source = file_path or ""
+                if local_source:
+                    oss_url = await self._upload_local_image_to_oss(
+                        local_source,
+                        dest_key,
+                        metadata={"scene_number": scene_number, "source": "generate_with_autoprompt"}
+                    )
+                    if oss_url:
+                        hosted_url = oss_url
+                else:
+                    # 若没有本地文件，但仍有原始URL，尝试直接镜像上传
+                    oss_url = await self._mirror_image_url_to_oss(
+                        image_url,
+                        dest_key,
+                        metadata={"scene_number": scene_number, "source": "generate_with_autoprompt", "original_url": image_url}
+                    )
+                    if oss_url:
+                        hosted_url = oss_url
+
+        # 若获得了公开可访问的URL，则优先使用之
+        if hosted_url:
+            self.logger.info(f"IMAGE_REHOST_RESULT scene={scene_number} url={hosted_url}")
+            image_url = hosted_url
 
         return {
             "success": True,
@@ -349,8 +415,99 @@ class ImageGenerationTool(AsyncTool):
             "prompt_text": prompt_text,
             "style": style,
             "size": size,
-            "scene_number": scene_number
+            "scene_number": scene_number,
+            "prompt_safety": gen.get("prompt_safety", {}),
         }
+
+    async def _upload_local_image_to_oss(self, local_path: str, remote_path: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """将本地图片上传到 OSS，返回可公开访问的 URL。"""
+        if not local_path or not os.path.exists(local_path):
+            return None
+
+        try:
+            self.logger.info(
+                "OSS_UPLOAD_DEBUG(local) local_path=%s remote_path=%s key_id=%s endpoint=%s bucket=%s",
+                local_path,
+                remote_path,
+                getattr(settings, "OSS_ACCESS_KEY_ID", None),
+                getattr(settings, "OSS_ENDPOINT", None),
+                getattr(settings, "OSS_BUCKET_NAME", None),
+            )
+            from ..tool_registry import get_tool_registry
+            from ..base_tool import ToolInput as TI
+
+            registry = get_tool_registry()
+            oss_tool = registry.get_tool("oss_storage")
+            if not oss_tool:
+                return None
+
+            params = {
+                "local_path": local_path,
+                "remote_path": remote_path,
+                "public_read": True,
+                "overwrite": True,
+                "metadata": metadata or {},
+            }
+
+            res = await oss_tool.execute(TI(action="upload", parameters=params))
+            payload = getattr(res, 'result', res)
+            if isinstance(payload, dict):
+                url = payload.get("url")
+                if url:
+                    return url
+                if payload.get("skipped") and payload.get("url"):
+                    return payload.get("url")
+        except Exception as exc:
+            try:
+                self.logger.warning(f"OSS upload failed for {local_path}: {exc}")
+            except Exception:
+                pass
+        return None
+
+    async def _mirror_image_url_to_oss(self, source_url: str, remote_path: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """当没有本地文件时，尝试将远端图片镜像到 OSS。"""
+        if not source_url:
+            return None
+
+        temp_file = None
+        try:
+            self.logger.info(
+                "OSS_UPLOAD_DEBUG(remote) source_url=%s remote_path=%s key_id=%s endpoint=%s bucket=%s",
+                source_url,
+                remote_path,
+                getattr(settings, "OSS_ACCESS_KEY_ID", None),
+                getattr(settings, "OSS_ENDPOINT", None),
+                getattr(settings, "OSS_BUCKET_NAME", None),
+            )
+            timeout_seconds = 30
+            try:
+                from ....core.config import settings as _cfg
+                timeout_seconds = int(getattr(_cfg, 'FILE_STORAGE_HTTP_TIMEOUT', timeout_seconds))
+            except Exception:
+                pass
+
+            async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+                response = await client.get(source_url)
+                response.raise_for_status()
+                suffix = os.path.splitext(remote_path)[1] or ".jpg"
+                fd, temp_file = tempfile.mkstemp(suffix=suffix)
+                with os.fdopen(fd, "wb") as tmp:
+                    tmp.write(response.content)
+
+            url = await self._upload_local_image_to_oss(temp_file, remote_path, metadata=metadata)
+            return url
+        except Exception as exc:
+            try:
+                self.logger.warning(f"OSS mirror failed for {source_url}: {exc}")
+            except Exception:
+                pass
+            return None
+        finally:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.unlink(temp_file)
+                except Exception:
+                    pass
     
     async def _analyze_image_style(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """分析图像风格"""
@@ -438,18 +595,54 @@ class ImageGenerationTool(AsyncTool):
                 f"请直接输出最终提示词。"
             )
 
+            advisor = get_prompt_safety_advisor()
+            provider_name = None
+            if hasattr(llm, "get_provider_name"):
+                try:
+                    provider_name = llm.get_provider_name()
+                except Exception:
+                    provider_name = None
+            safety_context = SafetyContext(
+                modality="image",
+                provider=provider_name,
+                language="zh",
+                metadata={
+                    "action": "gen_image_prompt",
+                    "scene_number": params.get("scene_number"),
+                },
+                tags=["prompt_engineering"],
+            )
+            advice = advisor.get_advice(safety_context, user_ctx)
+            system_prompt = advice.compose_system_prompt(system) or system
+            user_payload = advice.apply_to_prompt(user_ctx)
+
             res = await llm.chat_completion(
-                messages=[{"role":"system","content":system},{"role":"user","content":user_ctx}],
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_payload}],
                 temperature=0.3,
                 model=(cfg_model or None)
             )
             prompt = (res.get("content") or "").strip()
             if not prompt:
                 return {"success": False, "error": "未生成提示词"}
+            prompt = advice.apply_to_prompt(prompt)
+            advisor_meta = advice.metadata.copy()
+            sanitized = sanitize_prompt(
+                prompt,
+                {
+                    "modality": "image",
+                    "scene_number": params.get("scene_number"),
+                    "tool": self.metadata.name,
+                    "advisor_layers": advisor_meta.get("applied_layers"),
+                },
+            )
+            prompt = sanitized.text
+            advisor_meta["sanitized_changed"] = sanitized.changed
+            advisor_meta["sanitized_matches"] = sanitized.matches
             return {
                 "success": True,
                 "prompt_text": prompt,
-                "scene_number": params.get("scene_number")
+                "scene_number": params.get("scene_number"),
+                "prompt_safety": advisor_meta,
             }
         except Exception as e:
             return {"success": False, "error": f"提示词建议失败: {str(e)}"}

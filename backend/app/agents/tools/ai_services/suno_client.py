@@ -11,6 +11,11 @@ from typing import Dict, Any, List, Optional
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from ....services.redis_service import redis_service
 from ....core.config import settings
+from ....services.prompt_safety import (
+    apply_prompt_safety,
+    sanitize_prompt,
+    SafetyContext,
+)
 
 
 class SunoClientTool(AsyncTool):
@@ -246,6 +251,41 @@ class SunoClientTool(AsyncTool):
             # 将时长提示加入enhanced_prompt
             enhanced_prompt_with_duration = f"{enhanced_prompt}, {duration_hint}"
 
+            advisor_meta: Dict[str, Any] = {}
+            try:
+                safe_prompt, advice = apply_prompt_safety(
+                    enhanced_prompt_with_duration,
+                    SafetyContext(
+                        modality="audio",
+                        provider="suno",
+                        language="en",
+                        metadata={
+                            "action": "background_music",
+                            "title": title,
+                            "style": style,
+                        },
+                    ),
+                )
+                advisor_meta = advice.metadata.copy()
+                sanitized = sanitize_prompt(
+                    safe_prompt,
+                    {
+                        "modality": "audio",
+                        "tool": self.metadata.name,
+                        "action": "background_music",
+                        "advisor_layers": advisor_meta.get("applied_layers"),
+                    },
+                )
+                enhanced_prompt_with_duration = sanitized.text
+                enhanced_prompt = advice.apply_to_prompt(enhanced_prompt)
+                advisor_meta["sanitized_changed"] = sanitized.changed
+                advisor_meta["sanitized_matches"] = sanitized.matches
+            except Exception as advisor_exc:
+                try:
+                    self.logger.debug("Prompt safety advisor skipped: %s", advisor_exc)
+                except Exception:
+                    pass
+
             # -------- 参数与长度校验（依据官方规则）--------
             custom_mode = True
             prompt_limit, style_limit = self._get_model_limits(model, custom_mode)
@@ -361,11 +401,12 @@ class SunoClientTool(AsyncTool):
                     "style": style,
                     "mood": mood,
                     "instrumental": instrumental,
-                    "prompt_used": enhanced_prompt,
+                    "prompt_used": enhanced_prompt_with_duration,
                     "generation_mode": "background_music",
                     "file_format": "mp3",
                     "quality": "128kbps",
-                    "commercial_license": True
+                    "commercial_license": True,
+                    "prompt_safety": advisor_meta,
                 }
                 
         except httpx.TimeoutException:
@@ -592,14 +633,16 @@ class SunoClientTool(AsyncTool):
         except Exception as e:
             raise ToolError(f"Custom music generation failed: {str(e)}", self.metadata.name)
     
-    async def _poll_generation_status(self, task_id: str, max_attempts: int = 15) -> Dict[str, Any]:
+    async def _poll_generation_status(self, task_id: str, max_attempts: Optional[int] = None) -> Dict[str, Any]:
         """轮询音乐生成状态"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        attempts = max_attempts if isinstance(max_attempts, int) and max_attempts > 0 else getattr(settings, "SUNO_POLL_MAX_ATTEMPTS", 20)
+        poll_interval = max(5, getattr(settings, "SUNO_POLL_INTERVAL_SECONDS", 30))
         
-        for attempt in range(max_attempts):
+        for attempt in range(attempts):
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     response = await client.get(
@@ -609,7 +652,7 @@ class SunoClientTool(AsyncTool):
                     
                     if response.status_code != 200:
                         self.logger.warning(f"Failed to get music status: {response.status_code}")
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(poll_interval)
                         continue
                     
                     result = response.json()
@@ -666,21 +709,22 @@ class SunoClientTool(AsyncTool):
                         self.logger.error(f"API query error: {error_msg}")
                     
                     # 仍在处理中，等待后重试
-                    self.logger.info(f"Music generation in progress... ({attempt + 1}/{max_attempts})")
-                    await asyncio.sleep(30)
+                    self.logger.info(f"Music generation in progress... ({attempt + 1}/{attempts})")
+                    await asyncio.sleep(poll_interval)
                     
             except httpx.TimeoutException:
                 self.logger.warning("Timeout checking music status, retrying...")
-                await asyncio.sleep(30)
+                await asyncio.sleep(poll_interval)
                 continue
             except Exception as e:
                 self.logger.error(f"Error polling music result: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(poll_interval)
                 continue
         
         # 超时处理
-        self.logger.warning(f"Music generation timeout after {max_attempts * 30} seconds")
-        raise ToolError(f"Music generation timeout after {max_attempts * 30} seconds", self.metadata.name)
+        total_wait = attempts * poll_interval
+        self.logger.warning(f"Music generation timeout after {total_wait} seconds")
+        raise ToolError(f"Music generation timeout after {total_wait} seconds", self.metadata.name)
     
     async def _get_generation_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取生成状态"""

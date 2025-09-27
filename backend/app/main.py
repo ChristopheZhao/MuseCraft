@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 import os
 
 from .core.config import settings
+from .core.logging_utils import configure_mas_logging
 from .api.v1.api import api_router
 from .services.websocket import websocket_manager
 
@@ -21,6 +22,7 @@ logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+configure_mas_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +169,10 @@ if os.path.exists(settings.GENERATED_PATH):
 
 if os.path.exists(settings.TEMP_PATH):
     app.mount("/files/temp", StaticFiles(directory=settings.TEMP_PATH), name="temp")
+
+# Final outputs (e.g., composed videos/audio) live under storage/outputs
+if os.path.exists(settings.FINAL_OUTPUT_ROOT):
+    app.mount("/files/outputs", StaticFiles(directory=settings.FINAL_OUTPUT_ROOT), name="outputs")
 
 
 # Periodic tasks

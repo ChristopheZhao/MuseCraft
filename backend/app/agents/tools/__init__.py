@@ -13,6 +13,7 @@ from .ai_services.suno_client import SunoClientTool
 from .ai_services.image_generation_client import ImageGenerationClientTool
 from .ai_services.jimeng_image_tool import JimengImageTool
 from .ai_services.video_generation_tool_v2 import VideoGenerationTool
+from .ai_services.voice_synth_tool import VoiceSynthesisTool
 from .ai_services.scene_analysis_tool import SceneAnalysisTool
 from .ai_services.parameter_optimization_tool import ParameterOptimizationTool
 from .ai_services.intelligent_scene_planning_tool import IntelligentScenePlanningTool
@@ -48,6 +49,7 @@ def register_default_tools():
     tool_registry.register_tool(KimiClientTool)
     tool_registry.register_tool(ZhipuClientTool)
     tool_registry.register_tool(SunoClientTool)
+    tool_registry.register_tool(VoiceSynthesisTool)
     tool_registry.register_tool(ImageGenerationClientTool)
     tool_registry.register_tool(JimengImageTool)
     
@@ -100,6 +102,7 @@ __all__ = [
     "KimiClientTool", 
     "ZhipuClientTool", 
     "SunoClientTool",
+    "VoiceSynthesisTool",
     "ImageGenerationClientTool",
     "JimengImageTool",
     "VideoGenerationTool",

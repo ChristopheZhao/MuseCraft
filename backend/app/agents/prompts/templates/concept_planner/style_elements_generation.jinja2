@@ -1,0 +1,70 @@
+作为概念规划第二阶段，请基于骨架信息设计整体风格与内容要素。
+
+## 用户需求摘要
+{{ user_prompt_brief }}
+
+## 概念骨架（Skeleton JSON）
+{{ skeleton_json }}
+
+{% if style_preference %}
+## 用户额外风格偏好
+{{ style_preference }}
+{% endif %}
+
+## 输出要求
+仅输出一个 JSON 对象，包含：
+{
+  "intelligent_style_design": {
+    "style_name": "命名一个独特风格",
+    "style_description": "描述该风格的核心特征",
+    "visual_approach": "真人实拍/动画/混合等",
+    "narrative_style": "纪录片式/电影叙事式/商业推广式等",
+    "production_taste": "极简/精致/真实质朴等",
+    "emotional_tone": "主要情绪关键字",
+    "style_reasoning": "阐述选择理由和预期效果"
+  },
+  "content_elements": {
+    "characters": [
+      {
+        "canonical_name": "角色唯一标识（英文或中性编号）",
+        "display_name": "对外呈现名称（可为中文）",
+        "type": "角色类型（人类/灵兽/抽象等）",
+        "abstract_traits": ["3-5 个特征，含外形/性格/象征"],
+        "visual_identity": ["颜色/材质/配饰等"],
+        "role": "在故事中的功能定位"
+      }
+    ],
+    "environments": [
+      {
+        "name": "场景环境名",
+        "setting": "空间说明",
+        "mood": "氛围描述",
+        "key_features": ["突出的视觉元素"]
+      }
+    ],
+    "objects_and_props": [
+      {
+        "category": "道具类别",
+        "items": ["具体物品"],
+        "significance": "为何重要"
+      }
+    ],
+    "concepts_and_ideas": [
+      {
+        "concept": "抽象概念",
+        "visualization_approach": "可视化方式"
+      }
+    ]
+  },
+  "consistency_hints": {
+    "visual": "跨场景需要保持的视觉要点",
+    "narrative": "叙事连贯性提醒",
+    "color_palette": ["主题色1", "主题色2"],
+    "risks": ["潜在冲突或易出错点"]
+  }
+}
+
+### 规则
+1. 所有要素需与骨架中的场景、主题保持一致。
+2. 若信息不足，可做合理假设并在 `consistency_hints.risks` 中说明。
+3. 确保输出为合法 JSON，不要额外解释。

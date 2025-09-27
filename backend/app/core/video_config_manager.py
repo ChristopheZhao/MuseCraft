@@ -2,7 +2,7 @@
 Video Configuration Manager - 管理不同视频生成API的配置
 """
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from .config import settings
 
 
@@ -19,6 +19,10 @@ class VideoProviderConfig:
     resolution_options: List[str]      # 支持的分辨率
     frame_rate_options: List[int]      # 支持的帧率
     prompt_max_length: int = 500      # 视频提示词最大长度
+    prompt_limits: Dict[str, Any] = field(default_factory=dict)
+    resolution_aliases: Dict[str, str] = field(default_factory=dict)
+    ratio_options: List[str] = field(default_factory=list)
+    ratio_aliases: Dict[str, str] = field(default_factory=dict)
 
 
 class VideoConfigManager:
@@ -46,8 +50,32 @@ class VideoConfigManager:
                 default_duration=settings.COGVIDEOX_DEFAULT_DURATION,
                 amplification_ratio=settings.VIDEO_AMPLIFICATION_RATIO,
                 supports_first_last_frame=True,
-                resolution_options=["720x480", "1080x720"],
-                frame_rate_options=[24, 30]
+                resolution_options=[
+                    "1280x720",
+                    "720x1280",
+                    "1024x1024",
+                    "1920x1080",
+                    "1080x1920",
+                    "2048x1080",
+                    "3840x2160"
+                ],
+                frame_rate_options=[24, 30],
+                prompt_limits={
+                    "max_bytes": 512,
+                    "approx_chinese_chars": 170,
+                    "approx_english_chars": 340,
+                    "note": "智谱接口限制提示词大约170个中文字符（或340个英文字符）以内，超出将被拒绝",
+                    "enforce": True,
+                },
+                resolution_aliases={
+                    "720p": "1280x720",
+                    "1080p": "1920x1080",
+                    "2k": "2048x1080",
+                    "4k": "3840x2160",
+                    "vertical-720p": "720x1280",
+                    "vertical-1080p": "1080x1920",
+                    "square-1k": "1024x1024",
+                }
             ),
             
             # CogVideoX-2 (智谱AI 旧版)
@@ -113,7 +141,15 @@ class VideoConfigManager:
                 # 豆包支持首/尾帧（由工具按成本选择合适模型：lite-i2v 处理FLF，pro/pronew 处理单图/文本）
                 supports_first_last_frame=True,
                 resolution_options=["1280x720", "1920x1080"],
-                frame_rate_options=[24, 30]
+                frame_rate_options=[24, 30],
+                resolution_aliases={
+                    "720p": "1280x720",
+                    "1080p": "1920x1080",
+                },
+                ratio_options=["16:9", "9:16", "1:1", "adaptive"],
+                ratio_aliases={
+                    "default": "adaptive",
+                }
             )
         }
         
@@ -142,43 +178,45 @@ class VideoConfigManager:
         """获取系统级别的总体时长能力
 
         计算方法：
-        - 单次最大时长 * 放大倍数 * 最大场景数 作为系统最大可达总时长（组合拼接）
-        - 单次最大时长 * 放大倍数 * 最小场景数 / 最大场景数 作为系统最小建议（保守）
+        - 单次最大时长 * 最小场景数 作为系统最小可达时长
+        - 单次最大时长 * 最大场景数 作为系统最大可达时长
         最终再与系统配置的 MIN/MAX 进行裁剪。
         """
         config = self.get_current_provider_config()
         
-        # 计算系统总体能力 = 单次最大时长 * 放大倍数 * 场景数量
+        # 计算系统总体能力 = 单次最大时长 * 场景数量
         min_scenes = settings.SCENE_COUNT_RANGE_MIN
         max_scenes = settings.SCENE_COUNT_RANGE_MAX
         single_max = config.max_duration
-        amplification = config.amplification_ratio
-        
-        system_min = single_max * amplification * min_scenes // max_scenes  # 保守估计
-        # 支持通过多场景拼接实现更长的总时长能力
-        system_max = single_max * amplification * max_scenes
-        
+
+        system_min = single_max * min_scenes
+        system_max = single_max * max_scenes
+
         return {
             "min_duration": max(system_min, settings.SYSTEM_DURATION_CAPABILITY_MIN),
             "max_duration": min(system_max, settings.SYSTEM_DURATION_CAPABILITY_MAX),
             "provider": config.provider_name,
-            "amplification_ratio": amplification
+            "amplification_ratio": config.amplification_ratio
         }
-    
+
     def calculate_optimal_scene_count(self, target_duration: int) -> int:
         """根据目标时长计算最优场景数量"""
         config = self.get_current_provider_config()
-        
-        # 单个场景的有效时长（考虑放大倍数）
-        effective_duration_per_scene = config.default_duration * config.amplification_ratio
-        
-        # 计算需要的场景数
-        needed_scenes = max(1, target_duration // effective_duration_per_scene)
-        
+
+        # 单个场景的可达时长由提供商的 duration_capabilities 决定
+        if config.duration_capabilities:
+            per_scene_duration = max(config.duration_capabilities)
+        else:
+            per_scene_duration = config.max_duration or config.default_duration
+
+        per_scene_duration = max(1, per_scene_duration)
+
+        needed_scenes = max(1, -(-target_duration // per_scene_duration))  # 向上取整
+
         # 限制在配置范围内
         min_scenes = settings.SCENE_COUNT_RANGE_MIN
         max_scenes = settings.SCENE_COUNT_RANGE_MAX
-        
+
         return max(min_scenes, min(needed_scenes, max_scenes))
     
     def get_provider_specific_config(self) -> Dict[str, Any]:
@@ -237,7 +275,7 @@ class VideoConfigManager:
         matrix = {}
         
         for name, config in self._providers.items():
-            system_capability = config.max_duration * config.amplification_ratio
+            system_capability = config.max_duration * settings.SCENE_COUNT_RANGE_MAX
             
             matrix[name] = {
                 "provider_name": config.provider_name,

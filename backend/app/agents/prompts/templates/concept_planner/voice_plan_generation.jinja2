@@ -1,0 +1,40 @@
+作为概念规划第三阶段，请根据骨架信息设计旁白与音频策略。
+
+## 用户需求摘要
+{{ user_prompt_brief }}
+
+## 概念骨架（Skeleton JSON）
+{{ skeleton_json }}
+
+## 输出要求
+仅输出一个 JSON 对象，包含：
+{
+  "voice_plan": {
+    "enabled": true,
+    "mode": "narration|storytelling|explainer|none",
+    "persona": "旁白身份或角色设定",
+    "tone_keywords": ["语气/节奏/情绪关键词"],
+    "style_notes": "整体措辞与节奏建议",
+    "scene_guidance": [
+      {
+        "scene_number": 1,
+        "should_narrate": true,
+        "objective": "该幕旁白要达成的目标",
+        "emotion": "情绪基调",
+        "key_points": ["需要提及的信息要点"],
+        "pace_tag": "slow|medium|fast",
+        "target_char_count": 45
+      }
+    ],
+    "audio_strategy": {
+      "bgm_direction": "背景音乐风格与节奏",
+      "silence_and_pauses": "需要刻意留白或停顿的位置",
+      "sfx_notes": "如需音效提示，可列出概括" 
+    }
+  }
+}
+
+### 规则
+1. `scene_guidance` 覆盖骨架中的所有场景编号，并确保 `pace_tag` 仅取 slow/medium/fast；`target_char_count` 需结合骨架中的时长提示，约等于「场景时长 × 对应节奏的字符速率」。
+2. 若无需旁白，将 `enabled` 设为 false，`mode` 为 "none"，并给出原因。
+3. 确保输出合法 JSON，无额外说明。

@@ -1,595 +1,1029 @@
 """
-Concept Planner Agent - Analyzes requirements and creates video concept plan
+Concept Planner Agent - multi-stage concept planning with structured sub tasks.
 """
+
 import json
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..core.config import settings
 from ..models import Task, AgentExecution, AgentType, Scene, SceneType
-from ..services.ai_client import AIClient
+from ..core.prompt_manager import get_prompt_manager
 from .utils import SceneDurationCalculator
 
 
 class ConceptPlannerAgent(BaseAgent):
-    """
-    Concept Planner Agent analyzes user requirements and creates a detailed
-    video concept plan with scene breakdowns and visual descriptions
-    """
-    
+    """Concept Planner agent that orchestrates skeleton, style, audio, and scene sub-tasks."""
+
+    SCENE_BATCH_SIZE = 2
+
     def __init__(self, llms=None):
         super().__init__(
             agent_type=AgentType.CONCEPT_PLANNER,
             agent_name="concept_planner",
-            timeout_seconds=getattr(settings, 'CONCEPT_PLANNER_TIMEOUT_SECONDS', 200),
+            timeout_seconds=getattr(settings, "CONCEPT_PLANNER_TIMEOUT_SECONDS", 200),
             max_retries=2,
-            llms=llms
-            # ConceptPlanner使用LLM原生能力，不需要外部工具
+            llms=llms,
         )
-        # 使用LLM原生FC能力进行概念生成和智能风格设计
-    
+
     async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
+        self,
+        task: Task,
+        input_data: Dict[str, Any],
         execution: AgentExecution,
-        db: Session
+        db: Session,
     ) -> Dict[str, Any]:
-        """Generate video concept plan from user requirements"""
-        
-        # Validate input - ConceptPlanner自主生成智能风格，不需要外部video_style
         self._validate_input(input_data, ["user_prompt", "duration", "workflow_state_id"])
-        
+
         user_prompt = input_data["user_prompt"]
-        # 移除video_style外部依赖，ConceptPlanner将自主生成智能风格设计
-        style_preference = input_data.get("style_preference", None)  # 可选的用户风格偏好
-        
-        # 使用配置化的总体时长设置
+        style_preference = input_data.get("style_preference")
+
         from ..core.video_config_manager import get_video_config
+
         video_config = get_video_config()
-        
-        # 获取系统duration能力
         duration_capability = video_config.get_system_duration_capability()
-        default_duration = (duration_capability["min_duration"] + duration_capability["max_duration"]) // 2
-        duration = input_data.get("duration", default_duration)  # seconds
-        
-        # 验证duration请求
+        default_duration = (
+            duration_capability["min_duration"] + duration_capability["max_duration"]
+        ) // 2
+        duration = input_data.get("duration", default_duration)
+
         validation = video_config.validate_duration_request(duration)
         if not validation["is_valid"]:
-            self.logger.warning(f"🎭 Requested duration {duration}s not supported by {validation['provider']}, "
-                              f"using {validation['suggestion']}s instead")
+            self.logger.warning(
+                "🎭 Requested duration %ss not supported by %s, using %ss",
+                duration,
+                validation["provider"],
+                validation["suggestion"],
+            )
             duration = validation["suggestion"]
+
         aspect_ratio = input_data.get("aspect_ratio", "16:9")
         workflow_state_id = input_data["workflow_state_id"]
-        
-        # 获取 WorkflowState
-        from ..core.workflow_state import workflow_manager, SceneData
+
+        from ..core.workflow_state import workflow_manager
+
         workflow_state = workflow_manager.get_workflow(workflow_state_id)
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
-        
-        await self._update_progress(execution, 10, "Analyzing requirements", db)
-        
-        # Prepare concept planning prompt - 智能风格设计
-        concept_prompt = self._build_intelligent_concept_prompt(
-            user_prompt, style_preference, duration, aspect_ratio
+
+        provider_config = video_config.get_current_provider_config()
+        raw_capabilities = provider_config.duration_capabilities or getattr(
+            settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]
         )
-        
-        await self._update_progress(execution, 30, "Generating concept plan", db)
-        
+        duration_capabilities = sorted({int(cap) for cap in raw_capabilities if cap}) or [5, 10]
+        scene_count_min = getattr(settings, "SCENE_COUNT_RANGE_MIN", 3)
+        scene_count_max = getattr(settings, "SCENE_COUNT_RANGE_MAX", 10)
+        optimal_scene_count = video_config.calculate_optimal_scene_count(duration)
+        optimal_scene_count = max(scene_count_min, min(optimal_scene_count, scene_count_max))
+
+        system_prompt = self._build_system_prompt()
+
+        from ..core.ai_config import get_ai_config
+
+        ai_config_manager = get_ai_config()
+        concept_model = ai_config_manager.get_model_for_agent("concept_planner")
+        model_config = ai_config_manager.get_model_config(concept_model)
+        fallback_model = (
+            ai_config_manager.get_fallback_model_for_agent("concept_planner")
+            or (
+                model_config.fallback_model
+                if model_config and getattr(model_config, "fallback_model", None)
+                else None
+            )
+            or ai_config_manager.agent_model_mapping.get("default")
+        )
+        fallback_model_config = (
+            ai_config_manager.get_model_config(fallback_model) if fallback_model else None
+        )
+
         try:
-            # 使用LLM原生FC能力生成概念计划和智能风格设计
-            from ..core.ai_config import get_ai_config
-            ai_config_manager = get_ai_config()
-            concept_model = ai_config_manager.get_model_for_agent("concept_planner")
-            model_config = ai_config_manager.get_model_config(concept_model)
-            
-            # 构建系统+用户消息（不暴露工具名/参数；仅角色与事实）
-            messages = []
+            total_timeout = int(getattr(settings, "CONCEPT_PLANNER_TIMEOUT_SECONDS", 180))
+        except Exception:
+            total_timeout = 180
+
+        stage_timeouts, stage_token_limits = self._compute_stage_budgets(
+            total_timeout, model_config
+        )
+        skeleton_timeout = stage_timeouts["skeleton"]
+        style_timeout = stage_timeouts["style"]
+        voice_timeout = stage_timeouts["voice"]
+        scene_timeout = stage_timeouts["scene"]
+
+        try:
+            fallback_request_timeout = int(getattr(settings, "LLM_FALLBACK_TIMEOUT_MAX", 60))
+        except Exception:
+            fallback_request_timeout = 60
+
+        skeleton_max_tokens = stage_token_limits["skeleton"]
+        style_max_tokens = stage_token_limits["style"]
+        voice_max_tokens = stage_token_limits["voice"]
+        scene_max_tokens = stage_token_limits["scene"]
+
+        base_temperature = getattr(model_config, "temperature", 0.7) if model_config else 0.7
+        skeleton_temperature = min(0.65, base_temperature)
+        style_temperature = min(0.7, base_temperature)
+        voice_temperature = min(0.7, base_temperature)
+        scene_temperature = base_temperature
+
+        await self._update_progress(execution, 20, "Drafting concept skeleton", db)
+
+        skeleton_payload, skeleton_usage = await self._generate_skeleton(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            duration_capabilities=duration_capabilities,
+            scene_count_min=scene_count_min,
+            scene_count_max=scene_count_max,
+            optimal_scene_count=optimal_scene_count,
+            model_name=concept_model,
+            model_config=model_config,
+            fallback_model=fallback_model,
+            fallback_model_config=fallback_model_config,
+            request_timeout=skeleton_timeout,
+            fallback_request_timeout=fallback_request_timeout,
+            max_tokens=skeleton_max_tokens,
+            temperature=skeleton_temperature,
+        )
+        self._update_token_usage(execution, skeleton_usage)
+        workflow_state.concept_outline = skeleton_payload
+
+        skeleton_json = self._compact_json(skeleton_payload)
+        user_prompt_brief = self._build_prompt_snippet(user_prompt)
+
+        await self._update_progress(execution, 40, "Designing style and voice plan", db)
+
+        style_task = asyncio.create_task(
+            self._generate_style_bundle(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                skeleton_json=skeleton_json,
+                style_preference=style_preference,
+                model_name=concept_model,
+                model_config=model_config,
+                fallback_model=fallback_model,
+                fallback_model_config=fallback_model_config,
+                request_timeout=style_timeout,
+                fallback_request_timeout=fallback_request_timeout,
+                max_tokens=style_max_tokens,
+                temperature=style_temperature,
+            )
+        )
+        voice_task = asyncio.create_task(
+            self._generate_voice_plan(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                skeleton_json=skeleton_json,
+                model_name=concept_model,
+                model_config=model_config,
+                fallback_model=fallback_model,
+                fallback_model_config=fallback_model_config,
+                request_timeout=voice_timeout,
+                fallback_request_timeout=fallback_request_timeout,
+                max_tokens=voice_max_tokens,
+                temperature=voice_temperature,
+            )
+        )
+
+        style_bundle, voice_bundle = await asyncio.gather(style_task, voice_task)
+        self._update_token_usage(execution, style_bundle["usage"])
+        self._update_token_usage(execution, voice_bundle["usage"])
+
+        intelligent_style_design = style_bundle["payload"].get("intelligent_style_design", {})
+        content_elements = style_bundle["payload"].get("content_elements", {})
+        consistency_hints = style_bundle["payload"].get("consistency_hints", {})
+
+        workflow_state.intelligent_style_design = intelligent_style_design
+        workflow_state.content_elements = content_elements
+        workflow_state.consistency_hints = consistency_hints
+
+        voice_plan_raw = voice_bundle["payload"].get("voice_plan", {})
+        voice_plan = self._normalize_voice_plan(voice_plan_raw)
+        voice_plan = self._apply_voice_plan_pacing(
+            voice_plan,
+            skeleton_payload,
+        )
+        workflow_state.voice_plan = voice_plan
+
+        await self._update_progress(execution, 65, "Detailing scenes", db)
+
+        scene_results = await self._generate_scene_details(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            skeleton_payload=skeleton_payload,
+            style_payload=style_bundle["payload"],
+            voice_plan=voice_plan,
+            duration_capabilities=duration_capabilities,
+            duration=duration,
+            model_name=concept_model,
+            model_config=model_config,
+            fallback_model=fallback_model,
+            fallback_model_config=fallback_model_config,
+            request_timeout=scene_timeout,
+            fallback_request_timeout=fallback_request_timeout,
+            max_tokens=scene_max_tokens,
+            temperature=scene_temperature,
+        )
+
+        self._update_token_usage(execution, scene_results["usage"])
+        scenes = scene_results["scenes"]
+        scene_notes = scene_results["notes"]
+        total_planned_duration = scene_results["total_duration"]
+
+        await self._update_progress(execution, 85, "Finalizing concept plan", db)
+
+        concept_plan = self._finalize_concept_plan(
+            skeleton_payload,
+            intelligent_style_design,
+            content_elements,
+            consistency_hints,
+            voice_plan,
+            scenes,
+            scene_notes,
+            duration,
+            total_planned_duration,
+        )
+
+        workflow_state.concept_plan = concept_plan
+
+        scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
+
+        try:
+            memory_stored = await self.store_creative_guidance(
+                workflow_id=workflow_state_id,
+                concept_plan=concept_plan,
+            )
+            self.logger.info(
+                "🧠 ConceptPlanner: creative guidance stored in MAS memory (success=%s)",
+                memory_stored,
+            )
+        except Exception as exc:
+            self.logger.warning(f"⚠️ ConceptPlanner: failed to store creative guidance - {exc}")
+
+        await self._update_progress(execution, 100, "Concept planning completed", db)
+
+        try:
+            await self.websocket_manager.broadcast_to_task(
+                str(task.task_id),
+                {
+                    "type": "concept_plan_ready",
+                    "task_id": str(task.task_id),
+                    "scenes_count": len(scenes_data),
+                    "estimated_duration": duration,
+                },
+            )
+        except Exception as ws_err:
+            self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
+
+        return {
+            "concept_plan": concept_plan,
+            "voice_plan": voice_plan,
+            "total_scenes": len(scenes_data),
+            "estimated_duration": duration,
+            "video_concept": concept_plan.get("overview", ""),
+            "visual_style": self._extract_intelligent_style_summary(concept_plan),
+            "target_audience": concept_plan.get("target_audience", "general"),
+            "key_messages": concept_plan.get("key_messages", []),
+            "workflow_state_id": workflow_state_id,
+        }
+
+    def _build_system_prompt(self) -> str:
+        try:
+            pm = get_prompt_manager()
+            mas_sys = pm.render_template(
+                "mas_system", "system", variables={}, use_cache=True, auto_reload=False
+            )
+            agent_sys = pm.render_template(
+                "concept_planner", "system", variables={}, use_cache=True, auto_reload=False
+            )
+            parts: List[str] = []
+            if mas_sys and isinstance(mas_sys, str) and mas_sys.strip():
+                parts.append(mas_sys.strip())
+            if agent_sys and isinstance(agent_sys, str) and agent_sys.strip():
+                if agent_sys.strip() not in parts:
+                    parts.append(agent_sys.strip())
+            return "\n\n".join(parts).strip()
+        except Exception as exc:
+            self.logger.debug("Failed to build system prompt: %s", exc)
+            return ""
+
+    def _compose_messages(self, system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+        return messages
+
+    async def _generate_skeleton(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        duration: int,
+        aspect_ratio: str,
+        duration_capabilities: List[int],
+        scene_count_min: int,
+        scene_count_max: int,
+        optimal_scene_count: int,
+        model_name: str,
+        model_config: Any,
+        fallback_model: Optional[str],
+        fallback_model_config: Any,
+        request_timeout: int,
+        fallback_request_timeout: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> Tuple[Dict[str, Any], int]:
+        prompt = self.render_prompt(
+            "skeleton_generation",
+            user_prompt=user_prompt,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            duration_capabilities=duration_capabilities,
+            scene_count_min=scene_count_min,
+            scene_count_max=scene_count_max,
+            optimal_scene_count=optimal_scene_count,
+        )
+        messages = self._compose_messages(system_prompt, prompt)
+        response = await self._invoke_concept_model(
+            messages=messages,
+            model_name=model_name,
+            model_config=model_config,
+            fallback_model=fallback_model,
+            fallback_model_config=fallback_model_config,
+            request_timeout=request_timeout,
+            fallback_request_timeout=fallback_request_timeout,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            context_description="skeleton_generation",
+        )
+        payload = self._safe_json_loads(response.get("content", ""))
+        if not isinstance(payload, dict):
+            raise AgentError("Skeleton generation returned invalid payload")
+        if "scene_blueprint" not in payload or not isinstance(payload["scene_blueprint"], list):
+            raise AgentError("Skeleton generation missing scene_blueprint array")
+        usage = response.get("usage", {}).get("total_tokens", 0)
+        return payload, usage
+
+    async def _generate_style_bundle(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        skeleton_json: str,
+        style_preference: Optional[str],
+        model_name: str,
+        model_config: Any,
+        fallback_model: Optional[str],
+        fallback_model_config: Any,
+        request_timeout: int,
+        fallback_request_timeout: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> Dict[str, Any]:
+        user_prompt_brief = self._build_prompt_snippet(user_prompt)
+        prompt = self.render_prompt(
+            "style_elements_generation",
+            user_prompt=user_prompt,
+            skeleton_json=skeleton_json,
+            style_preference=style_preference,
+            user_prompt_brief=user_prompt_brief,
+        )
+        messages = self._compose_messages(system_prompt, prompt)
+        response = await self._invoke_concept_model(
+            messages=messages,
+            model_name=model_name,
+            model_config=model_config,
+            fallback_model=fallback_model,
+            fallback_model_config=fallback_model_config,
+            request_timeout=request_timeout,
+            fallback_request_timeout=fallback_request_timeout,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            context_description="style_elements_generation",
+        )
+        payload = self._safe_json_loads(response.get("content", ""))
+        if not isinstance(payload, dict) or "intelligent_style_design" not in payload:
+            raise AgentError("Style generation returned invalid payload")
+        return {"payload": payload, "usage": response.get("usage", {}).get("total_tokens", 0)}
+
+    async def _generate_voice_plan(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        skeleton_json: str,
+        model_name: str,
+        model_config: Any,
+        fallback_model: Optional[str],
+        fallback_model_config: Any,
+        request_timeout: int,
+        fallback_request_timeout: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> Dict[str, Any]:
+        user_prompt_brief = self._build_prompt_snippet(user_prompt)
+        prompt = self.render_prompt(
+            "voice_plan_generation",
+            user_prompt=user_prompt,
+            skeleton_json=skeleton_json,
+            user_prompt_brief=user_prompt_brief,
+        )
+        messages = self._compose_messages(system_prompt, prompt)
+        response = await self._invoke_concept_model(
+            messages=messages,
+            model_name=model_name,
+            model_config=model_config,
+            fallback_model=fallback_model,
+            fallback_model_config=fallback_model_config,
+            request_timeout=request_timeout,
+            fallback_request_timeout=fallback_request_timeout,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            context_description="voice_plan_generation",
+        )
+        payload = self._safe_json_loads(response.get("content", ""))
+        if not isinstance(payload, dict) or "voice_plan" not in payload:
+            raise AgentError("Voice plan generation returned invalid payload")
+        return {"payload": payload, "usage": response.get("usage", {}).get("total_tokens", 0)}
+
+    async def _generate_scene_details(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        skeleton_payload: Dict[str, Any],
+        style_payload: Dict[str, Any],
+        voice_plan: Dict[str, Any],
+        duration_capabilities: List[int],
+        duration: int,
+        model_name: str,
+        model_config: Any,
+        fallback_model: Optional[str],
+        fallback_model_config: Any,
+        request_timeout: int,
+        fallback_request_timeout: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> Dict[str, Any]:
+        scene_slots = skeleton_payload.get("scene_blueprint", [])
+        if not isinstance(scene_slots, list) or not scene_slots:
+            raise AgentError("Scene blueprint is empty; cannot generate details")
+
+        batches = self._make_scene_batches(scene_slots, self.SCENE_BATCH_SIZE)
+        skeleton_json = self._compact_json(skeleton_payload)
+        style_json = self._compact_json(style_payload)
+        voice_json = self._compact_json({"voice_plan": voice_plan})
+        user_prompt_brief = self._build_prompt_snippet(user_prompt)
+
+        combined_scenes: List[Dict[str, Any]] = []
+        notes_consistency: List[str] = []
+        notes_duration: List[str] = []
+        total_usage = 0
+
+        for batch_index, batch in enumerate(batches):
+            scene_batch_json = self._compact_json(batch)
+            prompt = self.render_prompt(
+                "scene_detail_batch_generation",
+                user_prompt=user_prompt,
+                skeleton_json=skeleton_json,
+                style_guidance_json=style_json,
+                voice_plan_json=voice_json,
+                scene_batch_json=scene_batch_json,
+                duration_capabilities=duration_capabilities,
+                user_prompt_brief=user_prompt_brief,
+            )
+            messages = self._compose_messages(system_prompt, prompt)
+            response = await self._invoke_concept_model(
+                messages=messages,
+                model_name=model_name,
+                model_config=model_config,
+                fallback_model=fallback_model,
+                fallback_model_config=fallback_model_config,
+                request_timeout=request_timeout,
+                fallback_request_timeout=fallback_request_timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                context_description=f"scene_detail_batch_generation_batch_{batch_index+1}",
+            )
+            payload = self._safe_json_loads(response.get("content", ""))
+            if not isinstance(payload, dict) or "scenes" not in payload:
+                raise AgentError("Scene detail generation returned invalid payload")
+            batch_scenes = payload.get("scenes", [])
+            if not isinstance(batch_scenes, list):
+                raise AgentError("Scene detail generation produced invalid scenes list")
+            combined_scenes.extend(batch_scenes)
+            notes = payload.get("notes", {}) or {}
+            if isinstance(notes.get("consistency"), str) and notes["consistency"].strip():
+                notes_consistency.append(notes["consistency"].strip())
+            if isinstance(notes.get("duration_adjustment"), str) and notes["duration_adjustment"].strip():
+                notes_duration.append(notes["duration_adjustment"].strip())
+            total_usage += response.get("usage", {}).get("total_tokens", 0)
+
+        combined_scenes.sort(key=lambda s: s.get("scene_number", 0))
+        optimized_scenes = SceneDurationCalculator.optimize_scene_durations(
+            combined_scenes,
+            duration,
+        )
+        total_duration = sum(
+            scene.get("final_duration", scene.get("duration", 0))
+            for scene in optimized_scenes
+        )
+
+        return {
+            "scenes": optimized_scenes,
+            "notes": {
+                "consistency": notes_consistency,
+                "duration": notes_duration,
+            },
+            "usage": total_usage,
+            "total_duration": total_duration,
+        }
+
+    def _compute_stage_budgets(self, total_timeout: int, model_config: Any) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Compute per-stage timeout and token budgets, mirroring diagnostic flow."""
+
+        try:
+            timeout_ratio = float(getattr(settings, "LLM_PRIMARY_TIMEOUT_RATIO", 0.5))
+        except Exception:
+            timeout_ratio = 0.5
+        if timeout_ratio <= 0:
+            timeout_ratio = 0.5
+
+        base_timeout = max(5, int(total_timeout * timeout_ratio))
+        stage_timeouts = {
+            "skeleton": max(40, int(base_timeout * 0.5)),
+            "style": max(20, int(base_timeout * 0.3)),
+            "voice": max(15, int(base_timeout * 0.25)),
+            "scene": max(30, int(base_timeout * 0.35)),
+        }
+
+        try:
+            standard_limit = int(getattr(settings, "LLM_MAX_TOKENS_STANDARD", 12800) or 12800)
+        except Exception:
+            standard_limit = 12800
+
+        stage_tokens = {
+            "skeleton": standard_limit,
+            "style": standard_limit,
+            "voice": standard_limit,
+            "scene": standard_limit,
+        }
+
+        # 除非显式配置，否则把场景阶段再限制到全局场景上限
+        from ..core.config import settings as _settings
+        global_scene_max = getattr(_settings, "LLM_MAX_TOKENS_SCENE_DETAIL", None)
+        if global_scene_max:
             try:
-                from ..core.prompt_manager import get_prompt_manager
-                pm = get_prompt_manager()
-                mas_sys = pm.render_template("mas_system", "system", variables={}, use_cache=True, auto_reload=False)
-                agent_sys = pm.render_template("concept_planner", "system", variables={}, use_cache=True, auto_reload=False)
-                sys_text = ((mas_sys or "").strip() + "\n\n" + (agent_sys or "").strip()).strip()
-                if isinstance(sys_text, str) and sys_text.strip():
-                    messages.append({"role": "system", "content": sys_text})
+                scene_cap = int(global_scene_max)
+                stage_tokens["scene"] = min(stage_tokens["scene"], scene_cap)
             except Exception:
                 pass
-            messages.append({"role": "user", "content": concept_prompt})
-            
-            # 使用LLM原生FC能力进行概念生成（不做细粒度子超时切分，避免硬编码预算）
-            primary_err = None
-            concept_response = None
-            try:
-                # 传递主调超时（依据全局配置的步骤总时长与主调比例）
-                try:
-                    primary_total = int(getattr(settings, 'CONCEPT_PLANNER_TIMEOUT_SECONDS', 180))
-                    primary_ratio = float(getattr(settings, 'LLM_PRIMARY_TIMEOUT_RATIO', 0.5))
-                    primary_request_timeout = max(5, int(primary_total * primary_ratio))
-                except Exception:
-                    primary_request_timeout = 90
 
-                concept_response = await self.llm_function_call(
-                    messages=messages,
-                    model=concept_model,
-                    context_description=f"Generate intelligent video concept with style design for: {user_prompt[:100]}...",
-                    temperature=model_config.temperature if model_config else 0.7,
-                    max_tokens=model_config.max_tokens if model_config else 4000,
-                    request_timeout=primary_request_timeout,
-                    response_format={"type": "json_object"}
-                )
-            except Exception as e:
-                primary_err = e
-
-            # 判定是否需要回退：
-            # - 出现异常；或
-            # - 返回结构为失败(success=False)；或
-            # - 缺少content字段
+        model_token_limit: Optional[int] = None
+        if model_config is not None:
+            candidate = getattr(model_config, "max_tokens", None)
             try:
-                need_fallback = (
-                    primary_err is not None
-                    or (not concept_response)
-                    or (isinstance(concept_response, dict) and not concept_response.get("success", True))
-                    or (isinstance(concept_response, dict) and not concept_response.get("content"))
-                )
+                if candidate:
+                    model_token_limit = int(candidate)
             except Exception:
+                model_token_limit = None
+
+        if model_token_limit and model_token_limit > 0:
+            for key, value in stage_tokens.items():
+                stage_tokens[key] = min(value, model_token_limit)
+
+        return stage_timeouts, stage_tokens
+
+    def _make_scene_batches(self, scene_slots: List[Dict[str, Any]], batch_size: int) -> List[List[Dict[str, Any]]]:
+        batches: List[List[Dict[str, Any]]] = []
+        for i in range(0, len(scene_slots), batch_size):
+            batches.append(scene_slots[i : i + batch_size])
+        return batches
+
+    def _build_prompt_snippet(self, text: str, limit: int = 600) -> str:
+        if not text:
+            return ""
+        cleaned = " ".join(text.strip().split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit].rstrip() + "…"
+
+    def _compact_json(self, payload: Dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _finalize_concept_plan(
+        self,
+        skeleton: Dict[str, Any],
+        intelligent_style_design: Dict[str, Any],
+        content_elements: Dict[str, Any],
+        consistency_hints: Dict[str, Any],
+        voice_plan: Dict[str, Any],
+        scenes: List[Dict[str, Any]],
+        scene_notes: Dict[str, List[str]],
+        target_duration: int,
+        total_planned_duration: float,
+    ) -> Dict[str, Any]:
+        concept_plan = {
+            "overview": skeleton.get("overview", ""),
+            "genre_and_theme": skeleton.get("genre_and_theme", {}),
+            "target_audience": skeleton.get("target_audience", ""),
+            "key_messages": skeleton.get("key_messages", []),
+            "intelligent_style_design": intelligent_style_design,
+            "content_elements": content_elements,
+            "voice_plan": voice_plan,
+            "scenes": scenes,
+            "consistency_guidelines": self._build_consistency_guidelines(
+                consistency_hints,
+                scene_notes,
+            ),
+            "success": True,
+            "total_planned_duration": total_planned_duration,
+            "duration_gap": round(target_duration - total_planned_duration, 2),
+        }
+        return concept_plan
+
+    def _build_consistency_guidelines(
+        self,
+        consistency_hints: Dict[str, Any],
+        scene_notes: Dict[str, List[str]],
+    ) -> Dict[str, str]:
+        visual_hint = consistency_hints.get("visual") if isinstance(consistency_hints, dict) else ""
+        narrative_hint = consistency_hints.get("narrative") if isinstance(consistency_hints, dict) else ""
+        color_hint = ", ".join(consistency_hints.get("color_palette", [])) if isinstance(consistency_hints, dict) else ""
+
+        scene_consistency = "; ".join(scene_notes.get("consistency", [])) if scene_notes else ""
+
+        return {
+            "character_consistency": visual_hint or "确保角色外形与特征在所有场景保持一致。",
+            "environment_consistency": narrative_hint or "场景氛围和叙事节奏需延续骨架设定。",
+            "object_consistency": "重复出现的关键道具需保持造型与用途一致。",
+            "style_consistency": (color_hint or "坚持既定的风格组合和色彩基调。")
+            + (f" {scene_consistency}" if scene_consistency else ""),
+        }
+
+    def _safe_json_loads(self, raw: str) -> Any:
+        content = (raw or "").strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as parse_error:
+            repaired = self._attempt_json_repair(content, parse_error)
+            if repaired:
+                return json.loads(repaired)
+            raise
+
+    def _normalize_voice_plan(self, voice_plan_raw: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(voice_plan_raw, dict):
+            voice_plan_raw = {}
+        enabled_raw = voice_plan_raw.get("enabled")
+        if isinstance(enabled_raw, str):
+            enabled = enabled_raw.strip().lower() not in {"false", "0", "no", "off"}
+        elif isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        else:
+            enabled = True
+        mode = str(voice_plan_raw.get("mode", "narration")).strip().lower()
+        if mode not in {"narration", "storytelling", "explainer", "none"}:
+            mode = "none" if not enabled else "narration"
+        if not enabled:
+            mode = "none"
+        tone_raw = voice_plan_raw.get("tone_keywords", [])
+        if isinstance(tone_raw, str):
+            tone_keywords = [tok.strip() for tok in tone_raw.replace("、", ",").split(",") if tok.strip()]
+        elif isinstance(tone_raw, list):
+            tone_keywords = [str(tok).strip() for tok in tone_raw if str(tok).strip()]
+        else:
+            tone_keywords = []
+        scene_guidance = voice_plan_raw.get("scene_guidance", [])
+        if not isinstance(scene_guidance, list):
+            scene_guidance = []
+        normalized_guidance = []
+        for entry in scene_guidance:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                scene_number = int(entry.get("scene_number"))
+            except (TypeError, ValueError):
+                continue
+            should = entry.get("should_narrate", True)
+            if isinstance(should, str):
+                should = should.strip().lower() not in {"false", "0", "no"}
+            normalized_guidance.append(
+                {
+                    "scene_number": scene_number,
+                    "should_narrate": bool(should),
+                    "objective": entry.get("objective", ""),
+                    "emotion": entry.get("emotion", ""),
+                    "key_points": entry.get("key_points", []) if isinstance(entry.get("key_points"), list) else [],
+                    "pace_tag": str(entry.get("pace_tag", "")).strip(),
+                    "target_char_count": entry.get("target_char_count"),
+                }
+            )
+        normalized_guidance.sort(key=lambda g: g.get("scene_number", 0))
+        audio_strategy = voice_plan_raw.get("audio_strategy", {}) if isinstance(voice_plan_raw.get("audio_strategy"), dict) else {}
+        return {
+            "enabled": bool(enabled),
+            "mode": mode,
+            "persona": voice_plan_raw.get("persona", ""),
+            "tone_keywords": tone_keywords,
+            "style_notes": voice_plan_raw.get("style_notes", ""),
+            "scene_guidance": normalized_guidance,
+            "audio_strategy": audio_strategy,
+        }
+
+    def _apply_voice_plan_pacing(
+        self,
+        voice_plan: Dict[str, Any],
+        skeleton_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(voice_plan, dict):
+            raise AgentError("Voice plan normalization produced invalid structure")
+
+        scene_guidance = voice_plan.get("scene_guidance") or []
+        if not isinstance(scene_guidance, list) or not scene_guidance:
+            return voice_plan
+
+        char_rates = getattr(settings, "VOICE_PACE_CHAR_RATES", {}) or {}
+        allowed_paces = set(char_rates.keys())
+        if not allowed_paces:
+            raise AgentError("VOICE_PACE_CHAR_RATES configuration is empty")
+
+        blueprint = skeleton_payload.get("scene_blueprint", []) if isinstance(skeleton_payload, dict) else []
+        duration_map: Dict[int, float] = {}
+        for entry in blueprint:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                scene_number = int(entry.get("scene_number"))
+            except (TypeError, ValueError):
+                continue
+            duration_hint = entry.get("duration_hint")
+            if duration_hint is None:
+                duration_hint = entry.get("duration")
+            try:
+                duration_value = float(duration_hint)
+            except (TypeError, ValueError):
+                duration_value = 0.0
+            duration_map[scene_number] = max(duration_value, 0.0)
+
+        max_chars = getattr(settings, "VOICE_MAX_CHARS_PER_REQUEST", 300)
+
+        for guidance in scene_guidance:
+            scene_number = guidance.get("scene_number")
+            if scene_number is None:
+                raise AgentError("Voice plan scene guidance missing scene_number")
+            pace_raw = str(guidance.get("pace_tag", "")).strip().lower()
+            if pace_raw not in allowed_paces:
+                raise AgentError(
+                    f"Voice plan pace_tag 无效: scene {scene_number} -> {pace_raw or '空值'}"
+                )
+            if scene_number not in duration_map or duration_map[scene_number] <= 0:
+                raise AgentError(
+                    f"Scene {scene_number} 缺少有效的时长提示，无法计算目标字数"
+                )
+            char_rate = float(char_rates[pace_raw])
+            target_chars = int(round(duration_map[scene_number] * char_rate))
+            target_chars = max(20, min(max_chars, target_chars))
+            guidance["pace_tag"] = pace_raw
+            guidance["target_char_count"] = target_chars
+
+        voice_plan["scene_guidance"] = scene_guidance
+        return voice_plan
+
+    async def _invoke_concept_model(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        model_name: str,
+        model_config: Any,
+        fallback_model: Optional[str],
+        fallback_model_config: Any,
+        request_timeout: int,
+        fallback_request_timeout: int,
+        max_tokens: int,
+        temperature: float,
+        response_format: Dict[str, Any],
+        context_description: str,
+    ) -> Dict[str, Any]:
+        primary_err: Optional[Exception] = None
+        response: Optional[Dict[str, Any]] = None
+
+        try:
+            response = await self.llm_function_call(
+                messages=messages,
+                model=model_name,
+                context_description=context_description,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                request_timeout=request_timeout,
+                response_format=response_format,
+                thinking={"type": "disabled"},
+            )
+        except Exception as exc:
+            primary_err = exc
+
+        need_fallback = False
+        if primary_err is not None or not response:
+            need_fallback = True
+        elif isinstance(response, dict):
+            content = response.get("content")
+            if not content:
+                self.logger.warning(
+                    "ConceptPlanner empty content from primary model during %s", context_description
+                )
+                primary_err = primary_err or Exception("empty content")
                 need_fallback = True
 
-            if need_fallback:
-                from ..core.ai_config import get_ai_config
-                ai_cfg = get_ai_config()
-                fallback_model = (
-                    ai_cfg.get_fallback_model_for_agent("concept_planner")
-                    or (model_config.fallback_model if model_config and getattr(model_config, 'fallback_model', None) else None)
-                    or ai_cfg.agent_model_mapping.get("default")
-                )
-                problem = primary_err or (concept_response.get("error") if isinstance(concept_response, dict) else "unknown error")
-                self.logger.warning(
-                    f"ConceptPlanner primary model '{concept_model}' failed or returned invalid content ({problem}); fallback to '{fallback_model}'"
-                )
-                llm = self.get_llm('plan')
-                fb_mc = ai_cfg.get_model_config(fallback_model) if fallback_model else None
-                # 传递回退阶段的超时（依据全局回退上限）
-                try:
-                    fallback_request_timeout = int(getattr(settings, 'LLM_FALLBACK_TIMEOUT_MAX', 60))
-                except Exception:
-                    fallback_request_timeout = 60
-
-                concept_response = await llm.chat_completion(
-                    messages=messages,
-                    model=fallback_model,
-                    temperature=0.5,
-                    max_tokens=min(
-                        getattr(settings, 'LLM_MAX_TOKENS_STANDARD', 8000),
-                        (fb_mc.max_tokens if fb_mc and getattr(fb_mc, 'max_tokens', None) else 4000)
-                    ),
-                    request_timeout=fallback_request_timeout,
-                    response_format={"type": "json_object"}
-                )
-            
-            # 解析LLM响应
-            if not concept_response or "content" not in concept_response:
-                raise AgentError("LLM failed to generate concept response")
-            
-            # 提取token使用信息
-            usage_info = concept_response.get("usage", {})
-            self._update_token_usage(execution, usage_info.get("total_tokens", 0))
-            
-            await self._update_progress(execution, 60, "Parsing concept plan", db)
-            
-            # Parse the concept plan - concept_response["content"] 是AI生成的JSON字符串
-            concept_plan = self._parse_concept_response(concept_response["content"])
-            
-            # 关键日志：检查生成的场景描述
-            self.logger.info(f"🎭 ConceptPlanner: user_prompt='{user_prompt}', scenes_count={len(concept_plan.get('scenes', []))}")
-            for i, scene in enumerate(concept_plan.get("scenes", [])):
-                visual_desc = scene.get('visual_description', '')
-                desc = scene.get('description', '')
-                self.logger.info(f"   Scene {i+1}: visual_description='{visual_desc}', description='{desc}'")
-            await self._update_progress(execution, 80, "Creating scene breakdowns", db)
-            
-            # 使用动态时长优化场景
-            optimized_scenes = SceneDurationCalculator.optimize_scene_durations(
-                concept_plan.get("scenes", []),
-                duration
+        if need_fallback:
+            if not fallback_model:
+                error = primary_err or Exception("LLM returned empty content")
+                raise AgentError(f"ConceptPlanner failed during {context_description}") from error
+            self.logger.warning(
+                "ConceptPlanner fallback engaged: primary=%s, fallback=%s, reason=%s",
+                model_name,
+                fallback_model,
+                primary_err or (response.get("error") if isinstance(response, dict) else "empty content"),
             )
-            concept_plan["scenes"] = optimized_scenes
-            
-            # Create scene data in WorkflowState (不直接操作数据库)
-            scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
-            
-            await self._update_progress(execution, 95, "Finalizing concept", db)
-            
-            # 更新 WorkflowState 的概念计划
-            workflow_state.concept_plan = concept_plan
-            
-            # 🧠 Phase 1.2 - 实现MAS记忆共享：ConceptPlanner存储创意指导
-            try:
-                memory_stored = await self.store_creative_guidance(
-                    workflow_id=workflow_state_id,
-                    concept_plan=concept_plan
-                )
-                self.logger.info(f"🧠 ConceptPlanner: 创意指导已存储到MAS记忆系统 (success={memory_stored})")
-            except Exception as e:
-                self.logger.warning(f"⚠️ ConceptPlanner: 记忆存储失败 - {e}")
-            
-            # Prepare output data
-            output_data = {
-                "concept_plan": concept_plan,
-                "total_scenes": len(scenes_data),
-                "estimated_duration": duration,
-                "video_concept": concept_plan.get("overview", ""),
-                "visual_style": self._extract_intelligent_style_summary(concept_plan),
-                "target_audience": concept_plan.get("target_audience", "general"),
-                "key_messages": concept_plan.get("key_messages", []),
-                "workflow_state_id": workflow_state_id
-            }
+            llm = self.get_llm("plan")
+            fallback_max_tokens = min(
+                getattr(settings, "LLM_MAX_TOKENS_STANDARD", 8000),
+                getattr(fallback_model_config, "max_tokens", max_tokens) if fallback_model_config else max_tokens,
+            )
+            fallback_temperature = (
+                getattr(fallback_model_config, "temperature", 0.5) if fallback_model_config else 0.5
+            )
+            response = await llm.chat_completion(
+                messages=messages,
+                model=fallback_model,
+                temperature=fallback_temperature,
+                max_tokens=fallback_max_tokens,
+                request_timeout=fallback_request_timeout,
+                response_format=response_format,
+                thinking={"type": "disabled"},
+            )
+        if not response or not response.get("content"):
+            self.logger.error(
+                "ConceptPlanner final response missing content during %s", context_description
+            )
+            raise AgentError(f"ConceptPlanner received invalid response during {context_description}")
+        return response
 
-            # Broadcast a lightweight WS signal with planned scenes count (for UI coarse-grained sync)
-            try:
-                await self.websocket_manager.broadcast_to_task(
-                    str(task.task_id),
-                    {
-                        "type": "concept_plan_ready",
-                        "task_id": str(task.task_id),
-                        "scenes_count": len(scenes_data),
-                        "estimated_duration": duration,
-                    }
-                )
-            except Exception as ws_err:
-                self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
-            
-            await self._update_progress(execution, 100, "Concept planning completed", db)
-            
-            return output_data
-            
-        except Exception as e:
-            error_msg = f"Failed to generate concept plan: {str(e)}"
-            self.logger.error(error_msg)
-            raise AgentError(error_msg) from e
-    
-    def _build_intelligent_concept_prompt(
-        self, 
-        user_prompt: str, 
-        style_preference: Optional[str], 
-        duration: int,
-        aspect_ratio: str
-    ) -> str:
-        """Build intelligent concept prompt with LLM-driven style design"""
-        
-        # 使用智能风格设计模板 - LLM自主分析用户内容并设计合适风格
-        return self.render_prompt(
-            "concept_generation",
-            user_prompt=user_prompt,
-            style_preference=style_preference,  # 可选的用户偏好
-            enable_intelligent_style=True,     # 启用智能风格设计
-            duration=duration,
-            aspect_ratio=aspect_ratio
-        )
-    
-    def _parse_concept_response(self, response_content: str) -> Dict[str, Any]:
-        """Parse AI response into structured concept plan with robust error handling"""
-        
-        try:
-            # Clean response if needed
-            content = response_content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            
-            # First attempt: direct JSON parsing
-            try:
-                concept_plan = json.loads(content)
-            except json.JSONDecodeError as parse_error:
-                self.logger.warning(f"Initial JSON parsing failed: {parse_error}")
-                
-                # Second attempt: try to fix common JSON issues
-                concept_plan = self._attempt_json_repair(content, parse_error)
-            
-            # Validate required fields
-            required_fields = ["overview", "scenes"]
-            for field in required_fields:
-                if field not in concept_plan:
-                    raise ValueError(f"Missing required field: {field}")
-            
-            # Validate scenes
-            if not isinstance(concept_plan["scenes"], list) or len(concept_plan["scenes"]) == 0:
-                raise ValueError("Scenes must be a non-empty list")
-            
-            # Process scene_physics_type field if it exists
-            if "scene_physics_type" in concept_plan:
-                physics_type = concept_plan["scene_physics_type"]
-                if isinstance(physics_type, dict):
-                    # Convert string "true"/"false" to boolean if needed
-                    if "is_realistic" in physics_type:
-                        if isinstance(physics_type["is_realistic"], str):
-                            is_realistic_str = physics_type["is_realistic"].lower()
-                            if "true" in is_realistic_str:
-                                physics_type["is_realistic"] = True
-                            elif "false" in is_realistic_str:
-                                physics_type["is_realistic"] = False
-                            else:
-                                # Default to true for realistic scenes
-                                physics_type["is_realistic"] = True
-                    
-                    # Ensure physics_constraints is set correctly
-                    if "physics_constraints" not in physics_type or not physics_type["physics_constraints"]:
-                        physics_type["physics_constraints"] = "strict" if physics_type.get("is_realistic", True) else "basic"
-                    elif "strict" in str(physics_type["physics_constraints"]).lower():
-                        physics_type["physics_constraints"] = "strict"
-                    elif "basic" in str(physics_type["physics_constraints"]).lower():
-                        physics_type["physics_constraints"] = "basic"
-            else:
-                # Add default scene_physics_type if missing
-                self.logger.warning("scene_physics_type missing in concept_plan, adding default")
-                concept_plan["scene_physics_type"] = {
-                    "is_realistic": True,
-                    "physics_constraints": "strict",
-                    "reasoning": "Default: assuming realistic scene"
-                }
-            
-            return concept_plan
-        
-            
-        except json.JSONDecodeError as e:
-            # Log the problematic content for debugging
-            self.logger.error(f"JSON parsing failed. Content length: {len(response_content)}")
-            self.logger.error(f"Content preview: {response_content[:500]}...")
-            self.logger.error(f"Content ending: ...{response_content[-200:]}")
-            raise AgentError(f"Failed to parse concept plan JSON: {str(e)}")
-        except Exception as e:
-            raise AgentError(f"Invalid concept plan format: {str(e)}")
-    
-    def _attempt_json_repair(self, content: str, original_error: json.JSONDecodeError) -> Dict[str, Any]:
-        """Attempt to repair malformed JSON content"""
-        
+    def _attempt_json_repair(self, content: str, original_error: json.JSONDecodeError) -> Optional[str]:
         repair_strategies = [
             self._fix_unterminated_strings,
             self._fix_missing_closing_braces,
             self._extract_complete_json_object,
-            self._create_fallback_concept
+            self._create_fallback_concept,
         ]
-        
         for strategy in repair_strategies:
             try:
                 repaired_content = strategy(content, original_error)
                 if repaired_content:
-                    concept_plan = json.loads(repaired_content)
-                    self.logger.info(f"JSON repair successful using strategy: {strategy.__name__}")
-                    return concept_plan
-            except (json.JSONDecodeError, Exception) as e:
-                self.logger.debug(f"Repair strategy {strategy.__name__} failed: {e}")
-                continue
-        
-        # If all repair strategies fail, raise the original error
-        raise original_error
-    
+                    json.loads(repaired_content)
+                    self.logger.info(
+                        "JSON repair successful using strategy: %s", strategy.__name__
+                    )
+                    return repaired_content
+            except Exception as exc:
+                self.logger.debug("Repair strategy %s failed: %s", strategy.__name__, exc)
+        return None
+
     def _fix_unterminated_strings(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        """Try to fix unterminated string literals"""
         try:
-            # Find the position of the error
-            error_pos = error.pos if hasattr(error, 'pos') else len(content)
-            
-            # Look for the last opening quote before the error position
-            content_before_error = content[:error_pos]
-            last_quote_pos = content_before_error.rfind('"')
-            
-            if last_quote_pos != -1:
-                # Check if this quote is unmatched
-                quote_count = content_before_error[last_quote_pos:].count('"')
-                if quote_count % 2 == 1:  # Odd number means unmatched quote
-                    # Add closing quote and try to complete the JSON
-                    fixed_content = content[:error_pos] + '"'
-                    
-                    # Try to complete the JSON structure
-                    if not fixed_content.rstrip().endswith('}'):
-                        fixed_content += '}'
-                    
-                    return fixed_content
-            
-            return None
-            
+            repaired = content
+            quote_count = repaired.count('"')
+            if quote_count % 2 != 0:
+                repaired += '"'
+            return repaired
         except Exception:
             return None
-    
+
     def _fix_missing_closing_braces(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        """Try to fix missing closing braces"""
         try:
-            # Count opening and closing braces
             open_braces = content.count('{')
             close_braces = content.count('}')
-            open_brackets = content.count('[')
-            close_brackets = content.count(']')
-            
-            # Add missing closing characters
-            fixed_content = content
-            missing_braces = open_braces - close_braces
-            missing_brackets = open_brackets - close_brackets
-            
-            if missing_braces > 0:
-                fixed_content += '}' * missing_braces
-            
-            if missing_brackets > 0:
-                fixed_content += ']' * missing_brackets
-            
-            return fixed_content if missing_braces > 0 or missing_brackets > 0 else None
-            
+            if open_braces > close_braces:
+                repaired = content + ('}' * (open_braces - close_braces))
+                return repaired
+            return None
         except Exception:
             return None
-    
+
     def _extract_complete_json_object(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        """Try to extract a complete JSON object from the beginning"""
         try:
-            # Look for the first complete JSON object
             brace_count = 0
             start_pos = content.find('{')
-            
             if start_pos == -1:
                 return None
-            
             for i, char in enumerate(content[start_pos:], start_pos):
                 if char == '{':
                     brace_count += 1
                 elif char == '}':
                     brace_count -= 1
                     if brace_count == 0:
-                        # Found complete object
-                        return content[start_pos:i+1]
-            
+                        return content[start_pos : i + 1]
             return None
-            
         except Exception:
             return None
-    
+
     def _create_fallback_concept(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        """Create a minimal fallback concept plan"""
         try:
-            # Extract any text content to use as overview
-            import re
-            
-            # Try to extract overview text
-            overview_match = re.search(r'"overview":\s*"([^"]*)', content)
-            overview = overview_match.group(1) if overview_match else "Generated video concept"
-            
-            # Create minimal valid concept
+            overview = "Generated video concept"
             fallback_concept = {
                 "overview": overview,
-                "scenes": [
-                    {
-                        "scene_number": 1,
-                        "description": "Main video content",
-                        "visual_description": "Visual representation of the video content",
-                        "duration": settings.DEFAULT_SCENE_DURATION,
-                        "key_elements": ["main content"]
-                    }
-                ],
-                "visual_style": "professional",
-                "target_audience": "general",
-                "key_messages": ["main message"]
+                "scene_blueprint": [],
             }
-            
-            self.logger.warning("Using fallback concept plan due to JSON parsing failure")
             return json.dumps(fallback_concept)
-            
         except Exception:
             return None
-    
+
     async def _create_scenes(
-        self, 
-        task: Task, 
-        concept_plan: Dict[str, Any], 
-        db: Session
+        self,
+        task: Task,
+        concept_plan: Dict[str, Any],
+        db: Session,
     ) -> List[Scene]:
-        """Create scene records in database"""
-        
         scenes = []
         current_start_time = 0.0
-        
-        for scene_data in concept_plan["scenes"]:
+        for scene_data in concept_plan.get("scenes", []):
             scene = Scene(
                 task_id=task.id,
                 scene_number=scene_data.get("scene_number", len(scenes) + 1),
                 scene_type=self._map_scene_type(scene_data.get("scene_type", "main_content")),
                 title=scene_data.get("title", f"Scene {len(scenes) + 1}"),
                 description=scene_data.get("description", ""),
-                
-                # Content
                 narrative_description=scene_data.get("narrative_description", ""),
                 visual_description=scene_data.get("visual_description", ""),
-                
-                # Timing - 使用动态计算的时长
                 duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
                 start_time=current_start_time,
                 duration_reasoning=scene_data.get("duration_reasoning", ""),
-                
-                # Visual elements
                 background_prompt=scene_data.get("visual_description", ""),
-                character_descriptions=scene_data.get("characters", []),
-                props_and_objects=scene_data.get("props", []),
-                mood_and_atmosphere=scene_data.get("mood", "")[:100],  # Truncate to fit DB
-                
-                # Camera and style
+                character_descriptions=scene_data.get("content_elements", {}).get("characters_present", []),
+                props_and_objects=scene_data.get("content_elements", {}).get("key_objects", []),
+                mood_and_atmosphere=scene_data.get("mood_and_atmosphere", "")[:100],
                 camera_angle=scene_data.get("camera_angle", "medium shot")[:50],
-                lighting_style=scene_data.get("lighting", "natural")[:50],
-                art_style=concept_plan.get("visual_style", "realistic")[:100],  # Truncate to fit DB
-                color_palette=concept_plan.get("color_palette", [])
+                lighting_style=scene_data.get("lighting_style", scene_data.get("lighting", "natural"))[:50],
+                art_style=concept_plan.get("intelligent_style_design", {}).get("style_name", "")[:100],
+                color_palette=concept_plan.get("intelligent_style_design", {}).get("color_palette", []),
             )
-            
             scene.end_time = current_start_time + scene.duration
             current_start_time = scene.end_time
-            
             db.add(scene)
             scenes.append(scene)
-        
         db.commit()
-        
-        # Refresh scenes to get IDs
         for scene in scenes:
             db.refresh(scene)
-        
         return scenes
-    
+
     async def _create_scenes_in_workflow_state(
-        self, 
-        workflow_state, 
-        concept_plan: Dict[str, Any]
+        self,
+        workflow_state,
+        concept_plan: Dict[str, Any],
     ) -> List:
-        """Create scene data in WorkflowState (内存操作，不涉及数据库)"""
-        
         scenes_data = []
         current_start_time = 0.0
-        
-        for scene_data in concept_plan["scenes"]:
-            from ..core.workflow_state import SceneData
-            
+        from ..core.workflow_state import SceneData
+
+        for scene_data in concept_plan.get("scenes", []):
             scene = SceneData(
                 scene_number=scene_data.get("scene_number", len(scenes_data) + 1),
                 scene_type=scene_data.get("scene_type", "main_content"),
                 title=scene_data.get("title", f"Scene {len(scenes_data) + 1}"),
                 description=scene_data.get("description", ""),
-                
-                # Content
                 narrative_description=scene_data.get("narrative_description", ""),
                 visual_description=scene_data.get("visual_description", ""),
-                
-                # Timing - 使用动态计算的时长
                 duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
                 start_time=current_start_time,
                 duration_reasoning=scene_data.get("duration_reasoning", ""),
-                
-                # Visual elements
-                character_descriptions=scene_data.get("characters", []),
-                props_and_objects=scene_data.get("props", []),
-                mood_and_atmosphere=scene_data.get("mood", ""),
-                
-                # Camera and style
+                characters_present=scene_data.get("content_elements", {}).get("characters_present", []),
+                props_and_objects=scene_data.get("content_elements", {}).get("key_objects", []),
+                mood_and_atmosphere=scene_data.get("mood_and_atmosphere", ""),
                 camera_angle=scene_data.get("camera_angle", "medium shot"),
-                lighting_style=scene_data.get("lighting", "natural"),
-                art_style=concept_plan.get("visual_style", "realistic"),
-                color_palette=concept_plan.get("color_palette", [])
+                lighting_style=scene_data.get("lighting_style", scene_data.get("lighting", "natural")),
+                art_style=concept_plan.get("intelligent_style_design", {}).get("style_name", ""),
+                color_palette=concept_plan.get("intelligent_style_design", {}).get("color_palette", []),
             )
-            
             scene.end_time = current_start_time + scene.duration
             current_start_time = scene.end_time
-            
-            # 添加到 WorkflowState
             workflow_state.add_scene(scene)
             scenes_data.append(scene)
-        
         return scenes_data
-    
+
     def _map_scene_type(self, scene_type_str: str) -> SceneType:
-        """Map string scene type to enum - handles both English and Chinese terms"""
         if not scene_type_str:
             return SceneType.MAIN_CONTENT
-        
         scene_type_lower = scene_type_str.lower().strip()
-        
-        # English mappings
         english_mapping = {
             "intro": SceneType.INTRO,
             "introduction": SceneType.INTRO,
@@ -597,62 +1031,18 @@ class ConceptPlannerAgent(BaseAgent):
             "main_content": SceneType.MAIN_CONTENT,
             "main": SceneType.MAIN_CONTENT,
             "content": SceneType.MAIN_CONTENT,
-            "body": SceneType.MAIN_CONTENT,
             "transition": SceneType.TRANSITION,
             "bridge": SceneType.TRANSITION,
             "outro": SceneType.OUTRO,
             "conclusion": SceneType.OUTRO,
             "ending": SceneType.OUTRO,
-            "background": SceneType.BACKGROUND
+            "background": SceneType.BACKGROUND,
         }
-        
-        # Chinese mappings for common scenario types
-        chinese_mapping = {
-            # 开始/起始/引入相关
-            "修炼起始": SceneType.INTRO,
-            "开始": SceneType.INTRO,
-            "起始": SceneType.INTRO,
-            "引入": SceneType.INTRO,
-            "初始": SceneType.INTRO,
-            "开场": SceneType.INTRO,
-            # 主要内容/发展/过程
-            "能量爆发": SceneType.MAIN_CONTENT,
-            "主要内容": SceneType.MAIN_CONTENT,
-            "发展": SceneType.MAIN_CONTENT,
-            "过程": SceneType.MAIN_CONTENT,
-            "进行": SceneType.MAIN_CONTENT,
-            "演进": SceneType.MAIN_CONTENT,
-            "修炼过程": SceneType.MAIN_CONTENT,
-            # 突破/成功/结论/高潮
-            "突破成功": SceneType.OUTRO,
-            "突破": SceneType.OUTRO,
-            "成功": SceneType.OUTRO,
-            "完成": SceneType.OUTRO,
-            "结束": SceneType.OUTRO,
-            "结论": SceneType.OUTRO,
-            "收尾": SceneType.OUTRO,
-            # 过渡
-            "过渡": SceneType.TRANSITION,
-            "转场": SceneType.TRANSITION,
-            "衔接": SceneType.TRANSITION,
-            # 背景
-            "背景": SceneType.BACKGROUND,
-            "环境": SceneType.BACKGROUND
-        }
-        
-        # Try English mapping first
         if scene_type_lower in english_mapping:
             return english_mapping[scene_type_lower]
-        
-        # Try Chinese mapping
-        if scene_type_str in chinese_mapping:
-            return chinese_mapping[scene_type_str]
-        
-        # Default fallback
         return SceneType.MAIN_CONTENT
-    
+
     def _scene_to_dict(self, scene: Scene) -> Dict[str, Any]:
-        """Convert scene model to dictionary"""
         return {
             "id": scene.id,
             "scene_number": scene.scene_number,
@@ -670,36 +1060,18 @@ class ConceptPlannerAgent(BaseAgent):
             "art_style": scene.art_style,
             "characters": scene.character_descriptions,
             "props": scene.props_and_objects,
-            "color_palette": scene.color_palette
+            "color_palette": scene.color_palette,
         }
-    
+
     def _extract_intelligent_style_summary(self, concept_plan: Dict[str, Any]) -> str:
-        """从智能风格设计中提取风格摘要"""
-        
-        # 尝试从intelligent_style_design提取风格
-        if "intelligent_style_design" in concept_plan:
-            style_design = concept_plan["intelligent_style_design"]
-            if isinstance(style_design, dict) and "chosen_style" in style_design:
-                chosen_style = style_design["chosen_style"]
-                
-                # 构建风格摘要
-                style_parts = []
-                if "presentation_form" in chosen_style:
-                    style_parts.append(chosen_style["presentation_form"])
-                if "narrative_style" in chosen_style:
-                    style_parts.append(chosen_style["narrative_style"])
-                if "emotional_tone" in chosen_style:
-                    style_parts.append(chosen_style["emotional_tone"])
-                
-                if style_parts:
-                    return " + ".join(style_parts)
-        
-        # Fallback: 尝试从visual_style_guidance提取
-        if "visual_style_guidance" in concept_plan:
-            guidance = concept_plan["visual_style_guidance"]
-            if isinstance(guidance, dict) and "overall_aesthetic" in guidance:
-                return guidance["overall_aesthetic"]
-        
-        # 最终fallback
+        style_design = concept_plan.get("intelligent_style_design", {})
+        if isinstance(style_design, dict):
+            style_name = style_design.get("style_name")
+            visual_approach = style_design.get("visual_approach")
+            narrative_style = style_design.get("narrative_style")
+            if style_name:
+                return style_name
+            parts = [part for part in [visual_approach, narrative_style] if part]
+            if parts:
+                return " + ".join(parts)
         return "智能生成风格"
-    
