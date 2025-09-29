@@ -38,6 +38,7 @@ from .video_processing.final_frame_tool import FinalFrameTool
 from .video_processing.scene_continuity_preparation_tool import SceneContinuityPreparationTool
 from .memory_tool import MemoryTool
 from .orchestrator_control_tool import OrchestratorControlTool
+from .consistency_tool import ConsistencyTool
 
 # Tool registry instance
 tool_registry = get_tool_registry()
@@ -77,6 +78,7 @@ def register_default_tools():
     tool_registry.register_tool(ImageGenerationTool)
     tool_registry.register_tool(QualityAnalysisTool)
     tool_registry.register_tool(RoleAnalysisTool)
+    tool_registry.register_tool(ConsistencyTool)
     # Register shared memory capability
     tool_registry.register_tool(MemoryTool)
     # Register orchestrator control
@@ -128,6 +130,7 @@ __all__ = [
     "SceneContinuityPreparationTool",
     "MemoryTool",
     "OrchestratorControlTool",
+    "ConsistencyTool",
     
     # Functions
     "register_default_tools"

@@ -43,7 +43,7 @@ async def test_tool_registration():
         print(f"✅ 可用工具: {available_tools}")
         
         # 检查关键工具
-        required_tools = ["zhipu_client", "openai_client", "image_generation_client"]
+        required_tools = ["zhipu_client", "openai_client", "image_generation_client", "consistency_tool"]
         missing_tools = [tool for tool in required_tools if tool not in available_tools]
         
         if missing_tools:
@@ -74,13 +74,18 @@ async def test_tool_registration():
         # 检查工具是否加载
         available_tools = list(video_generator._available_tools.keys())
         print(f"✅ 可用工具: {available_tools}")
-        
+
         # 检查关键工具
         if "zhipu_client" in video_generator._available_tools:
             zhipu_tool = video_generator._available_tools["zhipu_client"]
             print(f"✅ zhipu_client工具可用: {type(zhipu_tool).__name__}")
         else:
             print(f"❌ zhipu_client工具不可用")
+
+        if "consistency_tool" in video_generator._available_tools:
+            print("✅ consistency_tool 工具可用")
+        else:
+            print("❌ consistency_tool 工具不可用")
         
     except Exception as e:
         print(f"❌ VideoGenerator测试失败: {e}")
@@ -112,7 +117,7 @@ async def test_tool_registration():
                 print(f"   - {tool_name}: 加载失败 ({e})")
         
         # 检查核心工具
-        core_tools = ["zhipu_client", "openai_client", "image_generation_client"]
+        core_tools = ["zhipu_client", "openai_client", "image_generation_client", "consistency_tool"]
         for tool_name in core_tools:
             if tool_name in all_tools:
                 print(f"✅ {tool_name} 已注册")
@@ -129,3 +134,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

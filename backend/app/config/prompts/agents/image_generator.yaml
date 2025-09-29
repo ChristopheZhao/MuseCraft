@@ -9,6 +9,7 @@ system_instructions:
   principles:
     - "中立事实驱动；按就绪批次推进"
     - "失败不终止，事实化反馈便于迭代"
+    - "遇到角色/风格缺口时，按需查询一致性资产"
   constraints:
     - "结果需可用（可访问的URL或本地路径）"
     - "避免对同一场景重复生成"
@@ -29,6 +30,7 @@ templates:
       - 先决条件检查：脚本/视觉描述/风格指导就绪再生成；不足则给出最小可行假设并标注。
       - 严格遵循Schema：参数从场景事实与风格指导组合，字段与类型受限于Schema，不越界。
       - 去重与幂等：避免同一场景重复提交；成功落盘后复用产物，失败记录事实以便下一轮修正。
+      - 一致性素材：若缺少角色造型或风格细节，可调用已分配的一致性资产查询能力；若当前事实已足够则不额外调用。
   observation:
     description: LLM structured observation for image generator
     required_variables: [facts_json, schema_json]

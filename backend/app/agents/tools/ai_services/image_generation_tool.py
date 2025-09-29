@@ -14,6 +14,7 @@ from ....core.config import settings
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 from .service_interfaces import get_vlm_service
+from ...prompts.template_manager import get_template_manager
 from ....services.prompt_safety import (
     sanitize_prompt,
     apply_prompt_safety,
@@ -48,6 +49,7 @@ class ImageGenerationTool(AsyncTool):
         metadata = self.get_metadata()
         super().__init__(metadata=metadata, **kwargs)
         self._vlm_service = None
+        self._prompt_manager = get_template_manager("image_generator")
     
     def get_available_actions(self) -> List[str]:
         # 精简对FC暴露的动作：优先复合函数
@@ -274,48 +276,155 @@ class ImageGenerationTool(AsyncTool):
                 "error": f"图像生成异常: {str(e)}"
             }
     
-    async def _create_image_prompt_from_scene(self, scene_data: Dict[str, Any], style: str, style_guidance: Dict[str, Any] | None = None) -> str:
-        """从场景数据创建图像生成提示词（轻量组合，避免强依赖LLM）。
-        兼容场景字段：优先 visual_description；无则回退 description/title。
-        同时融合 style_guidance: art_style, composition, color_palette, mood。
+    async def _create_image_prompt_from_scene(
+        self,
+        scene_data: Dict[str, Any],
+        style: str,
+        style_guidance: Dict[str, Any] | None = None,
+    ) -> str:
+        """根据场景与风格信息构建结构化图像提示词。
+
+        - 统一通过 prompt 模板输出，确保角色/画风描述与其它 Agent 保持一致性。
+        - 若模板渲染失败，则回退到轻量串接逻辑（与旧版本兼容）。
         """
+
         sd = scene_data or {}
-        # 兼容字段：优先视觉描述
+        sg = style_guidance or {}
+
+        def _as_list(value: Any) -> List[str]:
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                return [str(value).strip()]
+            return []
+
+        def _dedup(values: List[str]) -> List[str]:
+            seen = set()
+            result = []
+            for item in values:
+                if not item:
+                    continue
+                if item not in seen:
+                    seen.add(item)
+                    result.append(item)
+            return result
+
         visual_desc = (sd.get("visual_description") or sd.get("description") or sd.get("title") or "").strip()
         content_focus = (sd.get("content_focus") or "").strip()
         narrative_desc = (sd.get("narrative_description") or "").strip()
-        # 角色注入：若场景标注了 characters_present/character_descriptions，将其作为语义约束追加
-        # 兼容别名：scene_data.characters 视为 character_descriptions 的等价输入
-        chars = sd.get("character_descriptions") or sd.get("characters") or []
-        if not chars:
-            # 回退：仅使用名字
-            names = sd.get("characters_present") or []
-            if names:
-                chars = ["、".join(names)]
 
-        parts = [p for p in [visual_desc, content_focus, narrative_desc] if p]
-        if chars:
-            parts.append("角色设定：" + "；".join(chars))
-        base = "，".join(parts) if parts else "场景静态画面"
+        # 角色结构化描述：优先使用结构化约束，其次角色描述文本
+        character_sections: List[str] = []
+        char_structs = sd.get("character_constraints_struct")
+        if isinstance(char_structs, list):
+            for item in char_structs:
+                if not isinstance(item, dict):
+                    continue
+                name = (item.get("display_name") or item.get("name") or "").strip()
+                segments: List[str] = []
+                for key in ["archetype_or_identity", "species_or_breed"]:
+                    val = item.get(key)
+                    if isinstance(val, str) and val.strip():
+                        segments.append(val.strip())
+                sig = _as_list(item.get("signature_outfit_or_props"))
+                if sig:
+                    segments.append("标志道具：" + "、".join(sig[:4]))
+                traits = _as_list(item.get("key_traits"))
+                if traits:
+                    segments.append("特征：" + "、".join(traits[:6]))
+                role = item.get("role")
+                if isinstance(role, str) and role.strip():
+                    segments.append(f"叙事角色：{role.strip()}")
+                if segments:
+                    block = f"{name}：" + "；".join(segments) if name else "；".join(segments)
+                    character_sections.append(block)
 
-        # 风格融合：支持外部 style 文本与结构化 style_guidance
-        sg = style_guidance or {}
-        # 优先使用结构化的 art_style/风格提示；缺失时不强行回落到 "realistic"，保持风格中立
-        art_style = sg.get("art_style") or sg.get("style") or sg.get("name") or style or ""
-        composition = sg.get("composition") or ""
-        color_palette = sg.get("color_palette") or ""
-        mood = sg.get("mood") or ""
+        if not character_sections:
+            char_descs = _as_list(sd.get("character_descriptions")) or _as_list(sd.get("characters"))
+            if not char_descs:
+                names = _as_list(sd.get("characters_present"))
+                if names:
+                    char_descs.append("登场角色：" + "、".join(names))
+            character_sections = char_descs
 
-        style_bits = [
-            f"风格：{art_style}" if art_style else "",
-            f"构图：{composition}" if composition else "",
-            f"配色：{color_palette}" if color_palette else "",
-            f"氛围：{mood}" if mood else "",
-        ]
-        style_text = "，".join([b for b in style_bits if b])
-        tail = "高质量，细节清晰，构图平衡"
-        # 若无风格信息则不强加默认风格，避免与用户的动画/绘制意图冲突
-        return f"{base}，{style_text}，{tail}" if style_text else f"{base}，{tail}"
+        # 风格 / 媒介 / 情绪等信息
+        style_sections: List[str] = []
+        style_map = {
+            "style_name": "风格",
+            "style_description": "风格说明",
+            "visual_approach": "媒介表现",
+            "narrative_style": "叙事方式",
+            "production_taste": "制作风格",
+        }
+        for key, label in style_map.items():
+            val = sg.get(key)
+            if isinstance(val, str) and val.strip():
+                style_sections.append(f"{label}：{val.strip()}")
+
+        mood_sections = []
+        for key in ["emotional_tone", "mood", "mood_and_atmosphere"]:
+            val = sg.get(key) if key in sg else sd.get(key)
+            if isinstance(val, str) and val.strip():
+                mood_sections.append(val.strip())
+        mood_sections = _dedup(mood_sections)
+
+        color_sections = _dedup(
+            _as_list(sg.get("color_palette")) + _as_list(sd.get("color_palette"))
+        )
+
+        props_sections = _dedup(_as_list(sd.get("props_and_objects")))
+
+        # 辅助 bullet：内容焦点/叙事实要
+        scene_focus = _dedup([item for item in [content_focus, narrative_desc] if item])
+
+        cautionary_notes: List[str] = []
+        anime_hint_sources = style_sections + mood_sections
+        if any("动画" in seg or "动漫" in seg for seg in anime_hint_sources):
+            cautionary_notes.append("保持动画笔触，避免写实摄影质感")
+
+        template_payload = {
+            "scene_description": visual_desc or "场景静态画面",
+            "scene_focus": scene_focus,
+            "character_sections": _dedup(character_sections),
+            "style_sections": _dedup(style_sections),
+            "mood_sections": mood_sections,
+            "color_sections": color_sections,
+            "props_sections": props_sections,
+            "cautionary_notes": cautionary_notes,
+        }
+
+        try:
+            return self._prompt_manager.render_template(
+                "image_autoprompt",
+                template_payload,
+                validate=False,
+            ).strip()
+        except Exception:
+            # 回退：延用旧的串接逻辑，确保功能不中断
+            parts = [visual_desc, content_focus, narrative_desc]
+            chars = _dedup(character_sections)
+            if chars:
+                parts.append("角色设定：" + "；".join(chars))
+
+            base = "，".join([p for p in parts if p]) or "场景静态画面"
+
+            art_style = (
+                sg.get("style_name")
+                or sg.get("visual_approach")
+                or sg.get("style")
+                or style
+                or ""
+            )
+            extra_bits = []
+            if art_style:
+                extra_bits.append(f"风格：{art_style}")
+            if color_sections:
+                extra_bits.append("配色：" + "、".join(color_sections))
+            if mood_sections:
+                extra_bits.append("氛围：" + "、".join(mood_sections))
+
+            tail = "高质量，细节清晰，构图平衡"
+            return f"{base}，{'，'.join(extra_bits)}，{tail}" if extra_bits else f"{base}，{tail}"
 
     async def _generate_with_autoprompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """复合：自动提示词 → 生成 → 可选持久化。"""

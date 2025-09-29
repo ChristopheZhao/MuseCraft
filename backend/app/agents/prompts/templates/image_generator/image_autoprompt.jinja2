@@ -1,0 +1,46 @@
+场景描述：
+{{ scene_description }}
+{% if scene_focus %}
+
+补充要素：
+{% for item in scene_focus %}- {{ item }}
+{% endfor %}
+{% endif %}
+{% if character_sections %}
+
+角色设定：
+{% for block in character_sections %}- {{ block }}
+{% endfor %}
+{% endif %}
+{% if style_sections %}
+
+风格指导：
+{% for block in style_sections %}- {{ block }}
+{% endfor %}
+{% endif %}
+{% if mood_sections %}
+
+情绪与氛围：
+{% for block in mood_sections %}- {{ block }}
+{% endfor %}
+{% endif %}
+{% if color_sections %}
+
+色彩提示：
+{% for block in color_sections %}- {{ block }}
+{% endfor %}
+{% endif %}
+{% if props_sections %}
+
+道具与细节：
+{% for block in props_sections %}- {{ block }}
+{% endfor %}
+{% endif %}
+{% if cautionary_notes %}
+
+注意事项：
+{% for note in cautionary_notes %}- {{ note }}
+{% endfor %}
+{% endif %}
+
+画面要求：高质量，细节清晰，构图平衡
