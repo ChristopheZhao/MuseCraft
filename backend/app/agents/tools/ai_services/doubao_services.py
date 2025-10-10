@@ -328,14 +328,20 @@ class DoubaoVideoService(VideoModelServiceInterface):
             task_id_local = data.get("id") or data.get("task_id") or data.get("data", {}).get("task_id")
             if not task_id_local:
                 raise RuntimeError(f"Doubao create video did not return task id: {data}")
-            video_url_local = await self._poll_video_result(task_id_local, headers)
-            return {"task_id": task_id_local, "video_url": video_url_local}
+            poll_res = await self._poll_video_result(task_id_local, headers)
+            return {
+                "task_id": task_id_local,
+                "video_url": poll_res.get("video_url"),
+                "status": poll_res.get("status"),
+                "provider_error": poll_res.get("provider_error"),
+            }
 
         # 第一次尝试（按自动/显式选择的模型）
         first = await _create_and_poll(chosen_model)
-        task_id = first["task_id"]
-        video_url = first["video_url"]
-        status = "completed" if video_url else "timeout"
+        task_id = first.get("task_id")
+        video_url = first.get("video_url")
+        status = first.get("status", "UNKNOWN")
+        provider_error = first.get("provider_error")
 
         fallback_applied = False
         fallback_reason: Optional[str] = None
@@ -353,16 +359,18 @@ class DoubaoVideoService(VideoModelServiceInterface):
                     pass
                 second = await _create_and_poll(iv2_single_alt_model)
                 if second.get("video_url"):
-                    video_url = second["video_url"]
-                    task_id = second["task_id"]
+                    video_url = second.get("video_url")
+                    task_id = second.get("task_id") or first_attempt_task_id
                     chosen_model = iv2_single_alt_model
-                    status = "completed"
+                    status = second.get("status", "COMPLETED")
+                    provider_error = second.get("provider_error")
                     fallback_applied = True
                     fallback_reason = "provider_timeout"
                 else:
                     # 保持第一次的任务ID与模型，按 timeout 返回
                     fallback_applied = True
                     fallback_reason = "provider_timeout_no_alternative_result"
+                    provider_error = provider_error or {"code": "provider_timeout", "message": "i2v fallback failed"}
 
         # 记录结果日志
         try:
@@ -391,6 +399,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
             "ratio": ratio_for_api or ratio_canonical,
             "requested_ratio": requested_ratio,
         }
+        if provider_error:
+            result["provider_error"] = provider_error
         if fallback_applied:
             result.update({
                 "fallback_applied": True,
@@ -422,7 +432,7 @@ class DoubaoVideoService(VideoModelServiceInterface):
         )
         return {"task_id": task_id, "status": task_status, "video_url": video_url}
 
-    async def _poll_video_result(self, task_id: str, headers: Dict[str, str]) -> str:
+    async def _poll_video_result(self, task_id: str, headers: Dict[str, str]) -> Dict[str, Any]:
         # Poll up to ~3 minutes by default
         max_attempts = int(getattr(self, 'poll_attempts', 36))
         interval = int(getattr(self, 'poll_interval', 5))
@@ -447,17 +457,32 @@ class DoubaoVideoService(VideoModelServiceInterface):
                             or (js.get("data", {}).get("video_result", [{}]) or [{}])[0].get("url")
                             or (js.get("content", {}) or {}).get("video_url")
                         )
-                        if video_url:
-                            return video_url
-                        # Success but no url; break
-                        return ""
+                        return {
+                            "status": status_upper,
+                            "video_url": video_url or "",
+                            "provider_error": None,
+                        }
                     if status_upper in failed_status:
                         self.logger.error(f"Doubao task failed: {js}")
-                        return ""
+                        provider_error = js.get("error") or {}
+                        if not provider_error:
+                            provider_error = {
+                                "code": js.get("error_code") or status_upper.lower(),
+                                "message": js.get("message") or str(js),
+                            }
+                        return {
+                            "status": status_upper,
+                            "video_url": "",
+                            "provider_error": provider_error,
+                        }
                 except Exception as e:
                     self.logger.warning(f"Doubao poll error: {e}")
                 await asyncio.sleep(interval)
-        return ""
+        return {
+            "status": "TIMEOUT",
+            "video_url": "",
+            "provider_error": {"code": "provider_timeout", "message": "poll timeout"},
+        }
 
 
 class DoubaoVLMService(VLMServiceInterface):

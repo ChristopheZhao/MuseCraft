@@ -73,6 +73,10 @@ class SceneContinuityPreparationTool(AsyncTool):
                     "fallback_image_url": {
                         "type": "string",
                         "description": "可选：兜底图像URL（不需要连续性或连续性处理失败时使用）"
+                    },
+                    "workflow_state_id": {
+                        "type": "string",
+                        "description": "可选：明确指定 WorkflowState，确保连续性解析限定在当前任务内"
                     }
                 },
                 "required": ["scene_number"],

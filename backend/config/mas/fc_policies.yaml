@@ -15,3 +15,14 @@ per_agent:
     fc_stage_policy:
       default: auto
       react_rules: []
+  video_generator:
+    tools:
+      expose: true
+      allowed_actions:
+        - video_generation.generate_with_continuity
+        - image_generation.generate_with_autoprompt
+        - scene_continuity_preparation.prepare_scene_input
+        - consistency_tool.get_prompt_assets
+    fc_stage_policy:
+      default: auto
+      react_rules: []

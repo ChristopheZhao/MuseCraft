@@ -11,11 +11,12 @@ from typing import Dict, Any, List, Optional
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from ....services.redis_service import redis_service
 from ....core.config import settings
-from ....services.prompt_safety import (
-    apply_prompt_safety,
-    sanitize_prompt,
-    SafetyContext,
+from ....services.prompt_safety import apply_prompt_safety, sanitize_prompt, SafetyContext, sanitize_with_locks
+from ....services.prompt_safety.rewrite import (
+    is_sensitive_error as ps_is_sensitive_error,
+    rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
 )
+from ....core.consistency_policy import get_consistency_policy
 
 
 class SunoClientTool(AsyncTool):
@@ -253,7 +254,8 @@ class SunoClientTool(AsyncTool):
 
             advisor_meta: Dict[str, Any] = {}
             try:
-                safe_prompt, advice = apply_prompt_safety(
+                # 获取安全建议（仅用于日志/遥测，不注入到实际提示词）
+                _, advice = apply_prompt_safety(
                     enhanced_prompt_with_duration,
                     SafetyContext(
                         modality="audio",
@@ -266,9 +268,10 @@ class SunoClientTool(AsyncTool):
                         },
                     ),
                 )
-                advisor_meta = advice.metadata.copy()
-                sanitized = sanitize_prompt(
-                    safe_prompt,
+                advisor_meta = (advice.metadata or {}).copy()
+                sanitized = sanitize_with_locks(
+                    enhanced_prompt_with_duration,
+                    [],
                     {
                         "modality": "audio",
                         "tool": self.metadata.name,
@@ -276,8 +279,7 @@ class SunoClientTool(AsyncTool):
                         "advisor_layers": advisor_meta.get("applied_layers"),
                     },
                 )
-                enhanced_prompt_with_duration = sanitized.text
-                enhanced_prompt = advice.apply_to_prompt(enhanced_prompt)
+                enhanced_prompt_with_duration = sanitized.text or enhanced_prompt_with_duration
                 advisor_meta["sanitized_changed"] = sanitized.changed
                 advisor_meta["sanitized_matches"] = sanitized.matches
             except Exception as advisor_exc:
@@ -409,10 +411,90 @@ class SunoClientTool(AsyncTool):
                     "prompt_safety": advisor_meta,
                 }
                 
-        except httpx.TimeoutException:
-            raise ToolError("Suno AI API request timeout", self.metadata.name)
+        except httpx.TimeoutException as te:
+            raise ToolError("Suno AI API request timeout", self.metadata.name) from te
+        except ToolError as terr:
+            # 仅敏感/违规错误时尝试一次轻量重写
+            try:
+                policy = get_consistency_policy()
+                ps_cfg = getattr(policy, "prompt_safety", None)
+                enable_rewrite = bool(getattr(ps_cfg, "enable_rewrite_on_sensitive_error", False))
+                rewrite_model = getattr(ps_cfg, "rewrite_model", None)
+            except Exception:
+                enable_rewrite = False
+                rewrite_model = None
+
+            if enable_rewrite and ps_is_sensitive_error(terr):
+                rewritten, telemetry = await ps_rewrite_preserving_locks(
+                    enhanced_prompt_with_duration,
+                    [],
+                    model=rewrite_model,
+                    language="en",
+                    metadata={"action": "background_music", "tool": self.metadata.name},
+                )
+                try:
+                    self.logger.info(
+                        "prompt_rewrite(audio): applied=%s reason=sensitive_error model=%s tokens=%s",
+                        bool(rewritten), telemetry.get("model"), telemetry.get("tokens")
+                    )
+                except Exception:
+                    pass
+                if rewritten and rewritten.strip() and rewritten.strip() != enhanced_prompt_with_duration:
+                    # 重试一次
+                    payload_retry = dict(payload)
+                    payload_retry["prompt"] = rewritten.strip()
+                    # 保留日志
+                    try:
+                        self.logger.info(
+                            "PROMPT_COMBINED(generate_audio:rewrite): len=%d bytes text=%s",
+                            len(payload_retry["prompt"].encode("utf-8")),
+                            payload_retry["prompt"],
+                        )
+                    except Exception:
+                        pass
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
+                        response = await client.post(
+                            f"{self.base_url}/api/v1/generate",
+                            headers=headers,
+                            json=payload_retry,
+                        )
+                        if response.status_code != 200:
+                            raise ToolError(
+                                f"Suno AI API error: {response.status_code} - {response.text}", self.metadata.name
+                            )
+                        result = response.json()
+                        if result.get("code") == 200:
+                            data = result.get("data", {})
+                            api_task_id = data.get("taskId", "") or data.get("task_id", "")
+                            if not api_task_id:
+                                raise ToolError("No task ID returned from Suno API", self.metadata.name)
+                            # 回用原有分支（轮询/回调）简化：直接用轮询
+                            audio_result = await self._poll_generation_status(api_task_id)
+                            audio_url = audio_result.get("audio_url", "") if audio_result else ""
+                            return {
+                                "audio_url": audio_url,
+                                "task_id": api_task_id,
+                                "title": title,
+                                "duration": duration,
+                                "style": style,
+                                "mood": mood,
+                                "instrumental": instrumental,
+                                "prompt_used": payload_retry["prompt"],
+                                "generation_mode": "background_music",
+                                "file_format": "mp3",
+                                "quality": "128kbps",
+                                "commercial_license": True,
+                                "prompt_safety_rewrite": {
+                                    "applied": True,
+                                    "reason": "sensitive_error",
+                                    "model": rewrite_model,
+                                },
+                                "prompt_safety": advisor_meta,
+                            }
+            # 非敏感或重写失败：交由上层
+            raise
         except Exception as e:
-            raise ToolError(f"Background music generation failed: {str(e)}", self.metadata.name)
+            raise ToolError(f"Background music generation failed: {str(e)}", self.metadata.name) from e
     
     async def _generate_callback_url(self, task_id: str = None) -> str:
         """生成动态回调URL"""

@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 import httpx
 
 from ....core.config import settings
+from ....core.consistency_policy import get_consistency_policy
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 from .service_interfaces import get_vlm_service
@@ -20,6 +21,11 @@ from ....services.prompt_safety import (
     apply_prompt_safety,
     get_prompt_safety_advisor,
     SafetyContext,
+    sanitize_with_locks,
+)
+from ....services.prompt_safety.rewrite import (
+    is_sensitive_error as ps_is_sensitive_error,
+    rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
 )
 
 
@@ -201,7 +207,7 @@ class ImageGenerationTool(AsyncTool):
         # 风格改为“按需透传”：无则不默认，避免硬编码偏置
         style = (params.get("style") or "").strip()
         size = params.get("size", "1024x1024")
-        
+
         # 轻量提示词质量校验
         if self._is_prompt_weak(prompt):
             return {
@@ -235,8 +241,16 @@ class ImageGenerationTool(AsyncTool):
                 ),
             )
             advisor_meta = advice.metadata
-            sanitized = sanitize_prompt(
+            # 锁定片段（可选）：若上层传入 consistency_locks/locked_segments，则在 sanitize 时保持不变
+            try:
+                locks = params.get("locked_segments") or params.get("consistency_locks")
+                if not isinstance(locks, list):
+                    locks = []
+            except Exception:
+                locks = []
+            sanitized = sanitize_with_locks(
                 safe_prompt,
+                locks,
                 {
                     "modality": "image",
                     "scene_number": params.get("scene_number"),
@@ -244,7 +258,7 @@ class ImageGenerationTool(AsyncTool):
                     "advisor_layers": advisor_meta.get("applied_layers"),
                 },
             )
-            prompt = sanitized.text
+            prompt = sanitized.text or safe_prompt
             advisor_meta["sanitized_changed"] = sanitized.changed
             advisor_meta["sanitized_matches"] = sanitized.matches
 
@@ -254,27 +268,109 @@ class ImageGenerationTool(AsyncTool):
                 gen_args["style"] = style
             if params.get("quality"):
                 gen_args["quality"] = params["quality"]
-            res = await self._vlm_service.image_generation(**gen_args)
+            # 调试期保留组合提示词日志
+            try:
+                prompt_bytes_len = len(prompt.encode("utf-8")) if isinstance(prompt, str) else 0
+                self.logger.info(
+                    "PROMPT_COMBINED(generate_image): len=%d bytes text=%s",
+                    prompt_bytes_len,
+                    prompt,
+                )
+            except Exception:
+                pass
 
-            image_url = res.get("image_url") or res.get("url") or ""
-            if not image_url:
-                # 将失败抛出为工具错误，以便上层Agent识别为失败而不是“成功但无产物”导致的重复尝试
-                raise ToolError("image_generation returned no image_url", self.metadata.name)
-            return {
-                "success": True,
-                "image_url": image_url,
-                "generated_prompt": prompt,
-                "style": style,
-                "size": size,
-                "generation_metadata": res,
-                "prompt_safety": advisor_meta,
-            }
+            try:
+                res = await self._vlm_service.image_generation(**gen_args)
+                image_url = res.get("image_url") or res.get("url") or ""
+                if not image_url:
+                    # 统一抛错，让下方敏感处理或上层 ReAct 接手
+                    raise ToolError("image_generation returned no image_url", self.metadata.name)
+                return {
+                    "success": True,
+                    "image_url": image_url,
+                    "generated_prompt": prompt,
+                    "style": style,
+                    "size": size,
+                    "generation_metadata": res,
+                    "prompt_safety": advisor_meta,
+                }
+            except ToolError as terr:
+                # 仅当供应商明确返回“敏感/违规”错误时，触发一次轻量重写
+                try:
+                    policy = get_consistency_policy()
+                    ps_cfg = getattr(policy, "prompt_safety", None)
+                    enable_rewrite = bool(getattr(ps_cfg, "enable_rewrite_on_sensitive_error", False))
+                except Exception:
+                    ps_cfg = None
+                    enable_rewrite = False
+
+                if enable_rewrite and ps_is_sensitive_error(terr):
+                    locked_segments = []
+                    # 支持可选锁定片段透传：params["locked_segments"] 或 params["consistency_locks"]
+                    try:
+                        cand = params.get("locked_segments") or params.get("consistency_locks") or []
+                        if isinstance(cand, list):
+                            locked_segments = [str(x).strip() for x in cand if str(x).strip()]
+                    except Exception:
+                        locked_segments = []
+
+                    rewrite_model = getattr(ps_cfg, "rewrite_model", None)
+                    rewritten, telemetry = await ps_rewrite_preserving_locks(
+                        prompt,
+                        locked_segments,
+                        model=rewrite_model,
+                        language="zh",
+                        metadata={"action": "generate_image", "scene_number": params.get("scene_number"), "tool": self.metadata.name},
+                    )
+                    # 记录事件
+                    try:
+                        self.logger.info(
+                            "prompt_rewrite(image): applied=%s reason=sensitive_error model=%s tokens=%s",
+                            bool(rewritten),
+                            telemetry.get("model"),
+                            telemetry.get("tokens"),
+                        )
+                    except Exception:
+                        pass
+
+                    if rewritten and rewritten.strip() and rewritten.strip() != prompt:
+                        prompt = rewritten.strip()
+                        # 调试日志：重写后的组合提示词
+                        try:
+                            self.logger.info(
+                                "PROMPT_COMBINED(generate_image:rewrite): len=%d bytes text=%s",
+                                len(prompt.encode("utf-8")),
+                                prompt,
+                            )
+                        except Exception:
+                            pass
+                        # 重试一次
+                        gen_args_retry = dict(gen_args)
+                        gen_args_retry["prompt"] = prompt
+                        res2 = await self._vlm_service.image_generation(**gen_args_retry)
+                        image_url2 = res2.get("image_url") or res2.get("url") or ""
+                        if not image_url2:
+                            # 二次仍失败，走原有失败路径
+                            raise terr
+                        return {
+                            "success": True,
+                            "image_url": image_url2,
+                            "generated_prompt": prompt,
+                            "style": style,
+                            "size": size,
+                            "generation_metadata": res2,
+                            "prompt_safety": advisor_meta,
+                            "prompt_safety_rewrite": {
+                                "applied": True,
+                                "reason": "sensitive_error",
+                                "model": rewrite_model,
+                            },
+                        }
+                # 非敏感或关闭重写：交由下方 except 统一返回失败
+                raise
                 
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"图像生成异常: {str(e)}"
-            }
+            return {"success": False, "error": f"图像生成异常: {str(e)}"}
     
     async def _create_image_prompt_from_scene(
         self,
@@ -704,26 +800,9 @@ class ImageGenerationTool(AsyncTool):
                 f"请直接输出最终提示词。"
             )
 
-            advisor = get_prompt_safety_advisor()
-            provider_name = None
-            if hasattr(llm, "get_provider_name"):
-                try:
-                    provider_name = llm.get_provider_name()
-                except Exception:
-                    provider_name = None
-            safety_context = SafetyContext(
-                modality="image",
-                provider=provider_name,
-                language="zh",
-                metadata={
-                    "action": "gen_image_prompt",
-                    "scene_number": params.get("scene_number"),
-                },
-                tags=["prompt_engineering"],
-            )
-            advice = advisor.get_advice(safety_context, user_ctx)
-            system_prompt = advice.compose_system_prompt(system) or system
-            user_payload = advice.apply_to_prompt(user_ctx)
+            # 安全提示不注入LLM提示词，仅用于遥测；生成后的结果再做 sanitize
+            system_prompt = system
+            user_payload = user_ctx
 
             res = await llm.chat_completion(
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_payload}],
@@ -733,18 +812,17 @@ class ImageGenerationTool(AsyncTool):
             prompt = (res.get("content") or "").strip()
             if not prompt:
                 return {"success": False, "error": "未生成提示词"}
-            prompt = advice.apply_to_prompt(prompt)
-            advisor_meta = advice.metadata.copy()
+            advisor_meta = {}
             sanitized = sanitize_prompt(
                 prompt,
                 {
                     "modality": "image",
                     "scene_number": params.get("scene_number"),
                     "tool": self.metadata.name,
-                    "advisor_layers": advisor_meta.get("applied_layers"),
+                    "advisor_layers": advisor_meta.get("applied_layers") if advisor_meta else None,
                 },
             )
-            prompt = sanitized.text
+            prompt = sanitized.text or prompt
             advisor_meta["sanitized_changed"] = sanitized.changed
             advisor_meta["sanitized_matches"] = sanitized.matches
             return {
@@ -757,18 +835,23 @@ class ImageGenerationTool(AsyncTool):
             return {"success": False, "error": f"提示词建议失败: {str(e)}"}
 
     def _is_prompt_weak(self, prompt: str) -> bool:
-        """极轻量提示词质量判断：
-        - 长度不足（<30字符）视为弱；
-        - 在较短（<50字符）时若包含多项口号式词汇也视为弱。
-        仅作为底线兜底，避免在Agent中硬编码流程。
-        """
+        """极轻量提示词质量判断（读取配置）"""
+        cfg = getattr(settings, "IMAGE_TOOL_PROMPT_RULES", {}) or {}
+        min_length = int(cfg.get("min_length", 30))
+        allow_weak = bool(cfg.get("allow_weak_prompt", False))
         p = (prompt or "").strip()
-        if len(p) < 30:
+        if allow_weak:
+            return False
+        if len(p) < min_length:
             return True
-        weak_markers = ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]
-        if len(p) < 50:
-            hits = sum(1 for w in weak_markers if w in p)
-            if hits >= 2:
+        weak_markers = cfg.get("weak_markers")
+        if not isinstance(weak_markers, list):
+            weak_markers = ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]
+        near_limit = int(cfg.get("weak_marker_length_threshold", 50))
+        if len(p) < near_limit:
+            hits = sum(1 for w in weak_markers if isinstance(w, str) and w and w in p)
+            threshold = int(cfg.get("weak_marker_threshold", 2))
+            if hits >= threshold:
                 return True
         return False
     

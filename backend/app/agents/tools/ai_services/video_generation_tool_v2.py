@@ -4,11 +4,21 @@
 
 from typing import Dict, Any, List, Optional
 import logging
+import json
+import re
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from .service_interfaces import get_video_service
 from ....core.video_config_manager import get_video_config
 from ....core.config import settings
+from ....core.consistency_policy import get_consistency_policy
+from ....services.prompt_safety import apply_prompt_safety, sanitize_prompt, SafetyContext
+from ....services.prompt_safety.rewrite import (
+    is_sensitive_error as ps_is_sensitive_error,
+    rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
+)
+from ....services.reference_bank import get_scene_reference, store_scene_reference
+from ....services.enhanced_ai_client import enhanced_ai_client, TaskType
 
 
 class VideoGenerationTool(AsyncTool):
@@ -49,6 +59,7 @@ class VideoGenerationTool(AsyncTool):
         
         self.video_service = None
         self.video_config = get_video_config()
+        self._telemetry_logger = logging.getLogger("consistency_telemetry")
         
     def _initialize(self):
         """初始化视频生成工具"""
@@ -468,6 +479,7 @@ class VideoGenerationTool(AsyncTool):
             char_struct = params.get("character_constraints_struct") or []
             style_cons = params.get("style_constraints") or []
             neg_cons = params.get("negative_constraints") or []
+            consistency_meta = params.pop('_consistency_meta', {}) if isinstance(params, dict) else {}
             extra = []
             # 角色约束（结构化）
             if isinstance(char_cons, list) and char_cons:
@@ -499,72 +511,61 @@ class VideoGenerationTool(AsyncTool):
                         lines.append(line)
                 if lines:
                     extra.append("角色设定：" + "；".join(lines))
-            # 风格约束（优先使用 FC 提供）
-            if isinstance(style_cons, list) and style_cons:
-                extra.append("风格指导：" + "；".join([str(x) for x in style_cons if isinstance(x, str) and x.strip()]))
+            # 风格与约束合并（锁定/建议分层）
+            policy = get_consistency_policy()
+            scene_key = params.get("scene_number")
+            scene_ref = str(scene_key) if scene_key is not None else "global"
+            style_meta = (consistency_meta.get('style') or {})
+            style_snapshot = style_meta.get(scene_ref) or style_meta.get('global')
+            if style_snapshot:
+                style_locked = style_snapshot.get('locked', [])
+                style_suggestions = style_snapshot.get('suggestions', [])
             else:
-                # 软兜底（非侵入）：FC 未提供风格、且当前缺少强视觉锚点（T2V场景）时，基于WF概念计划提炼极简风格短语
-                try:
-                    has_continuity = bool(params.get("continuity_frame"))
-                    has_image = bool(params.get("image_url"))
-                    wf_id_fb = params.get("workflow_state_id")
-                    if (not has_continuity) and (not has_image) and wf_id_fb:
-                        from ....core.workflow_state import workflow_manager
-                        wf_fb = workflow_manager.get_workflow(wf_id_fb)
-                        fb_styles: list = []
-                        if wf_fb:
-                            # 优先 concept_plan.intelligent_style_design；回退 WorkflowState.intelligent_style_design
-                            isd = {}
-                            try:
-                                cp = getattr(wf_fb, 'concept_plan', {}) or {}
-                                if isinstance(cp, dict):
-                                    isd = cp.get('intelligent_style_design') or {}
-                            except Exception:
-                                isd = {}
-                            if not isd:
-                                try:
-                                    isd = getattr(wf_fb, 'intelligent_style_design', {}) or {}
-                                except Exception:
-                                    isd = {}
-                            if isinstance(isd, dict) and isd:
-                                # 提取关键信息，去重去空，限制长度
-                                cand = []
-                                for k in ("visual_approach", "narrative_style", "production_taste", "emotional_tone", "style_name"):
-                                    v = isd.get(k)
-                                    if isinstance(v, str) and v.strip():
-                                        cand.append(v.strip())
-                                # 合成 1-2 条紧凑短语
-                                if cand:
-                                    line = "，".join(cand)
-                                    if len(line) > 120:
-                                        line = line[:120]
-                                    fb_styles = [line]
-                        if fb_styles:
-                            params["style_constraints"] = fb_styles
-                            extra.append("风格指导：" + "；".join(fb_styles))
-                            try:
-                                self.logger.info(
-                                    f"STYLE_INJECT(generate_video): styles={len(fb_styles)} source=fallback reasons=no_fc_style+t2v"
-                                )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-            # 负向约束
-            if isinstance(neg_cons, list) and neg_cons:
-                extra.append("避免：" + "；".join([str(x) for x in neg_cons if isinstance(x, str) and x.strip()]))
+                style_locked = []
+                style_suggestions = [str(x).strip() for x in (style_cons or []) if str(x).strip()]
+            if style_locked:
+                extra.append("风格锁定：" + "；".join(style_locked))
+            if style_suggestions:
+                extra.append("风格指导：" + "；".join(style_suggestions))
+
+            negative_meta = (consistency_meta.get('negative') or {})
+            negative_snapshot = negative_meta.get(scene_ref)
+            if negative_snapshot:
+                locked_neg = negative_snapshot.get('locked', [])
+                suggested_neg = negative_snapshot.get('suggestions', [])
+            else:
+                locked_neg = []
+                suggested_neg = [str(x).strip() for x in (neg_cons or []) if str(x).strip()]
+            if locked_neg:
+                extra.append("锁定约束：" + "；".join(locked_neg))
+            if suggested_neg:
+                extra.append("建议约束：" + "；".join(suggested_neg))
             # 合并追加段
             if extra:
                 try:
-                    self.logger.info(f"CHAR_INJECT(generate_video): chars={len(char_cons or [])} neg={len(neg_cons or [])}")
+                    self.logger.info(
+                        "CHAR_INJECT(generate_video): chars=%d style_locked=%d style_soft=%d neg_locked=%d neg_soft=%d",
+                        len(char_cons or []),
+                        len(style_locked),
+                        len(style_suggestions),
+                        len(locked_neg),
+                        len(suggested_neg),
+                    )
                     if char_struct:
                         self.logger.info(f"CHAR_INJECT_STRUCT(generate_video): items={len(char_struct or [])}")
-                    if style_cons:
-                        self.logger.info(f"STYLE_INJECT(generate_video): styles={len(style_cons or [])} source=fc")
                 except Exception:
                     pass
                 prompt = (prompt + "\n" + "\n".join(extra)) if prompt else "\n".join(extra)
                 params["prompt"] = prompt
+                self._run_consistency_guard(
+                    params.get("workflow_state_id"),
+                    scene_key,
+                    prompt,
+                    style_locked,
+                    locked_neg,
+                    char_struct if isinstance(char_struct, list) else [],
+                    policy,
+                )
         except Exception:
             pass
         try:
@@ -774,11 +775,14 @@ class VideoGenerationTool(AsyncTool):
             if not isinstance(result, dict) or not result.get('video_url'):
                 status = (result or {}).get('status') if isinstance(result, dict) else None
                 fb_reason = (result or {}).get('fallback_reason') if isinstance(result, dict) else None
+                provider_error = (result or {}).get('provider_error') if isinstance(result, dict) else None
                 mdl = (result or {}).get('model') if isinstance(result, dict) else model
                 err_type = str(fb_reason or (status or 'no_video_url'))
-                # 使用 ToolError 的 error_code 让上层拿到明确错误类型（如 provider_timeout）
+                if isinstance(provider_error, dict):
+                    err_type = provider_error.get('code') or err_type
+                # 使用 ToolError 的 error_code 让上层拿到明确错误类型（如 provider_timeout/sensitive）
                 raise ToolError(
-                    message=f"video generation returned no url (status={status}, model={mdl}, fallback_reason={fb_reason})",
+                    message=f"video generation returned no url (status={status}, model={mdl}, fallback_reason={fb_reason}, provider_error={provider_error})",
                     tool_name=self.metadata.name,
                     error_code=err_type
                 )
@@ -802,6 +806,17 @@ class VideoGenerationTool(AsyncTool):
         except Exception as e:
             # 针对 image_url 拉取失败（400/403）的轻量修复重试：上云后重试一次
             emsg = str(e)
+            sensitive_details = self._extract_sensitivity_details(emsg, final_image_input if isinstance(final_image_input, str) else None)
+            if sensitive_details:
+                self.logger.warning(
+                    "INPUT_IMAGE_SENSITIVE_DETECTED: scene=%s request_id=%s", args.get("scene_number"), sensitive_details.get("request_id")
+                )
+                raise ToolError(
+                    f"Video generation failed: {sensitive_details.get('provider_error', {}).get('message', 'input image flagged as sensitive')}",
+                    self.metadata.name,
+                    error_code="sensitive_input_image",
+                    details=sensitive_details,
+                ) from e
             try_rehost_retry = False
             if isinstance(final_image_input, str) and final_image_input.startswith("http"):
                 markers = ["param\":\"image_url\"", "status code: 403", "InvalidParameter", "image_url"]
@@ -833,10 +848,51 @@ class VideoGenerationTool(AsyncTool):
                         return result
                 except Exception as _e:
                     self.logger.error(f"RETRY_AFTER_IMAGE_REHOST_FAILED: {_e}")
-                    raise ToolError(f"Video generation failed: {str(e)}", self.metadata.name)
             # 非 image_url 类问题或重试失败：按原样抛出
-            self.logger.error(f"Video generation failed: {str(e)}")
-            raise ToolError(f"Video generation failed: {str(e)}", self.metadata.name)
+            self.logger.error(f"Video generation failed: {emsg}")
+            if isinstance(e, ToolError):
+                raise
+            raise ToolError(
+                f"Video generation failed: {emsg}",
+                self.metadata.name,
+                error_code=getattr(e, "error_code", None),
+                details=sensitive_details if 'sensitive_details' in locals() else None,
+            ) from e
+
+    def _extract_sensitivity_details(self, error_message: str, image_input: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Parse provider error payload to surface structured sensitive-image diagnostics."""
+        if "InputImageSensitiveContentDetected" not in (error_message or ""):
+            return None
+
+        details: Dict[str, Any] = {"provider": "doubao"}
+        payload = {}
+        try:
+            start_idx = error_message.index('{"error"')
+            payload = json.loads(error_message[start_idx:])
+        except Exception:
+            payload = {}
+
+        provider_error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if provider_error:
+            details["provider_error"] = provider_error
+            msg = provider_error.get("message", "")
+        else:
+            msg = error_message
+
+        request_id = None
+        try:
+            match = re.search(r"Request id:\s*([A-Za-z0-9-]+)", msg or error_message)
+            if match:
+                request_id = match.group(1)
+        except Exception:
+            request_id = None
+        if request_id:
+            details["request_id"] = request_id
+
+        if isinstance(image_input, str) and image_input:
+            details["image_url"] = image_input
+
+        return details
 
     async def _rehost_external_image_url(self, remote_url: str) -> str:
         """将远程URL下载到本地后上传到自有OSS，返回可公开访问的URL。"""
@@ -876,12 +932,190 @@ class VideoGenerationTool(AsyncTool):
             return up_res['url']
         raise RuntimeError("OSS upload did not return url")
 
+    def _log_consistency_event(self, stage: str, workflow_state_id: Any, scene_number: Any, payload: Dict[str, Any]) -> None:
+        try:
+            record = {
+                "stage": stage,
+                "workflow_state_id": workflow_state_id,
+                "scene_number": scene_number,
+                **payload,
+            }
+            self._telemetry_logger.info(json.dumps(record, ensure_ascii=False))
+        except Exception:
+            pass
+
+    def _collect_locked_segments(self, consistency_meta: Dict[str, Any], scene_number: Any) -> Dict[str, List[str]]:
+        """Return locked segments grouped by type for a given scene."""
+
+        result: Dict[str, List[str]] = {
+            "style": [],
+            "negative": [],
+            "all": [],
+        }
+        if not isinstance(consistency_meta, dict):
+            return result
+
+        scene_ref = str(scene_number) if scene_number is not None else "global"
+
+        try:
+            style_meta = consistency_meta.get("style") or {}
+            if isinstance(style_meta, dict):
+                snapshot = style_meta.get(scene_ref) or style_meta.get("global") or {}
+                locked = snapshot.get("locked", []) if isinstance(snapshot, dict) else []
+                result["style"] = [str(item).strip() for item in locked if str(item).strip()]
+        except Exception:
+            result["style"] = []
+
+        try:
+            negative_meta = consistency_meta.get("negative") or {}
+            if isinstance(negative_meta, dict):
+                snapshot = negative_meta.get(scene_ref) or {}
+                locked = snapshot.get("locked", []) if isinstance(snapshot, dict) else []
+                result["negative"] = [str(item).strip() for item in locked if str(item).strip()]
+        except Exception:
+            result["negative"] = []
+
+        result["all"] = [item for item in (result["style"] + result["negative"]) if item]
+        return result
+
+    async def _rewrite_prompt_for_safety(
+        self,
+        prompt: str,
+        locked_segments: List[str],
+        rewrite_model: Optional[str],
+        workflow_state_id: Any,
+        scene_number: Any,
+    ) -> tuple[Optional[str], Dict[str, Any]]:
+        """Delegate to shared rewrite with locked-segment preservation and telemetry."""
+        rewritten, telemetry = await ps_rewrite_preserving_locks(
+            prompt,
+            locked_segments,
+            model=rewrite_model,
+            language="zh",
+            metadata={"workflow_state_id": workflow_state_id, "scene_number": scene_number, "tool": self.metadata.name},
+        )
+        return rewritten, telemetry
+
+    @staticmethod
+    def _is_sensitive_error(err: ToolError) -> bool:
+        return ps_is_sensitive_error(err)
+
     async def _generate_with_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """合并连续性准备与生成（确定性）：解析上一场景尾帧 → 生成 → 可选存尾帧。"""
         prompt = params.get("prompt")
         duration = params.get("duration")
         if not prompt or duration is None:
             raise ToolValidationError("prompt and duration are required", self.metadata.name)
+
+        policy = get_consistency_policy()
+        workflow_state_id = params.get("workflow_state_id")
+        scene_key = params.get("scene_number")
+
+        consistency_meta = params.get('_consistency_meta') if isinstance(params, dict) else {}
+        locked_info = self._collect_locked_segments(consistency_meta, scene_key)
+        locked_segments = locked_info.get("all", [])
+
+        prompt_safety_cfg = getattr(policy, "prompt_safety", None)
+        prompt = str(prompt)
+        advice = None
+        sanitized = None
+        sanitized_changed = False
+        placeholder_map: Dict[str, str] = {}
+        if prompt_safety_cfg and getattr(prompt_safety_cfg, "enabled", True):
+            try:
+                provider_name = None
+                if self.video_service and hasattr(self.video_service, "get_provider_name"):
+                    provider_name = self.video_service.get_provider_name()
+
+                prompt_for_safety = prompt
+                if bool(getattr(prompt_safety_cfg, "preserve_locked_sections", True)) and locked_segments:
+                    for idx, segment in enumerate(locked_segments):
+                        seg_text = str(segment).strip()
+                        if not seg_text:
+                            continue
+                        token = f"<<LOCKED_{idx}>>"
+                        if seg_text in prompt_for_safety:
+                            prompt_for_safety = prompt_for_safety.replace(seg_text, token)
+                            placeholder_map[token] = seg_text
+
+                safe_prompt, advice = apply_prompt_safety(
+                    prompt_for_safety,
+                    SafetyContext(
+                        modality="video",
+                        provider=provider_name,
+                        language="zh",
+                        metadata={
+                            "scene_number": scene_key,
+                            "workflow_state_id": workflow_state_id,
+                        },
+                    ),
+                )
+
+                sanitized = sanitize_prompt(
+                    safe_prompt,
+                    {
+                        "modality": "video",
+                        "scene_number": scene_key,
+                        "tool": self.metadata.name,
+                        "advisor_layers": (advice.metadata or {}).get("applied_layers") if advice else None,
+                    },
+                )
+                sanitized_changed = sanitized.changed
+                prompt_processed = sanitized.text or safe_prompt
+
+                if placeholder_map:
+                    for token, seg_text in placeholder_map.items():
+                        prompt_processed = prompt_processed.replace(token, seg_text)
+
+                if not prompt_processed.strip():
+                    prompt_processed = prompt
+
+                prompt = prompt_processed
+                params["prompt"] = prompt
+                self._log_consistency_event(
+                    "prompt_safety",
+                    workflow_state_id,
+                    scene_key,
+                    {
+                        "enabled": True,
+                        "level": str(getattr(prompt_safety_cfg, "level", "moderate")),
+                        "sanitized_changed": sanitized_changed,
+                        "preserve_locked": bool(getattr(prompt_safety_cfg, "preserve_locked_sections", True)),
+                        "locked_segments": locked_segments,
+                        "advisor_layers": (advice.metadata or {}).get("applied_layers") if advice else None,
+                        "sanitized_matches": sanitized.matches if sanitized else [],
+                    },
+                )
+            except Exception as exc:
+                try:
+                    self.logger.debug("Prompt safety advisor skipped: %s", exc)
+                except Exception:
+                    pass
+                prompt = str(prompt)
+                params["prompt"] = prompt
+                self._log_consistency_event(
+                    "prompt_safety",
+                    workflow_state_id,
+                    scene_key,
+                    {
+                        "enabled": True,
+                        "error": str(exc)[:200],
+                    },
+                )
+        else:
+            params["prompt"] = prompt
+            if prompt_safety_cfg:
+                self._log_consistency_event(
+                    "prompt_safety",
+                    workflow_state_id,
+                    scene_key,
+                    {
+                        "enabled": False,
+                        "locked_segments": locked_segments,
+                    },
+                )
+
+        base_prompt = str(prompt)
 
         # 纠偏：duration → provider 离散值
         try:
@@ -928,20 +1162,28 @@ class VideoGenerationTool(AsyncTool):
             prev_scene_no = prev_scene_no or None
 
         if not continuity_frame and prev_scene_no is not None:
-            # 1) 内存优先（URL更优）
+            # 0) 参考缓存
             try:
-                from ..tool_registry import get_tool_registry
-                from ..base_tool import ToolInput as TI
-                registry = get_tool_registry()
-                final_tool = registry.get_tool("final_frame_tool")
-                resp_mem = await final_tool.execute(TI(action="get_final_frame_from_memory", parameters={"scene_number": prev_scene_no, "prefer_url": True}))
-                pay_mem = getattr(resp_mem, 'result', resp_mem)
-                if isinstance(pay_mem, dict):
-                    url = pay_mem.get("url") or pay_mem.get("data_url")
-                    if isinstance(url, str) and url.startswith("http"):
-                        continuity_frame = url
+                ref_frame = get_scene_reference(params.get("workflow_state_id"), prev_scene_no)
+                if isinstance(ref_frame, str) and ref_frame.startswith("http"):
+                    continuity_frame = ref_frame
             except Exception:
-                pass
+                continuity_frame = continuity_frame
+            # 1) 内存优先（URL更优）
+            if not continuity_frame:
+                try:
+                    from ..tool_registry import get_tool_registry
+                    from ..base_tool import ToolInput as TI
+                    registry = get_tool_registry()
+                    final_tool = registry.get_tool("final_frame_tool")
+                    resp_mem = await final_tool.execute(TI(action="get_final_frame_from_memory", parameters={"scene_number": prev_scene_no, "prefer_url": True}))
+                    pay_mem = getattr(resp_mem, 'result', resp_mem)
+                    if isinstance(pay_mem, dict):
+                        url = pay_mem.get("url") or pay_mem.get("data_url")
+                        if isinstance(url, str) and url.startswith("http"):
+                            continuity_frame = url
+                except Exception:
+                    pass
             # 2) WF 尾帧字段
             if not continuity_frame:
                 try:
@@ -999,6 +1241,10 @@ class VideoGenerationTool(AsyncTool):
                 continuity_frame = None
 
         next_params = dict(params)
+        consistency_meta_snapshot = None
+        if isinstance(next_params, dict) and "_consistency_meta" in next_params:
+            consistency_meta_snapshot = next_params["_consistency_meta"]
+
         if continuity_frame:
             next_params["continuity_frame"] = continuity_frame
             # 若供应商支持首尾帧，可由上层按需注入 first/last；此处不强制策略，保持最小职责
@@ -1018,51 +1264,55 @@ class VideoGenerationTool(AsyncTool):
             style_cons_gwc = params.get("style_constraints") or []
             if isinstance(style_cons_gwc, list) and style_cons_gwc:
                 self.logger.info(f"STYLE_INJECT(generate_with_continuity): styles={len(style_cons_gwc)} source=fc")
-            else:
-                # 软兜底触发条件：无FC风格 + 无连续性帧 + 无参考图（T2V）
-                try:
-                    no_cont = not bool(continuity_frame)
-                    no_img = not bool(params.get("image_url"))
-                    wf_id_fb = params.get("workflow_state_id")
-                    if no_cont and no_img and wf_id_fb:
-                        from ....core.workflow_state import workflow_manager
-                        wf_fb = workflow_manager.get_workflow(wf_id_fb)
-                        fb_styles: list = []
-                        if wf_fb:
-                            isd = {}
-                            try:
-                                cp = getattr(wf_fb, 'concept_plan', {}) or {}
-                                if isinstance(cp, dict):
-                                    isd = cp.get('intelligent_style_design') or {}
-                            except Exception:
-                                isd = {}
-                            if not isd:
-                                try:
-                                    isd = getattr(wf_fb, 'intelligent_style_design', {}) or {}
-                                except Exception:
-                                    isd = {}
-                            if isinstance(isd, dict) and isd:
-                                cand = []
-                                for k in ("visual_approach", "narrative_style", "production_taste", "emotional_tone", "style_name"):
-                                    v = isd.get(k)
-                                    if isinstance(v, str) and v.strip():
-                                        cand.append(v.strip())
-                                if cand:
-                                    line = "，".join(cand)
-                                    if len(line) > 120:
-                                        line = line[:120]
-                                    fb_styles = [line]
-                        if fb_styles:
-                            params["style_constraints"] = fb_styles
-                            next_params["style_constraints"] = fb_styles
-                            self.logger.info(
-                                f"STYLE_INJECT(generate_with_continuity): styles={len(fb_styles)} source=fallback reasons=no_fc_style+t2v"
-                            )
-                except Exception:
-                    pass
         except Exception:
             pass
-        gen_res = await self._generate_video(next_params)
+        if consistency_meta_snapshot is None and isinstance(next_params, dict):
+            consistency_meta_snapshot = next_params.get("_consistency_meta")
+        try:
+            gen_res = await self._generate_video(next_params)
+        except ToolError as err:
+            should_rewrite = (
+                prompt_safety_cfg
+                and getattr(prompt_safety_cfg, "enable_rewrite_on_sensitive_error", False)
+                and self._is_sensitive_error(err)
+            )
+            if should_rewrite:
+                rewrite_prompt, rewrite_event = await self._rewrite_prompt_for_safety(
+                    base_prompt,
+                    locked_segments,
+                    getattr(prompt_safety_cfg, "rewrite_model", None),
+                    workflow_state_id,
+                    scene_key,
+                )
+                original_prompt_text = (next_params.get("prompt") or "").strip()
+                if rewrite_prompt and rewrite_prompt.strip() and rewrite_prompt.strip() != original_prompt_text:
+                    if rewrite_event:
+                        self._log_consistency_event("prompt_rewrite", workflow_state_id, scene_key, rewrite_event)
+                    rewrite_params = dict(next_params)
+                    if consistency_meta_snapshot is not None:
+                        rewrite_params['_consistency_meta'] = consistency_meta_snapshot
+                    rewrite_params["prompt"] = rewrite_prompt
+                    rewrite_params["prompt_rewrite_reason"] = "sensitive_error"
+                    gen_res = await self._generate_video(rewrite_params)
+                    if isinstance(gen_res, dict):
+                        rewrite_meta = dict(gen_res.get("prompt_safety_rewrite") or {})
+                        rewrite_meta.update(
+                            {
+                                "applied": True,
+                                "reason": "sensitive_error",
+                                "model": getattr(prompt_safety_cfg, "rewrite_model", None),
+                            }
+                        )
+                        gen_res["prompt_safety_rewrite"] = rewrite_meta
+                else:
+                    if rewrite_event:
+                        if rewrite_event.get("result") == "success" and rewrite_prompt:
+                            rewrite_event = dict(rewrite_event)
+                            rewrite_event["result"] = "unchanged"
+                        self._log_consistency_event("prompt_rewrite", workflow_state_id, scene_key, rewrite_event)
+                    raise err
+            else:
+                raise
 
         # emit_last_frame（auto按出边）
         try:
@@ -1096,6 +1346,10 @@ class VideoGenerationTool(AsyncTool):
                     except Exception:
                         pass
                     try:
+                        store_scene_reference(params.get("workflow_state_id"), scene_no, last_url)
+                    except Exception:
+                        pass
+                    try:
                         wf_id = params.get("workflow_state_id")
                         if wf_id and scene_no is not None:
                             from ....core.workflow_state import workflow_manager
@@ -1113,6 +1367,56 @@ class VideoGenerationTool(AsyncTool):
             except Exception:
                 pass
         return gen_res
+
+    def _run_consistency_guard(
+        self,
+        workflow_state_id: Any,
+        scene_number: Any,
+        prompt: str,
+        locked_style: List[str],
+        locked_negative: List[str],
+        char_struct: List[Dict[str, Any]],
+        policy,
+    ) -> None:
+        guard_policy = getattr(policy, "guard", None)
+        if not guard_policy:
+            return
+
+        issues: List[str] = []
+        for text in locked_style:
+            if text and text not in prompt:
+                issues.append(f"missing_style:{text}")
+        for text in locked_negative:
+            if text and text not in prompt:
+                issues.append(f"missing_negative:{text}")
+
+        if getattr(guard_policy, 'require_signature_props', True):
+            for struct in char_struct or []:
+                props = struct.get('signature_outfit_or_props') or []
+                display_name = struct.get('display_name') or struct.get('name') or '角色'
+                for prop in props:
+                    prop_text = str(prop).strip()
+                    if prop_text and prop_text not in prompt:
+                        issues.append(f"signature_prop_missing:{display_name}:{prop_text}")
+
+        payload = {
+            "mode": guard_policy.mode,
+            "issues": issues,
+            "result": "pass" if not issues else "violations",
+        }
+        self._log_consistency_event("tool_guard", workflow_state_id, scene_number, payload)
+
+        if not issues:
+            return
+
+        mode = getattr(guard_policy, 'mode', 'advisory')
+        summary = ", ".join(issues)
+        if mode == 'enforce':
+            raise ToolError(f"Consistency guard failed: {summary}", self.metadata.name, error_code="consistency_guard")
+        try:
+            self.logger.warning("Consistency guard advisory: %s", summary)
+        except Exception:
+            pass
 
     def _get_outdegree_from_wf_or_active(self, wf_id: Optional[str], scene_no: int) -> int:
         try:

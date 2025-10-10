@@ -11,6 +11,35 @@
 {{ style_preference }}
 {% endif %}
 
+{% if style_taxonomy_summary %}
+## 风格分类参考（可复用）
+{{ style_taxonomy_summary }}
+{% endif %}
+
+{% if predefined_style_profile %}
+## 既定风格（必须沿用）
+{{ predefined_style_profile }}
+（请勿更改上述风格，仅可补充说明与一致性提醒）
+{% endif %}
+
+{% if project_character_bible %}
+## 项目角色设定（供选择）
+{{ project_character_bible }}
+{% endif %}
+
+{% if concept_mode == "project" %}
+## 任务说明
+- 这是项目级风格规划，请为整个项目选择统一风格与角色全集。
+- 复用输入中已有的角色时，保持 `canonical_name` 不变，并在 `metadata.origin` 标记为 `"project_existing"`。
+- 确有跨集叙事需要时才新增角色；新增条目的 `metadata.origin` 设为 `"project_new"`，并在 `metadata.justification` 中说明原因。
+- 如信息不足，可在 `consistency_hints.risks` 中记录需要后续补充的点。
+{% else %}
+## 任务说明
+- 项目级风格已确定，不得更改，仅需描述如何在本集场景中贯彻该风格。
+- 从项目角色设定中挑选本集需要重点呈现的角色，并在 `content_elements.characters` 中标注，保持 `canonical_name` 与项目库一致，`metadata.origin` 设为 `"project_existing"`。
+- 仅当现有角色无法满足剧情时才新增辅助角色；新增条目的 `metadata.origin` 设为 `"episode_extra"`，且在 `metadata.justification` 中解释用途及与主角的关系。
+{% endif %}
+
 ## 输出要求
 仅输出一个 JSON 对象，包含：
 {
@@ -28,10 +57,28 @@
       {
         "canonical_name": "角色唯一标识（英文或中性编号）",
         "display_name": "对外呈现名称（可为中文）",
+        "aliases": ["别名1", "别名2"],
         "type": "角色类型（人类/灵兽/抽象等）",
         "abstract_traits": ["3-5 个特征，含外形/性格/象征"],
+        "personality_traits": ["补充性格关键词（可与 abstract_traits 重叠）"],
         "visual_identity": ["颜色/材质/配饰等"],
-        "role": "在故事中的功能定位"
+        "signature_outfit_or_props": ["标志性服饰/道具"],
+        "role": "在故事中的功能定位",
+        "species_or_breed": "物种或品系（若适用）",
+        "archetype_or_identity": "原型/身份设定（如守护者、叛逆者）",
+        "description": "一句话描述角色核心特征",
+        "visual_traits": {
+          "identity_tags": ["确保为数组"],
+          "signature_props": ["确保为数组"],
+          "entity_type": "与 type 一致的英文短语"
+        },
+        "style_preferences": {"keywords": ["保持为对象"]},
+        "voice_profile": {"notes": "如无可留空字符串"},
+        "reference_assets": {"items": ["若有参考素材"]},
+        "metadata": {
+          "origin": "只能填写 \"project_existing\"、\"project_new\" 或 \"episode_extra\" 之一 (JSON 字符串)",
+          "justification": "当 origin 不是 project_existing 时说明原因"
+        }
       }
     ],
     "environments": [
@@ -67,4 +114,5 @@
 ### 规则
 1. 所有要素需与骨架中的场景、主题保持一致。
 2. 若信息不足，可做合理假设并在 `consistency_hints.risks` 中说明。
-3. 确保输出为合法 JSON，不要额外解释。
+3. `visual_traits`、`style_preferences`、`voice_profile`、`reference_assets`、`metadata` 必须是对象（object），不得输出为数组或字符串；其中 `metadata.origin` 必须是 JSON 字符串，并且取值严格限定为 `"project_existing"`、`"project_new"` 或 `"episode_extra"`。
+4. 确保输出为合法 JSON，不要额外解释。

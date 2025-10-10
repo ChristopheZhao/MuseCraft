@@ -136,7 +136,10 @@ class Settings(BaseSettings):
     DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
     # Doubao image generation (Seedream)
     DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
-    
+
+    # Orchestration defaults
+    DEFAULT_GENERATION_MODE: str = config("DEFAULT_GENERATION_MODE", default="quick")
+
     # Image Generation APIs
     MIDJOURNEY_API_KEY: Optional[str] = config("MIDJOURNEY_API_KEY", default=None)
     JIMENG_API_KEY: Optional[str] = config("JIMENG_API_KEY", default=None)
@@ -425,6 +428,10 @@ class Settings(BaseSettings):
     DEFAULT_TOOL_TIMEOUT: int = config("DEFAULT_TOOL_TIMEOUT", default=120, cast=int)  # 默认工具超时
     VIDEO_GENERATION_TOOL_TIMEOUT: int = config("VIDEO_GENERATION_TOOL_TIMEOUT", default=300, cast=int)
     IMAGE_GENERATION_TOOL_TIMEOUT: int = config("IMAGE_GENERATION_TOOL_TIMEOUT", default=180, cast=int)
+    IMAGE_TOOL_PROMPT_RULES: Dict[str, Any] = config(
+        "IMAGE_TOOL_PROMPT_RULES",
+        default='{"min_length": 30, "allow_weak_prompt": false, "weak_marker_length_threshold": 50, "weak_marker_threshold": 2, "weak_markers": ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]}'
+    )
     AUDIO_GENERATION_TOOL_TIMEOUT: int = config("AUDIO_GENERATION_TOOL_TIMEOUT", default=240, cast=int)
     # HTTP下载类（如从第三方拉取音频/视频到本地）超时，供 file_storage_tool 使用
     FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=300, cast=int)
@@ -443,6 +450,20 @@ class Settings(BaseSettings):
         elif isinstance(v, (list, str)):
             return v
         raise ValueError(v)
+
+    @field_validator("IMAGE_TOOL_PROMPT_RULES", mode="before")
+    @classmethod
+    def parse_image_tool_rules(cls, v):
+        if isinstance(v, str):
+            import json
+            try:
+                parsed = json.loads(v or "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("IMAGE_TOOL_PROMPT_RULES must be JSON string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("IMAGE_TOOL_PROMPT_RULES must be dict")
+            return parsed
+        return v or {}
     
     model_config = {
         "env_file": ".env",

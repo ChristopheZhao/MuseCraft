@@ -11,6 +11,7 @@ import {
 } from '@/types';
 
 interface AppState {
+  mode: 'quick' | 'project';
   // 当前视频请求
   currentRequest: VideoRequest | null;
   // 最终合成视频地址（可选，本地路径或URL）
@@ -36,6 +37,7 @@ interface AppState {
   
   // Actions
   setCurrentRequest: (request: VideoRequest | null) => void;
+  setMode: (mode: 'quick' | 'project') => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
   addResult: (result: GenerationResult) => void;
   updateResult: (resultId: string, updates: Partial<GenerationResult>) => void;
@@ -135,6 +137,7 @@ export const useAppStore = create<AppState>()(
       // Initial state
       currentRequest: null,
       finalVideoUrl: undefined,
+      mode: 'quick',
       agents: initialAgents,
       results: [],
       ui: initialUIState,
@@ -144,6 +147,9 @@ export const useAppStore = create<AppState>()(
       wsConnected: false,
 
       // Actions
+      setMode: (mode) =>
+        set({ mode }, false, 'setMode'),
+
       setCurrentRequest: (request) => 
         set({ currentRequest: request }, false, 'setCurrentRequest'),
 

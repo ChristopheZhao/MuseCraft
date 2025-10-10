@@ -35,6 +35,9 @@ class AgentToolAllocator:
             
             # 概念规划Agent - 纯LLM原生能力，无需外部工具
             AgentType.CONCEPT_PLANNER: [],
+
+            # 项目级Series Planner - 纯策划，不调用工具
+            AgentType.SERIES_PLANNER: [],
             
             # 脚本编写Agent - 文本生成和叙事分析
             AgentType.SCRIPT_WRITER: [
@@ -54,6 +57,7 @@ class AgentToolAllocator:
             # 视频生成Agent - 简化工具集合
             AgentType.VIDEO_GENERATOR: [
                 "video_generation",                    # 视频生成（核心工具）
+                "image_generation",                    # 补充图像生成（用于敏感图替换）
                 "scene_continuity_preparation",       # 连续性准备（组合工具）
                 "consistency_tool",                   # 一致性资产查询与注册
                 "file_storage_tool"                   # 文件存储
@@ -96,7 +100,13 @@ class AgentToolAllocator:
             # 协调器Agent - 使用轻量控制工具进行FC调度
             AgentType.ORCHESTRATOR: [
                 "orchestrator_control"
-            ]
+            ],
+
+            # Episode Orchestrator 复用已有工作流，不额外暴露工具
+            AgentType.EPISODE_ORCHESTRATOR: [],
+
+            # Episode Script Planner - 纯文本草稿生成
+            AgentType.EPISODE_SCRIPT_PLANNER: [],
         }
         
         # 定义通用工具（所有Agent都可以使用）

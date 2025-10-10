@@ -382,15 +382,12 @@ def get_prompt_safety_advisor() -> PromptSafetyAdvisor:
 
 
 def apply_prompt_safety(prompt: str, context: SafetyContext | Dict[str, Any]) -> tuple[str, SafetyAdvice]:
-    """Convenience helper returning the adjusted prompt and the advice metadata."""
+    """Return original prompt with advisory metadata; no pre-emptive rewriting."""
 
     advisor = get_prompt_safety_advisor()
     advice = advisor.get_advice(context, prompt)
-    if advice.is_active():
-        safe_prompt = advice.apply_to_prompt(prompt)
-    else:
-        safe_prompt = prompt
-    return safe_prompt, advice
+    # 不在此阶段改写或拼接提示词，原样返回，由调用者决定是否采纳 advice
+    return prompt, advice
 
 
 __all__ = [
@@ -402,3 +399,39 @@ __all__ = [
     "get_prompt_safety_advisor",
     "apply_prompt_safety",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Locked-segment aware sanitize helper (supplier-agnostic)
+# ---------------------------------------------------------------------------
+
+def sanitize_with_locks(text: str, locked_segments: Optional[Sequence[str]] = None, context: Optional[Dict[str, Any]] = None) -> SanitizedPrompt:
+    """Sanitize while preserving locked segments by using placeholders.
+
+    - Replace each locked segment with a placeholder token before sanitize
+    - Run sanitize_prompt
+    - Restore placeholders back to original locked text
+    - Return a SanitizedPrompt with restored text and original matches/changed flags
+    """
+    locked = []
+    if locked_segments:
+        try:
+            locked = [str(x).strip() for x in locked_segments if str(x).strip()]
+        except Exception:
+            locked = []
+
+    placeholders: Dict[str, str] = {}
+    work = str(text or "")
+    for idx, seg in enumerate(locked):
+        token = f"<<LOCKED_{idx}>>"
+        if seg and seg in work:
+            work = work.replace(seg, token)
+            placeholders[token] = seg
+
+    sp = sanitize_prompt(work, context or {})
+    restored = sp.text
+    if isinstance(restored, str) and placeholders:
+        for token, seg in placeholders.items():
+            restored = restored.replace(token, seg)
+
+    return SanitizedPrompt(text=restored, changed=sp.changed, matches=sp.matches, metadata=sp.metadata)

@@ -11,6 +11,8 @@ from ..models import Task, AgentExecution, AgentType, Scene
 from ..core.workflow_state import WorkflowState, SceneData
 from .tools.tool_registry import get_tool_registry
 from .tools.base_tool import ToolInput as TI
+from ..core.consistency_policy import get_consistency_policy
+from ..services.style_taxonomy import match_style_taxonomy
 
 
 class ScriptWriterAgent(BaseAgent):
@@ -66,6 +68,25 @@ class ScriptWriterAgent(BaseAgent):
                     "results": []
                 }
 
+            # 直接读取上下文（存在即用），不依赖配置开关；缺失则自然降级
+            episode_context = input_data.get("episode_context") or getattr(workflow_state, "episode_context", None)
+            project_context = input_data.get("project_context") or getattr(workflow_state, "project_context", None)
+            approved_script_text = ""
+            if episode_context:
+                approved_script_text = str(episode_context.get("approved_script", "") or "").strip()
+
+            episode_character_ids: List[str] = []
+            if episode_context:
+                self.logger.info(
+                    "🧠 ScriptWriter received episode_context (approved_script=%s)",
+                    bool(approved_script_text),
+                )
+                episode_character_ids = [
+                    str(cid).strip()
+                    for cid in episode_context.get("character_ids", []) or []
+                    if str(cid).strip()
+                ]
+
             # 获取场景和概念规划
             scenes = getattr(workflow_state, 'scenes', [])
             concept_plan = getattr(workflow_state, 'concept_plan', {})
@@ -79,7 +100,15 @@ class ScriptWriterAgent(BaseAgent):
                 }
 
             # 批量生成脚本
-            return await self._batch_generate_scripts(scenes, concept_plan, workflow_state, task)
+            return await self._batch_generate_scripts(
+                scenes,
+                concept_plan,
+                workflow_state,
+                task,
+                episode_context=episode_context,
+                project_context=project_context,
+                approved_script_text=approved_script_text,
+            )
 
         except Exception as e:
             self.logger.error(f"ScriptWriter execution failed: {str(e)}")
@@ -96,10 +125,25 @@ class ScriptWriterAgent(BaseAgent):
         scenes: List[SceneData], 
         concept_plan: Dict[str, Any],
         workflow_state: WorkflowState,
-        task: Task
+        task: Task,
+        *,
+        episode_context: Optional[Dict[str, Any]] = None,
+        project_context: Optional[Dict[str, Any]] = None,
+        approved_script_text: str = "",
     ) -> Dict[str, Any]:
         """批量生成场景脚本"""
-        
+        # 从入参 episode_context 推导本集涉及的角色ID（若存在）
+        episode_character_ids: List[str] = []
+        try:
+            if isinstance(episode_context, dict):
+                raw_ids = episode_context.get("character_ids") or []
+                if isinstance(raw_ids, list):
+                    episode_character_ids = [
+                        str(cid).strip() for cid in raw_ids if str(cid).strip()
+                    ]
+        except Exception:
+            episode_character_ids = []
+
         voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
         voice_plan_enabled = True
         if isinstance(voice_plan, dict):
@@ -158,7 +202,19 @@ class ScriptWriterAgent(BaseAgent):
             scripts_map: Dict[str, Any] = {}
             hard_failed_voice_scenes: List[Dict[str, Any]] = []
             warning_voice_scenes: List[Dict[str, Any]] = []
-            intelligent_style = concept_plan.get('intelligent_style_design', {})
+            intelligent_style = concept_plan.get('intelligent_style_design', {}) if isinstance(concept_plan, dict) else {}
+            if isinstance(intelligent_style, dict) and intelligent_style:
+                taxonomy_match = match_style_taxonomy(intelligent_style)
+                if taxonomy_match:
+                    enriched_style = dict(intelligent_style)
+                    enriched_style['taxonomy'] = taxonomy_match
+                    intelligent_style = enriched_style
+                    try:
+                        if isinstance(concept_plan, dict):
+                            concept_plan['intelligent_style_design'] = enriched_style
+                        workflow_state.intelligent_style_design = enriched_style
+                    except Exception:
+                        pass
             # 读取脚本写作模型与token预算（来自ai_config）
             try:
                 from ..core.ai_config import get_ai_config
@@ -207,6 +263,22 @@ class ScriptWriterAgent(BaseAgent):
                         pace_tag = ""
                         target_char_count = None
 
+                    context_payload: Dict[str, Any] = {
+                        "previous_scene": "",
+                        "narrative_arc": concept_plan.get('genre_and_theme', {}).get('theme', '')
+                    }
+                    if episode_context:
+                        context_payload["episode_context"] = episode_context
+                    if episode_character_ids:
+                        context_payload["episode_characters"] = episode_character_ids
+                    if project_context:
+                        context_payload["project_context"] = project_context
+                        char_bible = project_context.get("character_bible") if isinstance(project_context, dict) else {}
+                        if isinstance(char_bible, dict) and char_bible:
+                            context_payload["character_bible"] = char_bible
+                    if approved_script_text:
+                        context_payload["approved_script"] = approved_script_text
+
                     tool_params = {
                         "scene_data": {
                             "scene_number": scene.scene_number,
@@ -215,21 +287,25 @@ class ScriptWriterAgent(BaseAgent):
                             "duration": scene.duration,
                         },
                         "intelligent_style_design": intelligent_style,
-                        "context": {
-                            "previous_scene": "",
-                            "narrative_arc": concept_plan.get('genre_and_theme', {}).get('theme', '')
-                        },
+                        "context": context_payload,
                         # 让工具按配置使用模型和token预算，替代内部默认值
                         "model": script_model,
                         "max_tokens": max_tokens_budget,
                     }
+                    if episode_character_ids:
+                        tool_params["scene_data"]["character_ids"] = episode_character_ids
+                    if project_context:
+                        char_bible = project_context.get("character_bible") if isinstance(project_context, dict) else {}
+                        if isinstance(char_bible, dict) and char_bible:
+                            tool_params["character_bible"] = char_bible
+                    gd = guidance or {}
                     tool_params["voice_guidance"] = {
                         "should_narrate": should_narrate,
                         "pace_tag": pace_tag,
                         "target_char_count": target_char_count,
-                        "key_points": guidance.get("key_points", []),
-                        "emotion": guidance.get("emotion", ""),
-                        "objective": guidance.get("objective", ""),
+                        "key_points": gd.get("key_points", []),
+                        "emotion": gd.get("emotion", ""),
+                        "objective": gd.get("objective", ""),
                     }
                     one = await self.use_tool(
                         "script_generation",
@@ -254,6 +330,11 @@ class ScriptWriterAgent(BaseAgent):
                         elif voice_line is not None:
                             voice_line = str(voice_line).strip()
 
+                        motion_beats = self._sanitize_motion_beats(
+                            payload.get("motion_beats"),
+                            scene.duration,
+                        )
+
                         is_valid_voice, warning_msg = self._validate_voice_line(
                             scene.scene_number, voice_line, tool_params["voice_guidance"]
                         )
@@ -274,6 +355,7 @@ class ScriptWriterAgent(BaseAgent):
                             "sound_effects": payload.get("sound_effects", []),
                             "voice_over_text": voice_line or "",
                             "voice_guidance": tool_params["voice_guidance"],
+                            "motion_beats": motion_beats,
                         }
                 except AgentError as ae:
                     hard_failed_voice_scenes.append({
@@ -346,7 +428,16 @@ class ScriptWriterAgent(BaseAgent):
                                 "target_char_count": voice_guidance.get("target_char_count"),
                                 "should_narrate": voice_guidance.get("should_narrate"),
                             },
+                            motion_beats=scene_script_data.get("motion_beats", []),
                         )
+                        try:
+                            if isinstance(concept_plan, dict):
+                                for sc_def in concept_plan.get('scenes', []) or []:
+                                    if sc_def.get('scene_number') == scene.scene_number:
+                                        sc_def['motion_beats'] = scene_script_data.get("motion_beats", [])
+                                        break
+                        except Exception:
+                            pass
                         generated_count += 1
                         result_entry = {
                             "scene_number": scene.scene_number,
@@ -796,6 +887,79 @@ class ScriptWriterAgent(BaseAgent):
                 "scenes_generated": 0,
                 "workflow_state_updated": False
             }
+
+    def _sanitize_motion_beats(self, beats: Any, scene_duration: float) -> List[Dict[str, Any]]:
+        if not isinstance(beats, list):
+            return []
+
+        def _coerce_seconds(value: Any) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                text = str(value).strip().lower()
+                if not text:
+                    return None
+                text = text.replace('秒', '').replace('s', '').replace('sec', '')
+                text = text.replace('：', ':').replace('，', ',')
+                if '-' in text and text.count('-') == 1 and text.replace('-', '').replace('.', '').isdigit():
+                    parts = text.split('-')
+                    return float(parts[0])
+                return float(text)
+            except Exception:
+                return None
+
+        sanitized: List[Dict[str, Any]] = []
+        total_duration = float(scene_duration or 0.0)
+        fallback_span = total_duration / max(len(beats), 1) if total_duration > 0 else 0.0
+        cursor = 0.0
+
+        for idx, raw in enumerate(beats):
+            if not isinstance(raw, dict):
+                continue
+            start = _coerce_seconds(
+                raw.get('start')
+                or raw.get('start_seconds')
+                or raw.get('begin')
+                or raw.get('timecode_start')
+            )
+            end = _coerce_seconds(
+                raw.get('end')
+                or raw.get('end_seconds')
+                or raw.get('stop')
+                or raw.get('timecode_end')
+            )
+            duration_hint = _coerce_seconds(raw.get('duration'))
+
+            if start is None:
+                start = cursor
+            if duration_hint is not None and end is None:
+                end = start + max(duration_hint, 0.0)
+            if end is None:
+                end = start + fallback_span
+            if total_duration > 0:
+                start = max(0.0, min(start, total_duration))
+                end = max(start, min(end, total_duration))
+            if end <= start and total_duration > 0:
+                end = min(total_duration, start + max(fallback_span, 0.5))
+
+            beat_summary = str(raw.get('description') or raw.get('beat_summary') or raw.get('action') or '').strip()
+            visual_focus = str(raw.get('visual_focus') or raw.get('focus') or raw.get('subject') or '').strip()
+
+            sanitized.append({
+                'index': idx + 1,
+                'start': round(start, 3),
+                'end': round(end, 3),
+                'duration': round(max(0.0, end - start), 3),
+                'beat_summary': beat_summary,
+                'visual_focus': visual_focus,
+            })
+            cursor = end
+            if len(sanitized) >= 6:
+                break
+
+        return sanitized
 
     def _validate_voice_line(
         self,

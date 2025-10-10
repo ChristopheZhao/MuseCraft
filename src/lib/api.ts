@@ -1,5 +1,13 @@
 // API client for backend communication
 
+import type {
+  CreateProjectRequest,
+  ProjectStateResponse,
+  UpdateEpisodeScriptRequest,
+  OrchestrateProjectRequest,
+  OrchestrateProjectResponse,
+} from '@/types/project';
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 export interface CreateTaskRequest {
@@ -94,5 +102,78 @@ export class ApiClient {
     }
 
     return response.json();
+  }
+
+  static async createProject(request: CreateProjectRequest): Promise<ProjectStateResponse> {
+    const response = await fetch(`${API_BASE_URL}/projects/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      mode: 'cors',
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || 'Failed to create project');
+    }
+
+    const data = await response.json();
+    return data.project as ProjectStateResponse;
+  }
+
+  static async getProject(projectId: string): Promise<ProjectStateResponse> {
+    const response = await fetch(`${API_BASE_URL}/projects/${projectId}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || 'Failed to fetch project');
+    }
+
+    const data = await response.json();
+    return data as ProjectStateResponse;
+  }
+
+  static async updateEpisodeScript(
+    projectId: string,
+    episodeId: string,
+    payload: UpdateEpisodeScriptRequest,
+  ): Promise<ProjectStateResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/projects/${projectId}/episodes/${episodeId}/script`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        mode: 'cors',
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || 'Failed to update episode script');
+    }
+
+    const data = await response.json();
+    return data as ProjectStateResponse;
+  }
+
+  static async orchestrateProject(
+    projectId: string,
+    payload: OrchestrateProjectRequest,
+  ): Promise<OrchestrateProjectResponse> {
+    const response = await fetch(`${API_BASE_URL}/projects/${projectId}/orchestrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      mode: 'cors',
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || 'Failed to orchestrate project');
+    }
+
+    const data = await response.json();
+    return data as OrchestrateProjectResponse;
   }
 }

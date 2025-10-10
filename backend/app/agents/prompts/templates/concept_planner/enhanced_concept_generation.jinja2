@@ -47,6 +47,10 @@
 - 请确保每个场景的预计时长落在上述生成能力范围内，并通过合理的场景拆分覆盖目标总时长
 
 ## 输出要求
+为保持后续代理的一致性：
+- 复用输入中已有或 outline 明确的角色时，保持 `canonical_name` 不变，并将 `metadata.origin` 标记为 `"project_existing"`；
+- 新创造的核心角色将 `metadata.origin` 设为 `"project_new"`，并在 `metadata.justification` 中说明新增原因；
+- 仅在必要时引入场景限定配角，`metadata.origin` 设为 `"episode_extra"` 并说明其作用。
 请生成包含以下结构的JSON格式概念计划（包含完整的内容元素设计）：
 {
     "overview": "整体概念概述",
@@ -67,13 +71,29 @@
                 "abstract_traits": [
                     "3-5条高层特征（外形/色彩/形状/气质/功能）"
                 ],
+                "personality_traits": [
+                    "补充性格或行为关键词（与 abstract_traits 可有重合）"
+                ],
                 "visual_identity": [
                     "可选：标识元素（颜色/形状/符号/材质/纹理等）"
                 ],
                 "signature_outfit_or_props": [
                     "可选：标志性服饰/道具（如红斗篷、篮子、护目镜、冲浪板）"
                 ],
-                "role": "在叙事中的功能与关系（如主角/搭档/信息提供者/情绪承载等)"
+                "role": "在叙事中的功能与关系（如主角/搭档/信息提供者/情绪承载等)",
+                "description": "一句话核心印象",
+                "visual_traits": {
+                    "identity_tags": ["需输出数组"],
+                    "signature_props": ["需输出数组"],
+                    "entity_type": "与 type 对齐的英文短语"
+                },
+                "style_preferences": {"keywords": ["保持对象结构"]},
+                "voice_profile": {"notes": "若无可给空字符串"},
+                "reference_assets": {"items": ["可选素材"]},
+                "metadata": {
+                    "origin": "只能填写 \"project_existing\"、\"project_new\" 或 \"episode_extra\" 之一 (JSON 字符串)",
+                    "justification": "当 origin 不为 project_existing 时说明原因"
+                }
             }
         ],
         "environments": [
@@ -161,4 +181,5 @@
 5. consistency_guidelines 要结合 outline 中的要点（如情绪、视觉主色、叙事线索），确保场景间的风格连续性。
 6. 内容安全与合规：避免描述敏感或露骨的身体部位与 NSFW 内容；以专业、中性的方式描述服饰、姿态与构图。
 7. voice_plan 要与 outline 中的 `voice_plan_overview` 呼应，明确每幕旁白职责；若无需配音，请将 enabled 设为 false 且 mode 为 "none"。
-8. 所有输出均需为 JSON，无额外自然语言说明；字段缺失时给出 `[]` 或 `{}`，不要省略。
+8. `visual_traits`、`style_preferences`、`voice_profile`、`reference_assets`、`metadata` 必须以对象（object）形式给出，禁止输出为数组或字符串，其中 `metadata.origin` 必须是 JSON 字符串，且值严格限定为 `"project_existing"`、`"project_new"` 或 `"episode_extra"`。
+9. 所有输出均需为 JSON，无额外自然语言说明；字段缺失时给出 `[]` 或 `{}`，不要省略。

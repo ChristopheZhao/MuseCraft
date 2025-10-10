@@ -1,0 +1,121 @@
+version: 0.1
+families:
+  - key: anime
+    label: 动漫 Anime
+    description: 以二维/三维动画语汇为主的风格家族
+    substyles:
+      - key: anime_2d_tv
+        label: 2D 日漫TV/剧场
+        positive_tokens: [anime, cel-shading, "clean lineart", "flat colors", "limited shading"]
+        negative_tokens: [photorealistic, pbr, "real skin pores", "documentary look", "heavy film grain"]
+        exclude_styles: [photoreal, live_action]
+      - key: anime_ink_cn
+        label: 国漫古风/水墨卡通
+        positive_tokens: ["ink wash", "brush strokes", "rice paper texture", stylized, "soft edges"]
+        negative_tokens: [photorealistic, "realistic skin"]
+        exclude_styles: [photoreal]
+      - key: anime_manga_bw
+        label: 漫画黑白/网点/高对比
+        positive_tokens: ["manga black-and-white", halftone, screentone, "bold inking", "high contrast"]
+        negative_tokens: [photorealistic, pbr]
+      - key: anime_chibi
+        label: Q版/萌系
+        positive_tokens: [chibi, "super deformed", kawaii, "rounded proportions", "flat shading"]
+        negative_tokens: [photorealistic]
+      - key: anime_mecha
+        label: 机甲动漫
+        positive_tokens: [mecha, "hard surface", "clean lineart", "panel lines", "cel-shading"]
+        negative_tokens: [photorealistic]
+      - key: anime_3d_cel
+        label: 3D Toon/Cel 渲染
+        positive_tokens: ["toon shader", "edge outline", "banded shading", "stylized proportions"]
+        negative_tokens: ["pbr realism", "sss heavy", "ray-traced photoreal"]
+
+  - key: game
+    label: 游戏 Game
+    description: 游戏CG的写实与风格化风格
+    substyles:
+      - key: game_cg_real_cinematic
+        label: CG 写实（AAA/电影感）
+        positive_tokens: ["cinematic lighting", "physically-based", "high-detail textures", "filmic grade"]
+        negative_tokens: ["toon shading", "flat colors", "exaggerated proportions"]
+        exclude_styles: [anime, manga]
+      - key: game_cg_scifi_real
+        label: 科幻写实/赛博写实
+        positive_tokens: ["photoreal", "neon lighting", "wet streets", "volumetric fog", "pbr"]
+        negative_tokens: ["toon", "flat shading"]
+      - key: game_stylized_jrpg
+        label: JRPG 二次元风格化
+        positive_tokens: ["jrpg", "anime-inspired", "stylized", "saturated palette", "clean lineart"]
+        negative_tokens: [photorealistic]
+      - key: game_stylized_handpaint
+        label: 手绘贴图（Hand-painted）
+        positive_tokens: ["hand-painted textures", "brushy texture", "saturated colors", stylized]
+        negative_tokens: [photorealistic, "high-frequency textures"]
+      - key: game_lowpoly
+        label: 低多边形 Low-poly
+        positive_tokens: ["low-poly", "flat shading", "simple geometry", "solid colors"]
+        negative_tokens: [photorealistic, "micro detail"]
+      - key: game_voxel
+        label: 体素 Voxel
+        positive_tokens: [voxel, "blocky", "orthographic", "limited palette"]
+        negative_tokens: [photorealistic]
+      - key: game_pixel_retro
+        label: 像素复古 8/16-bit
+        positive_tokens: ["pixel-art", "limited palette", dithering, "crt effect"]
+        negative_tokens: [photorealistic]
+      - key: game_cyberpunk_stylized
+        label: 赛博朋克（风格化）
+        positive_tokens: [cyberpunk, neon, "high contrast", "stylized" ]
+        negative_tokens: ["classical oil painting", "soft natural palette"]
+
+  - key: edu
+    label: 教育演示 Edu
+    description: 面向教学/讲解/流程可视化的风格
+    substyles:
+      - key: edu_flat_infographic
+        label: 扁平信息图/卡通讲解
+        positive_tokens: ["flat design", infographic, "simplified shapes", "clean labels"]
+        negative_tokens: [photorealistic, "heavy texture"]
+      - key: edu_whiteboard
+        label: 白板/手绘 Scribe
+        positive_tokens: [whiteboard, "sketched lines", handwriting]
+        negative_tokens: [pbr, photoreal]
+      - key: edu_3d_demo
+        label: 3D 实物示意/工程讲解
+        positive_tokens: ["3d schematic", "clean lighting", "clear labeling", "neutral background"]
+        negative_tokens: ["artistic toon shading"]
+      - key: edu_ui_flow
+        label: UI/数据流程演示
+        positive_tokens: ["ui walkthrough", "data flow", "node-link diagram", "flat"]
+        negative_tokens: [photorealistic]
+
+  - key: other
+    label: 其它 Other
+    description: 非主赛道的补充风格
+    substyles:
+      - key: other_live_cinematic
+        label: 电影写实（Live-action look）
+        positive_tokens: ["live-action look", "cinematic grade", "real lighting"]
+        negative_tokens: [anime, toon]
+      - key: other_documentary
+        label: 纪录片/自然
+        positive_tokens: [documentary, "natural lighting", "handheld" ]
+        negative_tokens: [anime, toon]
+      - key: other_illustration_watercolor
+        label: 水彩/插画
+        positive_tokens: [watercolor, "soft edges", "paper texture"]
+        negative_tokens: [photorealistic]
+      - key: other_oil_painting
+        label: 油画
+        positive_tokens: ["oil painting", impasto, "visible brush strokes"]
+        negative_tokens: [photorealistic]
+      - key: other_stop_motion
+        label: 定格/纸片
+        positive_tokens: ["stop-motion", "paper cut", "handmade texture"]
+        negative_tokens: [photorealistic]
+      - key: other_minimal_geometric
+        label: 极简抽象/几何
+        positive_tokens: ["minimalist", "geometric shapes", "solid colors"]
+        negative_tokens: [photorealistic]
+
