@@ -655,10 +655,16 @@ class ImageGeneratorAgent(ReActAgent):
             "style": (ctx.get("intelligent_style") or {}).get("style_name") or "",
             "size_options": ["1024x1024", "1024x1792", "1792x1024"],
         }
+        # 软提示：建议单轮选择的候选对象数量（不做硬裁剪）
+        try:
+            max_plan_units_hint = int(getattr(settings, "IMAGE_GENERATOR_MAX_PLAN_SCENE_NUMS", 2) or 2)
+        except Exception:
+            max_plan_units_hint = 2
         variables = {
             "goal_text": goal_text,
             "constraints_json": json.dumps(constraints, ensure_ascii=False),
             "scenes_json": json.dumps(scenes, ensure_ascii=False),
+            "max_plan_units_hint": max_plan_units_hint,
         }
         try:
             sys_text = self.prompt_manager.render_template("agents/image_generator", "planning_round0", variables, auto_reload=False)
@@ -734,12 +740,18 @@ class ImageGeneratorAgent(ReActAgent):
         progress_summary = self.build_progress_summary() or ""
         scratchpad = self.build_scratchpad(k=2) or ""
         observation_json = json.dumps(current_state, ensure_ascii=False)
+        # 软提示：建议单轮选择的候选对象数量（不做硬裁剪）
+        try:
+            max_plan_units_hint = int(getattr(settings, "IMAGE_GENERATOR_MAX_PLAN_SCENE_NUMS", 2) or 2)
+        except Exception:
+            max_plan_units_hint = 2
         variables = {
             "plan_digest": plan_digest,
             "plan_outline": plan_outline,
             "progress_summary": progress_summary,
             "scratchpad": scratchpad,
             "observation_json": observation_json,
+            "max_plan_units_hint": max_plan_units_hint,
         }
         sys_text = self.prompt_manager.render_template("agents/image_generator", "planning_roundN", variables, auto_reload=False)
         messages = [{"role": "system", "content": sys_text}]
@@ -795,10 +807,25 @@ class ImageGeneratorAgent(ReActAgent):
         try:
             obs_aug = dict(observation)
             ctx = (self.iteration_context.get("working_state", {}) or {}).get("context", {}) or {}
+            project_ctx = ctx.get("project_context") or {}
+            character_bible = project_ctx.get("character_bible") if isinstance(project_ctx, dict) else {}
+            if isinstance(character_bible, dict) and character_bible:
+                obs_aug["character_bible"] = character_bible
             # 风格指导：来自 intelligent_style（概念决策），作为高层抽象存在
             obs_aug["style_guidance"] = style_guidance or ctx.get("intelligent_style", {}) or {}
             # 角色事实：从 scenes_to_generate / WF.scene / concept_plan 提取
             char_map = {}
+            alias_lookup = {}
+            for cid, profile in (character_bible or {}).items():
+                if not isinstance(profile, dict):
+                    continue
+                display_name = str(profile.get("display_name") or "").strip()
+                if display_name:
+                    alias_lookup.setdefault(display_name.casefold(), cid)
+                for alias in profile.get("aliases") or []:
+                    alias_name = str(alias).strip()
+                    if alias_name:
+                        alias_lookup.setdefault(alias_name.casefold(), cid)
             try:
                 scenes_cat = {int(s.get('scene_number')): s for s in (ctx.get('scenes_to_generate') or []) if isinstance(s, dict) and s.get('scene_number') is not None}
             except Exception:
@@ -858,7 +885,18 @@ class ImageGeneratorAgent(ReActAgent):
                     except Exception:
                         pass
                 if names or descs:
-                    char_map[sn] = {"names": names, "descriptions": descs}
+                    entry = {"names": names, "descriptions": descs}
+                    matched_ids: List[str] = []
+                    for nm in names:
+                        token = str(nm).strip()
+                        if not token:
+                            continue
+                        canonical = alias_lookup.get(token.casefold())
+                        if canonical and canonical not in matched_ids:
+                            matched_ids.append(canonical)
+                    if matched_ids:
+                        entry["character_ids"] = matched_ids
+                    char_map[sn] = entry
             obs_aug["characters_map"] = char_map
             observation_json = json.dumps(obs_aug, ensure_ascii=False)
         except Exception:
@@ -880,12 +918,18 @@ class ImageGeneratorAgent(ReActAgent):
         except Exception:
             pass
 
+        # 软提示：建议单轮选择的候选对象数量（不做硬裁剪）
+        try:
+            max_plan_units_hint = int(getattr(settings, "IMAGE_GENERATOR_MAX_PLAN_SCENE_NUMS", 2) or 2)
+        except Exception:
+            max_plan_units_hint = 2
         variables = {
             "plan_digest": plan_digest,
             "plan_outline": plan_outline,
             "progress_summary": progress_summary,
             "scratchpad": scratchpad,
             "observation_json": observation_json,
+            "max_plan_units_hint": max_plan_units_hint,
         }
         try:
             sys_text = self.prompt_manager.render_template("agents/image_generator", "planning_roundN", variables, auto_reload=False)

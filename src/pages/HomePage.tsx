@@ -11,9 +11,10 @@ import ExportInterface from '@/components/video/ExportInterface';
 import { useI18n } from '@/i18n/I18nProvider';
 import { useTaskPolling } from '@/hooks/useTaskPolling';
 import ResultOverlay from '@/components/video/ResultOverlay';
+import ProjectModeView from '@/components/project/ProjectModeView';
 
 const HomePage: React.FC = () => {
-  const { ui, currentRequest, finalVideoUrl } = useAppStore();
+  const { ui, currentRequest, finalVideoUrl, mode, setMode, setCurrentStep } = useAppStore();
   const { currentStep } = ui;
   const { t } = useI18n();
 
@@ -97,9 +98,49 @@ const HomePage: React.FC = () => {
     }
   };
 
+  const handleModeChange = (nextMode: 'quick' | 'project') => {
+    setMode(nextMode);
+    if (nextMode === 'quick') {
+      setCurrentStep('input');
+    }
+  };
+
+  const renderModeTabs = () => (
+    <div className="flex items-center justify-center">
+      <div className="inline-flex rounded-full bg-gray-100 p-1">
+        <button
+          className={`px-4 py-2 text-sm font-medium rounded-full transition ${
+            mode === 'quick' ? 'bg-white shadow text-primary-600' : 'text-gray-600 hover:text-gray-900'
+          }`}
+          onClick={() => handleModeChange('quick')}
+        >
+          快速创作
+        </button>
+        <button
+          className={`px-4 py-2 text-sm font-medium rounded-full transition ${
+            mode === 'project' ? 'bg-white shadow text-primary-600' : 'text-gray-600 hover:text-gray-900'
+          }`}
+          onClick={() => handleModeChange('project')}
+        >
+          项目模式
+        </button>
+      </div>
+    </div>
+  );
+
+  if (mode === 'project') {
+    return (
+      <div className="h-full flex-1 w-full flex flex-col p-6 gap-6 relative">
+        {renderModeTabs()}
+        <ProjectModeView />
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex-1 w-full flex flex-col p-6 gap-6 relative">
-      {/* Step Indicator */}
+      {renderModeTabs()}
+
       <div className="flex items-center justify-center">
         <div className="flex items-center space-x-8">
           {[
@@ -109,8 +150,9 @@ const HomePage: React.FC = () => {
             { id: 'export', label: t('step.export'), number: 4 },
           ].map((step, index) => {
             const isActive = currentStep === step.id;
-            const isCompleted = ['input', 'processing', 'review'].indexOf(currentStep) > ['input', 'processing', 'review'].indexOf(step.id);
-            
+            const stepOrder = ['input', 'processing', 'review', 'export'];
+            const isCompleted = stepOrder.indexOf(currentStep) > stepOrder.indexOf(step.id);
+
             return (
               <div key={step.id} className="flex items-center">
                 <div className={`
@@ -132,7 +174,7 @@ const HomePage: React.FC = () => {
                     {step.label}
                   </span>
                 </div>
-                
+
                 {index < 3 && (
                   <div className={`
                     w-16 h-1 mx-4 rounded-full
@@ -145,10 +187,8 @@ const HomePage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Content */}
       {renderMainContent()}
 
-      {/* Result overlay (slide-in) */}
       <ResultOverlay />
     </div>
   );

@@ -2,8 +2,10 @@
 Video Generator Agent - ReAct with autonomous FC parameter selection
 """
 from typing import Dict, Any, List, Optional, Set, Tuple
+from dataclasses import dataclass
 import json as _json
 import re
+import time
 
 from sqlalchemy.orm import Session
 
@@ -11,10 +13,19 @@ from .react_agent import ReActAgent
 from .base import AgentError
 from ..models import Task, AgentExecution, AgentType
 from ..core.video_config_manager import get_video_config
+from ..core.consistency_policy import get_consistency_policy
 from ..core.config import settings
+from ..core.scene_continuity_memory import get_scene_continuity_memory
 
 # ===== Strict planning/reflection schemas (T2) =====
 from pydantic import BaseModel, Field, validator
+
+
+@dataclass
+class ConstraintMergeResult:
+    locked: List[str]
+    suggestions: List[str]
+    flattened: List[str]
 
 
 class PlanningDecision(BaseModel):
@@ -107,6 +118,42 @@ class VideoGeneratorAgent(ReActAgent):
             llms=llms,
         )
         self.video_config = get_video_config()
+        self.max_image_regen_attempts = 2
+
+    def _build_tool_context(self, tool_name: str, action: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """扩展工具上下文，向执行层提供连续性所需信息。"""
+        context = super()._build_tool_context(tool_name, action, parameters)
+        try:
+            ws = self.iteration_context.get('working_state', {}) or {}
+        except Exception:
+            ws = {}
+        ctx = ws.get('context') if isinstance(ws, dict) else {}
+        wf_id = ctx.get('workflow_state_id') if isinstance(ctx, dict) else None
+        if not wf_id:
+            wf_id = self.iteration_context.get('workflow_state_id')
+        if tool_name == 'video_generation':
+            try:
+                prepared = ws.get('prepared_last_frames') if isinstance(ws, dict) else None
+                current_batch = ws.get('current_batch') if isinstance(ws, dict) else None
+                context.update({
+                    'workflow_state_id': wf_id,
+                    'prepared_last_frames': prepared or {},
+                    'current_batch': current_batch or [],
+                    'force_generate_only': bool(self.iteration_context.get('force_generate_only')),
+                    'target_resolution': self.iteration_context.get('target_resolution'),
+                })
+            except Exception:
+                context.setdefault('workflow_state_id', wf_id)
+        elif tool_name == 'scene_continuity_preparation':
+            try:
+                prepared = ws.get('prepared_last_frames') if isinstance(ws, dict) else None
+                context.update({
+                    'workflow_state_id': wf_id,
+                    'prepared_last_frames': prepared or {},
+                })
+            except Exception:
+                context.setdefault('workflow_state_id', wf_id)
+        return context
 
     # ==== PLAN/OBSERVE ====
     def _get_goal_text(self, workflow_state_id: Optional[str]) -> str:
@@ -147,6 +194,23 @@ class VideoGeneratorAgent(ReActAgent):
                 continue
         return ids
 
+    @staticmethod
+    def _planning_decision_schema() -> Dict[str, Any]:
+        """统一的 PlanningDecision JSON Schema。"""
+        return {
+            "type": "object",
+            "properties": {
+                "intent": {"type": "string", "enum": ["execute", "observe", "replan", "halt"]},
+                "selected_units": {"type": ["array", "null"], "items": {"type": "integer"}},
+                "adjust_batch_size": {"type": ["integer", "null"]},
+                "plan_update": {"type": ["object", "null"]},
+                "plan_digest": {"type": "string"},
+                "rationale": {"type": ["string", "null"]},
+                "version": {"type": ["integer", "null"]}
+            },
+            "required": ["intent", "plan_digest"]
+        }
+
     async def _planning_round0(self, current_state: Dict[str, Any]) -> Dict[str, Any]:
         # 构造模板变量
         ws = self.iteration_context.get("working_state", {}) or {}
@@ -173,19 +237,7 @@ class VideoGeneratorAgent(ReActAgent):
             "role": "user",
             "content": "请严格按上面的系统指令，仅输出一个严格的总体规划 JSON（不要额外文字/不要代码围栏）。"
         })
-        schema = {
-            "type": "object",
-            "properties": {
-                "intent": {"type": "string", "enum": ["execute", "observe", "replan", "halt"]},
-                "selected_units": {"type": ["array", "null"], "items": {"type": "integer"}},
-                "adjust_batch_size": {"type": ["integer", "null"]},
-                "plan_update": {"type": ["object", "null"]},
-                "plan_digest": {"type": "string"},
-                "rationale": {"type": ["string", "null"]},
-                "version": {"type": ["integer", "null"]}
-            },
-            "required": ["intent", "plan_digest"]
-        }
+        schema = self._planning_decision_schema()
         data = await self.llm_structured_observation(messages, schema)
         if not isinstance(data, dict):
             raise AgentError("首轮规划未返回有效JSON")
@@ -249,19 +301,7 @@ class VideoGeneratorAgent(ReActAgent):
             )
         except Exception:
             pass
-        schema = {
-            "type": "object",
-            "properties": {
-                "intent": {"type": "string", "enum": ["execute", "observe", "replan", "halt"]},
-                "selected_units": {"type": ["array", "null"], "items": {"type": "integer"}},
-                "adjust_batch_size": {"type": ["integer", "null"]},
-                "plan_update": {"type": ["object", "null"]},
-                "plan_digest": {"type": "string"},
-                "rationale": {"type": ["string", "null"]},
-                "version": {"type": ["integer", "null"]}
-            },
-            "required": ["intent", "plan_digest"]
-        }
+        schema = self._planning_decision_schema()
         data = await self.llm_structured_observation(messages, schema)
         if not isinstance(data, dict):
             raise AgentError("滚动规划未返回有效JSON")
@@ -287,15 +327,64 @@ class VideoGeneratorAgent(ReActAgent):
 
         for scene in scenes_data:
             depends_on_scene = getattr(scene, 'depends_on_scene', None)
+            visual_description = (getattr(scene, 'visual_description', '') or '').strip()
+            if not visual_description:
+                raise AgentError(
+                    f"workflow_scene_{getattr(scene, 'scene_number', '?')} 缺少 visual_description，无法初始化视频生成任务"
+                )
+
+            script_text = (getattr(scene, 'script_text', '') or '').strip()
+            narrative_description = (getattr(scene, 'narrative_description', '') or '').strip()
+            action_sequence_description = (
+                getattr(scene, 'action_sequence_description', '') or ''
+            ).strip()
+            timing_structure_description = (
+                getattr(scene, 'timing_structure_description', '') or ''
+            ).strip()
+            initial_state_description = (
+                getattr(scene, 'initial_state_description', '') or ''
+            ).strip()
+            target_outcome_description = (
+                getattr(scene, 'target_outcome_description', '') or ''
+            ).strip()
+            complete_video_description = (
+                getattr(scene, 'complete_video_description', '') or ''
+            ).strip()
+
             info = {
                 "scene_number": scene.scene_number,
                 "title": getattr(scene, 'title', ''),
-                "visual_description": getattr(scene, 'visual_description', ''),
+                "visual_description": visual_description,
                 "duration": getattr(scene, 'duration', 5),
                 "depends_on_scene": depends_on_scene,
                 "image_url": getattr(scene, 'image_url', ''),
                 "video_url": getattr(scene, 'video_url', ''),
+                "narrative_description": narrative_description,
+                "script_text": script_text,
+                "action_sequence_description": action_sequence_description,
+                "timing_structure_description": timing_structure_description,
+                "motion_beats": getattr(scene, 'motion_beats', []),
+                "initial_state_description": initial_state_description,
+                "target_outcome_description": target_outcome_description,
+                "complete_video_description": complete_video_description,
             }
+
+            if not any(
+                [
+                    script_text,
+                    action_sequence_description,
+                    timing_structure_description,
+                    complete_video_description,
+                ]
+            ):
+                try:
+                    self.logger.warning(
+                        "SCENE_CONTEXT_GAP: scene=%s 缺少脚本/动作节奏信息，仅有视觉语境。请检查上游 Script/Concept 输出。",
+                        scene.scene_number,
+                    )
+                except Exception:
+                    pass
+
             scenes_to_generate.append(info)
             (dependent_scenes if depends_on_scene else independent_scenes).append(info)
 
@@ -412,11 +501,14 @@ class VideoGeneratorAgent(ReActAgent):
             pass
         failed_scene_numbers = {s.get("scene_number") for s in failed_scenes if isinstance(s, dict)}
 
+        pending_regen_map, blocked_for_regen = self._extract_pending_image_regen(workflow_state, sanitize=True)
+
         # independent scenes pending
         # 独立场景：失败不做永久排除，允许后续轮次重试
         pending_independent = [
             s for s in independent_scenes
             if s.get("scene_number") not in completed_scene_numbers
+            and self._normalize_scene_number(s.get('scene_number')) not in blocked_for_regen
         ]
 
         executable_dependent: List[Dict[str, Any]] = []
@@ -425,6 +517,8 @@ class VideoGeneratorAgent(ReActAgent):
             sn = s.get("scene_number")
             # 失败不做永久排除，允许后续轮次重试
             if sn in completed_scene_numbers:
+                continue
+            if self._normalize_scene_number(sn) in blocked_for_regen:
                 continue
             dep = s.get("depends_on_scene")
             if dep in completed_scene_numbers:
@@ -457,6 +551,14 @@ class VideoGeneratorAgent(ReActAgent):
             "pending_dependent_count": len(pending_dependent),
             "executable_scenes": executable_scenes,
             "pending_dependent_scenes": pending_dependent,
+            "pending_image_regen": pending_regen_map,
+            "blocked_scenes": [
+                {
+                    "scene_number": sn,
+                    **(pending_regen_map.get(sn) or {}),
+                }
+                for sn in sorted(blocked_for_regen)
+            ],
             # 完成门槛：无可执行且无待依赖，且无失败，且完成数达到目标
             "task_status": (
                 "completed"
@@ -582,7 +684,6 @@ class VideoGeneratorAgent(ReActAgent):
             except Exception:
                 pass
             # 预判就绪：优先利用 prepared_last_frames 或现有参考图
-            tools_override = None
             try:
                 ws0 = self.iteration_context.get("working_state", {}) or {}
                 prepared_map = dict(ws0.get('prepared_last_frames') or {})
@@ -606,7 +707,6 @@ class VideoGeneratorAgent(ReActAgent):
                     filled = list(scenes_batch or [])
                     ready_scenes = [s for s in filled if _scene_ready_to_generate(s)]
                     if ready_scenes and len(ready_scenes) < len(filled):
-                        # 日志去噪：仅当子集变化时打印一次
                         try:
                             subset_ids = []
                             for s in ready_scenes:
@@ -629,57 +729,16 @@ class VideoGeneratorAgent(ReActAgent):
                             self.iteration_context["working_state"] = ws_cur
                         except Exception:
                             pass
-                        vg = self._available_tools.get('video_generation')
-                        if vg is not None and hasattr(vg, 'get_action_schema'):
-                            params_schema = vg.get_action_schema('generate_with_continuity') or {}
-                            tools_override = [{
-                                "type": "function",
-                                "function": {
-                                    "name": "video_generation.generate_with_continuity",
-                                    "description": f"{vg.get_metadata().description} - generate_with_continuity",
-                                    "parameters": params_schema
-                                }
-                            }]
-                            self.logger.info("PLAN_ONLY_START: tools_override=['video_generation.generate_with_continuity'] (subset ready)")
                 except Exception:
                     pass
-
-                # 若上一轮出现无进展（连续prepare）行为，则强制仅生成
-                force_generate_only = bool(self.iteration_context.get('force_generate_only'))
-                ready_batch = False
-                try:
-                    filled2 = list(scenes_batch or [])
-                    if filled2:
-                        ready_batch = all(_scene_ready_to_generate(s) for s in filled2)
-                except Exception:
-                    ready_batch = False
-
-                if tools_override is None and (force_generate_only or ready_batch):
-                    # 构建仅包含 video_generation.generate_with_continuity 的 schema
-                    vg = self._available_tools.get('video_generation')
-                    if vg is not None and hasattr(vg, 'get_action_schema'):
-                        params_schema = vg.get_action_schema('generate_with_continuity') or {}
-                        tools_override = [{
-                            "type": "function",
-                            "function": {
-                                "name": "video_generation.generate_with_continuity",
-                                "description": f"{vg.get_metadata().description} - generate_with_continuity",
-                                "parameters": params_schema
-                            }
-                        }]
-                        self.logger.info("PLAN_ONLY_START: tools_override=['video_generation.generate_with_continuity'] (batch ready or forced)")
-                        # 清除一次性强制标记
-                        if force_generate_only:
-                            try:
-                                self.iteration_context.pop('force_generate_only', None)
-                            except Exception:
-                                pass
             except Exception:
-                tools_override = None
+                pass
+
+            force_generate_only = bool(self.iteration_context.get('force_generate_only'))
 
             # Build neutral facts and let FC pick tools/params（使用可能调整后的 scenes_batch）
             messages = self.build_fc_messages_for_batch(scenes_batch, workflow_state)
-            round_outcome = await self.run_fc_round(messages=messages, context_description="batch video generation", temperature=0.2, tools_override=tools_override)
+            round_outcome = await self.run_fc_round(messages=messages, context_description="batch video generation", temperature=0.2)
             executed_calls = round_outcome.get("executed_calls", []) or []
             # 合规提醒：有可执行但无 tool_calls → 记录一次空转
             if (scenes_batch and not executed_calls):
@@ -845,6 +904,7 @@ class VideoGeneratorAgent(ReActAgent):
                 np = int(self.iteration_context.get('no_progress_rounds', 0) or 0)
                 if progressed:
                     self.iteration_context['no_progress_rounds'] = 0
+                    self.iteration_context.pop('force_generate_only', None)
                 elif only_prepare:
                     self.iteration_context['no_progress_rounds'] = np + 1
                     try:
@@ -857,6 +917,7 @@ class VideoGeneratorAgent(ReActAgent):
                         self.iteration_context['no_progress_rounds'] = 0
                 else:
                     self.iteration_context['no_progress_rounds'] = 0
+                    self.iteration_context.pop('force_generate_only', None)
             except Exception:
                 pass
 
@@ -881,7 +942,8 @@ class VideoGeneratorAgent(ReActAgent):
         - Ensure scene_number is present when determinable (single-item batch fallback)
         - Default emit_last_frame to 'auto' for generate_with_continuity
         """
-        calls = []
+        calls: List[Dict[str, Any]] = []
+        blocked_results: List[Dict[str, Any]] = []
         try:
             ws = self.iteration_context.get("working_state", {}) or {}
             ctx = ws.get("context", {}) or {}
@@ -907,6 +969,7 @@ class VideoGeneratorAgent(ReActAgent):
                     raw = tc.get("function", {}).get("arguments")
                     import json as _json
                     args = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    skip_call = False
                     if isinstance(args, dict):
                         # Inject for video_generation.generate_with_continuity
                         if fn == 'video_generation.generate_with_continuity':
@@ -993,12 +1056,23 @@ class VideoGeneratorAgent(ReActAgent):
 
                             # 结构化参数增强：默认补充画风与角色一致性约束
                             try:
-                                # 样式约束：若调用方未提供，则注入概念计划/一致性指引中的画风描述
+                                policy = get_consistency_policy()
+
                                 style_defaults = self._get_style_constraints()
-                                if style_defaults:
-                                    merged_styles = self._merge_string_list(args.get('style_constraints'), style_defaults)
-                                    if merged_styles:
-                                        args['style_constraints'] = merged_styles
+                                merged_style = self._merge_style_constraints(
+                                    args.get('style_constraints'),
+                                    style_defaults,
+                                    policy,
+                                )
+                                if merged_style.flattened:
+                                    args['style_constraints'] = merged_style.flattened
+                                meta_bucket = args.setdefault('_consistency_meta', {})
+                                style_meta = meta_bucket.setdefault('style', {})
+                                current_scene_id = args.get('scene_number')
+                                style_meta[str(current_scene_id) if current_scene_id is not None else 'global'] = {
+                                    "locked": merged_style.locked,
+                                    "suggestions": merged_style.suggestions,
+                                }
 
                                 wf_id2 = args.get('workflow_state_id') or wf_id
                                 sn2_raw = args.get('scene_number')
@@ -1008,24 +1082,36 @@ class VideoGeneratorAgent(ReActAgent):
                                     concept_plan_local = self._get_concept_plan(wf_obj2)
                                     char_structs, char_texts = self._get_scene_character_constraints(wf_id2, sn2)
                                     if char_structs:
-                                        merged_structs = self._merge_struct_list(args.get('character_constraints_struct'), char_structs)
+                                        merged_structs = self._merge_struct_list(
+                                            args.get('character_constraints_struct'),
+                                            char_structs,
+                                        )
                                         if merged_structs:
                                             args['character_constraints_struct'] = merged_structs
                                     if char_texts:
-                                        merged_text = self._merge_string_list(args.get('character_constraints'), char_texts)
+                                        merged_text = self._merge_character_text_constraints(
+                                            args.get('character_constraints'),
+                                            char_texts,
+                                            policy,
+                                        )
                                         if merged_text:
                                             args['character_constraints'] = merged_text
 
-                                    neg_defaults = self._collect_negative_constraints(
+                                    merged_neg = self._merge_negative_constraints(
+                                        args.get('negative_constraints'),
                                         char_structs,
                                         char_texts,
                                         concept_plan_local,
                                         sn2,
+                                        policy,
                                     )
-                                    if neg_defaults:
-                                        merged_neg = self._merge_string_list(args.get('negative_constraints'), neg_defaults)
-                                        if merged_neg:
-                                            args['negative_constraints'] = merged_neg
+                                    if merged_neg.flattened:
+                                        args['negative_constraints'] = merged_neg.flattened
+                                    negative_meta = meta_bucket.setdefault('negative', {})
+                                    negative_meta[str(sn2)] = {
+                                        "locked": merged_neg.locked,
+                                        "suggestions": merged_neg.suggestions,
+                                    }
                             except Exception:
                                 pass
                         # Normalize scene_number to int when possible
@@ -1046,13 +1132,54 @@ class VideoGeneratorAgent(ReActAgent):
                             tc['function']['arguments'] = _json.dumps(args, ensure_ascii=False)
                         else:
                             tc['function']['arguments'] = args
+
+                        if fn == 'video_generation.generate_with_continuity':
+                            sn_val = self._normalize_scene_number(args.get('scene_number'))
+                            entry = self._get_pending_regen_entry(sn_val) if sn_val is not None else None
+                            status = str((entry or {}).get('status', '')).lower()
+                            if entry and status in {'waiting', 'regenerating'}:
+                                skip_call = True
+                                meta = {
+                                    'scene_number': sn_val,
+                                    'status': status,
+                                    'attempts': entry.get('attempts'),
+                                    'reason': entry.get('reason'),
+                                }
+                                blocked_results.append({
+                                    'tool': fn,
+                                    'args': args,
+                                    'scene_number': sn_val,
+                                    'success': False,
+                                    'error': 'scene pending image regeneration',
+                                    'error_type': 'pending_image_regen',
+                                    'metadata': meta,
+                                })
+                                try:
+                                    self.logger.warning(
+                                        "SKIP_VIDEO_CALL_PENDING_REGEN: scene=%s status=%s attempts=%s",
+                                        sn_val,
+                                        status,
+                                        entry.get('attempts'),
+                                    )
+                                except Exception:
+                                    pass
+                        elif fn == 'image_generation.generate_with_autoprompt':
+                            sn_val = self._normalize_scene_number(args.get('scene_number'))
+                            if sn_val is not None and self._get_pending_regen_entry(sn_val):
+                                self._set_pending_regen_status(sn_val, 'regenerating')
+                    if skip_call:
+                        continue
                 except Exception:
-                    pass
-                calls.append(tc)
+                    skip_call = False
+                if not skip_call:
+                    calls.append(tc)
         except Exception:
             calls = list(tool_calls or [])
         # Delegate to base for actual execution and logging
-        return await super().execute_tool_calls(calls)
+        results = await super().execute_tool_calls(calls)
+        if blocked_results:
+            results.extend(blocked_results)
+        return results
 
     def build_fc_messages_for_batch(self, scenes_batch: List[Dict[str, Any]], workflow_state: Dict[str, Any]) -> List[Dict[str, Any]]:
         completed = workflow_state.get("completed_scenes", {}) or {}
@@ -1060,6 +1187,7 @@ class VideoGeneratorAgent(ReActAgent):
         prev_failed = len(workflow_state.get("failed_scenes", []) or [])
         notes = workflow_state.get("reflection_notes", []) or []
         note_str = " | ".join(notes[-3:]) if notes else ""
+        force_generate_only = bool(self.iteration_context.get('force_generate_only'))
         image_map: Dict[int, str] = {}
         video_map: Dict[int, str] = {}
         depends_map: Dict[int, Optional[int]] = {}
@@ -1068,6 +1196,9 @@ class VideoGeneratorAgent(ReActAgent):
         last_frame_map: Dict[int, str] = {}
         prepared_map: Dict[int, str] = {}
         priority_ids: List[int] = []
+        pending_regen_map: Dict[int, Dict[str, Any]] = {}
+        blocked_regen_ids: Set[int] = set()
+        motion_beats_map: Dict[int, List[Dict[str, Any]]] = {}
         try:
             from ..core.workflow_state import workflow_manager
             wf_id = workflow_state.get('context', {}).get('workflow_state_id') or self.iteration_context.get('workflow_state_id')
@@ -1144,9 +1275,31 @@ class VideoGeneratorAgent(ReActAgent):
                 priority_ids = [int(x) for x in priority_ids if isinstance(x, (int, str)) and str(x).isdigit()]
             except Exception:
                 priority_ids = []
+            try:
+                pending_regen_map, blocked_regen_ids = self._extract_pending_image_regen(workflow_state, sanitize=True)
+            except Exception:
+                pending_regen_map, blocked_regen_ids = {}, set()
+            try:
+                ctx_scenes = (workflow_state.get('context') or {}).get('scenes_to_generate') or []
+                for sc in ctx_scenes:
+                    if not isinstance(sc, dict):
+                        continue
+                    sn = sc.get('scene_number')
+                    if sn is None:
+                        continue
+                    beats = sc.get('motion_beats')
+                    if isinstance(beats, list) and beats:
+                        try:
+                            motion_beats_map[int(sn)] = beats
+                        except Exception:
+                            continue
+            except Exception:
+                motion_beats_map = {}
         except Exception:
             image_map, video_map = {}, {}
             depends_map, reason_map, conf_map, last_frame_map = {}, {}, {}, {}
+            pending_regen_map, blocked_regen_ids = {}, set()
+            motion_beats_map = {}
 
         target_resolution = None
         try:
@@ -1240,10 +1393,25 @@ class VideoGeneratorAgent(ReActAgent):
             except Exception:
                 pass
             # 汇入角色一致性“事实”供FC参考（不包含工具/参数名）
+            project_ctx = ctx.get('project_context') or {}
+            character_bible = project_ctx.get('character_bible') if isinstance(project_ctx, dict) else {}
+            if isinstance(character_bible, dict) and character_bible:
+                obs_aug['character_bible'] = character_bible
             try:
                 # 角色来源：WF.scene 优先；缺失回退 concept_plan.scenes；再回退 orchestrator.scene_guidances
                 char_names: Dict[int, List[str]] = {}
                 char_descs: Dict[int, List[str]] = {}
+                alias_lookup: Dict[str, str] = {}
+                for cid, profile in (character_bible or {}).items():
+                    if not isinstance(profile, dict):
+                        continue
+                    display = str(profile.get('display_name') or '').strip()
+                    if display:
+                        alias_lookup.setdefault(display.casefold(), cid)
+                    for alias in profile.get('aliases') or []:
+                        alias_name = str(alias).strip()
+                        if alias_name:
+                            alias_lookup.setdefault(alias_name.casefold(), cid)
                 try:
                     wf_id = ctx.get("workflow_state_id")
                     if wf_id:
@@ -1298,7 +1466,22 @@ class VideoGeneratorAgent(ReActAgent):
                                 char_names[sid] = [str(x) for x in nms if str(x).strip()]
                     except Exception:
                         pass
-                char_facts = {sn: {"names": char_names.get(sn, []), "descriptions": char_descs.get(sn, [])} for sn in set(list(char_names.keys()) + list(char_descs.keys()))}
+                char_facts: Dict[int, Dict[str, Any]] = {}
+                for sn in set(list(char_names.keys()) + list(char_descs.keys())):
+                    names = char_names.get(sn, [])
+                    descs = char_descs.get(sn, [])
+                    entry = {"names": names, "descriptions": descs}
+                    matched_ids: List[str] = []
+                    for nm in names:
+                        token = str(nm).strip()
+                        if not token:
+                            continue
+                        canonical = alias_lookup.get(token.casefold())
+                        if canonical and canonical not in matched_ids:
+                            matched_ids.append(canonical)
+                    if matched_ids:
+                        entry["character_ids"] = matched_ids
+                    char_facts[sn] = entry
             except Exception:
                 char_facts = {}
 
@@ -1312,6 +1495,8 @@ class VideoGeneratorAgent(ReActAgent):
                 "last_frame_map": last_frame_map,
                 "prepared_last_frames": prepared_map,
                 "priority_prepared_ids": priority_ids,
+                "pending_image_regen": pending_regen_map,
+                "motion_beats_map": motion_beats_map,
                 "characters_map": char_facts,
             }
             # 适度诊断：DEBUG 级别输出可见的风格/角色事实摘要（不打印大对象）
@@ -1346,6 +1531,16 @@ class VideoGeneratorAgent(ReActAgent):
         facts_lines.append(
             f"批次候选数量：{len(scenes_batch)}；进度：已完成 {prev_completed}，失败 {prev_failed}。" + (f" 最近反思：{note_str}" if note_str else "")
         )
+        if force_generate_only:
+            facts_lines.append("⚠️ 最近几轮仅执行准备步骤，请直接调用视频生成工具完成当前批次，不要只调用准备类动作。")
+        if blocked_regen_ids:
+            for sn in sorted(blocked_regen_ids):
+                info = pending_regen_map.get(sn) or {}
+                reason_txt = info.get('reason') or '参考图被判敏感'
+                attempts_txt = info.get('attempts') or 0
+                facts_lines.append(
+                    f"场景{sn}需先生成安全参考图（已尝试{attempts_txt}次：{reason_txt}）。"
+                )
         if target_resolution:
             facts_lines.append(f"目标输出分辨率：{target_resolution}。如需调整，请在响应中说明原因。")
         for s in filled_batch:
@@ -1371,6 +1566,9 @@ class VideoGeneratorAgent(ReActAgent):
                     parts.append("有连续性尾帧")
                 if sn in priority_ids:
                     parts.append("优先执行")
+                beats_preview = motion_beats_map.get(sn)
+                if beats_preview:
+                    parts.append(f"节奏{len(beats_preview)}段")
                 facts_lines.append("- " + "，".join(parts))
             except Exception:
                 continue
@@ -1392,7 +1590,50 @@ class VideoGeneratorAgent(ReActAgent):
                 args = call.get("args") or {}
                 payload = call.get("result") or {}
                 fn = call.get('tool') or (call.get('function', {}) or {}).get('name') or ''
+                metadata = call.get('metadata') or {}
+                error_type = call.get('error_type')
+                scene_num = call.get('scene_number')
+                if scene_num is None and isinstance(args, dict):
+                    scene_num = args.get("scene_number")
+                try:
+                    if scene_num is not None and str(scene_num).isdigit():
+                        scene_num = int(scene_num)
+                except Exception:
+                    pass
                 # 仅处理本代理的视频生成调用
+                if isinstance(fn, str) and fn.startswith('image_generation.'):
+                    # 处理重新生成的参考图
+                    try:
+                        if hasattr(payload, 'result'):
+                            payload = getattr(payload, 'result')
+                    except Exception:
+                        pass
+                    image_url = payload.get('image_url') if isinstance(payload, dict) else None
+                    if image_url:
+                        await self._apply_regenerated_image(scene_num, payload)
+                        results.append({
+                            "success": True,
+                            "scene_number": scene_num,
+                            "artifact_type": "image_regen",
+                            "image_url": image_url,
+                            "prompt_text": (args.get('prompt') if isinstance(args, dict) else None) or payload.get('prompt_text') or '',
+                        })
+                    else:
+                        err_msg = None
+                        if isinstance(payload, dict):
+                            err_msg = payload.get('error') or payload.get('message') or payload.get('status')
+                        if not err_msg:
+                            err_msg = call.get('error') if isinstance(call.get('error'), str) else 'image_regen_failed'
+                        self._note_image_regen_failure(scene_num, err_msg or 'image_regen_failed')
+                        results.append({
+                            "success": False,
+                            "scene_number": scene_num,
+                            "artifact_type": "image_regen",
+                            "error": err_msg or 'image_regen_failed',
+                            "error_type": call.get('error_type') or 'image_regen_failed',
+                        })
+                    continue
+
                 if not (isinstance(fn, str) and fn.startswith('video_generation.')):
                     continue
                 # 兼容 ToolOutput：若为对象则取其 result 字段
@@ -1401,14 +1642,13 @@ class VideoGeneratorAgent(ReActAgent):
                         payload = getattr(payload, 'result')
                 except Exception:
                     pass
-                scene_num = args.get("scene_number") if isinstance(args, dict) else None
                 if isinstance(payload, dict) and payload.get("video_url"):
                     # 成功路径
                     try:
-                        if scene_num is not None:
+                        if scene_num is not None and str(scene_num).isdigit():
                             scene_num = int(scene_num)
                     except Exception:
-                        scene_num = None
+                        pass
                     storage_result = await self._store_generated_video(payload.get("video_url", ""), scene_num)
                     file_path = ""
                     if isinstance(storage_result, dict):
@@ -1430,12 +1670,26 @@ class VideoGeneratorAgent(ReActAgent):
                                 err = payload.get('error') or payload.get('status') or payload.get('message')
                             if not err and isinstance(call.get('error'), str):
                                 err = call.get('error')
-                            results.append({
+                            failure_entry = {
                                 "success": False,
                                 "scene_number": int(scene_num) if str(scene_num).isdigit() else scene_num,
                                 "error": err or "video_generation returned no artifact",
                                 "duration": (args.get("duration") if isinstance(args, dict) else None) or 5,
-                            })
+                            }
+                            if error_type:
+                                failure_entry["error_type"] = error_type
+                            if metadata.get('error_details_struct'):
+                                failure_entry["error_details"] = metadata.get('error_details_struct')
+                            elif metadata.get('error_details'):
+                                failure_entry["error_details"] = metadata.get('error_details')
+                            results.append(failure_entry)
+                            if error_type == 'sensitive_input_image':
+                                details_struct = metadata.get('error_details_struct') or {}
+                                await self._handle_sensitive_image_failure(
+                                    int(scene_num) if str(scene_num).isdigit() else scene_num,
+                                    details_struct,
+                                    args if isinstance(args, dict) else {},
+                                )
                     except Exception:
                         pass
             except Exception:
@@ -1503,6 +1757,312 @@ class VideoGeneratorAgent(ReActAgent):
         except Exception:
             return {}
 
+    # === 敏感参考图回收与再生成辅助 ===
+
+    def _normalize_scene_number(self, value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip():
+                txt = value.strip()
+                if txt.isdigit():
+                    return int(txt)
+            return int(value)
+        except Exception:
+            return None
+
+    def _get_working_state(self) -> Dict[str, Any]:
+        ws = self.iteration_context.get("working_state")
+        if not isinstance(ws, dict):
+            ws = {}
+            self.iteration_context["working_state"] = ws
+        return ws
+
+    def _get_pending_regen_entry(self, scene_number: int) -> Optional[Dict[str, Any]]:
+        ws = self._get_working_state()
+        pending = ws.get('pending_image_regen')
+        if not isinstance(pending, dict):
+            return None
+        entry = pending.get(scene_number)
+        if entry is None:
+            entry = pending.get(str(scene_number))
+        return entry if isinstance(entry, dict) else None
+
+    def _upsert_pending_regen_entry(self, scene_number: int, updates: Dict[str, Any]) -> Dict[str, Any]:
+        ws = self._get_working_state()
+        pending = ws.get('pending_image_regen')
+        if not isinstance(pending, dict):
+            pending = {}
+        entry = dict(self._get_pending_regen_entry(scene_number) or {})
+        # 仅保留非 None 的字段，避免旧字段被覆盖为 None
+        for key, value in updates.items():
+            if value is not None:
+                entry[key] = value
+        pending[int(scene_number)] = entry
+        ws['pending_image_regen'] = pending
+        self.iteration_context['working_state'] = ws
+        return entry
+
+    def _set_pending_regen_status(self, scene_number: int, status: str, **extra: Any) -> None:
+        sn = self._normalize_scene_number(scene_number)
+        if sn is None:
+            return
+        payload = {"status": str(status).lower(), "updated_at": time.time()}
+        payload.update(extra)
+        self._upsert_pending_regen_entry(sn, payload)
+
+    def _extract_pending_image_regen(
+        self,
+        workflow_state: Dict[str, Any],
+        *,
+        sanitize: bool = True,
+    ) -> Tuple[Dict[int, Dict[str, Any]], Set[int]]:
+        pending_raw = {}
+        try:
+            pending_raw = workflow_state.get('pending_image_regen') or {}
+        except Exception:
+            pending_raw = {}
+        sanitized: Dict[int, Dict[str, Any]] = {}
+        blocked: Set[int] = set()
+        if not isinstance(pending_raw, dict):
+            return sanitized, blocked
+
+        for key, entry in pending_raw.items():
+            if not isinstance(entry, dict):
+                continue
+            sn = self._normalize_scene_number(key)
+            if sn is None:
+                sn = self._normalize_scene_number(entry.get('scene_number'))
+            if sn is None:
+                continue
+            status = str(entry.get('status', 'waiting')).lower()
+            info: Dict[str, Any] = {
+                'status': status,
+                'attempts': int(entry.get('attempts', 0) or 0),
+                'reason': entry.get('reason') or 'input_image_sensitive',
+            }
+            if entry.get('blocked_at'):
+                info['blocked_at'] = entry.get('blocked_at')
+            if entry.get('last_error'):
+                info['last_error'] = entry.get('last_error')
+            if status in {'waiting', 'regenerating'}:
+                info['needs_image_regen'] = True
+                blocked.add(sn)
+            if status == 'aborted':
+                info['aborted'] = True
+            if not sanitize:
+                info['blocked_image_url'] = entry.get('blocked_image_url')
+                info['last_prompt'] = entry.get('last_prompt')
+            sanitized[sn] = info
+        return sanitized, blocked
+
+    def _append_image_regen_history(self, scene_number: int, record: Dict[str, Any]) -> None:
+        ws = self._get_working_state()
+        history = ws.get('image_regen_history')
+        if not isinstance(history, list):
+            history = []
+        history.append(record)
+        if len(history) > 20:
+            history = history[-20:]
+        ws['image_regen_history'] = history
+        self.iteration_context['working_state'] = ws
+
+    async def _clear_sensitive_references(self, scene_number: int, *, reason: str = '') -> None:
+        sn = self._normalize_scene_number(scene_number)
+        if sn is None:
+            return
+        ws = self._get_working_state()
+        changed = False
+        try:
+            prepared = dict(ws.get('prepared_last_frames') or {})
+            if sn in prepared:
+                prepared.pop(sn, None)
+                ws['prepared_last_frames'] = prepared
+                changed = True
+        except Exception:
+            pass
+        try:
+            pr_list = [
+                self._normalize_scene_number(x)
+                for x in ws.get('priority_prepared_ids') or []
+                if self._normalize_scene_number(x) is not None
+            ]
+            pr_list = [x for x in pr_list if x is not None and x != sn]
+            ws['priority_prepared_ids'] = pr_list
+            changed = True
+        except Exception:
+            pass
+        try:
+            ctx = ws.get('context') or {}
+            scenes = ctx.get('scenes_to_generate') or []
+            for sc in scenes:
+                if not isinstance(sc, dict):
+                    continue
+                if self._normalize_scene_number(sc.get('scene_number')) != sn:
+                    continue
+                old_url = sc.get('image_url')
+                if old_url:
+                    sc['last_sensitive_image_url'] = old_url
+                    sc['image_url'] = ''
+                    sc['image_cleared_reason'] = reason or 'input_image_sensitive'
+                    changed = True
+            ctx['scenes_to_generate'] = scenes
+            ws['context'] = ctx
+        except Exception:
+            pass
+        if changed:
+            self.iteration_context['working_state'] = ws
+
+    async def _handle_sensitive_image_failure(
+        self,
+        scene_number: Any,
+        details_struct: Dict[str, Any],
+        args: Dict[str, Any],
+    ) -> None:
+        sn = self._normalize_scene_number(scene_number)
+        if sn is None:
+            return
+        await self._clear_sensitive_references(sn, reason='input_image_sensitive')
+
+        ws = self._get_working_state()
+        attempts = ws.get('image_regen_attempts')
+        if not isinstance(attempts, dict):
+            attempts = {}
+        attempts[sn] = int(attempts.get(sn, 0) or 0) + 1
+        ws['image_regen_attempts'] = attempts
+        self.iteration_context['working_state'] = ws
+
+        provider = None
+        blocked_url = None
+        reason = 'input_image_sensitive'
+        if isinstance(details_struct, dict):
+            provider = details_struct.get('provider')
+            blocked_url = details_struct.get('image_url')
+            reason = details_struct.get('provider_error', {}).get('message') or reason
+
+        entry = self._upsert_pending_regen_entry(sn, {
+            'scene_number': sn,
+            'status': 'waiting',
+            'reason': reason,
+            'blocked_at': time.time(),
+            'blocked_image_url': blocked_url,
+            'provider': provider,
+            'attempts': attempts.get(sn, 1),
+            'last_prompt': args.get('prompt'),
+        })
+
+        max_attempts = max(int(getattr(self, 'max_image_regen_attempts', 2) or 2), 1)
+        if entry.get('attempts', 0) > max_attempts:
+            entry['status'] = 'aborted'
+            entry['aborted_at'] = time.time()
+            ws = self._get_working_state()
+            pending = ws.get('pending_image_regen') or {}
+            pending[int(sn)] = entry
+            ws['pending_image_regen'] = pending
+            failed_list = list(ws.get('failed_scenes') or [])
+            failed_list.append({
+                'scene_number': sn,
+                'error': 'input_image_sensitive_exceeded_regen',
+                'reason': reason,
+                'attempts': entry.get('attempts'),
+            })
+            ws['failed_scenes'] = failed_list
+            self.iteration_context['working_state'] = ws
+            try:
+                self.logger.error(
+                    "IMAGE_REGEN_ABORTED: scene=%s attempts=%s reason=%s",
+                    sn,
+                    entry.get('attempts'),
+                    reason,
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            self.logger.warning(
+                "IMAGE_REGEN_REQUIRED: scene=%s attempts=%s provider=%s", sn, entry.get('attempts'), provider
+            )
+        except Exception:
+            pass
+
+    async def _apply_regenerated_image(self, scene_number: Any, payload: Dict[str, Any]) -> None:
+        sn = self._normalize_scene_number(scene_number)
+        if sn is None:
+            return
+        image_url = None
+        if isinstance(payload, dict):
+            image_url = payload.get('image_url')
+        if not image_url:
+            return
+
+        ws = self._get_working_state()
+        ctx = ws.get('context') or {}
+        scenes = ctx.get('scenes_to_generate') or []
+        for sc in scenes:
+            if not isinstance(sc, dict):
+                continue
+            if self._normalize_scene_number(sc.get('scene_number')) != sn:
+                continue
+            sc['image_url'] = image_url
+            sc['image_regen_prompt_text'] = payload.get('prompt_text') or payload.get('prompt') or ''
+            sc['image_regenerated_at'] = time.time()
+        ctx['scenes_to_generate'] = scenes
+        ws['context'] = ctx
+
+        prepared = ws.get('prepared_last_frames')
+        if not isinstance(prepared, dict):
+            prepared = {}
+        prepared[sn] = image_url
+        ws['prepared_last_frames'] = prepared
+
+        pr_list = [
+            self._normalize_scene_number(x)
+            for x in ws.get('priority_prepared_ids') or []
+            if self._normalize_scene_number(x) is not None and self._normalize_scene_number(x) != sn
+        ]
+        pr_list.insert(0, sn)
+        ws['priority_prepared_ids'] = pr_list[:8]
+
+        pending = ws.get('pending_image_regen')
+        if isinstance(pending, dict) and sn in pending:
+            entry = dict(pending.pop(sn) or {})
+        else:
+            entry = {}
+        ws['pending_image_regen'] = pending or {}
+        ws['last_image_regen_scene'] = sn
+        self.iteration_context['working_state'] = ws
+
+        history_record = {
+            'scene_number': sn,
+            'image_url': image_url,
+            'prompt_text': payload.get('prompt_text') or payload.get('prompt'),
+            'applied_at': time.time(),
+            'attempts': entry.get('attempts') or (ws.get('image_regen_attempts') or {}).get(sn),
+        }
+        self._append_image_regen_history(sn, history_record)
+
+        try:
+            self.logger.info("IMAGE_REGEN_APPLIED: scene=%s url=%s", sn, image_url)
+        except Exception:
+            pass
+
+    def _note_image_regen_failure(self, scene_number: Any, error_message: str) -> None:
+        sn = self._normalize_scene_number(scene_number)
+        if sn is None:
+            return
+        entry = self._upsert_pending_regen_entry(sn, {
+            'status': 'waiting',
+            'last_error': error_message,
+            'updated_at': time.time(),
+        })
+        try:
+            self.logger.warning("IMAGE_REGEN_FAILED: scene=%s error=%s", sn, error_message)
+        except Exception:
+            pass
+
     # === 风格与角色一致性辅助方法 ===
 
     def _get_style_constraints(self) -> List[str]:
@@ -1523,6 +2083,15 @@ class VideoGeneratorAgent(ReActAgent):
                     val = isd.get(key)
                     if isinstance(val, str) and val.strip():
                         constraints.append(val.strip())
+                taxonomy = isd.get('taxonomy')
+                if isinstance(taxonomy, dict):
+                    for tag_key in ['substyle_label', 'family_label', 'substyle_key']:
+                        tag_val = taxonomy.get(tag_key)
+                        if isinstance(tag_val, str) and tag_val.strip():
+                            constraints.append(tag_val.strip())
+                    for token in taxonomy.get('positive_tokens') or []:
+                        if isinstance(token, str) and token.strip():
+                            constraints.append(token.strip())
             cg = concept_plan.get('consistency_guidelines', {}) if isinstance(concept_plan, dict) else {}
             if isinstance(cg, dict):
                 for key in ['style_consistency', 'environment_consistency', 'character_consistency', 'object_consistency']:
@@ -1665,6 +2234,123 @@ class VideoGeneratorAgent(ReActAgent):
                 seen.add(text)
         return result
 
+    def _constraint_items(self, values, source: str, default_category: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        if not isinstance(values, list):
+            values = [values] if values else []
+        for value in values:
+            text = str(value).strip()
+            if not text:
+                continue
+            items.append({
+                "text": text,
+                "source": source,
+                "category": default_category,
+                "lock": "soft",
+            })
+        return items
+
+    def _merge_items_with_policy(
+        self,
+        fc_items: List[Dict[str, Any]],
+        memory_items: List[Dict[str, Any]],
+        merge_mode: str,
+        lock_sections: List[str],
+    ) -> List[Dict[str, Any]]:
+        lock_set = set(lock_sections or [])
+        ordered: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        def _mark_lock(entry: Dict[str, Any]) -> Dict[str, Any]:
+            if entry.get("category") in lock_set:
+                entry["lock"] = "hard"
+            return entry
+
+        def _append(items: List[Dict[str, Any]]):
+            for entry in items:
+                entry = _mark_lock(entry)
+                text = entry.get("text", "").strip()
+                if not text or text in seen:
+                    continue
+                ordered.append(entry)
+                seen.add(text)
+
+        if merge_mode == "fc_over_memory":
+            _append(fc_items)
+            _append(memory_items)
+        elif merge_mode == "memory_over_fc":
+            _append(memory_items)
+            _append(fc_items)
+        elif merge_mode == "merge_all":
+            _append(memory_items)
+            _append(fc_items)
+        else:
+            _append(memory_items)
+            _append(fc_items)
+        return ordered
+
+    def _build_merge_result(self, items: List[Dict[str, Any]]) -> ConstraintMergeResult:
+        locked = [entry["text"] for entry in items if entry.get("lock") == "hard"]
+        suggestions = [entry["text"] for entry in items if entry.get("lock") != "hard"]
+        flattened = [entry["text"] for entry in items]
+        return ConstraintMergeResult(locked=locked, suggestions=suggestions, flattened=flattened)
+
+    def _merge_style_constraints(
+        self,
+        fc_styles: List[Any],
+        style_defaults: List[str],
+        policy,
+    ) -> ConstraintMergeResult:
+        fc_items = self._constraint_items(fc_styles or [], "fc", "style")
+        memory_items = self._constraint_items(style_defaults or [], "memory", "style_anchors")
+        merged_items = self._merge_items_with_policy(
+            fc_items,
+            memory_items,
+            getattr(policy.merge_policy, "style_constraints", "memory_over_fc"),
+            policy.lock_sections,
+        )
+        return self._build_merge_result(merged_items)
+
+    def _merge_negative_constraints(
+        self,
+        fc_negatives: List[Any],
+        char_structs: List[Dict[str, Any]],
+        char_texts: List[str],
+        concept_plan: Dict[str, Any],
+        scene_number: int,
+        policy,
+    ) -> ConstraintMergeResult:
+        fc_items = self._constraint_items(fc_negatives or [], "fc", "general")
+        memory_items = self._collect_negative_constraints(
+            char_structs,
+            char_texts,
+            concept_plan,
+            scene_number,
+        )
+        merged_items = self._merge_items_with_policy(
+            fc_items,
+            memory_items,
+            getattr(policy.merge_policy, "negative_constraints", "memory_over_fc"),
+            policy.lock_sections,
+        )
+        return self._build_merge_result(merged_items)
+
+    def _merge_character_text_constraints(
+        self,
+        fc_texts: List[Any],
+        memory_texts: List[str],
+        policy,
+    ) -> List[str]:
+        fc_items = self._constraint_items(fc_texts or [], "fc", "character_text")
+        memory_items = self._constraint_items(memory_texts or [], "memory", "appearance")
+        merged_items = self._merge_items_with_policy(
+            fc_items,
+            memory_items,
+            getattr(policy.merge_policy, "character_constraints", "memory_over_fc"),
+            policy.lock_sections,
+        )
+        return [entry["text"] for entry in merged_items]
+
     def _merge_struct_list(self, existing, additions) -> List[Dict[str, Any]]:
         merged: List[Dict[str, Any]] = []
         seen = set()
@@ -1780,27 +2466,183 @@ class VideoGeneratorAgent(ReActAgent):
         mapping: Dict[str, Dict[str, Any]] = {}
         try:
             characters = (concept_plan.get('content_elements') or {}).get('characters') or []
-            for entry in characters:
-                if not isinstance(entry, dict):
-                    continue
-                alias_set = set()
-                for key in ['display_name', 'canonical_name', 'name']:
-                    val = entry.get(key)
-                    if isinstance(val, str) and val.strip():
-                        alias_set.add(val)
-                for alias in entry.get('aliases') or []:
-                    if isinstance(alias, str) and alias.strip():
-                        alias_set.add(alias)
-                for alias in list(alias_set):
-                    normalized = self._normalize_name(alias)
-                    if normalized:
-                        mapping[normalized] = entry
+            self._ingest_character_entries(mapping, characters)
         except Exception:
-            mapping = {}
+            pass
+
+        # 项目级角色手册：先查工作流态再查源输入
+        project_context = {}
+        try:
+            wf_obj = self._get_workflow_state_obj(workflow_state_id)
+            if wf_obj is not None:
+                project_context = getattr(wf_obj, 'project_context', {}) or {}
+        except Exception:
+            project_context = {}
+
+        try:
+            src_input = dict(self.iteration_context.get('source_input') or {})
+            if not project_context:
+                project_context = src_input.get('project_context') or {}
+            elif src_input.get('project_context'):
+                # prefer workflow context but merge source hints
+                merged_ctx = dict(src_input.get('project_context') or {})
+                merged_ctx.setdefault('character_bible', project_context.get('character_bible'))
+                for key, value in project_context.items():
+                    if key not in merged_ctx or merged_ctx[key] in (None, {}):
+                        merged_ctx[key] = value
+                project_context = merged_ctx
+        except Exception:
+            pass
+
+        try:
+            bible = project_context.get('character_bible') if isinstance(project_context, dict) else {}
+            self._ingest_character_entries(mapping, bible)
+        except Exception:
+            pass
 
         cache_all[key] = mapping
         self.iteration_context['_character_def_cache'] = cache_all
         return mapping
+
+    def _ingest_character_entries(
+        self,
+        mapping: Dict[str, Dict[str, Any]],
+        entries: Any,
+    ) -> None:
+        if not entries:
+            return
+
+        if isinstance(entries, dict):
+            iterable = entries.values()
+        elif isinstance(entries, list):
+            iterable = entries
+        else:
+            iterable = [entries]
+
+        for entry in iterable:
+            if not isinstance(entry, dict):
+                continue
+
+            normalized_entry = self._normalise_character_entry(entry)
+            if not normalized_entry:
+                continue
+
+            alias_set = set()
+            for key in ['display_name', 'canonical_name', 'canonical_id', 'name']:
+                val = normalized_entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    alias_set.add(val)
+            for alias in normalized_entry.get('aliases') or []:
+                if isinstance(alias, str) and alias.strip():
+                    alias_set.add(alias)
+
+            for alias in list(alias_set):
+                normalized = self._normalize_name(alias)
+                if not normalized:
+                    continue
+                existing = mapping.get(normalized)
+                if existing:
+                    merged = self._merge_character_definitions(existing, normalized_entry)
+                    mapping[normalized] = merged
+                else:
+                    mapping[normalized] = normalized_entry
+
+    def _normalise_character_entry(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Convert various character schemas into unified definition structure."""
+
+        if not isinstance(entry, dict):
+            return None
+
+        def _as_list(value) -> List[str]:
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if str(v).strip()]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+            return []
+
+        visual_traits = entry.get('visual_traits') or {}
+        style_prefs = entry.get('style_preferences') or {}
+
+        display = str(entry.get('display_name') or entry.get('name') or entry.get('canonical_id') or '').strip()
+        canonical = str(entry.get('canonical_id') or entry.get('canonical_name') or display).strip()
+        if not (display or canonical):
+            return None
+
+        species = (
+            entry.get('species_or_breed')
+            or visual_traits.get('species')
+            or entry.get('species')
+            or ''
+        )
+        archetype = (
+            entry.get('archetype_or_identity')
+            or entry.get('narrative_role')
+            or entry.get('role')
+            or ''
+        )
+        signature = _as_list(entry.get('signature_outfit_or_props'))
+        if not signature:
+            signature = _as_list(visual_traits.get('signature_outfit_or_props'))
+        if not signature:
+            signature = _as_list(style_prefs.get('signature_outfit_or_props'))
+
+        traits = _as_list(entry.get('key_traits'))
+        if visual_traits.get('key_traits'):
+            traits.extend(_as_list(visual_traits.get('key_traits')))
+        if not traits:
+            traits.extend(_as_list(entry.get('personality_traits')))
+        description = entry.get('description') or entry.get('long_description')
+        if isinstance(description, str) and description.strip():
+            traits.append(description.strip())
+
+        role = entry.get('role') or entry.get('narrative_role') or ''
+
+        normalized = {
+            'display_name': display or canonical,
+            'canonical_name': canonical or display,
+            'canonical_id': entry.get('canonical_id') or canonical or display,
+            'aliases': _as_list(entry.get('aliases')),
+            'species_or_breed': species,
+            'archetype_or_identity': archetype,
+            'signature_outfit_or_props': list(dict.fromkeys(signature)),
+            'key_traits': list(dict.fromkeys(traits)),
+            'role': role,
+        }
+
+        if style_prefs:
+            normalized.setdefault('style_preferences', style_prefs)
+        if visual_traits:
+            normalized.setdefault('visual_traits', visual_traits)
+        if entry.get('reference_assets'):
+            normalized.setdefault('reference_assets', entry.get('reference_assets'))
+        return normalized
+
+    def _merge_character_definitions(
+        self,
+        base: Dict[str, Any],
+        override: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged = dict(base or {})
+        for key in ['display_name', 'canonical_name', 'canonical_id', 'species_or_breed', 'archetype_or_identity', 'role']:
+            value = override.get(key)
+            if value and not merged.get(key):
+                merged[key] = value
+
+        def _merge_list_field(field: str) -> None:
+            if field not in merged or not isinstance(merged[field], list):
+                merged[field] = []
+            if override.get(field):
+                merged[field] = list(dict.fromkeys(list(merged[field]) + list(override.get(field) or [])))
+
+        for list_field in ['aliases', 'signature_outfit_or_props', 'key_traits']:
+            _merge_list_field(list_field)
+
+        for dict_field in ['visual_traits', 'style_preferences', 'reference_assets']:
+            merged.setdefault(dict_field, {})
+            if isinstance(override.get(dict_field), dict):
+                merged[dict_field].update({k: v for k, v in override[dict_field].items() if v is not None})
+
+        return merged
 
     def _lookup_character_definition(self, mapping: Dict[str, Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
         if not name:
@@ -1945,11 +2787,11 @@ class VideoGeneratorAgent(ReActAgent):
         char_texts: List[str],
         concept_plan: Dict[str, Any],
         scene_number: int,
-    ) -> List[str]:
-        constraints: List[str] = []
+    ) -> List[Dict[str, Any]]:
+        constraints: List[Dict[str, Any]] = []
         seen: Set[str] = set()
 
-        def _add(sentence: Optional[str]) -> None:
+        def _add(sentence: Optional[str], category: str) -> None:
             if not sentence:
                 return
             text = str(sentence).strip()
@@ -1957,12 +2799,18 @@ class VideoGeneratorAgent(ReActAgent):
                 return
             if len(text) > 160:
                 text = text[:160].rstrip('，；、。,. ') + '...'
-            if text not in seen:
-                constraints.append(text)
-                seen.add(text)
+            if text in seen:
+                return
+            constraints.append({
+                "text": text,
+                "source": "memory",
+                "category": category,
+                "lock": "soft",
+            })
+            seen.add(text)
 
         for base in self._get_default_negative_constraints():
-            _add(base)
+            _add(base, "general")
 
         subjects: List[str] = []
         for struct in char_structs or []:
@@ -1975,36 +2823,35 @@ class VideoGeneratorAgent(ReActAgent):
 
             species = struct.get('species_or_breed')
             if isinstance(species, str) and species.strip():
-                _add(f"保持{subject_label}的物种设定（{species.strip()}），不要改变")
+                _add(f"保持{subject_label}的物种设定（{species.strip()}），不要改变", "appearance")
 
             archetype = struct.get('archetype_or_identity') or struct.get('role')
             if isinstance(archetype, str) and archetype.strip():
-                _add(f"保持{subject_label}的身份设定（{archetype.strip()}），不要改变角色定位")
+                _add(f"保持{subject_label}的身份设定（{archetype.strip()}），不要改变角色定位", "identity")
 
             for trait in struct.get('key_traits') or []:
                 trait_txt = str(trait).strip()
                 if trait_txt:
-                    _add(f"不要改变{subject_label}的特征：{trait_txt}")
+                    _add(f"不要改变{subject_label}的特征：{trait_txt}", "appearance")
 
             props = [str(p).strip() for p in (struct.get('signature_outfit_or_props') or []) if str(p).strip()]
             if props:
-                _add(f"保持{subject_label}的标志性道具：{'、'.join(props)}，不要新增或移除")
+                _add(f"保持{subject_label}的标志性道具：{'、'.join(props)}，不要新增或移除", "signature_props")
 
         for desc in char_texts or []:
             description = str(desc).strip()
             if description:
-                _add(f"确保角色外观符合设定：{description}")
+                _add(f"确保角色外观符合设定：{description}", "appearance")
 
         if self._scene_depends_on_previous(scene_number):
-            _add("与上一场景保持角色造型完全一致，包括头部、服饰与体态细节，避免新增或缺失元素")
+            _add("与上一场景保持角色造型完全一致，包括头部、服饰与体态细节，避免新增或缺失元素", "continuity")
 
         if not char_structs and concept_plan:
-            # 回退：使用整体人物一致性指引
             snippets = self._extract_character_guideline_snippets(concept_plan, subjects or [], scene_number)
             for snippet in snippets:
-                _add(f"遵循角色一致性指引：{snippet}")
+                _add(f"遵循角色一致性指引：{snippet}", "appearance")
 
-        _add("不要新增未在角色设定中出现的身体细节或装饰")
+        _add("不要新增未在角色设定中出现的身体细节或装饰", "appearance")
 
         return constraints
 

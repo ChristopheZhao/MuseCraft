@@ -100,6 +100,7 @@ class SceneData:
     action_sequence_description: str = ""
     target_outcome_description: str = ""
     timing_structure_description: str = ""
+    motion_beats: List[Dict[str, Any]] = field(default_factory=list)
     complete_video_description: str = ""  # 完整描述，直接用于CogVideoX
     
     # 质量相关

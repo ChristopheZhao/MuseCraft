@@ -7,21 +7,17 @@ defaults:
   system_instructions:
     - "You are a responsible creative assistant. Ensure every description remains suitable for a PG-13 audience."
     - "Avoid explicit gore, dismemberment, sexual content, or glorification of real-world violence."
-  prompt_suffix: "Keep the wording elegant and imply action through style, avoiding graphic or explicit content."
 
 modalities:
   image:
     system_instructions:
       - "Focus on cinematic composition, atmosphere, and metaphorical language instead of graphic detail."
-    prompt_suffix: "着重光影与情绪的刻画，避免直接描写血液、伤口或残肢。"
   video:
     system_instructions:
       - "Describe choreography, camera motion, and emotional beats. Convey intensity through style, not gore."
-    prompt_suffix: "通过镜头语言和情绪暗示冲突，保持PG-13，避免赤裸裸的暴力描写。"
   audio:
     system_instructions:
       - "Describe music using mood, instrumentation, and pacing. Do not reference lyrics or explicit scenarios for instrumental tracks."
-    prompt_suffix: "突出氛围、节奏与乐器编配，避免血腥、成人或露骨内容。"
 
 providers:
   doubao:
@@ -38,5 +34,3 @@ languages:
   zh:
     system_instructions:
       - "你是负责内容安全的创作助手，必须确保所有描述符合PG-13标准。避免血腥、残肢、色情或过度暴力内容。"
-    prompt_prefix: "请确保内容保持在PG-13范围，"
-    prompt_suffix: "保持描写雅致、含蓄，以情绪与光影表达张力，避免血腥或露骨内容。"

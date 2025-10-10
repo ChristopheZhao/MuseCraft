@@ -12,7 +12,8 @@ from .base import BaseAgent, AgentError
 from ..core.config import settings
 from ..models import Task, AgentExecution, AgentType, Scene, SceneType
 from ..core.prompt_manager import get_prompt_manager
-from .utils import SceneDurationCalculator
+from ..core.story_plan import normalize_character_elements
+from .utils import SceneDurationCalculator,safe_json_loads
 
 
 class ConceptPlannerAgent(BaseAgent):
@@ -38,8 +39,11 @@ class ConceptPlannerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         self._validate_input(input_data, ["user_prompt", "duration", "workflow_state_id"])
 
+        concept_mode = str(input_data.get("concept_mode", "episode") or "episode").lower()
         user_prompt = input_data["user_prompt"]
         style_preference = input_data.get("style_preference")
+        style_taxonomy_summary = input_data.get("style_taxonomy_summary")
+        predefined_style_profile = input_data.get("predefined_style_profile")
 
         from ..core.video_config_manager import get_video_config
 
@@ -68,6 +72,17 @@ class ConceptPlannerAgent(BaseAgent):
         workflow_state = workflow_manager.get_workflow(workflow_state_id)
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
+
+        if not predefined_style_profile:
+            try:
+                predefined_style_profile = getattr(workflow_state, "intelligent_style_design", None)
+            except Exception:
+                predefined_style_profile = None
+
+        project_character_bible = input_data.get("character_bible") or {}
+        if not project_character_bible:
+            project_ctx = input_data.get("project_context") or {}
+            project_character_bible = project_ctx.get("character_bible") or {}
 
         provider_config = video_config.get_current_provider_config()
         raw_capabilities = provider_config.duration_capabilities or getattr(
@@ -170,6 +185,10 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_request_timeout=fallback_request_timeout,
                 max_tokens=style_max_tokens,
                 temperature=style_temperature,
+                concept_mode=concept_mode,
+                style_profile_override=predefined_style_profile,
+                taxonomy_summary=style_taxonomy_summary,
+                character_bible=project_character_bible,
             )
         )
         voice_task = asyncio.create_task(
@@ -193,7 +212,20 @@ class ConceptPlannerAgent(BaseAgent):
         self._update_token_usage(execution, voice_bundle["usage"])
 
         intelligent_style_design = style_bundle["payload"].get("intelligent_style_design", {})
-        content_elements = style_bundle["payload"].get("content_elements", {})
+        if predefined_style_profile:
+            intelligent_style_design = self._merge_style_profiles(
+                predefined_style_profile,
+                intelligent_style_design,
+            )
+        content_elements_raw = style_bundle["payload"].get("content_elements", {}) or {}
+        if not isinstance(content_elements_raw, dict):
+            content_elements_raw = {}
+        characters_raw = content_elements_raw.get("characters")
+        sanitized_characters, _ = normalize_character_elements(characters_raw)
+        if sanitized_characters or characters_raw is not None:
+            content_elements_raw = dict(content_elements_raw)
+            content_elements_raw["characters"] = sanitized_characters
+        content_elements = content_elements_raw
         consistency_hints = style_bundle["payload"].get("consistency_hints", {})
 
         workflow_state.intelligent_style_design = intelligent_style_design
@@ -210,28 +242,36 @@ class ConceptPlannerAgent(BaseAgent):
 
         await self._update_progress(execution, 65, "Detailing scenes", db)
 
-        scene_results = await self._generate_scene_details(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            skeleton_payload=skeleton_payload,
-            style_payload=style_bundle["payload"],
-            voice_plan=voice_plan,
-            duration_capabilities=duration_capabilities,
-            duration=duration,
-            model_name=concept_model,
-            model_config=model_config,
-            fallback_model=fallback_model,
-            fallback_model_config=fallback_model_config,
-            request_timeout=scene_timeout,
-            fallback_request_timeout=fallback_request_timeout,
-            max_tokens=scene_max_tokens,
-            temperature=scene_temperature,
-        )
+        if concept_mode == "project":
+            scenes = []
+            scene_notes: Dict[str, List[str]] = {}
+            total_planned_duration = float(duration)
+            scene_results_usage = 0
+        else:
+            scene_results = await self._generate_scene_details(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                skeleton_payload=skeleton_payload,
+                style_payload=style_bundle["payload"],
+                voice_plan=voice_plan,
+                duration_capabilities=duration_capabilities,
+                duration=duration,
+                model_name=concept_model,
+                model_config=model_config,
+                fallback_model=fallback_model,
+                fallback_model_config=fallback_model_config,
+                request_timeout=scene_timeout,
+                fallback_request_timeout=fallback_request_timeout,
+                max_tokens=scene_max_tokens,
+                temperature=scene_temperature,
+            )
 
-        self._update_token_usage(execution, scene_results["usage"])
-        scenes = scene_results["scenes"]
-        scene_notes = scene_results["notes"]
-        total_planned_duration = scene_results["total_duration"]
+            scene_results_usage = scene_results["usage"]
+            scenes = scene_results["scenes"]
+            scene_notes = scene_results["notes"]
+            total_planned_duration = scene_results["total_duration"]
+
+        self._update_token_usage(execution, scene_results_usage)
 
         await self._update_progress(execution, 85, "Finalizing concept plan", db)
 
@@ -249,7 +289,10 @@ class ConceptPlannerAgent(BaseAgent):
 
         workflow_state.concept_plan = concept_plan
 
-        scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
+        if concept_mode == "project":
+            scenes_data: List[Scene] = []
+        else:
+            scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
 
         try:
             memory_stored = await self.store_creative_guidance(
@@ -265,18 +308,19 @@ class ConceptPlannerAgent(BaseAgent):
 
         await self._update_progress(execution, 100, "Concept planning completed", db)
 
-        try:
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                {
-                    "type": "concept_plan_ready",
-                    "task_id": str(task.task_id),
-                    "scenes_count": len(scenes_data),
-                    "estimated_duration": duration,
-                },
-            )
-        except Exception as ws_err:
-            self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
+        if concept_mode != "project":
+            try:
+                await self.websocket_manager.broadcast_to_task(
+                    str(task.task_id),
+                    {
+                        "type": "concept_plan_ready",
+                        "task_id": str(task.task_id),
+                        "scenes_count": len(scenes_data),
+                        "estimated_duration": duration,
+                    },
+                )
+            except Exception as ws_err:
+                self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
 
         return {
             "concept_plan": concept_plan,
@@ -361,7 +405,11 @@ class ConceptPlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
             context_description="skeleton_generation",
         )
-        payload = self._safe_json_loads(response.get("content", ""))
+        payload = safe_json_loads(
+            response.get("content", ""),
+            logger=self.logger,
+            context="skeleton_generation",
+        )
         if not isinstance(payload, dict):
             raise AgentError("Skeleton generation returned invalid payload")
         if "scene_blueprint" not in payload or not isinstance(payload["scene_blueprint"], list):
@@ -384,14 +432,32 @@ class ConceptPlannerAgent(BaseAgent):
         fallback_request_timeout: int,
         max_tokens: int,
         temperature: float,
+        concept_mode: str,
+        style_profile_override: Optional[Dict[str, Any]],
+        taxonomy_summary: Optional[str],
+        character_bible: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
+        override_json = (
+            json.dumps(style_profile_override, ensure_ascii=False, indent=2)
+            if style_profile_override
+            else ""
+        )
+        character_bible_json = (
+            json.dumps(character_bible, ensure_ascii=False, indent=2)
+            if character_bible
+            else ""
+        )
         prompt = self.render_prompt(
             "style_elements_generation",
             user_prompt=user_prompt,
             skeleton_json=skeleton_json,
             style_preference=style_preference,
             user_prompt_brief=user_prompt_brief,
+            concept_mode=concept_mode,
+            predefined_style_profile=override_json,
+            style_taxonomy_summary=taxonomy_summary or "",
+            project_character_bible=character_bible_json,
         )
         messages = self._compose_messages(system_prompt, prompt)
         response = await self._invoke_concept_model(
@@ -407,7 +473,11 @@ class ConceptPlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
             context_description="style_elements_generation",
         )
-        payload = self._safe_json_loads(response.get("content", ""))
+        payload = safe_json_loads(
+            response.get("content", ""),
+            logger=self.logger,
+            context="style_elements_generation",
+        )
         if not isinstance(payload, dict) or "intelligent_style_design" not in payload:
             raise AgentError("Style generation returned invalid payload")
         return {"payload": payload, "usage": response.get("usage", {}).get("total_tokens", 0)}
@@ -448,7 +518,11 @@ class ConceptPlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
             context_description="voice_plan_generation",
         )
-        payload = self._safe_json_loads(response.get("content", ""))
+        payload = safe_json_loads(
+            response.get("content", ""),
+            logger=self.logger,
+            context="voice_plan_generation",
+        )
         if not isinstance(payload, dict) or "voice_plan" not in payload:
             raise AgentError("Voice plan generation returned invalid payload")
         return {"payload": payload, "usage": response.get("usage", {}).get("total_tokens", 0)}
@@ -513,7 +587,11 @@ class ConceptPlannerAgent(BaseAgent):
                 response_format={"type": "json_object"},
                 context_description=f"scene_detail_batch_generation_batch_{batch_index+1}",
             )
-            payload = self._safe_json_loads(response.get("content", ""))
+            payload = safe_json_loads(
+                response.get("content", ""),
+                logger=self.logger,
+                context=f"scene_detail_batch_generation_batch_{batch_index+1}",
+            )
             if not isinstance(payload, dict) or "scenes" not in payload:
                 raise AgentError("Scene detail generation returned invalid payload")
             batch_scenes = payload.get("scenes", [])
@@ -619,6 +697,30 @@ class ConceptPlannerAgent(BaseAgent):
     def _compact_json(self, payload: Dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
+    def _merge_style_profiles(
+        self,
+        primary: Optional[Dict[str, Any]],
+        fallback: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Merge style profiles, preserving primary values when provided."""
+
+        if not primary and not fallback:
+            return {}
+
+        merged: Dict[str, Any] = dict(primary or {})
+
+        for key, value in (fallback or {}).items():
+            if key not in merged or not merged[key]:
+                merged[key] = value
+            elif isinstance(merged[key], dict) and isinstance(value, dict):
+                nested = dict(merged[key])
+                for sub_key, sub_value in value.items():
+                    if sub_key not in nested or not nested[sub_key]:
+                        nested[sub_key] = sub_value
+                merged[key] = nested
+
+        return merged
+
     def _finalize_concept_plan(
         self,
         skeleton: Dict[str, Any],
@@ -668,20 +770,6 @@ class ConceptPlannerAgent(BaseAgent):
             "style_consistency": (color_hint or "坚持既定的风格组合和色彩基调。")
             + (f" {scene_consistency}" if scene_consistency else ""),
         }
-
-    def _safe_json_loads(self, raw: str) -> Any:
-        content = (raw or "").strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError as parse_error:
-            repaired = self._attempt_json_repair(content, parse_error)
-            if repaired:
-                return json.loads(repaired)
-            raise
 
     def _normalize_voice_plan(self, voice_plan_raw: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(voice_plan_raw, dict):
@@ -789,6 +877,13 @@ class ConceptPlannerAgent(BaseAgent):
                     f"Voice plan pace_tag 无效: scene {scene_number} -> {pace_raw or '空值'}"
                 )
             if scene_number not in duration_map or duration_map[scene_number] <= 0:
+                # 增加日志定位是什么问题导致的报错
+                if not duration_map:
+                    self.logger.error("duration_map is empty")
+                elif scene_number not in duration_map:
+                    self.logger.error(f"scene_number {scene_number} not in duration_map keys: {list(duration_map.keys())}")
+                else:
+                    self.logger.error(f"scene_number {scene_number} has non-positive duration: {duration_map[scene_number]}")
                 raise AgentError(
                     f"Scene {scene_number} 缺少有效的时长提示，无法计算目标字数"
                 )
@@ -879,74 +974,6 @@ class ConceptPlannerAgent(BaseAgent):
             raise AgentError(f"ConceptPlanner received invalid response during {context_description}")
         return response
 
-    def _attempt_json_repair(self, content: str, original_error: json.JSONDecodeError) -> Optional[str]:
-        repair_strategies = [
-            self._fix_unterminated_strings,
-            self._fix_missing_closing_braces,
-            self._extract_complete_json_object,
-            self._create_fallback_concept,
-        ]
-        for strategy in repair_strategies:
-            try:
-                repaired_content = strategy(content, original_error)
-                if repaired_content:
-                    json.loads(repaired_content)
-                    self.logger.info(
-                        "JSON repair successful using strategy: %s", strategy.__name__
-                    )
-                    return repaired_content
-            except Exception as exc:
-                self.logger.debug("Repair strategy %s failed: %s", strategy.__name__, exc)
-        return None
-
-    def _fix_unterminated_strings(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        try:
-            repaired = content
-            quote_count = repaired.count('"')
-            if quote_count % 2 != 0:
-                repaired += '"'
-            return repaired
-        except Exception:
-            return None
-
-    def _fix_missing_closing_braces(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        try:
-            open_braces = content.count('{')
-            close_braces = content.count('}')
-            if open_braces > close_braces:
-                repaired = content + ('}' * (open_braces - close_braces))
-                return repaired
-            return None
-        except Exception:
-            return None
-
-    def _extract_complete_json_object(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        try:
-            brace_count = 0
-            start_pos = content.find('{')
-            if start_pos == -1:
-                return None
-            for i, char in enumerate(content[start_pos:], start_pos):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        return content[start_pos : i + 1]
-            return None
-        except Exception:
-            return None
-
-    def _create_fallback_concept(self, content: str, error: json.JSONDecodeError) -> Optional[str]:
-        try:
-            overview = "Generated video concept"
-            fallback_concept = {
-                "overview": overview,
-                "scene_blueprint": [],
-            }
-            return json.dumps(fallback_concept)
-        except Exception:
-            return None
 
     async def _create_scenes(
         self,

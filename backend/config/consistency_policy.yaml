@@ -1,0 +1,30 @@
+# Consistency policy for episode-level orchestration
+# This file drives how memory-based anchors are merged with FC outputs
+# and how downstream guards behave. Values can be hot-reloaded.
+
+merge_policy:
+  style_constraints: memory_over_fc
+  character_constraints: memory_over_fc
+  negative_constraints: memory_over_fc
+
+lock_sections:
+  - appearance
+  - outfit
+  - signature_props
+  - style_anchors
+
+guard:
+  mode: advisory   # advisory | enforce
+  face_similarity_threshold: 0.72
+  palette_distance_threshold: 0.18
+  require_signature_props: true
+
+prompt_safety:
+  enabled: true
+  level: moderate   # moderate | strict
+  preserve_locked_sections: true
+  rewrite_model: glm-4.5-air
+  enable_rewrite_on_sensitive_error: true
+  use_episode_context: true
+  inject_project_context: true
+  use_approved_script_context: true

@@ -87,6 +87,10 @@ class OrchestratorAgent(BaseAgent):
             AgentType.QUALITY_CHECKER
         ]
 
+    def reset_repeat_counters(self) -> None:
+        """Clear per-step repeat counters so retries start fresh."""
+        self._step_repeat_counts = {}
+
     async def _execute_impl(
         self, 
         task: Task, 
@@ -121,6 +125,13 @@ class OrchestratorAgent(BaseAgent):
         # 不能直接传递 WorkflowState 对象，因为它不能JSON序列化
         # 将 workflow_state_id 传递给 Agent，Agent内部通过 workflow_manager 获取状态
         workflow_data["workflow_state_id"] = workflow_state.task_id
+
+        # 将存在的 Episode/Project 上下文注入工作流（无需配置即可生效）
+        if workflow_data.get("episode_context"):
+            setattr(workflow_state, "episode_context", workflow_data.get("episode_context"))
+        if workflow_data.get("project_context"):
+            setattr(workflow_state, "project_context", workflow_data.get("project_context"))
+
         workflow_results = {}
         
         total_steps = len(self.workflow_order)
@@ -730,10 +741,39 @@ class OrchestratorAgent(BaseAgent):
         try:
             # 复制基础工作流数据
             agent_input = workflow_data.copy()
-            
+
+            if agent_type in [AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER]:
+                episode_ctx = None
+                project_ctx = None
+                episode_ctx = workflow_data.get("episode_context")
+                if not episode_ctx:
+                    try:
+                        wf = workflow_manager.get_workflow(workflow_id)
+                        episode_ctx = getattr(wf, "episode_context", None) if wf else None
+                    except Exception:
+                        episode_ctx = None
+                project_ctx = workflow_data.get("project_context")
+                if not project_ctx:
+                    try:
+                        wf = workflow_manager.get_workflow(workflow_id)
+                        project_ctx = getattr(wf, "project_context", None) if wf else None
+                    except Exception:
+                        project_ctx = None
+
+                if episode_ctx:
+                    agent_input["episode_context"] = episode_ctx
+                    approved_flag = bool(str(episode_ctx.get("approved_script", "")).strip())
+                    self.logger.info(
+                        "🧠 Episode context injected for %s (approved_script=%s)",
+                        agent_type.value,
+                        approved_flag,
+                    )
+                if project_ctx:
+                    agent_input["project_context"] = project_ctx
+
             # 如果是需要创意指导的Agent，从记忆服务获取并添加到上下文
             if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
-                
+
                 # 获取整体创意指导
                 overall_guidance = await global_memory_service.retrieve_creative_guidance(
                     workflow_id=workflow_id,

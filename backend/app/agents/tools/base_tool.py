@@ -137,9 +137,17 @@ class ToolOutput(BaseModel):
 
 class ToolError(Exception):
     """Base tool error"""
-    def __init__(self, message: str, tool_name: str = None, error_code: str = None):
+
+    def __init__(
+        self,
+        message: str,
+        tool_name: str | None = None,
+        error_code: str | None = None,
+        details: Dict[str, Any] | None = None,
+    ):
         self.tool_name = tool_name
         self.error_code = error_code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -353,6 +361,13 @@ class BaseTool(ABC):
             except Exception:
                 pass
 
+            error_details_struct: Dict[str, Any] | None = None
+            if isinstance(e, ToolError):
+                try:
+                    error_details_struct = getattr(e, "details", None)
+                except Exception:
+                    error_details_struct = None
+
             return ToolOutput(
                 success=False,
                 error=error_msg,
@@ -360,7 +375,8 @@ class BaseTool(ABC):
                 metadata={
                     "tool_name": self.metadata.name,
                     "error_type": error_type,
-                    "error_details": str(e)
+                    "error_details": str(e),
+                    "error_details_struct": error_details_struct or {},
                 }
             )
     

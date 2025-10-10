@@ -71,6 +71,9 @@ templates:
       - 约束：{{ constraints_json }}
       - 初始对象清单（仅中立事实）：{{ scenes_json }}
 
+      建议（软约束）：
+      - 为保证上下文清晰与稳健，建议本轮选择的候选对象数量保持较小规模（不超过 {{ max_plan_units_hint }} 个）；如需更多，请在计划中说明理由与潜在影响。
+
       输出（PlanningDecision，JSON）：
       {
         "intent": "execute|observe|replan|halt",
@@ -106,6 +109,9 @@ templates:
       - 进度摘要：{{ progress_summary }}
       - 最近K轮摘要：{{ scratchpad }}
       - 当轮观测：{{ observation_json }}
+
+      建议（软约束）：
+      - 为控制上下文规模与执行预算，建议当轮选择的对象数量不超过 {{ max_plan_units_hint }} 个；如确有必要超出，请在 rationale 中简要说明取舍依据。
 
       输出（PlanningDecision，JSON）：
       {

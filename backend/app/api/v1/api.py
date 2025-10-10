@@ -3,12 +3,13 @@ API v1 router
 """
 from fastapi import APIRouter
 
-from .endpoints import tasks, files, websocket, callbacks
+from .endpoints import tasks, files, websocket, callbacks, projects
 from . import config
 
 api_router = APIRouter()
 
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
+api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 api_router.include_router(files.router, prefix="/files", tags=["files"])
 api_router.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 api_router.include_router(callbacks.router, prefix="/callbacks", tags=["callbacks"])

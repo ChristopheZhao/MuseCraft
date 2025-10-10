@@ -27,6 +27,7 @@ class TaskType(str, enum.Enum):
     IMAGE_GENERATION = "image_generation"
     SCRIPT_WRITING = "script_writing"
     VIDEO_EDITING = "video_editing"
+    CONCEPT_PLANNING = "concept_planning"
 
 
 class Task(BaseModel):

@@ -967,7 +967,22 @@ class BaseAgent(ABC):
                             stage = tool_obj.get_action_stage(aname) or 'act'
                 except Exception:
                     stage = 'act'
-                record = {"tool": fn, "args": args, "success": is_success}
+                scene_number = None
+                try:
+                    if isinstance(args, dict) and args.get("scene_number") is not None:
+                        scene_number = int(args.get("scene_number")) if str(args.get("scene_number")).isdigit() else args.get("scene_number")
+                except Exception:
+                    scene_number = args.get("scene_number") if isinstance(args, dict) else None
+
+                record = {"tool": fn, "args": args, "success": is_success, "scene_number": scene_number}
+                meta_payload = {}
+                if hasattr(tool_result, 'metadata'):
+                    try:
+                        meta_payload = dict(getattr(tool_result, 'metadata') or {})
+                    except Exception:
+                        meta_payload = {}
+                if meta_payload:
+                    record["metadata"] = meta_payload
                 if is_success:
                     record["result"] = tool_result
                     results.append(record)
@@ -975,6 +990,12 @@ class BaseAgent(ABC):
                 else:
                     record["error"] = error_text or "tool execution failed"
                     record["error_type"] = error_type
+                    if meta_payload:
+                        # 兼容上层读取结构化错误详情
+                        if "error_details_struct" in meta_payload:
+                            record["error_details"] = meta_payload.get("error_details_struct")
+                        elif "error_details" in meta_payload:
+                            record["error_details"] = meta_payload.get("error_details")
                     results.append(record)
                     round_metrics['fail'] += 1
                 # 写入FC执行轨迹（用于后续FC上下文注入）
@@ -1218,11 +1239,8 @@ class BaseAgent(ABC):
         try:
             # Execute tool
             from .tools.base_tool import ToolInput
-            # Inject context for timeout resolver: allow agent-level control without hardcoding
-            context = {
-                "agent_tool_timeout": None,  # reserved for per-agent tool defaults
-                "agent_timeout_seconds": self.timeout_seconds,
-            }
+            # 构造统一的工具上下文，支持子类按需扩展
+            context = self._build_tool_context(tool_name=tool_name, action=action, parameters=parameters)
             # action 允许为 None（无动作工具），约定下发 "__call__" 作为工具级调用占位符
             tool_input = ToolInput(action=(action if action is not None else "__call__"), parameters=parameters, context=context, timeout=timeout)
             result = await tool.execute(tool_input)
@@ -1245,6 +1263,14 @@ class BaseAgent(ABC):
             self.logger.error(f"Tool execution failed for {tool_name}.{action}: {e}")
             raise AgentError(f"Tool execution failed: {str(e)}")
     
+
+    def _build_tool_context(self, tool_name: str, action: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """构建工具执行上下文（子类可覆盖扩展）。"""
+        return {
+            "agent_tool_timeout": None,
+            "agent_timeout_seconds": self.timeout_seconds,
+        }
+
     # 🚀 Phase 1.3 - 工具系统解耦：统一AI服务接口
     async def generate_text(
         self,
