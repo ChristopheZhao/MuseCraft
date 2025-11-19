@@ -1,0 +1,30 @@
+name: context_editor
+description: Prompts for context compaction (observation view)
+version: 1.0.0
+templates:
+  compaction:
+    description: LLM-based compaction of observation view
+    required_variables:
+      - budget_tokens
+      - schema_hint
+      - raw_view_json
+    template: |
+      你是一名上下文编辑器，需要将给定的“观察视图 JSON”压缩为在当前模型上下文预算内可投喂的内容。
+
+      预算（tokens）：{{ budget_tokens }}
+
+      输出约束：
+      - 仅输出一个 JSON 对象（不要额外解释/代码围栏）。
+      - 保留可验证事实；禁止臆测工具或参数，也不要创造“待办/就绪”状态。
+      - 结构要求：
+        - scenes: 数组，包含每个场景的事实字段（scene_number、depends_on_scene、描述等）。
+        - completed_scene_numbers: 数组，列出已完成场景编号。
+        - failed_scene_numbers: 数组，列出失败场景编号。
+        - prepared_assets_refs: 数组，列出已具备准备资产的场景编号。
+        - notes: 可选数组，保留原始备注。
+        - 可附带 prepared_assets_detail、last_action、constraints 等事实信息，但不得添加 summary/pending。
+
+      输入视图如下（JSON）：
+      {{ raw_view_json }}
+
+      注意：如需压缩，请在保证事实完整的前提下删减冗余描述；若字段未知请省略，避免凭空补全。

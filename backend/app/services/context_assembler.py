@@ -23,8 +23,8 @@ except Exception:  # pragma: no cover - optional dependency
     yaml = None
 
 from ..models.task import TaskType
-from ..agents.memory.base_memory import MemoryType, MemoryImportance
-from .global_memory_service import GlobalMemoryService
+from ..agents.memory.long_term.stores import MemoryType, MemoryImportance
+from .memory_provider import get_memory_services, MemoryServices
 from ..core.scene_continuity_memory import get_scene_continuity_memory
 from .monitoring_service import MonitoringService, MetricType
 
@@ -46,9 +46,14 @@ def _load_yaml(path: str) -> Optional[Dict[str, Any]]:
 
 
 class ContextAssembler:
-    def __init__(self):
-        self._gms = GlobalMemoryService()
-        self._mon = MonitoringService()
+    def __init__(
+        self,
+        memory_services: Optional[MemoryServices] = None,
+        monitoring_service: Optional[MonitoringService] = None,
+    ):
+        services = memory_services or get_memory_services()
+        self._gms = services.global_service
+        self._mon = monitoring_service or MonitoringService()
         # Optional external policy files
         base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "mas")
         self._policy_path = os.path.join(base_dir, "context_policies.yaml")

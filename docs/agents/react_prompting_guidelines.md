@@ -23,7 +23,7 @@ ReAct 提示与反思约定（简版）
   - 本轮是否有进展（成功个数）；
   - 剩余待处理数量；
   - 简短“反思摘要”（如“未取得进展，建议先处理无依赖场景”）。
-- 写回 working_state：
+- 写回 agent_state：
   - reflection_notes（保留最近若干条）；
   - no_progress_rounds（连续无进展轮次，用于提前停止）。
 
@@ -40,4 +40,3 @@ ReAct 提示与反思约定（简版）
 
 - 适用于本项目 Image/Video 子代理及其他需要 ReAct 的 Agent；
 - 若需新增 Agent，请遵循本规范并通过 tools schema 注册能力，避免在提示中“硬编码能力与参数”。
-

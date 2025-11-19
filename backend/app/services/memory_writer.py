@@ -18,8 +18,8 @@ except Exception:  # pragma: no cover
     yaml = None
 
 from ..models.task import TaskType
-from ..agents.memory.base_memory import MemoryType, MemoryImportance
-from .global_memory_service import GlobalMemoryService
+from ..agents.memory.long_term.stores import MemoryType, MemoryImportance
+from .memory_provider import get_memory_services, MemoryServices
 from .monitoring_service import MonitoringService, MetricType
 
 
@@ -40,8 +40,9 @@ def _load_yaml(path: str) -> Optional[Dict[str, Any]]:
 
 
 class MemoryWriter:
-    def __init__(self):
-        self._gms = GlobalMemoryService()
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
+        services = memory_services or get_memory_services()
+        self._gms = services.global_service
         self._mon = MonitoringService()
         base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "mas")
         self._policy_path = os.path.join(base_dir, "writer_policies.yaml")

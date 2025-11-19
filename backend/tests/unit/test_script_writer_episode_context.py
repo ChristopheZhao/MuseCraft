@@ -2,21 +2,15 @@ import asyncio
 from types import SimpleNamespace
 
 from app.agents.script_writer import ScriptWriterAgent
-from app.core.workflow_state import WorkflowState, SceneData
+from app.agents.memory.short_term.working_memory import SceneSnapshot
 
 
 def test_script_writer_passes_episode_context(monkeypatch):
     agent = object.__new__(ScriptWriterAgent)
 
-    wf = WorkflowState(
-        task_id="wf1",
-        user_prompt="Episode prompt",
-        duration=60,
-        aspect_ratio="16:9",
-        resolution="720p",
-    )
-    wf.scenes = [
-        SceneData(scene_number=1, visual_description="Scene", narrative_description="Battle", duration=10.0)
+    wf_id = "wf1"
+    wf_scenes = [
+        SceneSnapshot(scene_number=1, visual_description="Scene", narrative_description="Battle", duration=10.0)
     ]
     concept_plan = {"genre_and_theme": {"theme": "loyalty"}}
 
@@ -37,9 +31,9 @@ def test_script_writer_passes_episode_context(monkeypatch):
 
     async def run():
         return await agent._batch_generate_scripts(
-            scenes=wf.scenes,
+            scenes=wf_scenes,
             concept_plan=concept_plan,
-            workflow_state=wf,
+            workflow_state_id=wf_id,
             task=None,
             episode_context={
                 "episode_index": 1,

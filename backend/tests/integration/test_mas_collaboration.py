@@ -13,7 +13,9 @@ sys.path.insert(0, str(project_root))
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.script_writer import ScriptWriterAgent
 from app.agents.image_generator import ImageGeneratorAgent
-from app.core.workflow_state import WorkflowState, SceneData
+from app.agents.services.mas_shared_memory import get_shared_wm
+from app.services.memory_provider import build_memory_services, set_memory_services
+from app.agents.memory.short_term.working_memory import SceneSnapshot
 
 def test_mas_collaboration():
     """测试多智能体协作效果"""
@@ -21,21 +23,15 @@ def test_mas_collaboration():
     print("🤖 测试MAS多智能体协作效果")
     print("=" * 60)
     
-    # 创建WorkflowState
-    workflow_state = WorkflowState(
-        task_id="test_mas_001",
-        user_prompt="创建一个朋友们在泳池派对中玩水的短视频",
-        video_style="bright and joyful",
-        duration=15
-    )
-    
-    # 从workflow_manager注册状态
-    from app.core.workflow_state import workflow_manager
-    workflow_manager._states[workflow_state.task_id] = workflow_state
-    
-    print(f"🎯 用户需求: {workflow_state.user_prompt}")
-    print(f"🎨 视频风格: {workflow_state.video_style}")
-    print(f"⏱️ 视频时长: {workflow_state.duration}s")
+    # 创建 Shared WM 工作流上下文
+    wf_id = "test_mas_001"
+    shared = get_shared_wm()
+    memory_services = build_memory_services()
+    set_memory_services(memory_services)
+    store = memory_services.fact_store
+    print(f"🎯 用户需求: 创建一个朋友们在泳池派对中玩水的短视频")
+    print(f"🎨 视频风格: bright and joyful")
+    print(f"⏱️ 视频时长: 15s")
     print()
     
     # 1. 模拟ConceptPlanner的输出
@@ -88,23 +84,16 @@ def test_mas_collaboration():
         ]
     }
     
-    # 添加场景到workflow_state
+    # 写入概念计划与场景快照到 Shared WM
+    store.put(wf_id, "project.concept_plan", concept_plan)
     for scene_data in concept_plan["scenes"]:
-        scene = SceneData(
-            scene_number=scene_data["scene_number"],
-            scene_type=scene_data["scene_type"],
-            title=scene_data["title"],
-            description=scene_data["description"],
+        snap = SceneSnapshot(
+            scene_number=int(scene_data["scene_number"]),
+            duration=float(scene_data["duration"]),
             visual_description=scene_data["visual_description"],
             narrative_description=scene_data["narrative_description"],
-            duration=float(scene_data["duration"]),
-            start_time=0.0 if scene_data["scene_number"] == 1 else 5.0,
-            props_and_objects=["swimming pool", "clear water", "pool toys"],
-            mood_and_atmosphere="joyful and energetic"
         )
-        workflow_state.add_scene(scene)
-    
-    workflow_state.concept_plan = concept_plan
+        shared.upsert_scene(wf_id, snap)
     
     print("✅ ConceptPlanner完成整体创意规划:")
     print(f"  - 整体美学: {concept_plan['visual_style_guidance']['overall_aesthetic']}")
@@ -119,25 +108,19 @@ def test_mas_collaboration():
     script_writer = ScriptWriterAgent()
     
     # 处理每个场景
-    for scene_data in workflow_state.scenes:
-        print(f"  📋 处理场景 {scene_data.scene_number}: {scene_data.title}")
-        
-        # 使用fallback方法生成场景参考
-        scene_script = script_writer._generate_fallback_script_from_data(scene_data)
-        
-        # 更新场景数据
-        workflow_state.update_scene(scene_data.scene_number,
-            script_text=scene_script["script_text"],
-            voice_over_text=scene_script["voice_over_text"],
-            narrative_description=scene_script["narrative_description"],
-            first_frame_scene_reference=scene_script["first_frame_scene_reference"],
-            last_frame_scene_reference=scene_script["last_frame_scene_reference"],
-            content_development_arc=scene_script["content_development_arc"]
-        )
-        
-        print(f"     ✅ 首帧参考: {scene_script['first_frame_scene_reference']['situation']}")
-        print(f"     ✅ 尾帧参考: {scene_script['last_frame_scene_reference']['situation']}")
-        print(f"     ✅ 内容发展: {scene_script['content_development_arc']['narrative_progression'][:50]}...")
+    # 简化：本测试主要展示协作路径，跳过已废弃的 fallback 生成；由 ScriptWriter 写回 facts.scene_scripts
+    for sn in [1, 2]:
+        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+        scripts[str(sn)] = {
+            "script_text": "场景脚本（示例）",
+            "voice_over_text": "旁白（示例）",
+            "narrative_description": "叙事描述（示例）",
+            "first_frame_scene_reference": {"situation": "入场情境"},
+            "last_frame_scene_reference": {"situation": "高潮情境"},
+            "content_development_arc": {"narrative_progression": "递进发展"},
+        }
+        store.put(wf_id, "project.scene_scripts", scripts)
+        print(f"     ✅ 场景 {sn} 已写入场景参考（facts.scene_scripts）")
     
     print()
     
@@ -147,7 +130,7 @@ def test_mas_collaboration():
     
     image_generator = ImageGeneratorAgent()
     
-    for scene_data in workflow_state.scenes:
+    for sn in [1, 2]:
         print(f"  🖼️ 处理场景 {scene_data.scene_number} 的视觉生成:")
         
         # 准备创意指导上下文
@@ -157,6 +140,7 @@ def test_mas_collaboration():
         }
         
         # 测试首帧提示词增强
+        scene_data = SceneSnapshot(scene_number=sn, duration=5, visual_description="Friends laughing and playing in a bright pool area")
         base_prompt = scene_data.visual_description
         enhanced_first_prompt = image_generator._enhance_prompt_for_first_frame(
             base_prompt, scene_data, creative_guidance
@@ -178,15 +162,17 @@ def test_mas_collaboration():
     validation_passed = True
     
     # 检查场景参考是否存在
-    for scene_data in workflow_state.scenes:
-        if not hasattr(scene_data, 'first_frame_scene_reference') or not scene_data.first_frame_scene_reference:
-            print(f"❌ 场景 {scene_data.scene_number} 缺少首帧场景参考")
+    for sn in [1, 2]:
+        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+        scene_script = scripts.get(str(sn), {})
+        if not scene_script.get('first_frame_scene_reference'):
+            print(f"❌ 场景 {sn} 缺少首帧场景参考")
             validation_passed = False
-        if not hasattr(scene_data, 'last_frame_scene_reference') or not scene_data.last_frame_scene_reference:
-            print(f"❌ 场景 {scene_data.scene_number} 缺少尾帧场景参考")
+        if not scene_script.get('last_frame_scene_reference'):
+            print(f"❌ 场景 {sn} 缺少尾帧场景参考")
             validation_passed = False
-        if not hasattr(scene_data, 'content_development_arc') or not scene_data.content_development_arc:
-            print(f"❌ 场景 {scene_data.scene_number} 缺少内容发展规划")
+        if not scene_script.get('content_development_arc'):
+            print(f"❌ 场景 {sn} 缺少内容发展规划")
             validation_passed = False
     
     if validation_passed:
@@ -201,21 +187,24 @@ def test_mas_collaboration():
     # 5. 显示最终协作结果
     print("🎊 MAS协作结果总结:")
     print("-" * 40)
-    print(f"✨ 总场景数: {len(workflow_state.scenes)}")
+    view = shared.get_task(wf_id)
+    print(f"✨ 总场景数: {len(view.scenes)}")
     print(f"📖 整体叙事: {concept_plan['overview']}")
     
-    for scene_data in workflow_state.scenes:
-        print(f"\n🎬 场景 {scene_data.scene_number}: {scene_data.title}")
-        print(f"   📝 脚本: {scene_data.script_text[:60]}...")
-        if hasattr(scene_data, 'first_frame_scene_reference') and scene_data.first_frame_scene_reference:
-            print(f"   🎯 首帧情境: {scene_data.first_frame_scene_reference.get('situation', 'N/A')}")
-        if hasattr(scene_data, 'last_frame_scene_reference') and scene_data.last_frame_scene_reference:
-            print(f"   🏁 尾帧情境: {scene_data.last_frame_scene_reference.get('situation', 'N/A')}")
+    for sn in sorted(view.scenes.keys()):
+        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+        print(f"\n🎬 场景 {sn}")
+        print(f"   📝 脚本: {(scripts.get(str(sn), {}).get('script_text',''))[:60]}...")
+        first_ref = scripts.get(str(sn), {}).get('first_frame_scene_reference', {})
+        last_ref = scripts.get(str(sn), {}).get('last_frame_scene_reference', {})
+        if first_ref:
+            print(f"   🎯 首帧情境: {first_ref.get('situation', 'N/A')}")
+        if last_ref:
+            print(f"   🏁 尾帧情境: {last_ref.get('situation', 'N/A')}")
     
     print(f"\n🚀 MAS多智能体协作测试完成!")
     
-    # 清理
-    del workflow_manager._states[workflow_state.task_id]
+    # Shared WM 用例无需清理全局状态
 
 if __name__ == "__main__":
     test_mas_collaboration()

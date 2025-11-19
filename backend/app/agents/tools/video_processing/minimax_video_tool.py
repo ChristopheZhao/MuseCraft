@@ -268,12 +268,14 @@ class MiniMaxVideoTool(AsyncTool):
         if not download_url:
             status_result = await self._check_status({"task_id": task_id})
             if status_result["status"] != "completed":
-                return {
-                    "success": False,
-                    "message": f"Video not ready. Status: {status_result['status_zh']}",
-                    "status": status_result["status"],
-                    "progress": status_result["progress"]
-                }
+                raise ToolError(
+                    f"Video not ready. Status: {status_result['status_zh']}",
+                    error_code="video_not_ready",
+                    details={
+                        "status": status_result["status"],
+                        "progress": status_result["progress"],
+                    },
+                )
             download_url = status_result["video_url"]
         
         if not download_url:

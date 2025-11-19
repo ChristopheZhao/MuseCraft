@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
-from .base_memory import (
+from .base import (
     BaseMemoryStore, MemoryItem, MemoryQuery,
     MemoryError, MemoryStorageError
 )

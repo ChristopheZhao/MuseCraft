@@ -422,3 +422,11 @@ For support, please:
 2. Search existing issues
 3. Create a new issue with detailed description
 4. Include logs and configuration details
+### ReActAgent 关键规范（无状态 + 合同优先）
+
+- PLAN 的 system 提示词为必需项：若 `agents/<agent>.system` 加载失败或为空，直接抛 AgentError（Fail‑Fast，便于审计）。
+- OBS 仅包含事实：`scenes`、`completed_scene_numbers`、`failed_scene_numbers` 以及当前回合的 `act_log`；不包含统计、建议或“准备清单”。
+- 观察压缩默认关闭：可通过 `REACT_OBS_AUGMENT_ENABLED=true` 开启，并用 `REACT_OBS_SCENE_THRESHOLD`、`REACT_OBS_SIZE_THRESHOLD` 配置阈值。即便开启，PLAN 输入也会过滤 `aug`/`aug_meta`，避免将模型衍生文本回灌到规划提示词。
+- PLAN 产出 `tool_calls`（响应总是存在，调用列表可能为空）；ACT 执行 `tool_calls` 并写入 WM 事件；REFLECT 仅做领域事实写回，并叠加最小合同字段 `{task_complete, completed_reason}`。若本轮实际执行过调用，则忽略该轮合同中的 `task_complete`。
+- 工具失败必须抛出 ToolError；Agent 仅依据 `ToolOutput.success` 判断成败。业务层不要返回 `{"success": false}` 而不抛异常。
+- WorkingMemory 是迭代事实的唯一来源；Agent 不缓存跨回合状态。每次调用会记录 `{scene_number, action, success, error_type}` 事件，可追溯。

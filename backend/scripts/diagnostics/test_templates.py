@@ -33,15 +33,45 @@ def main():
 
     # Image observation
     image_vars = {
-        "facts_json": json.dumps({"summary": {"total": 3, "pending": 3}}, ensure_ascii=False, indent=2),
-        "schema_json": json.dumps({"type": "object", "properties": {"summary": {"type": "object"}, "scenes": {"type": "array"}}}, ensure_ascii=False, indent=2)
+        "facts_json": json.dumps({
+            "scenes": [
+                {"scene_number": 1, "visual_description": "黎明山谷"},
+                {"scene_number": 2, "visual_description": "夜色竹林"},
+            ],
+            "completed_scene_numbers": [1],
+            "failed_scene_numbers": [],
+        }, ensure_ascii=False, indent=2),
+        "schema_json": json.dumps({
+            "type": "object",
+            "properties": {
+                "scenes": {"type": "array"},
+                "completed_scene_numbers": {"type": "array"},
+                "failed_scene_numbers": {"type": "array"},
+            }
+        }, ensure_ascii=False, indent=2)
     }
     render("image_generator", "observation", image_vars)
 
     # Video observation
     video_vars = {
-        "facts_json": json.dumps({"summary": {"total": 2, "pending": 2}}, ensure_ascii=False, indent=2),
-        "schema_json": json.dumps({"type": "object", "properties": {"summary": {"type": "object"}, "scenes": {"type": "array"}}}, ensure_ascii=False, indent=2)
+        "facts_json": json.dumps({
+            "scenes": [
+                {"scene_number": 1, "title": "启程", "duration": 6},
+                {"scene_number": 2, "title": "穿越风雪", "duration": 6, "depends_on_scene": 1},
+            ],
+            "completed_scene_numbers": [],
+            "failed_scene_numbers": [],
+            "prepared_assets_refs": [],
+        }, ensure_ascii=False, indent=2),
+        "schema_json": json.dumps({
+            "type": "object",
+            "properties": {
+                "scenes": {"type": "array"},
+                "completed_scene_numbers": {"type": "array"},
+                "failed_scene_numbers": {"type": "array"},
+                "prepared_assets_refs": {"type": "array"},
+            }
+        }, ensure_ascii=False, indent=2)
     }
     render("video_generator", "observation", video_vars)
 
@@ -66,4 +96,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

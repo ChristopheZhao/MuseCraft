@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .base_memory import (
+from .base import (
     BaseMemoryStore, MemoryItem, MemoryQuery, MemoryType, MemoryImportance,
     MemoryStorageError
 )

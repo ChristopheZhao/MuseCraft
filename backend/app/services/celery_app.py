@@ -2,6 +2,7 @@
 Celery application configuration
 """
 from celery import Celery
+from celery.signals import worker_process_init
 from ..core.config import settings
 
 # Create Celery app
@@ -29,6 +30,32 @@ celery_app.conf.update(
     worker_log_format='[%(asctime)s: %(levelname)s/%(processName)s] %(message)s',
     worker_task_log_format='[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s',
 )
+
+
+@worker_process_init.connect
+def _init_worker_process(**kwargs):
+    """Worker subprocess initialization.
+    - 不再主动改写 root logger 级别，遵循注入优先：
+      Celery CLI/环境的 --loglevel 控制控制台；.env 的 LOG_LEVEL 仅影响应用内部使用 basicConfig 的场景。
+    - 仅附加 MAS 文件日志（如启用）与注册工具，避免越权。
+    """
+    import logging
+
+    # Configure MAS rotating file handler if enabled (独立文件通道，不影响控制台)
+    try:
+        from ..core.logging_utils import configure_mas_logging
+        configure_mas_logging()
+    except Exception:
+        pass
+
+    # 保持注入单一来源：不在此处加专属 handler，避免局部规则影响全局可追溯性
+
+    # Register default tools once per worker process
+    try:
+        from ..agents.tools import register_default_tools
+        register_default_tools()
+    except Exception as e:
+        logging.getLogger("celery_task").warning(f"Tool registry init failed in worker_process_init: {e}")
 
 
 @celery_app.task(bind=True, name="process_video_task")

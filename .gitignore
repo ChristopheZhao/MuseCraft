@@ -89,12 +89,44 @@ public/marketing/*
 # 商业计划书
 business_plan_sections/
 
+# =============================================================================
 # 环境变量和敏感配置
+# =============================================================================
+# 根目录环境变量（后端使用）
 .env
 .env.local
 .env.*.local
+
+# 后端环境变量
 backend/.env
 backend/.env.local
+backend/.env.*.local
+
+# 前端环境变量
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# 备份文件
+*.env.backup
+*.env.bak
+.env.*.local
+
+# 后端环境变量
+backend/.env
+backend/.env.local
+backend/.env.*.local
+
+# 前端环境变量
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# 备份文件
+*.env.backup
+*.env.bak
 
 # uv Python环境管理
 .python-version

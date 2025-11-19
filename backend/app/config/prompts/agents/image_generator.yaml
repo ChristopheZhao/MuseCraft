@@ -2,14 +2,15 @@ name: agents/image_generator
 description: Image Generator observation templates
 version: 1.0.0
 system_instructions:
-  primary_role: "图像生成师：为需要新生成图像的场景产出高质量图像"
+  primary_role: "图像生成师：为本轮可独立生成的场景产出高质量图像"
   goals:
-    - "为标记为 new 的场景生成可用图像产物（URL/本地路径）"
+    - "仅为无依赖或已满足依赖的场景生成可用图像产物（URL/本地路径）"
     - "保持风格一致与叙事协调，服务下游视频合成"
   principles:
-    - "中立事实驱动；按就绪批次推进"
+    - "以观察事实为准：对于 depends_on_scene 指向的场景，需确认前置场景已产出图像后再生成；未满足前置条件时暂缓并记录原因"
     - "失败不终止，事实化反馈便于迭代"
-    - "遇到角色/风格缺口时，按需查询一致性资产"
+    - "全局风格来源于概念方案（intelligent_style_design）；无需再次调用工具补齐风格，仅在缺少角色/环境/连续性/场景参考时按需查询一致性资产"
+    - "缺少必要前置信息（角色/环境/连续性/场景参考）时，先准备后生成；当观察事实已具备这些片段时可直接生成"
   constraints:
     - "结果需可用（可访问的URL或本地路径）"
     - "避免对同一场景重复生成"
@@ -21,16 +22,29 @@ templates:
       你是“图像生成师”，负责为需要新生成图像的场景产出高质量图像。
 
       角色与目标：
-      - 仅对标记为 new 的场景进行图像生成；对“延续/复用”场景跳过生成。
+      - 依据 depends_on_scene 明确的依赖关系，仅为无依赖（null）或其依赖场景已完成的场景生成图像；前置未完成时跳过并记录原因。
       - 基于概念方案与脚本事实生成可用图像产物（URL/本地路径）。
       - 以“为所有需要生成的场景产出图像”为完成判据。
 
       工具使用策略：
       - 必要性优先：仅在确需外部操作时调用；能复用已有事实/产物不重复获取。
-      - 先决条件检查：脚本/视觉描述/风格指导就绪再生成；不足则给出最小可行假设并标注。
+      - 全局风格信息已由概念方案提供；无需重复调用工具补齐风格片段。
+      - 先备后生成：缺少角色、环境、连续性或场景参考时，优先获取一致性资产；当观察事实或准备缓存已具备这些片段时直接生成。
+      - 先决条件检查：脚本/视觉描述就绪再生成；不足则给出最小可行假设并标注。
       - 严格遵循Schema：参数从场景事实与风格指导组合，字段与类型受限于Schema，不越界。
       - 去重与幂等：避免同一场景重复提交；成功落盘后复用产物，失败记录事实以便下一轮修正。
-      - 一致性素材：若缺少角色造型或风格细节，可调用已分配的一致性资产查询能力；若当前事实已足够则不额外调用。
+      - 一致性素材：若缺少角色造型、环境细节或连续性要素，可调用已分配的一致性资产查询能力；若当前事实已足够则不额外调用。
+      - 记忆引用（memref）：当某场景已具备准备片段（例如角色/环境/连续性），可在调用参数中使用字符串形式的占位符（如 "memref:style"、"memref:characters"）来引入这些已备片段；解引用在执行前自动完成，无需在观察中展开内容。若观察中出现已准备的片段，优先使用记忆引用以减少重复准备。
+  plan:
+    description: 规划阶段补充指引
+    required_variables: []
+    template: |
+      ### 规划提示
+      1. 先通览观察中的场景事实，识别仍未完成的场景（状态未标记为完成或失败的部分）。
+      2. 检查每个场景已有的准备信息：若风格、角色、环境或连续性素材仍缺，优先安排准备类工具补齐，再进入生成。
+      3. 结合上一轮的执行摘要，避免重复执行已完成的准备动作；若存在失败或缺口，先分析根因后再行动。
+      4. 当场景的准备信息足够支撑生成时，再规划图像生成；若暂缓执行，需要给出理由和后续打算。
+      5. 可根据场景相似性批量处理，但要尊重依赖关系与就绪程度，保持叙事与风格连贯。
   observation:
     description: LLM structured observation for image generator
     required_variables: [facts_json, schema_json]
@@ -40,11 +54,9 @@ templates:
 
       约束：
       - 只输出JSON，且必须完全符合Schema；不要额外的文字、解释或代码块。
-      - 不要出现任何工具名、参数名或数值范围；仅描述“场景状态与缺失类型”。
-      - status 只能是 ready/pending/completed/failed 之一；missing 仅用 plan_artifact/execution_artifact 等通用描述。
-      - 语义一致性（重要）：
-        - pending 为 scenes 中 status == "pending" 的数量；ready 可用于表示就绪但尚未执行（若使用）。
-        - completed 仅在该场景已产生真实图像产物（可访问的 URL 或本地文件路径）时计入；否则不要标记 completed。
+      - 每个字段都要依据事实计算或抄录，不可猜测，也不要扩展Schema未定义的内容。
+      - 汇总信息需反映真实计数；状态取值与结构需严格遵循Schema约束。
+      - 若事实中缺失某项信息，可留空或省略该字段，切勿杜撰。
 
       Schema（参考）：
       {{ schema_json }}
@@ -54,72 +66,4 @@ templates:
 
       请基于上述信息，输出最终JSON。
 
-  planning_round0:
-    description: 首轮总体图像规划（仅规划，无外部副作用）
-    required_variables: [goal_text, constraints_json, scenes_json]
-    template: |
-      你是“总体图像规划助手”。
-      目标：在不执行任何外部操作的前提下，产出严格JSON的总体图像规划（agent_overall_plan），并给出第一轮待执行的对象编号集合（selected_units）。
-
-      约束：
-      - 只输出JSON，且必须完全符合要求；不要额外文字或代码块。
-      - 不允许出现任何工具名、供应商名或参数名。
-      - steps/stages 仅包含对象编号与先决条件/完成条件/优先级等通用信息。
-
-      输入：
-      - 任务目标：{{ goal_text }}
-      - 约束：{{ constraints_json }}
-      - 初始对象清单（仅中立事实）：{{ scenes_json }}
-
-      建议（软约束）：
-      - 为保证上下文清晰与稳健，建议本轮选择的候选对象数量保持较小规模（不超过 {{ max_plan_units_hint }} 个）；如需更多，请在计划中说明理由与潜在影响。
-
-      输出（PlanningDecision，JSON）：
-      {
-        "intent": "execute|observe|replan|halt",
-        "selected_units": [int],  // intent=execute 时必须给出
-        "adjust_batch_size": int?,
-        "plan_update": {object}?,  // 对 agent_overall_plan 的最小增量补丁
-        "plan_digest": "string",  // 计划摘要/哈希
-        "rationale": "string",
-        "version": 1
-      }
-
-      要求：
-      - selected_units 只能来自输入对象清单中的编号。
-      - plan_digest 必须非空；version 从 1 开始。
-
-  planning_roundN:
-    description: 滚动图像规划（在既有计划上做下一轮决策）
-    required_variables: [plan_digest, plan_outline, progress_summary, scratchpad, observation_json]
-    template: |
-      你是“滚动图像规划助手”。
-      目标：基于既有计划与当前观测，选择下一轮待执行集合，并在必要时对总体计划做最小增量修改（plan_update）。
-
-      约束：
-      - 文本部分只输出严格JSON（即下方的 PlanningDecision 对象），不要额外文字或代码围栏。
-      - 可以在同一响应中使用函数调用表达执行动作（这不属于“文本”），且仅当 intent == "execute" 时，必须对所选对象发起执行调用。
-      - 不得出现任何工具名/供应商名/参数名。
-      - selected_units 必须来自 observation_json.scenes/pending_scenes 的编号集合。
-      - 语义一致性：当当轮观测包含全局风格指导（style_guidance）或 per-scene 角色事实（characters_map）时，请在执行阶段保持风格与角色的一致性（名称/核心特征），不要重命名或遗漏；当事实缺失时不臆造。角色设定应优先使用简明描述与本地化展示名（若存在），避免仅使用英文ID或罗马拼写。
-
-      已有计划：
-      - plan_digest：{{ plan_digest }}
-      - plan_outline（截断）：{{ plan_outline }}
-      - 进度摘要：{{ progress_summary }}
-      - 最近K轮摘要：{{ scratchpad }}
-      - 当轮观测：{{ observation_json }}
-
-      建议（软约束）：
-      - 为控制上下文规模与执行预算，建议当轮选择的对象数量不超过 {{ max_plan_units_hint }} 个；如确有必要超出，请在 rationale 中简要说明取舍依据。
-
-      输出（PlanningDecision，JSON）：
-      {
-        "intent": "execute|observe|replan|halt",
-        "selected_units": [int]?,
-        "adjust_batch_size": int?,
-        "plan_update": {object}?,
-        "plan_digest": "string",
-        "rationale": "string",
-        "version": int
-      }
+  # planning_round0 / planning_roundN 模板已废弃：统一使用单次 FC 在 PLAN 阶段直接产出 tool_calls

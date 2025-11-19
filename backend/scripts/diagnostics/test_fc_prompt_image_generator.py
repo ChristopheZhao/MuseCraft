@@ -28,31 +28,31 @@ async def run_once(mode: str = "enforce") -> None:
 
     # 准备最小上下文与观察/计划变量
     plan_digest = "debug_plan_digest_seed"
+    pending_scenes = [
+        {"scene_number": 1, "title": "场景1", "visual_description": "仙侠风山谷，薄雾日出", "duration": 3},
+        {"scene_number": 5, "title": "场景5", "visual_description": "夜幕竹林，蜿蜒小径", "duration": 3},
+    ]
     observation = {
-        "summary": {"total": 2, "ready": 0, "pending": 2, "completed": 0, "failed": 0},
         "scenes": [
-            {"scene_number": 1, "status": "pending"},
-            {"scene_number": 5, "status": "pending"},
+            {"scene_number": 1, "title": "场景1"},
+            {"scene_number": 5, "title": "场景5"},
         ],
-        "pending_scenes": [
-            {"scene_number": 1, "title": "场景1", "visual_description": "仙侠风山谷，薄雾日出", "duration": 3},
-            {"scene_number": 5, "title": "场景5", "visual_description": "夜幕竹林，蜿蜒小径", "duration": 3},
-        ],
-        "task_status": "in_progress",
+        "completed_scene_numbers": [],
+        "failed_scene_numbers": [],
     }
     agent.iteration_context = {
-        "working_state": {
+        "agent_state": {
             "context": {
                 "agent_overall_plan": {"plan_digest": plan_digest, "version": 1},
                 "intelligent_style": {"style_name": "xianxia"},
-                "scenes_to_generate": observation["pending_scenes"],
+                "scenes_to_generate": pending_scenes,
             }
         },
         "last_observation": observation,
     }
 
     # 基于 planning_roundN 模板构造 system 消息
-    ws = agent.iteration_context.get("working_state", {})
+    ws = agent.iteration_context.get("agent_state", {})
     ctx = ws.get("context", {})
     aop = ctx.get("agent_overall_plan", {})
     try:

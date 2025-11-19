@@ -18,14 +18,15 @@ class QualityCheckerAgent(BaseAgent):
     and adherence to requirements
     """
     
-    def __init__(self, llms=None):
+    def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.QUALITY_CHECKER,
             agent_name="quality_checker",
             timeout_seconds=180,  # 3 minutes for quality analysis
             max_retries=1,
             tools=["quality_analysis_tool"],  # 🚀 Phase 1.3 - 使用原子性质量分析工具
-            llms=llms
+            llms=llms,
+            memory_services=memory_services,
         )
         # 移除直接AI客户端依赖
         self.file_storage = FileStorageService()
@@ -56,23 +57,67 @@ class QualityCheckerAgent(BaseAgent):
         except Exception as e:
             self.logger.warning(f"⚠️ QualityChecker: 记忆检索失败 - {e}")
         
-        # 通过 workflow_manager 获取 WorkflowState
-        from ..core.workflow_state import workflow_manager
-        workflow_state = workflow_manager.get_workflow(workflow_state_id)
-        if not workflow_state:
-            raise AgentError(f"WorkflowState {workflow_state_id} not found")
+        # 从 Shared Working Memory 读取事实视图
+        from .services.mas_shared_memory import get_shared_wm
+        view = get_shared_wm().get_task(str(workflow_state_id))
+        store = self.shared_memory_store
         
         await self._update_progress(execution, 10, "Loading final video from workflow", db)
         
-        # Get final video from WorkflowState
-        final_video_url = workflow_state.final_video_url
-        concept_plan = workflow_state.concept_plan
-        composition_timeline = workflow_state.composition_timeline or []
-        video_metadata = workflow_state.video_metadata or {}
+        # Get final video facts from Shared WM
+        fv = store.get(str(workflow_state_id), "project.final_video", default={}) or {}
+        final_video_url = fv.get("url") or fv.get("path") or ""
+        # 单写/优先 artifacts：尝试从 artifacts 获取最新 compose
+        try:
+            from ..core.config import settings as _cfg
+            prefer_artifacts = bool(getattr(_cfg, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False))
+        except Exception:
+            prefer_artifacts = False
+        if prefer_artifacts:
+            try:
+                latest = get_shared_wm().get_latest_artifact(str(workflow_state_id), kind='video', stage='compose')
+                if isinstance(latest, dict):
+                    final_video_url = latest.get('url') or latest.get('file_path') or final_video_url
+            except Exception:
+                pass
+        concept_plan = store.get(str(workflow_state_id), "project.concept_plan", default={}) or {}
+        
+        # 组合时间线：从场景快照推导（start/end/duration）
+        composition_timeline = []
+        try:
+            cursor = 0.0
+            for sn in sorted((view.scenes or {}).keys()):
+                snap = (view.scenes or {}).get(sn)
+                if not snap:
+                    continue
+                try:
+                    dur = float(getattr(snap, 'duration', 0.0) or 0.0)
+                except Exception:
+                    dur = 0.0
+                start = cursor
+                end = start + dur
+                composition_timeline.append({
+                    "scene_number": int(sn),
+                    "start": start,
+                    "end": end,
+                    "duration": dur,
+                })
+                cursor = end
+        except Exception:
+            composition_timeline = []
+        # 视频元数据：优先 facts.final_video.metadata，其次基于时间线估算总时长
+        video_metadata = fv.get("metadata", {}) if isinstance(fv, dict) else {}
+        if not video_metadata:
+            try:
+                total = sum(float(x.get("duration") or 0.0) for x in composition_timeline)
+                video_metadata = {"duration": total}
+            except Exception:
+                video_metadata = {}
         
         if not final_video_url:
             # If no final video, try to get from scenes (fallback)
-            scenes_data = workflow_state.scenes
+            scenes_map = view.scenes or {}
+            scenes_data = [scenes_map[k] for k in sorted(scenes_map.keys())]
             if scenes_data and len(scenes_data) > 0:
                 # Use first scene video as temporary final video for quality check
                 first_scene = scenes_data[0]
@@ -156,14 +201,16 @@ class QualityCheckerAgent(BaseAgent):
         
         await self._update_progress(execution, 30, "Analyzing image quality", db)
         
-        # 收集所有可用图像
+        # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
         available_images = []
         for scene in scenes_data:
-            if scene.image_path or scene.image_url:
+            url = getattr(scene, 'image_url', '')
+            path = getattr(scene, 'image_path', '') if hasattr(scene, 'image_path') else ''
+            if path or url:
                 available_images.append({
-                    "scene_number": scene.scene_number,
-                    "image_path": scene.image_path,
-                    "image_url": scene.image_url,
+                    "scene_number": getattr(scene, 'scene_number', None),
+                    "image_path": path,
+                    "image_url": url,
                     "description": getattr(scene, 'visual_description', '')
                 })
         

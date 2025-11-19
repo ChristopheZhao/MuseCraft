@@ -103,11 +103,7 @@ class VideoGenerationTool(AsyncTool):
             "allowed_actions": ["generate_with_continuity"]
         }
 
-    def get_action_stage(self, action: str) -> str:
-        """声明动作阶段：生成类为 act，查询类为 plan。"""
-        if action in ("generate_video", "generate_with_continuity"):
-            return "act"
-        return "plan"
+    # 取消阶段语义：工具仅具有执行属性
 
     def _fetch_capabilities(self, log_failure: bool = False):
         if not self.video_service or not hasattr(self.video_service, "get_capabilities"):
@@ -257,7 +253,7 @@ class VideoGenerationTool(AsyncTool):
                 "properties": {
                     "scene_number": {
                         "type": ["integer", "string"],
-                        "description": "可选：仅用于管道追踪，不影响生成API"
+                        "description": "场景编号：用于产物归属与尾帧登记（必填）"
                     },
                     "prompt": prompt_field,
                     "duration": {
@@ -319,7 +315,7 @@ class VideoGenerationTool(AsyncTool):
                         "description": "可选：需要避免的元素列表（将合并到提示词）"
                     }
                 },
-                "required": ["prompt", "duration"]
+                "required": ["scene_number", "prompt", "duration"]
             },
             "generate_with_continuity": {
                 "type": "object",
@@ -1136,101 +1132,15 @@ class VideoGenerationTool(AsyncTool):
         except Exception:
             pass
 
-        # 解析连续性帧：优先 continuity_frame > image_url > 内存/WF尾帧 > 上游视频抽帧
+        # 解析连续性帧：优先 continuity_frame；不再在工具内做隐式推断/抽帧，统一由连续性准备工具负责
         continuity_frame: Optional[str] = params.get("continuity_frame")
         image_url: Optional[str] = params.get("image_url")
-
-        prev_scene_no: Optional[int] = None
-        try:
-            dp = params.get("depends_on_scene")
-            if isinstance(dp, (int, str)) and str(dp).isdigit():
-                prev_scene_no = int(dp)
-            if prev_scene_no is None:
-                wf_id = params.get("workflow_state_id")
-                if wf_id:
-                    from ....core.workflow_state import workflow_manager
-                    wf = workflow_manager.get_workflow(wf_id)
-                    sn = params.get("scene_number")
-                    sn = int(sn) if sn is not None and str(sn).isdigit() else None
-                    if wf and sn is not None:
-                        sc = wf.get_scene(sn)
-                        if sc is not None:
-                            dp2 = getattr(sc, 'depends_on_scene', None)
-                            if isinstance(dp2, (int, str)) and str(dp2).isdigit():
-                                prev_scene_no = int(dp2)
-        except Exception:
-            prev_scene_no = prev_scene_no or None
-
-        if not continuity_frame and prev_scene_no is not None:
-            # 0) 参考缓存
+        # 关闭内部连续性回退：当未显式提供 continuity_frame 时，不再尝试从依赖/Shared WM/上游视频自动抽帧
+        if not continuity_frame:
             try:
-                ref_frame = get_scene_reference(params.get("workflow_state_id"), prev_scene_no)
-                if isinstance(ref_frame, str) and ref_frame.startswith("http"):
-                    continuity_frame = ref_frame
+                self.logger.info("CONTINUITY_DISABLED: no continuity_frame provided; generating without continuity")
             except Exception:
-                continuity_frame = continuity_frame
-            # 1) 内存优先（URL更优）
-            if not continuity_frame:
-                try:
-                    from ..tool_registry import get_tool_registry
-                    from ..base_tool import ToolInput as TI
-                    registry = get_tool_registry()
-                    final_tool = registry.get_tool("final_frame_tool")
-                    resp_mem = await final_tool.execute(TI(action="get_final_frame_from_memory", parameters={"scene_number": prev_scene_no, "prefer_url": True}))
-                    pay_mem = getattr(resp_mem, 'result', resp_mem)
-                    if isinstance(pay_mem, dict):
-                        url = pay_mem.get("url") or pay_mem.get("data_url")
-                        if isinstance(url, str) and url.startswith("http"):
-                            continuity_frame = url
-                except Exception:
-                    pass
-            # 2) WF 尾帧字段
-            if not continuity_frame:
-                try:
-                    wf_id = params.get("workflow_state_id")
-                    if wf_id:
-                        from ....core.workflow_state import workflow_manager
-                        wf = workflow_manager.get_workflow(wf_id)
-                        sc_prev = wf.get_scene(prev_scene_no) if wf else None
-                        lf = getattr(sc_prev, 'last_frame_url', '') if sc_prev else ''
-                        if isinstance(lf, str) and lf.startswith("http"):
-                            continuity_frame = lf
-                except Exception:
-                    pass
-            # 3) 上游视频抽帧（参数 > WF）
-            if not continuity_frame:
-                prev_url = params.get("previous_video_url")
-                if not prev_url:
-                    try:
-                        wf_id = params.get("workflow_state_id")
-                        if wf_id:
-                            from ....core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(wf_id)
-                            sc_prev = wf.get_scene(prev_scene_no) if wf else None
-                            prev_url = getattr(sc_prev, 'video_url', '') or getattr(sc_prev, 'video_path', '') if sc_prev else ''
-                    except Exception:
-                        prev_url = None
-                if prev_url:
-                    try:
-                        from ..tool_registry import get_tool_registry
-                        from ..base_tool import ToolInput as TI
-                        registry = get_tool_registry()
-                        final_tool = registry.get_tool("final_frame_tool")
-                        ff_params = {"video_url": prev_url, "to_base64": False}
-                        try:
-                            if prev_scene_no is not None:
-                                ff_params["scene_number"] = int(prev_scene_no)
-                        except Exception:
-                            pass
-                        resp = await final_tool.execute(TI(action="extract_final_frame_from_video", parameters=ff_params))
-                        payload = getattr(resp, 'result', resp)
-                        if isinstance(payload, dict):
-                            continuity_frame = payload.get("path") or payload.get("data_url")
-                    except Exception as e:
-                        try:
-                            self.logger.warning(f"continuity frame extraction failed: {e}")
-                        except Exception:
-                            pass
+                pass
 
         # 数据URL/本地 → 上传成外链
         if isinstance(continuity_frame, str) and continuity_frame and not (continuity_frame.startswith("http://") or continuity_frame.startswith("https://")):
@@ -1349,15 +1259,7 @@ class VideoGenerationTool(AsyncTool):
                         store_scene_reference(params.get("workflow_state_id"), scene_no, last_url)
                     except Exception:
                         pass
-                    try:
-                        wf_id = params.get("workflow_state_id")
-                        if wf_id and scene_no is not None:
-                            from ....core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(wf_id)
-                            if wf:
-                                wf.update_scene(scene_no, last_frame_url=last_url)
-                    except Exception:
-                        pass
+                    # 不再更新 WorkflowState；连续性帧已写入记忆工具/Shared WM 事实
                     cont = dict(gen_res.get("continuity", {}) or {})
                     cont.update({"last_frame_url": last_url})
                     gen_res["continuity"] = cont
@@ -1419,24 +1321,19 @@ class VideoGenerationTool(AsyncTool):
             pass
 
     def _get_outdegree_from_wf_or_active(self, wf_id: Optional[str], scene_no: int) -> int:
+        """估算某场景的出度（被多少场景依赖）。使用 Shared WM 的 scenes 快照，无全局遍历。"""
         try:
-            from ....core.workflow_state import workflow_manager
-            workflows = []
-            if wf_id:
-                wf = workflow_manager.get_workflow(wf_id)
-                if wf:
-                    workflows.append(wf)
-            if not workflows:
-                workflows.extend(workflow_manager.get_active_workflows())
+            if not wf_id:
+                return 0
+            from ...services.mas_shared_memory import get_shared_wm
+            view = get_shared_wm().get_task(str(wf_id))
+            scenes = view.scenes or {}
             outdeg = 0
-            for wf in workflows:
+            for sn, snap in scenes.items():
                 try:
-                    for sc in getattr(wf, 'scenes', []) or []:
-                        dep = getattr(sc, 'depends_on_scene', None)
-                        if dep is not None and int(dep) == int(scene_no):
-                            outdeg += 1
-                    if outdeg > 0:
-                        break
+                    dep = getattr(snap, 'depends_on_scene', None)
+                    if dep is not None and int(dep) == int(scene_no):
+                        outdeg += 1
                 except Exception:
                     continue
             return outdeg

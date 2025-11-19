@@ -31,25 +31,23 @@ async def run_once(mode: str = "enforce") -> None:
         {"scene_number": 2, "depends_on_scene": 1},
         {"scene_number": 3, "depends_on_scene": 2},
     ]
-    facts = {
-        "image_map": {1: "https://example.com/img1.jpg", 4: "https://example.com/img4.jpg"},
-        "video_map": {},
-        "depends_on": {4: 3},
-        "continuity_reason": {},
-        "continuity_confidence": {},
-        "last_frame_map": {},
-        "prepared_last_frames": {},
-    }
     observation = {
-        "executable_scenes": executable,
-        "pending_dependent_scenes": pending,
-        "task_status": "in_progress",
-        "facts": facts,
+        "scenes": [
+            {"scene_number": 1, "title": "英雄启程", "visual_description": "山巅起步", "duration": 6},
+            {"scene_number": 4, "title": "成功救援", "visual_description": "冰洞团聚", "duration": 6, "depends_on_scene": 3},
+            {"scene_number": 2, "depends_on_scene": 1},
+            {"scene_number": 3, "depends_on_scene": 2},
+        ],
+        "completed_scene_numbers": [],
+        "failed_scene_numbers": [],
+        "prepared_assets_refs": [],
+        "notes": [],
     }
     agent.iteration_context = {
-        "working_state": {
+        "agent_state": {
             "context": {
                 "agent_overall_plan": {"plan_digest": plan_digest, "version": 1},
+                "scenes_to_generate": executable,
             }
         },
         "last_observation": observation,
@@ -118,4 +116,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

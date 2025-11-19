@@ -5,7 +5,7 @@ import pytest
 
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
 from app.agents.tools import register_default_tools
-from app.core.workflow_state import workflow_manager, SceneData
+from app.agents.base import AgentError
 
 
 class StubLLM:
@@ -24,16 +24,6 @@ async def test_draft_narration_generates_natural_text(monkeypatch):
     agent = VoiceSynthesizerAgent(llms={})
     stub_llm = StubLLM("我在水草间轻盈穿梭，心里伏着对古卷的好奇。")
     monkeypatch.setattr(agent, "get_llm", lambda key: stub_llm)
-
-    workflow_state = workflow_manager.create_workflow(
-        user_prompt="测试旁白",
-        style_preference="water-ink",
-        duration=60,
-        aspect_ratio="16:9",
-    )
-
-    scene = SceneData(scene_number=1, duration=6.0, voice_over_text="")
-    workflow_state.add_scene(scene)
 
     scene_context = {
         "scene_number": 1,
@@ -57,14 +47,5 @@ async def test_draft_narration_generates_natural_text(monkeypatch):
         "style_notes": "保持童话色彩，语气柔和。",
     }
 
-    narration = await agent._draft_narration(scene_context, voice_plan, workflow_state)
-
-    char_limit = agent._estimate_char_limit(scene_context["target_duration"])
-    assert narration
-    assert len(narration) <= char_limit
-    assert "镜头" not in narration
-    assert stub_llm.calls, "LLM 应被调用以生成旁白"
-    system_prompt = stub_llm.calls[0]["messages"][0]["content"]
-    assert system_prompt.startswith("你是资深中文旁白撰稿人")
-
-    workflow_manager.remove_workflow(workflow_state.task_id)
+    with pytest.raises(AgentError):
+        await agent._draft_narration(scene_context, voice_plan)

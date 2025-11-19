@@ -244,8 +244,8 @@ class MultiAgentSystemChecker:
         self.logger.info("检查记忆管理系统...")
         
         try:
-            from backend.app.agents.memory.memory_manager import MemoryManager
-            from backend.app.agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+            from backend.app.agents.memory.long_term.manager import MemoryManager
+            from backend.app.agents.memory.long_term.stores import MemoryItem, MemoryType, MemoryImportance
             
             # 创建记忆管理器
             memory_manager = MemoryManager()

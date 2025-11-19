@@ -52,6 +52,8 @@ class PromptConfig:
         self.name = config_data.get("name", "")
         self.description = config_data.get("description", "")
         self.version = config_data.get("version", "1.0.0")
+        # 记录该配置来源文件路径（便于诊断）
+        self.source_path: str = ""
         
         # 角色设定
         self.role = config_data.get("role", {})
@@ -175,6 +177,10 @@ class PromptManager:
                 config_data = yaml.safe_load(f)
             
             config = PromptConfig(config_data)
+            try:
+                config.source_path = str(config_file)
+            except Exception:
+                config.source_path = str(config_file)
             
             with self._lock:
                 self._configs[config_name] = config
@@ -270,9 +276,12 @@ class PromptManager:
         if not template:
             raise ValueError(f"Template not found: {config_name}.{template_name}")
         
-        # 检查缓存
+        # 检查缓存（修正：加入 config_name 以避免不同配置的同名模板互相污染）
         if use_cache:
-            cache_key = template.get_cache_key(**variables)
+            try:
+                cache_key = f"{config_name}:{template.name}:{template.get_cache_key(**variables)}"
+            except Exception:
+                cache_key = template.get_cache_key(**variables)
             cached_result = self._render_cache.get(cache_key)
             if cached_result:
                 return cached_result
@@ -284,7 +293,12 @@ class PromptManager:
             # 存入缓存
             if use_cache:
                 with self._lock:
-                    self._render_cache[cache_key] = result
+                    # 与读取时采用同样的 cache_key 规则
+                    try:
+                        final_cache_key = f"{config_name}:{template.name}:{template.get_cache_key(**variables)}"
+                    except Exception:
+                        final_cache_key = template.get_cache_key(**variables)
+                    self._render_cache[final_cache_key] = result
             
             return result
             

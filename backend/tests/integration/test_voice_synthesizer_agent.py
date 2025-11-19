@@ -7,7 +7,9 @@ import pytest
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
 from app.agents.tools import register_default_tools
 from app.services.monitoring_service import monitoring_service
-from app.core.workflow_state import workflow_manager, SceneData
+from app.agents.services.mas_shared_memory import get_shared_wm
+from app.services.memory_provider import build_memory_services, set_memory_services
+from app.agents.memory.short_term.working_memory import SceneSnapshot
 from app.models import AgentExecution
 
 
@@ -36,20 +38,15 @@ async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, mo
     agent = VoiceSynthesizerAgent(llms={})
     monitoring_service.redis_client = None
 
-    # Create workflow with a single scene requiring voice-over
-    workflow_state = workflow_manager.create_workflow(
-        user_prompt="Test prompt",
-        style_preference="tech",
-        duration=10,
-        aspect_ratio="16:9"
-    )
-    scene_video = tmp_path / "scene1.mp4"
-    scene_video.write_bytes(b"FAKE")
-    scene = SceneData(scene_number=1, duration=4.0, voice_over_text="测试旁白内容。")
-    scene.video_prompt = "女剑客在竹林中练剑"
-    scene.video_path = str(scene_video)
-    workflow_state.add_scene(scene)
-    workflow_state.voice_plan = {
+    # 使用 Shared WM 构造一个需要旁白的场景
+    wf_id = "wf-voice-synth-test"
+    shared = get_shared_wm()
+    memory_services = build_memory_services()
+    set_memory_services(memory_services)
+    store = memory_services.fact_store
+    snap = SceneSnapshot(scene_number=1, duration=4.0, narrative_description="测试旁白内容。")
+    shared.upsert_scene(wf_id, snap)
+    store.put(wf_id, "project.voice_plan", {
         "enabled": True,
         "mode": "narration",
         "persona": "温柔的旁白者",
@@ -65,7 +62,7 @@ async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, mo
                 "target_char_count": len("测试旁白内容。"),
             }
         ],
-    }
+    })
 
     fake_audio = tmp_path / "voice.wav"
     fake_audio.write_bytes(b"RIFF....fake pcm data....")
@@ -106,27 +103,25 @@ async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, mo
     result = await agent.execute(
         task=task,
         input_data={
-            "workflow_state_id": workflow_state.task_id,
+            "workflow_state_id": wf_id,
             "voice_settings": {
                 "voice_id": "zhiyu",
                 "language": "zh-CN",
                 "speed": 1.0,
                 "pitch": 1.0,
             },
-            "voice_plan": workflow_state.voice_plan,
+            # Voice plan 也可从 Shared WM 读取，这里冗余传入以覆盖
+            "voice_plan": store.get(wf_id, "project.voice_plan", default={}),
         },
         db=db,
         execution_order=1,
     )
 
     assert result.get("success") is True or result.get("subtask_state") in {"complete", "partial"}
-    assert workflow_state.voice_over_assets, "Voice assets should be registered"
-    asset = workflow_state.voice_over_assets[0]
-    assert asset["scene_number"] == 1
-    assert asset["local_path"] == str(fake_audio)
-    assert workflow_state.scenes[0].voice_over_text == "测试旁白内容。"
-
-    workflow_manager.remove_workflow(workflow_state.task_id)
+    assets = store.get(wf_id, "project.voice_assets", default={}) or {}
+    assert 1 in assets, "Voice assets should be registered in Shared WM"
+    asset = assets[1]
+    assert asset.get("audio_path") == str(fake_audio)
     # 清理监控服务的异步任务，避免遗留 pending task
     try:
         shutdown_hook = getattr(monitoring_service, "shutdown", None)

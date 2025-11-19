@@ -440,15 +440,18 @@ class ReActOrchestratorAgent(BaseAgent):
         return {"action": ActionType.COMPLETE_TASK.value, "parameters": {}}
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """兼容保留的JSON解析（当前流程已不依赖）。"""
+        """统一使用安全解析工具，避免手写围栏剥离与静默失败。"""
+        from .utils.json_utils import safe_json_loads
         try:
-            content = (response or "").strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            return json.loads(content)
-        except Exception:
+            data = safe_json_loads(response, logger=self.logger, context="react_orchestrator.parse_response", allow_fallback=False)
+            return data if isinstance(data, dict) else {"raw_response": response}
+        except Exception as exc:
+            # 明确记录解析错误，保持可审计
+            try:
+                preview = (response or "").strip().replace("\n", " ")[:240]
+                self.logger.warning("ORCH_JSON_PARSE_FAIL err=%s preview=\"%s\"", exc, preview)
+            except Exception:
+                pass
             return {"raw_response": response}
     
     async def _finalize_workflow(self, workflow_state: Dict[str, Any], db: Session) -> Dict[str, Any]:

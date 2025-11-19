@@ -76,7 +76,7 @@ def test_memory_system_activation():
             
             # 测试存储记忆
             import asyncio
-            from app.agents.memory.base_memory import MemoryType, MemoryImportance
+            from app.agents.memory.long_term.stores import MemoryType, MemoryImportance
             
             async def test_basic_memory():
                 try:

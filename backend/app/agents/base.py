@@ -2,11 +2,12 @@
 Base agent class for all video generation agents
 """
 import asyncio
+import os
 import time
 import logging
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Tuple
 import re
 from sqlalchemy.orm import Session
 
@@ -16,8 +17,20 @@ from ..core.database import get_sync_db
 from ..services.websocket import WebSocketManager, websocket_manager
 
 from .tools.tool_registry import get_tool_registry
+from .tools.manager import get_tool_manager
 from .tools.agent_tool_allocation import get_agent_tools, validate_agent_tools
 from .prompts.template_manager import get_template_manager
+from .utils.tool_contracts import extract_contract_slot_writes
+from .utils.obs_builder import derive_action_facts
+from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
+from ..services.memory_provider import get_memory_services, MemoryServices
+from .memory.short_term import (
+    get_working_memory_service,
+    invalidate_working_memory as _working_memory_invalidate,
+    MemoryNotInitializedError,
+)
+from .utils.memory_helpers import agent_scope
+
 
 
 class AgentError(Exception):
@@ -32,7 +45,7 @@ class AgentTimeoutError(AgentError):
 
 class BaseAgent(ABC):
     """Base class for all agents in the video generation workflow"""
-    
+
     def __init__(
         self,
         agent_type: AgentType,
@@ -41,7 +54,8 @@ class BaseAgent(ABC):
         max_retries: int = 3,
         tools: List[str] = None,
         prompt_templates: List[str] = None,
-        llms: Dict[str, Any] = None
+        llms: Dict[str, Any] = None,
+        memory_services: Optional[MemoryServices] = None,
     ):
         self.agent_type = agent_type
         self.agent_name = agent_name
@@ -51,9 +65,18 @@ class BaseAgent(ABC):
         # Use global singleton WebSocket manager so broadcasts reach connected clients
         self.websocket_manager = websocket_manager
         
-        # Initialize tool registry
+        # Initialize tool registry/manager
         self.tool_registry = get_tool_registry()
+        self.tool_manager = get_tool_manager()
         self._available_tools = {}
+        # 迭代相关状态（仅在当前运行周期内使用），所有跨回合事实请写入 WorkingMemory
+        # WorkingMemory 引用缓存（非状态，仅为减少服务调用开销）
+        self._wm_cache = None
+        self.workflow_state_id: Optional[str] = None
+        self.task_id: Optional[str] = None
+        self._current_iteration: int = 0
+        self._max_iterations_hint: int = int(getattr(self, "max_iterations", 0) or 0)
+        # 不在 Agent 上保存跨回合状态；仅在同轮内以局部变量传递控制信息
         
         # 工具分配：使用专门的工具列表或手动指定的工具
         if tools is not None:
@@ -76,11 +99,18 @@ class BaseAgent(ABC):
         self.allocated_tools = list(self._available_tools.keys())
         
         # 记忆管理器 - 🧠 ACTIVATED! 实现真正的MAS记忆共享
-        from ..services.global_memory_service import global_memory_service
-        self.memory_manager = global_memory_service.memory_manager
-        self.memory_service = global_memory_service
-        
-        self.logger.info(f"🧠 {self.agent_name} memory system activated")
+        if memory_services is None:
+            memory_services = get_memory_services()
+        self._memory_services: MemoryServices = memory_services
+        self.memory_manager = memory_services.global_service.memory_manager
+        self.memory_service = memory_services.global_service
+        self.memory_coordinator = memory_services.coordinator
+        self.long_term_memory = memory_services.long_term
+        self.shared_memory_store = memory_services.fact_store
+        if self.memory_coordinator is None:
+            self.logger.warning("Memory Coordinator not available; falling back to legacy Shared WM")
+        else:
+            self.logger.info("🧠 %s memory coordinator activated", self.agent_name)
         
         # 统一提示词管理器 - 支持YAML配置和模板渲染
         from ..core.prompt_manager import get_prompt_manager
@@ -89,9 +119,11 @@ class BaseAgent(ABC):
         # 注入的 LLM 实例集合：{default, observe, plan, act}
         self._llms = llms or {}
         
-        # FC执行轨迹（用于在后续FC上下文中注入“已产出事实”，避免无谓重复）
+        # FC执行轨迹（仅用于同轮执行轨迹记录，日志/诊断用途，不参与提示注入）
         # 结构：[{"tool": str, "args": dict, "success": bool, "result": Any, "error": str, "ts": float}]
         self._fc_exec_trace: List[Dict[str, Any]] = []
+        # 最近一次行为摘要（领域自定义，供 OBS 提示）
+        self._last_action_summary: Optional[Dict[str, Any]] = None
 
         # Agent-specific initialization
         # Inject default thinking mode and token tiers from configuration
@@ -114,6 +146,400 @@ class BaseAgent(ABC):
             self.logger.warning(f"Failed to load LLM policy config: {e} (using defaults)")
 
         self._initialize_agent()
+
+    # --- Iteration control state helpers: removed. Agent保持无状态；仅由 WM 承载事实 ---
+
+    # --- Working Memory helpers（短期记忆服务） ----------------------------
+    def _cache_iteration_memory(self, wm: Any, workflow_state_id: Optional[str] = None):
+        """Cache WorkingMemory handle for quick access (no state beyond reference)."""
+        self._wm_cache = wm
+        if workflow_state_id:
+            self.workflow_state_id = str(workflow_state_id)
+        return wm
+
+    @property
+    def wm(self):
+        """返回当前 workflow/agent 的 WorkingMemory（短期记忆）。要求 orchestrator 预先通过服务创建。"""
+        if self._wm_cache is not None:
+            return self._wm_cache
+        wf_id = self.workflow_state_id
+        if not wf_id:
+            raise AgentError(
+                f"WorkingMemory requested for agent {self.agent_name}, but workflow_state_id is not set."
+            )
+        scope = agent_scope(wf_id, self.agent_name)
+        service = get_working_memory_service()
+        try:
+            wm = service.get(str(wf_id), scope)
+        except MemoryNotInitializedError as exc:
+            raise AgentError(
+                f"WorkingMemory not initialised for agent {self.agent_name} (workflow={wf_id}). "
+                "Orchestrator must call create_or_get before agent execution."
+            ) from exc
+        return self._cache_iteration_memory(wm, wf_id)
+
+    # iteration_context 已移除：如需回合内的临时控制信息，请通过局部变量传递
+
+    def memory_write(
+        self,
+        apply_patch: Callable[[Any], None],
+        *,
+        expected_version: Optional[int] = None,
+        operation: str = "write",
+    ) -> None:
+        """通过 WorkingMemory 服务应用受控写入（短期记忆）。"""
+        wf_id = self.workflow_state_id
+        if not wf_id:
+            raise AgentError("Cannot write WorkingMemory without workflow_state_id")
+        service = get_working_memory_service()
+        service.memory_write(
+            workflow_state_id=str(wf_id),
+            scope=agent_scope(str(wf_id), self.agent_name),
+            apply_patch=apply_patch,
+            expected_version=expected_version,
+            operation=operation,
+        )
+
+    def reset_iteration_memory_cache(self, *, invalidate: bool = False) -> None:
+        """清理 WorkingMemory 引用缓存。
+
+        注意：WorkingMemory 的创建/初始化责任在 orchestrator/memory 服务，
+        Agent 只应通过 self.wm 访问，不再主动创建或管理生命周期。
+        """
+        wf_id = self.workflow_state_id
+        self._wm_cache = None
+        if invalidate and wf_id:
+            _working_memory_invalidate(agent_scope(wf_id, self.agent_name), wf_id)
+
+    # === 预执行适配层（MemRef 解引用） ===
+    def _pre_execute_enrich_args(self, function_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        通用 MemRef 适配层：仅当入参中包含 "$memref" 标记时，基于 WorkingMemory（短期记忆）进行就地替换；
+        不做函数名判断，不做默认合并，不覆盖模型已明确给定的普通字段。
+
+        支持形态（示例）：
+        {"style_guidance": {"$memref": {"source": "wm.prepared_assets", "scene_number": 3, "select": ["style"]}}}
+        {"scene_data": {"$memref": {"source": "wm.prepared_assets", "select": ["environment","characters"]}}}  # scene_number 省略时取 args.scene_number
+        """
+        if not isinstance(args, dict):
+            return args
+
+        wm = self.wm
+
+        def _coerce_int(v):
+            try:
+                return int(v) if (v is not None and str(v).isdigit()) else None
+            except Exception:
+                return None
+
+        def _default_scene_number(local_args: Dict[str, Any]) -> Optional[int]:
+            try:
+                return _coerce_int(local_args.get('scene_number')) if isinstance(local_args, dict) else None
+            except Exception:
+                return None
+
+        def _resolve_memref(node: Dict[str, Any], local_args: Dict[str, Any]) -> Any:
+            ref = node.get('$memref') if isinstance(node, dict) else None
+            if not isinstance(ref, dict):
+                return node
+            source = str(ref.get('source') or 'wm.prepared_assets')
+            sn = ref.get('scene_number')
+            sn = _coerce_int(sn) if sn is not None else _default_scene_number(local_args)
+            selected = ref.get('select')
+            if source == 'wm.prepared_assets' and wm is not None and sn is not None:
+                try:
+                    try:
+                        strict = bool(getattr(settings, 'REACT_MEMREF_STRICT', False))
+                    except Exception:
+                        strict = False
+                    # 场景一致性校验：若本次调用参数存在 scene_number，要求与 memref 一致
+                    try:
+                        arg_sn = _default_scene_number(local_args)
+                        if arg_sn is not None and arg_sn != sn:
+                            try:
+                                self.logger.info(
+                                    f"MEMREF_SCENE_MISMATCH source={source} arg_sn={arg_sn} ref_sn={sn} -> skip"
+                                )
+                            except Exception:
+                                pass
+                            if strict:
+                                raise ValueError("memref scene mismatch")
+                            else:
+                                return {}
+                    except Exception:
+                        pass
+                    # 存量场景校验：仅对已知场景进行解引用
+                    try:
+                        if hasattr(wm, 'has_scene') and not wm.has_scene(sn):
+                            try:
+                                self.logger.info(
+                                    f"MEMREF_SCENE_UNKNOWN source={source} sn={sn} -> skip"
+                                )
+                            except Exception:
+                                pass
+                            if strict:
+                                raise ValueError("memref scene unknown")
+                            else:
+                                return {}
+                    except Exception:
+                        pass
+                    prepared = None
+                    if hasattr(wm, 'get_prepared_assets'):
+                        prepared = wm.get_prepared_assets(sn)
+                    if not isinstance(prepared, dict) or not prepared:
+                        try:
+                            self.logger.info(
+                                f"MEMREF_EMPTY source={source} sn={sn} select={selected} -> skip"
+                            )
+                        except Exception:
+                            pass
+                        if strict:
+                            raise ValueError("memref empty")
+                        else:
+                            return {}
+                    if isinstance(selected, (list, tuple)) and selected:
+                        out = {}
+                        for k in selected:
+                            if isinstance(k, str) and k in prepared:
+                                out[k] = prepared[k]
+                        try:
+                            self.logger.info(
+                                f"MEMREF_RESOLVE source={source} sn={sn} keys={list(out.keys())}"
+                            )
+                        except Exception:
+                            pass
+                        return out
+                    try:
+                        self.logger.info(
+                            f"MEMREF_RESOLVE source={source} sn={sn} keys={list(prepared.keys())}"
+                        )
+                    except Exception:
+                        pass
+                    return prepared
+                except Exception:
+                    return {}
+            # 未知 source：安全返回空
+            return {}
+
+        def _walk(value: Any, local_args: Dict[str, Any]) -> Any:
+            if isinstance(value, str) and value.startswith("memref:"):
+                ref_key = value[len("memref:") :].strip()
+                if not ref_key:
+                    return {}
+                resolved = _resolve_memref(
+                    {
+                        "$memref": {
+                            "source": "wm.prepared_assets",
+                            "select": [ref_key],
+                        }
+                    },
+                    local_args,
+                )
+                if isinstance(resolved, dict) and len(resolved) == 1 and ref_key in resolved:
+                    return resolved[ref_key]
+                return resolved
+            # dict with $memref at top-level
+            if isinstance(value, dict) and '$memref' in value:
+                return _resolve_memref(value, local_args)
+            if isinstance(value, dict):
+                out = {}
+                for k, v in value.items():
+                    out[k] = _walk(v, local_args)
+                return out
+            if isinstance(value, list):
+                return [_walk(v, local_args) for v in value]
+            return value
+
+        try:
+            return _walk(args, args)
+        except Exception:
+            return args
+
+    # --- Memory slot helper methods -------------------------------------------------
+
+    def store_memory_slot(
+        self,
+        workflow_id: Any,
+        slot_id: str,
+        value: Any,
+        *,
+        agent: Optional[str] = None,
+    ) -> None:
+        if self.shared_memory_store is None:
+            raise AgentError("Shared memory store not initialized; cannot persist facts.")
+        wf_id = str(workflow_id)
+        agent_name = agent or self.agent_name
+        try:
+            self.shared_memory_store.put(wf_id, slot_id, value, agent=agent_name)
+        except SharedMemoryStoreError as exc:
+            raise AgentError(f"Failed to write slot {slot_id}: {exc}") from exc
+
+    def fetch_memory_slot(
+        self,
+        workflow_id: Any,
+        slot_id: str,
+        default: Any = None,
+        *,
+        agent: Optional[str] = None,
+    ) -> Any:
+        if self.shared_memory_store is None:
+            raise AgentError("Shared memory store not initialized; cannot fetch facts.")
+        wf_id = str(workflow_id)
+        agent_name = agent or self.agent_name
+        try:
+            return self.shared_memory_store.get(wf_id, slot_id, agent=agent_name, default=default)
+        except SharedMemoryStoreError as exc:
+            self.logger.warning("Shared memory slot %s read failed: %s", slot_id, exc)
+            return default
+
+    def _apply_tool_output_contract(
+        self,
+        *,
+        tool_obj: Any,
+        tool_name: Optional[str],
+        action_name: Optional[str],
+        payload: Dict[str, Any],
+        scene_number: Optional[int],
+    ) -> None:
+        """Write tool outputs to working memory based on tool-declared contracts."""
+        if not isinstance(payload, dict):
+            return
+        if tool_obj is None or not hasattr(tool_obj, "get_output_contract"):
+            return
+        try:
+            contract = tool_obj.get_output_contract(action_name or "")
+        except Exception as exc:
+            self.logger.debug(
+                f"tool contract fetch skipped for {tool_name}.{action_name}: {exc}"
+            )
+            return
+        if not contract:
+            return
+        try:
+            writes = extract_contract_slot_writes(
+                payload,
+                contract,
+                default_scene=scene_number,
+            )
+        except Exception as exc:
+            self.logger.debug(
+                f"tool contract parse skipped for {tool_name}.{action_name}: {exc}"
+            )
+            return
+        if not writes:
+            return
+        for write in writes:
+            if write.scene_number is None:
+                continue
+            keys_info = None
+            if isinstance(write.value, dict):
+                keys_info = list(write.value.keys())[:6]
+            op_label = f"{tool_name or 'tool'}.{action_name or 'action'}:{write.slot}"
+            event_cfg = write.spec.get("record_event") if isinstance(write.spec, dict) else None
+
+            def _apply_patch(memory):
+                memory.set_slot_value(write.slot, write.scene_number, write.value)
+                if (
+                    event_cfg
+                    and isinstance(event_cfg, dict)
+                    and hasattr(memory, "record_event")
+                ):
+                    action_label = event_cfg.get("action")
+                    if action_label:
+                        memory.record_event(
+                            scene_number=write.scene_number,
+                            action=action_label,
+                            success=bool(event_cfg.get("success", True)),
+                            error_type=event_cfg.get("error_type"),
+                        )
+
+            try:
+                self.memory_write(_apply_patch, operation=op_label)
+                self.logger.info(
+                    f"WM_SLOT_WRITE tool={tool_name} action={action_name} slot={write.slot} "
+                    f"scene={write.scene_number} keys={keys_info} path={write.source_path}"
+                )
+            except Exception as exc:
+                self.logger.debug(
+                    f"WM slot write failed slot={write.slot} scene={write.scene_number}: {exc}"
+                )
+
+    # --- Unified SharedWM artifact writer ---------------------------------
+    def write_shared_artifact(
+        self,
+        *,
+        kind: str,
+        stage: str,
+        payload: Dict[str, Any],
+        scene_number: Optional[int] = None,
+        tool: Optional[str] = None,
+        workflow_state_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Write a normalized artifact record to Shared Working Memory.
+
+        This provides a single entry point for agents to register stage outputs
+        without duplicating set_fact/register logic across agents.
+
+        Args:
+            kind: 'video' | 'image' | 'audio' | 'voice' | 'subtitle' | 'final' | ...
+            stage: free-form stage tag, e.g. 'video_only', 'compose', 'voiceover', 'bgm'
+            payload: source fields; recognized: file_path/output_path/local_path, video_url/audio_url/image_url/url,
+                     duration/duration_sec, prompt_text/prompt, metadata
+            scene_number: optional scene id
+            tool: optional tool name responsible for the artifact
+            workflow_state_id: override task id (defaults to self.workflow_state_id)
+        Returns: artifact id (int) if written; otherwise None
+        """
+        try:
+            wf_id = workflow_state_id or self.workflow_state_id
+            if not wf_id:
+                self.logger.warning(
+                    "SharedWM write skipped: missing workflow_state_id (kind=%s, stage=%s)",
+                    kind,
+                    stage,
+                )
+                return None
+            # normalize fields
+            fp = (
+                (payload.get("file_path") if isinstance(payload, dict) else None)
+                or (payload.get("output_path") if isinstance(payload, dict) else None)
+                or (payload.get("local_path") if isinstance(payload, dict) else None)
+                or ""
+            )
+            url = ""
+            if isinstance(payload, dict):
+                url = payload.get("url") or payload.get("video_url") or payload.get("audio_url") or payload.get("image_url") or ""
+            dur = None
+            if isinstance(payload, dict):
+                dur = payload.get("duration_sec") or payload.get("final_duration") or payload.get("duration") or payload.get("audio_duration") or payload.get("video_duration")
+                try:
+                    if dur is not None:
+                        dur = float(dur)
+                except Exception:
+                    dur = None
+            prompt_text = ""
+            if isinstance(payload, dict):
+                prompt_text = payload.get("prompt_text") or payload.get("prompt") or ""
+            meta = {}
+            if isinstance(payload, dict):
+                meta = payload.get("metadata") or {}
+            rec = {
+                "kind": kind,
+                "stage": stage,
+                "scene_number": scene_number,
+                "file_path": fp,
+                "url": url,
+                "duration_sec": dur,
+                "prompt_text": prompt_text,
+                "agent": self.agent_name,
+                "tool": tool or "",
+                "metadata": meta,
+            }
+            from .services.mas_shared_memory import get_shared_wm  # lazy import to avoid cycles
+            return get_shared_wm().add_artifact(str(wf_id), rec)
+        except Exception as e:
+            self.logger.error("SharedWM artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
+            return None
     
     async def execute(
         self, 
@@ -134,6 +560,21 @@ class BaseAgent(ABC):
         Returns:
             Dict containing the agent's output data
         """
+        # 每次执行重置 WM 引用缓存，避免跨任务状态污染
+        self.reset_iteration_memory_cache(invalidate=True)
+        workflow_state_id = input_data.get("workflow_state_id")
+        if workflow_state_id:
+            wf_id_str = str(workflow_state_id)
+            self.workflow_state_id = wf_id_str
+        else:
+            self.workflow_state_id = None
+        task_identifier = getattr(task, "task_id", None) or getattr(task, "id", None)
+        if task_identifier is not None:
+            task_id_str = str(task_identifier)
+            self.task_id = task_id_str
+        else:
+            self.task_id = None
+
         # Reset FC执行轨迹（避免跨任务泄露）
         try:
             self._fc_exec_trace = []
@@ -181,6 +622,8 @@ class BaseAgent(ABC):
         # 将当前任务挂到实例上，便于进度上报和子类访问
         # 注意：同一实例串行执行多个任务时会被覆盖，这是预期行为
         self._current_task = task
+        # 暂存当前执行，便于工具参数策略注入
+        self._current_execution = execution
 
         try:
             # Start execution
@@ -233,6 +676,10 @@ class BaseAgent(ABC):
             # 避免跨任务残留引用
             try:
                 del self._current_task
+            except Exception:
+                pass
+            try:
+                del self._current_execution
             except Exception:
                 pass
     
@@ -476,18 +923,7 @@ class BaseAgent(ABC):
                                 arg_preview = arg_preview[:max_len]
                         call_summaries.append(f"{fn}({arg_preview})")
                     self.logger.info(f"📝 FC计划: {len(llm_response['tool_calls'])} calls -> " + ", ".join(call_summaries))
-                    # 将计划数量与函数名写入迭代上下文（若可用），仅作为可观测状态
-                    try:
-                        if hasattr(self, 'iteration_context') and isinstance(self.iteration_context, dict):
-                            planned_fns = [tc.get("function", {}).get("name") for tc in llm_response.get("tool_calls", []) if isinstance(tc, dict)]
-                            rm = dict(self.iteration_context.get('react_metrics', {}))
-                            rm.update({
-                                'planned_calls': len(planned_fns),
-                                'planned_functions': planned_fns[:10],
-                            })
-                            self.iteration_context['react_metrics'] = rm
-                    except Exception:
-                        pass
+                    # 仅日志，不写入 Agent/上下文状态
                 except Exception:
                     pass
                 return {
@@ -557,80 +993,27 @@ class BaseAgent(ABC):
     
     def _build_function_call_schema(self) -> List[Dict[str, Any]]:
         """
-        构建 Function Call 的工具 schema（最小化，不含任何策略裁剪）。
-        - 不嵌入具体工具实现逻辑，仅通过工具公开的 metadata/actions 构建 Schema。
-        - 路由映射的构建统一委托给 _rebuild_fc_map_from_schema，避免分叉。
+        通过 ToolManager 基于分配与策略构建给 LLM 的函数调用 Schema。
+        不在 Agent 运行时手动拼接；由 ToolManager 决定暴露动作集合与 schema，
+        此处仅重建一次本地路由作为防御。
         """
-        tools_schema: List[Dict[str, Any]] = []
-
-        for tool_name in self.allocated_tools:
-            try:
-                tool = self._available_tools.get(tool_name)
-                if tool is None:
-                    continue
-                # FC 可见性过滤：仅对暴露的动作构建schema
-                try:
-                    vis = tool.get_fc_visibility() if hasattr(tool, 'get_fc_visibility') else {"expose": True}
-                except Exception:
-                    vis = {"expose": True}
-                if not vis or not vis.get("expose", True):
-                    continue
-                allowed = vis.get("allowed_actions")
-                actions = tool.get_available_actions() or []
-                if isinstance(allowed, list) and allowed:
-                    actions = [a for a in actions if a in allowed]
-
-                # 1) 多动作工具：按“tool.action”注册
-                for action in actions:
-                    try:
-                        action_schema = tool.get_action_schema(action)
-                    except Exception:
-                        action_schema = None
-                    if not action_schema:
-                        continue
-                    func_name = f"{tool_name}.{action}"
-                    function_schema = {
-                        "type": "function",
-                        "function": {
-                            "name": func_name,
-                            "description": f"{tool.get_metadata().description} - {action}",
-                            "parameters": action_schema
-                        }
-                    }
-                    tools_schema.append(function_schema)
-
-                # 2) 无动作工具：支持工具级直接注册（仅当工具声明支持且策略允许）
-                if not actions and hasattr(tool, 'supports_tool_level_call') and callable(getattr(tool, 'supports_tool_level_call')):
-                    try:
-                        if tool.supports_tool_level_call():
-                            tool_level_schema = tool.get_tool_level_schema() if hasattr(tool, 'get_tool_level_schema') else {}
-                            if isinstance(tool_level_schema, dict) and tool_level_schema:
-                                func_name = f"{tool_name}"
-                                function_schema = {
-                                    "type": "function",
-                                    "function": {
-                                        "name": func_name,
-                                        "description": tool.get_metadata().description,
-                                        "parameters": tool_level_schema
-                                    }
-                                }
-                                tools_schema.append(function_schema)
-                    except Exception:
-                        pass
-
-            except Exception as e:
-                self.logger.warning(f"FC schema build failed for {tool_name}: {e}")
-
-        # 统一从 schema 重建一次路由表，防止局部变更遗漏
         try:
-            self._rebuild_fc_map_from_schema(tools_schema, strict=False)
-        except Exception as _e:
-            # 非严格模式下，映射失败不应阻断；仅记录
-            self.logger.debug(f"FC map rebuild (non-strict) skipped: {_e}")
-
-        if not tools_schema:
-            self.logger.info("No function-callable tools/actions available for this agent.")
-        return tools_schema
+            plan = self.tool_manager.allocate(
+                agent_type=self.agent_type,
+                requested=self.allocated_tools,
+                agent_name=self.agent_name,
+            )
+            tools_schema = self.tool_manager.build_fc_schema(plan.tools, plan.exposure)
+            try:
+                self._rebuild_fc_map_from_schema(tools_schema, strict=False)
+            except Exception as _e:
+                self.logger.debug(f"FC map rebuild (non-strict) skipped: {_e}")
+            if not tools_schema:
+                self.logger.info("No function-callable tools/actions available for this agent.")
+            return tools_schema
+        except Exception as e:
+            self.logger.warning(f"ToolManager schema build failed: {e}")
+            return []
 
     def _rebuild_fc_map_from_schema(self, tools_schema: List[Dict[str, Any]], strict: bool = False) -> None:
         """
@@ -667,116 +1050,50 @@ class BaseAgent(ABC):
         if strict and invalids:
             raise AgentError(f"Invalid tools_override entries: {', '.join(invalids)}")
 
-    # === FC进展注入（通用，不暴露工具名/参数名）===
-    def _build_progress_facts_block(self, limit: int = None) -> Optional[str]:
+
+    def _load_llms_from_policy(self) -> Dict[str, Any]:
         """
-        从最近的工具调用执行轨迹中提取“事实片段”，作为下轮FC的上下文补充。
-        - 保持中立：不出现工具名、动作名或参数名；仅呈现产出事实（文本片段/链接/文件路径等）。
-        - 目的：让模型看到已获得的素材，避免反复生成相同内容，从而实现真正的 ReAct 重规划。
+        Lazily construct LLM role handles from the shared llm_policies.yaml config
+        when explicit injections are not provided. This keeps agents supplier-agnostic
+        and ensures CLI/tests can bootstrap without the orchestrator wiring.
         """
+        from pathlib import Path
         try:
-            # 追加一行简要进度摘要（已完成/待办），帮助强模型把握收敛，而不需要重放全部轨迹
-            header_lines: List[str] = []
-            try:
-                ws = dict(self.iteration_context.get("working_state", {}) or {})
-                ctx = dict(ws.get("context", {}) or {})
-                scenes = ctx.get("scenes_to_generate") or []
-                completed = ws.get("completed_scenes") or []
-                failed = ws.get("failed_scenes") or []
-                completed_ids = set([s.get('scene_number') for s in (completed if isinstance(completed, list) else completed.values()) if isinstance(s, dict) and s.get('scene_number') is not None]) if completed else set()
-                failed_ids = set([s.get('scene_number') for s in failed if isinstance(s, dict) and s.get('scene_number') is not None])
-                all_ids = set([s.get('scene_number') for s in scenes if isinstance(s, dict) and s.get('scene_number') is not None])
-                pending_ids = [str(x) for x in sorted(list(all_ids - completed_ids - failed_ids))]
-                header_lines.append("进度摘要：")
-                header_lines.append(f"- 已完成：{','.join([str(x) for x in sorted(list(completed_ids))]) if completed_ids else '无'}")
-                header_lines.append(f"- 待办：{','.join(pending_ids) if pending_ids else '无'}")
-            except Exception:
-                pass
-            if not isinstance(self._fc_exec_trace, list) or not self._fc_exec_trace:
-                return "\n".join(header_lines) if header_lines else None
-            # 开关与上限从配置读取
-            enabled = True
-            try:
-                enabled = bool(getattr(settings, 'REACT_FC_PROGRESS_INJECTION', True))
-            except Exception:
-                enabled = True
-            if not enabled:
-                return "\n".join(header_lines) if header_lines else None
+            from .utils.llm_policy import LLMPolicyManager
+        except Exception as exc:
+            raise AgentError(
+                f"Unable to import LLMPolicyManager for agent {self.agent_name}: {exc}"
+            ) from exc
 
-            max_items = None
-            try:
-                max_items = int(getattr(settings, 'REACT_FC_MAX_PROGRESS_ITEMS', 8))
-            except Exception:
-                max_items = 8
-            if limit is None:
-                limit = max_items
+        policy_path = Path(__file__).resolve().parents[1] / "config" / "llm_policies.yaml"
+        if not policy_path.exists():
+            raise AgentError(
+                f"LLM policy file not found for agent {self.agent_name}: {policy_path}"
+            )
 
-            # 选取最近的若干成功结果
-            items = [r for r in self._fc_exec_trace if r.get('success')]
-            if not items:
-                # 若无成功项，回显最近失败的简要，以便模型调整策略
-                items = self._fc_exec_trace[-min(len(self._fc_exec_trace), limit or 8):]
-            else:
-                items = items[-min(len(items), limit or 8):]
+        try:
+            policy_manager = LLMPolicyManager(str(policy_path))
+            llm_handles = policy_manager.build_llms_for_agent(self.agent_name)
+        except Exception as exc:
+            raise AgentError(
+                f"Failed to load LLM policy for agent {self.agent_name}: {exc}"
+            ) from exc
 
-            lines: List[str] = []
-            if header_lines:
-                lines.extend(header_lines)
-            lines.append("最近产出要点（不含工具细节）：")
-            for r in items:
-                # 统一提取“标识/文本/链接/路径”四类中立字段
-                ident = None
-                text_preview = None
-                link = None
-                fpath = None
+        if not llm_handles:
+            raise AgentError(
+                f"No LLM handles configured for agent {self.agent_name} in {policy_path}"
+            )
 
-                payload = r.get('result')
-                if hasattr(payload, 'result'):
-                    payload = getattr(payload, 'result')
-                if isinstance(payload, dict):
-                    # 标识：常见为 scene_number / id / index
-                    for k in ['scene_number', 'scene', 'id', 'index', 'identifier']:
-                        if k in payload and payload[k] not in (None, ""):
-                            ident = payload[k]
-                            break
-                    # 文本片段：优先 text/script/prompt/description 字段
-                    for k in ['prompt_text', 'script_text', 'text', 'description', 'content']:
-                        v = payload.get(k)
-                        if isinstance(v, str) and len(v.strip()) >= 10:
-                            text_preview = v.strip().replace('\n', ' ')[:200]
-                            break
-                    # 链接与路径
-                    for k in ['image_url', 'video_url', 'url', 'link']:
-                        v = payload.get(k)
-                        if isinstance(v, str) and v.startswith(('http://','https://')):
-                            link = v
-                            break
-                    for k in ['file_path', 'path', 'output_path']:
-                        v = payload.get(k)
-                        if isinstance(v, str) and len(v) > 3:
-                            fpath = v
-                            break
-                elif isinstance(payload, str) and len(payload.strip()) >= 10:
-                    text_preview = payload.strip().replace('\n', ' ')[:200]
-
-                parts = []
-                if ident is not None:
-                    parts.append(f"标识={ident}")
-                if text_preview:
-                    parts.append(f"文本片段：{text_preview}")
-                # 优先展示本地路径，避免同时展示远程链接造成干扰
-                if fpath:
-                    parts.append(f"路径：{fpath}")
-                elif link:
-                    parts.append(f"链接：{link}")
-                if not parts:
-                    # 兜底：只提示已完成一项产出
-                    parts.append("已有可用产出")
-                lines.append("- " + "；".join(parts))
-
-            return "\n".join(lines)
+        try:
+            self.logger.info(
+                "LLM handles auto-loaded for %s using policy %s",
+                self.agent_name,
+                policy_path,
+            )
         except Exception:
-            return None
+            pass
+
+        return llm_handles
 
     # === LLM依赖注入访问器 ===
     def _resolve_llm_for_role(self, role: str):
@@ -789,6 +1106,8 @@ class BaseAgent(ABC):
     def get_llm(self, role: str = None):
         """Public accessor for injected llm handles."""
         r = role or 'default'
+        if (not self._llms) or all(handle is None for handle in self._llms.values()):
+            self._llms = self._load_llms_from_policy()
         return self._resolve_llm_for_role(r)
     
     async def _execute_function_call(self, function_name: str, function_args: Dict[str, Any]) -> Any:
@@ -812,6 +1131,8 @@ class BaseAgent(ABC):
     def get_llm(self, role: str = None):
         """Public accessor for injected llm handles."""
         r = role or 'default'
+        if (not self._llms) or all(handle is None for handle in self._llms.values()):
+            self._llms = self._load_llms_from_policy()
         return self._resolve_llm_for_role(r)
     
     async def _execute_function_call(self, function_name: str, function_args: Dict[str, Any]) -> Any:
@@ -835,16 +1156,19 @@ class BaseAgent(ABC):
             f"No matching tool for function '{function_name}'. Registered: {list(getattr(self, '_fc_function_map', {}).keys())}"
         )
 
-    async def execute_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def execute_tool_calls(self, tool_calls: List[Dict[str, Any]], *, collect_facts: bool = False):
         """统一执行一组 tool_calls（与 FC 返回格式兼容）。
         每条元素期望形如 {"function": {"name": str, "arguments": str|dict}}。
-        返回标准结果列表：[{tool, args, result?, success, error?, error_type?}]
+        返回：
+          - collect_facts=False（默认）：标准结果列表 [{tool, args, result?, success, error?, error_type?}]
+          - collect_facts=True：{"executed_calls": [...], "act_summary": {...}, "react_metrics": {...}, "act_log": [...]}（不落入Agent字段）
         """
         try:
             self.logger.info("🤖 选择工具：开始执行规划的工具调用")
         except Exception:
             pass
         results: List[Dict[str, Any]] = []
+        actions_this_round: List[Dict[str, Any]] = []
         funcs_used: List[str] = []
         # 本轮规范化结果快照（通用字段，供应商无关）
         last_round_results: List[Dict[str, Any]] = []
@@ -853,18 +1177,62 @@ class BaseAgent(ABC):
             'total': 0,
             'success': 0,
             'fail': 0,
-            'plan_total': 0,
-            'plan_success': 0,
-            'act_total': 0,
-            'act_success': 0,
             'artifacts': 0,
         }
+        # 轻量预验证（不改写）
+        try:
+            fc_schema = self._build_function_call_schema()
+            report = self.tool_manager.validate_tool_calls(tool_calls or [], fc_schema or [])
+            if report and report.issues:
+                for iss in report.issues:
+                    self.logger.warning(
+                        f"FC validation: idx={iss.call_index} level={iss.level} reason={iss.reason} hint={iss.hint}"
+                    )
+        except Exception as _ve:
+            self.logger.debug(f"FC validation skipped: {_ve}")
+
+        # 构造参数策略上下文
+        def _policy_context() -> Dict[str, Any]:
+            ctx: Dict[str, Any] = {
+                'agent_name': self.agent_name,
+                'agent_type': self.agent_type.value,
+            }
+            # 推断 wf_id：优先 AgentState.context.workflow_state_id
+            try:
+                if self.workflow_state_id:
+                    ctx['wf_id'] = str(self.workflow_state_id)
+            except Exception:
+                pass
+            # 执行ID来自当前执行上下文
+            try:
+                exec_id = getattr(getattr(self, '_current_execution', None), 'id', None)
+                if exec_id:
+                    ctx['execution.id'] = exec_id
+            except Exception:
+                pass
+            return ctx
+
+        policy_ctx = _policy_context()
+
         for idx, tool_call in enumerate(tool_calls):
             try:
                 fn = tool_call["function"]["name"]
                 funcs_used.append(fn)
                 raw_args = tool_call["function"].get("arguments", {})
                 args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                # 应用参数策略：仅在缺参+存在模板时补全；越权/缺 required 直接报错
+                try:
+                    if isinstance(args, dict):
+                        args = self.tool_manager.apply_param_policy(fn, args, policy_ctx)
+                except Exception as pe:
+                    raise ValueError(f"param policy rejected: {pe}")
+
+                # 预执行解析：基于迭代记忆解引用准备资产，补齐业务入参（不覆盖已有字段）
+                try:
+                    if isinstance(args, dict):
+                        args = self._pre_execute_enrich_args(fn, args)
+                except Exception:
+                    pass
 
                 # 解析 tool 与 action（优先映射，其次点分隔用于日志展示）
                 tool_name, action_name = None, None
@@ -877,6 +1245,13 @@ class BaseAgent(ABC):
                         tool_name, action_name = fn, None
                 except Exception:
                     tool_name, action_name = fn, None
+
+                tool_obj = None
+                try:
+                    if tool_name and tool_name in self._available_tools:
+                        tool_obj = self._available_tools[tool_name]
+                except Exception:
+                    tool_obj = None
 
                 scene = args.get("scene_number") if isinstance(args, dict) else None
                 try:
@@ -934,6 +1309,8 @@ class BaseAgent(ABC):
                     # 校验失败不阻断，交给执行期处理
                     pass
 
+                # 去阶段化：不再读取/使用 plan/act 阶段语义
+
                 call_id = f"{int(time.time()*1000)}-{idx}"
                 try:
                     self.logger.info(
@@ -944,6 +1321,7 @@ class BaseAgent(ABC):
 
                 _call_ts = time.time()
                 tool_result = await self._execute_function_call(fn, args)
+                payload = tool_result.result if hasattr(tool_result, 'result') else tool_result
                 _dur = time.time() - _call_ts
                 # 兼容 ToolOutput / dict
                 is_success = True
@@ -957,16 +1335,7 @@ class BaseAgent(ABC):
                         error_type = meta.get('error_type')
                 # 分段度量统计
                 round_metrics['total'] += 1
-                # 判定阶段（plan/act）
-                stage = 'act'
-                try:
-                    if hasattr(self, "_fc_function_map") and fn in getattr(self, "_fc_function_map", {}):
-                        tname, aname = self._fc_function_map[fn]
-                        tool_obj = self._available_tools.get(tname)
-                        if tool_obj and hasattr(tool_obj, 'get_action_stage') and callable(getattr(tool_obj, 'get_action_stage')):
-                            stage = tool_obj.get_action_stage(aname) or 'act'
-                except Exception:
-                    stage = 'act'
+                # 阶段（已在执行前判定），此处沿用
                 scene_number = None
                 try:
                     if isinstance(args, dict) and args.get("scene_number") is not None:
@@ -1018,79 +1387,23 @@ class BaseAgent(ABC):
                     artifact = None
                     payload = tool_result.result if hasattr(tool_result, 'result') else tool_result
                     if isinstance(payload, dict):
-                        # 优先使用本地持久化路径作为“产物”可观测标识
-                        artifact = payload.get('file_path') or payload.get('image_url') or payload.get('video_url')
-                        # 自动持久化：根据配置与可用工具，将 image_url/video_url 落盘并回写 file_path（保持中立，无供应商/工具名暴露）
-                        try:
-                            from ..core.config import settings as _cfg
-                            auto_persist = bool(getattr(_cfg, 'REACT_AUTO_PERSIST_ARTIFACTS', False))
-                        except Exception:
-                            auto_persist = False
-                        # 幂等保护：若 payload 已有 file_path，则跳过上传
-                        already_persisted = isinstance(payload.get('file_path'), str) and len(payload.get('file_path')) > 0
-                        if auto_persist and (not already_persisted) and artifact and isinstance(artifact, str) and artifact.startswith(("http://", "https://")):
-                            try:
-                                if 'file_storage_tool' in self._available_tools:
-                                    # 目标文件名推断（尽量基于场景号）
-                                    scene_num = args.get('scene_number') if isinstance(args, dict) else None
-                                    is_video = bool(payload.get('video_url'))
-                                    prefix = 'videos' if is_video else 'images'
-                                    fname = f"scene_{scene_num}_{'video.mp4' if is_video else 'image.jpg'}" if scene_num is not None else f"artifact_{int(time.time()*1000)}.bin"
-                                    dest_key = f"{prefix}/{fname}"
-                                    store_res = await self.use_tool(
-                                        tool_name='file_storage_tool',
-                                        action='upload_from_url',
-                                        parameters={
-                                            'url': artifact,
-                                            'destination_key': dest_key,
-                                            'metadata': {
-                                                'scene_number': scene_num,
-                                                'source': 'react_autopersist'
-                                            }
-                                        }
-                                    )
-                                    persisted = store_res.result if hasattr(store_res, 'result') else store_res
-                                    if isinstance(persisted, dict) and persisted.get('file_path'):
-                                        # 将持久化路径写回payload，便于统一快照与后续上下文
-                                        payload['file_path'] = persisted['file_path']
-                            except Exception:
-                                pass
+                        # 优先使用本地持久化路径作为“产物”可观测标识（不在此处做自动持久化，以免偏离 FC 规划）
+                        artifact = payload.get('file_path') or payload.get('image_url') or payload.get('video_url') or payload.get('audio_url')
                         if payload.get('file_path') or artifact:
                             round_metrics['artifacts'] += 1
-                    if stage == 'plan':
-                        round_metrics['plan_total'] += 1
-                        if is_success:
-                            round_metrics['plan_success'] += 1
-                    else:
-                        round_metrics['act_total'] += 1
-                        if is_success:
-                            round_metrics['act_success'] += 1
                     # 规范化结果快照（供应商无关字段）
                     try:
-                        snap: Dict[str, Any] = {
-                            'scene_number': args.get('scene_number') if isinstance(args, dict) else None,
-                            'success': is_success,
-                            'stage': stage,
-                            'duration_sec': round(_dur, 2),
-                        }
-                        if isinstance(payload, dict):
-                            # 文本片段（优先 prompt_text，其次 prompt/text/description）
-                            txt = payload.get('prompt_text') or payload.get('prompt') or payload.get('text') or payload.get('description')
-                            if isinstance(txt, str) and txt.strip():
-                                snap['prompt_text'] = txt.strip()
-                            # 产物位置
-                            if payload.get('image_url'):
-                                snap['image_url'] = payload.get('image_url')
-                            if payload.get('video_url'):
-                                snap['video_url'] = payload.get('video_url')
-                            # 音频产物位置（用于音频代理等场景）
-                            if payload.get('audio_url'):
-                                snap['audio_url'] = payload.get('audio_url')
-                            if payload.get('file_path'):
-                                snap['file_path'] = payload.get('file_path')
-                        last_round_results.append(snap)
-                    except Exception:
-                        pass
+                        snap = self.tool_manager.normalize_artifact(tool_result, args if isinstance(args, dict) else {})
+                        # 附加执行期信息（非供应商字段）
+                        if isinstance(snap, dict):
+                            snap.setdefault('success', is_success)
+                            snap.setdefault('duration_sec', round(_dur, 2))
+                            # 简易度量：若存在任何可用产物指示，计入 artifacts
+                            if snap.get('file_path') or snap.get('image_url') or snap.get('video_url') or snap.get('audio_url'):
+                                round_metrics['artifacts'] += 1
+                            last_round_results.append(snap)
+                    except Exception as ne:
+                        self.logger.debug(f"artifact normalization skipped: {ne}")
                     self.logger.info(
                         f"TOOL_END call_id={call_id} fn={fn} tool={tool_name} action={action_name} scene={scene} success={is_success} dur={_dur:.2f}s"
                         + (f" artifact={artifact}" if artifact else "")
@@ -1098,6 +1411,82 @@ class BaseAgent(ABC):
                     )
                 except Exception:
                     pass
+
+                # === 执行摘要（中立），用于下一轮 OBS 的可消费事实 ===
+                try:
+                    # 2) 基本布尔信号
+                    def _has_any_artifact(p: Any) -> bool:
+                        if not isinstance(p, dict):
+                            return False
+                        return bool(p.get('file_path') or p.get('image_url') or p.get('video_url') or p.get('audio_url'))
+                    def _has_text(p: Any) -> bool:
+                        if not isinstance(p, dict):
+                            return False
+                        for k in ('prompt_text', 'text', 'description', 'content'):
+                            v = p.get(k)
+                            if isinstance(v, str) and v.strip():
+                                return True
+                        return False
+                    has_artifact = _has_any_artifact(payload)
+                    text_present = _has_text(payload)
+                    # 3) 负载顶层键（白名单交集，不暴露内容）
+                    payload_keys: List[str] = []
+                    if isinstance(payload, dict):
+                        _whitelist = {
+                            'assets', 'style', 'characters', 'environment', 'continuity',
+                            'scene_references', 'motion_guidance', 'diagnostics'
+                        }
+                        payload_keys = [k for k in payload.keys() if k in _whitelist]
+                    # 4) scene 编号（已在上面解析为 scene 变量）
+                    scene_out = None
+                    try:
+                        scene_out = int(scene) if scene is not None else None
+                    except Exception:
+                        scene_out = scene
+                    # 5) tokens/时长（可选）
+                    tks = None
+                    try:
+                        tks = getattr(tool_result, 'tokens_used') if hasattr(tool_result, 'tokens_used') else None
+                    except Exception:
+                        tks = None
+                    # 6) 错误信息（限长）
+                    err_out = None
+                    if not is_success and error_text:
+                        try:
+                            err_out = (error_text or '')
+                            max_len = 200
+                            if isinstance(err_out, str) and len(err_out) > max_len:
+                                err_out = err_out[:max_len]
+                        except Exception:
+                            err_out = None
+                    actions_this_round.append({
+                        'tool': fn,
+                        'scene_number': scene_out,
+                        'success': bool(is_success),
+                        'has_artifact': bool(has_artifact),
+                        'text_present': bool(text_present),
+                        'payload_keys': payload_keys,
+                        'error_type': error_type if (not is_success) else None,
+                        'error': err_out,
+                        'duration_sec': round(_dur, 2) if isinstance(_dur, (int, float)) else None,
+                        'tokens_used': int(tks) if isinstance(tks, (int, float)) else None,
+                    })
+                except Exception:
+                    # 摘要生成不应影响主流程
+                    pass
+
+                if is_success and isinstance(payload, dict):
+                    try:
+                        self._apply_tool_output_contract(
+                            tool_obj=tool_obj,
+                            tool_name=tool_name,
+                            action_name=action_name,
+                            payload=payload,
+                            scene_number=scene_out,
+                        )
+                    except Exception:
+                        pass
+
             except Exception as e:
                 try:
                     _dur = time.time() - _call_ts if '_call_ts' in locals() else 0.0
@@ -1107,27 +1496,62 @@ class BaseAgent(ABC):
                 except Exception:
                     self.logger.error(f"Tool execution failed: {e}")
                 results.append({"tool": tool_call.get("function", {}).get("name"), "args": tool_call.get("function", {}).get("arguments"), "error": str(e), "success": False})
-        # 更新 ReAct 级别的重复调用守卫（若存在迭代上下文）
+        # 写入 WorkingMemory 的最近产物索引（如可用），以便跨回合/跨Agent消费
         try:
-            if hasattr(self, 'iteration_context') and isinstance(self.iteration_context, dict):
-                guard = dict(self.iteration_context.get('fc_repeat_guard', {}))
-                last_funcs = set(guard.get('last_functions', []))
-                current_funcs = set(funcs_used)
-                if current_funcs and current_funcs == last_funcs:
-                    guard['repeat_times'] = int(guard.get('repeat_times', 0)) + 1
-                else:
-                    guard['repeat_times'] = 0
-                guard['last_functions'] = list(current_funcs)
-                self.iteration_context['fc_repeat_guard'] = guard
-                # 写入本轮度量（仅可观测状态）
-                rm = dict(self.iteration_context.get('react_metrics', {}))
-                rm.update(round_metrics)
-                rm['executed_functions'] = funcs_used[:10]
-                self.iteration_context['react_metrics'] = rm
-                # 写入本轮规范化结果快照
-                self.iteration_context['last_round_results'] = last_round_results
+            wm = self.wm
+            if wm is not None:
+                snaps = list(last_round_results or [])
+                for snap in snaps:
+                    if not isinstance(snap, dict):
+                        continue
+                    # 推断 kind
+                    kind = None
+                    fp = (snap.get('file_path') or '').lower()
+                    def _has_ext(p: str, exts: list[str]):
+                        return any(p.endswith(ext) for ext in exts)
+                    if snap.get('video_url') or _has_ext(fp, ['.mp4', '.mov', '.mkv']):
+                        kind = 'video'
+                    elif snap.get('audio_url') or _has_ext(fp, ['.wav', '.mp3', '.aac', '.m4a', '.flac']):
+                        kind = 'audio'
+                    elif snap.get('image_url') or _has_ext(fp, ['.jpg', '.jpeg', '.png', '.webp']):
+                        kind = 'image'
+                    if not kind:
+                        continue
+                    scene_num = None
+                    try:
+                        if snap.get('scene_number') is not None:
+                            scene_num = int(snap.get('scene_number'))
+                    except Exception:
+                        scene_num = snap.get('scene_number')
+                    url = snap.get('video_url') or snap.get('audio_url') or snap.get('image_url') or ''
+                    wm.add_iteration_artifact(
+                        kind=kind,
+                        scene_number=scene_num,
+                        file_path=snap.get('file_path') or '',
+                        url=url,
+                        duration=snap.get('duration_sec'),
+                        prompt_text=snap.get('prompt_text') or '',
+                        stage=snap.get('stage'),
+                    )
         except Exception:
             pass
+
+        if collect_facts:
+            try:
+                act_summary, metrics, act_log = derive_action_facts(
+                    planned_calls=tool_calls,
+                    executed_calls=results,
+                    round_metrics=round_metrics,
+                    actions=actions_this_round,
+                )
+            except Exception:
+                act_summary, metrics, act_log = {}, {}, []
+            return {
+                "executed_calls": results,
+                "act_summary": act_summary,
+                "react_metrics": metrics,
+                "act_log": act_log,
+            }
         return results
     
     def get_tool_names(self) -> List[str]:
@@ -1146,6 +1570,22 @@ class BaseAgent(ABC):
                 capabilities.append(f"- {tool_name}: {metadata.description} (actions: {', '.join(actions)})")
         
         return "\n".join(capabilities) if capabilities else "No tools available"
+    
+    # 迭代摘要不在 Agent 内缓存；由调用方在同轮内通过局部变量传递
+
+    # --- No-op action summary accessors (stateless) -------------------------
+    def set_last_action_summary(self, summary: Optional[Dict[str, Any]]) -> None:
+        """Compatibility stub: do not persist per-agent state."""
+        try:
+            if isinstance(summary, dict):
+                # 审计日志用途（不写入 Agent 状态）
+                self.logger.info("ACT_SUMMARY %s", json.dumps(summary, ensure_ascii=False))
+        except Exception:
+            pass
+
+    def get_last_action_summary(self) -> Optional[Dict[str, Any]]:
+        """Compatibility stub: always return None to keep agent stateless."""
+        return None
     
     
     def get_system_instructions(self) -> Dict[str, Any]:
@@ -1266,10 +1706,17 @@ class BaseAgent(ABC):
 
     def _build_tool_context(self, tool_name: str, action: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """构建工具执行上下文（子类可覆盖扩展）。"""
-        return {
+        ctx = {
             "agent_tool_timeout": None,
             "agent_timeout_seconds": self.timeout_seconds,
         }
+        wf_id = self.workflow_state_id
+        if wf_id is None:
+            raise AgentError(
+                f"workflow_state_id missing in context for tool={tool_name}.{action}"
+            )
+        ctx["workflow_state_id"] = str(wf_id)
+        return ctx
 
     # 🚀 Phase 1.3 - 工具系统解耦：统一AI服务接口
     async def generate_text(
@@ -1361,7 +1808,7 @@ class BaseAgent(ABC):
         metadata: Dict[str, Any] = None
     ) -> str:
         """Store information in agent memory"""
-        from .memory.base_memory import MemoryImportance, MemoryType
+        from .memory.long_term.stores import MemoryImportance, MemoryType
         
         importance_map = {
             "minimal": MemoryImportance.MINIMAL,

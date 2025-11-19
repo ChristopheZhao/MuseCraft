@@ -7,7 +7,7 @@ import json
 from typing import Dict, Any
 
 from ..tools.tool_registry import get_tool_registry
-from ..memory.memory_manager import MemoryManager
+from ..memory.long_term.manager import MemoryManager
 from ..prompts.template_manager import get_template_manager
 from .enhanced_concept_planner import EnhancedConceptPlannerAgent
 

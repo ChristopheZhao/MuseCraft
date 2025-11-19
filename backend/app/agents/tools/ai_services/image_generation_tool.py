@@ -80,10 +80,8 @@ class ImageGenerationTool(AsyncTool):
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         """获取指定操作的参数架构"""
         base_schema = {
-            "type": "object", 
+            "type": "object",
             "properties": {},
-            # x-examples: 供提示展示，不参与校验
-            "x-examples": []
         }
         
         if action == "generate_image":
@@ -98,20 +96,15 @@ class ImageGenerationTool(AsyncTool):
                 },
                 "style": {
                     "type": "string",
-                    "description": "图像风格，如realistic, artistic, cinematic等"
+                    "description": "图像风格（例如 写实、艺术、电影感 等）"
                 },
                 "size": {
                     "type": "string",
-                    "description": "图像尺寸（自由字符串，如 1024x1024 / 2K / 1K）"
+                    "description": "图像尺寸（任意字符串，例如 1024x1024、2K、1K）"
                 }
             }
             base_schema["required"] = ["prompt"]
-            base_schema["x-examples"] = [
-                {
-                    "prompt": "超广角镜头，金色夕阳照耀的城市天际线，细节清晰，电影级",
-                    "size": "1024x1024"
-                }
-            ]
+            base_schema["description"] = "根据用户提供的提示词直接生成图像，可选指定尺寸以及风格。"
 
         elif action == "gen_image_prompt":
             base_schema["properties"] = {
@@ -121,65 +114,53 @@ class ImageGenerationTool(AsyncTool):
                 },
                 "scene_data": {
                     "type": "object",
-                    "description": "场景信息（视觉描述/叙事要点/时长等）"
+                    "description": "场景信息（例如视觉描述、叙事要点、时长等）"
                 },
                 "style_guidance": {
                     "type": "object",
-                    "description": "风格指导（如画风、构图偏好、色彩基调）"
+                    "description": "风格指导（如画风、构图偏好、色彩基调等）"
                 }
             }
-            base_schema["x-examples"] = [
-                {
-                    "scene_data": {"visual_description": "森林中小木屋，黄昏光影"},
-                    "style_guidance": {"color_tone": "warm", "composition": "wide-angle"}
-                }
-            ]
+            base_schema["description"] = "根据场景信息和风格指导生成图像提示词，而不直接产出图像。"
         elif action == "generate_with_autoprompt":
             base_schema["properties"] = {
                 "scene_number": {"type": ["integer", "string"], "description": "可选：用于追踪与持久化命名"},
                 "scene_data": {"type": "object", "description": "场景信息（视觉描述/标题/脚本摘要等）"},
-                "style_guidance": {"type": "object", "description": "风格指导（如画风、构图偏好、色彩基调）"},
-                "fallback_prompt": {"type": "string", "description": "当自动提示失败时使用的回退提示词"},
+                "style_guidance": {"type": "object", "description": "风格指导（如画风、构图偏好、色彩基调等）"},
+                "fallback_prompt": {"type": "string", "description": "当自动提示生成失败时使用的备用提示词"},
                 "size": {"type": "string", "enum": ["1024x1024", "1024x1792", "1792x1024"], "description": "图像尺寸"},
                 "persist": {"type": "boolean", "description": "是否持久化到存储（默认 true）"}
             }
-            base_schema["x-examples"] = [
-                {
-                    "scene_data": {"visual_description": "古堡外夜景，薄雾，灯光从窗内透出"},
-                    "style_guidance": {"style": "cinematic", "color_tone": "cool"},
-                    "size": "1024x1024"
-                }
-            ]
+            base_schema["description"] = "自动生成符合场景的图像提示词并调用底层服务生成图像，可配置尺寸与持久化。"
         elif action == "analyze_image_style":
             base_schema["properties"] = {
                 "image_url": {
                     "type": "string",
-                    "description": "图像URL"
+                    "description": "图像 URL"
                 },
                 "image_path": {
                     "type": "string", 
-                    "description": "图像路径"
+                    "description": "图像本地路径"
                 }
             }
+            base_schema["description"] = "分析指定图像的风格特征信息。"
             
         elif action == "extract_visual_features":
             base_schema["properties"] = {
                 "image_url": {
                     "type": "string",
-                    "description": "图像URL"
+                    "description": "图像 URL"
                 },
                 "image_path": {
                     "type": "string",
-                    "description": "图像路径"
+                    "description": "图像本地路径"
                 }
             }
+            base_schema["description"] = "提取图像的视觉特征向量等信息。"
         
         return base_schema
 
-    def get_action_stage(self, action: str) -> str:
-        if action == "gen_image_prompt":
-            return "plan"
-        return "act"
+    # 取消阶段语义：工具仅具有执行属性
     
     async def _execute_impl(self, tool_input) -> Dict[str, Any]:
         """执行图像生成相关操作"""
@@ -210,10 +191,10 @@ class ImageGenerationTool(AsyncTool):
 
         # 轻量提示词质量校验
         if self._is_prompt_weak(prompt):
-            return {
-                "success": False,
-                "error": "PROMPT_TOO_WEAK: 缺少或过短的图像生成提示词"
-            }
+            raise ToolError(
+                "PROMPT_TOO_WEAK: 缺少或过短的图像生成提示词",
+                error_code="prompt_too_weak",
+            )
         
         advisor_meta: Dict[str, Any] = {}
         try:
@@ -286,7 +267,6 @@ class ImageGenerationTool(AsyncTool):
                     # 统一抛错，让下方敏感处理或上层 ReAct 接手
                     raise ToolError("image_generation returned no image_url", self.metadata.name)
                 return {
-                    "success": True,
                     "image_url": image_url,
                     "generated_prompt": prompt,
                     "style": style,
@@ -353,7 +333,6 @@ class ImageGenerationTool(AsyncTool):
                             # 二次仍失败，走原有失败路径
                             raise terr
                         return {
-                            "success": True,
                             "image_url": image_url2,
                             "generated_prompt": prompt,
                             "style": style,
@@ -370,7 +349,10 @@ class ImageGenerationTool(AsyncTool):
                 raise
                 
         except Exception as e:
-            return {"success": False, "error": f"图像生成异常: {str(e)}"}
+            raise ToolError(
+                f"图像生成异常: {str(e)}",
+                error_code="image_generation_failed",
+            )
     
     async def _create_image_prompt_from_scene(
         self,
@@ -614,7 +596,6 @@ class ImageGenerationTool(AsyncTool):
             image_url = hosted_url
 
         return {
-            "success": True,
             "image_url": image_url,
             "file_path": file_path,
             "prompt_text": prompt_text,
@@ -721,10 +702,7 @@ class ImageGenerationTool(AsyncTool):
         image_path = params.get("image_path", "")
         
         if not image_url and not image_path:
-            return {
-                "success": False,
-                "error": "需要提供图像URL或路径"
-            }
+            raise ToolError("需要提供图像URL或路径", error_code="missing_image_input")
         
         # 构建分析提示
         analysis_prompt = """分析这张图像的视觉风格特征：
@@ -753,22 +731,18 @@ class ImageGenerationTool(AsyncTool):
             analysis_content = res.get("analysis", "")
             try:
                 style_analysis = json.loads(analysis_content)
-                return {"success": True, "style_analysis": style_analysis}
+                return {"style_analysis": style_analysis}
             except json.JSONDecodeError:
                 return {
-                    "success": True,
                     "style_analysis": {
                         "description": analysis_content,
                         "style_type": "mixed",
-                        "confidence": 0.7
+                        "confidence": 0.7,
                     }
                 }
                 
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"图像风格分析异常: {str(e)}"
-            }
+            raise ToolError(f"图像风格分析异常: {str(e)}", error_code="style_analysis_failed")
 
     # 注意：建议在Agent中通过FC调用 gen_image_prompt 生成提示词，再调用 generate_image。
 
@@ -811,7 +785,7 @@ class ImageGenerationTool(AsyncTool):
             )
             prompt = (res.get("content") or "").strip()
             if not prompt:
-                return {"success": False, "error": "未生成提示词"}
+                raise ToolError("未生成提示词", error_code="prompt_generation_failed")
             advisor_meta = {}
             sanitized = sanitize_prompt(
                 prompt,
@@ -826,13 +800,12 @@ class ImageGenerationTool(AsyncTool):
             advisor_meta["sanitized_changed"] = sanitized.changed
             advisor_meta["sanitized_matches"] = sanitized.matches
             return {
-                "success": True,
                 "prompt_text": prompt,
                 "scene_number": params.get("scene_number"),
                 "prompt_safety": advisor_meta,
             }
         except Exception as e:
-            return {"success": False, "error": f"提示词建议失败: {str(e)}"}
+            raise ToolError(f"提示词建议失败: {str(e)}", error_code="prompt_generation_failed")
 
     def _is_prompt_weak(self, prompt: str) -> bool:
         """极轻量提示词质量判断（读取配置）"""
@@ -862,10 +835,7 @@ class ImageGenerationTool(AsyncTool):
         image_path = params.get("image_path", "")
         
         if not image_url and not image_path:
-            return {
-                "success": False,
-                "error": "需要提供图像URL或路径"
-            }
+            raise ToolError("需要提供图像URL或路径", error_code="missing_image_input")
         
         feature_prompt = """提取这张图像的关键视觉特征：
 
@@ -887,13 +857,12 @@ class ImageGenerationTool(AsyncTool):
             res = await vlm.image_understanding(image_input=img_input, prompt=feature_prompt, model=None, temperature=0.2)
             content = (res.get("analysis") or res.get("content") or "").strip()
             if not content:
-                return {"success": False, "error": "视觉特征提取为空"}
+                raise ToolError("视觉特征提取为空", error_code="visual_feature_empty")
             try:
                 visual_features = json.loads(content)
-                return {"success": True, "visual_features": visual_features}
+                return {"visual_features": visual_features}
             except json.JSONDecodeError:
                 return {
-                    "success": True,
                     "visual_features": {
                         "description": content,
                         "extraction_method": "vlm_analysis",
@@ -901,4 +870,4 @@ class ImageGenerationTool(AsyncTool):
                     }
                 }
         except Exception as e:
-            return {"success": False, "error": f"视觉特征提取异常: {str(e)}"}
+            raise ToolError(f"视觉特征提取异常: {str(e)}", error_code="visual_feature_failed")

@@ -1,6 +1,6 @@
 """
 Orchestrator Agent - Coordinates the entire video generation workflow
-现在使用WorkflowState内存管理，避免数据库中断问题
+基于 Shared Working Memory（共享黑板）作为唯一对外事实源；取消对 WorkflowState 的依赖。
 """
 import asyncio
 import os
@@ -10,9 +10,13 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, TaskStatus, AgentType
-from ..core.workflow_state import WorkflowState, WorkflowStatus, workflow_manager
-from ..services.data_persistence import data_persistence_service
-from ..services.global_memory_service import global_memory_service
+from .services.mas_shared_memory import get_shared_wm
+from .memory.short_term.working_memory import SceneArtifact
+from .adapters.memory_views import build_media_agent_context, build_image_generation_context
+from ..services.data_persistence import data_persistence_service, configure_data_persistence
+from ..services.memory_provider import build_memory_services, MemoryServices
+from .memory.short_term import get_working_memory_service
+from .utils.memory_helpers import agent_scope, mas_scope, ensure_mas_memory
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -31,29 +35,56 @@ class OrchestratorAgent(BaseAgent):
     by coordinating all specialized agents in the correct order
     """
     
-    def __init__(self):
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
         import os
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         self._llm_policy = LLMPolicyManager(policy_file)
+        self._memory_services = memory_services or build_memory_services()
+        configure_data_persistence(self._memory_services)
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="orchestrator",
             timeout_seconds=getattr(settings, 'ORCHESTRATOR_TIMEOUT_SECONDS', 1800),
             max_retries=1,
-            llms=self._llm_policy.build_llms_for_agent('orchestrator')
+            llms=self._llm_policy.build_llms_for_agent('orchestrator'),
+            memory_services=self._memory_services,
         )
         
         # Initialize all specialized agents
         self.agents = {
-            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(llms=self._llm_policy.build_llms_for_agent('concept_planner')),
-            AgentType.SCRIPT_WRITER: ScriptWriterAgent(llms=self._llm_policy.build_llms_for_agent('script_writer')),
-            AgentType.VOICE_SYNTHESIZER: VoiceSynthesizerAgent(llms=self._llm_policy.build_llms_for_agent('voice_synthesizer')),
-            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('image_generator')),
-            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('video_generator')),
-            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('audio_generator')),
-            AgentType.VIDEO_COMPOSER: VideoComposerAgent(llms=self._llm_policy.build_llms_for_agent('video_composer')),
-            AgentType.QUALITY_CHECKER: QualityCheckerAgent(llms=self._llm_policy.build_llms_for_agent('quality_checker'))
+            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(
+                llms=self._llm_policy.build_llms_for_agent('concept_planner'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.SCRIPT_WRITER: ScriptWriterAgent(
+                llms=self._llm_policy.build_llms_for_agent('script_writer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VOICE_SYNTHESIZER: VoiceSynthesizerAgent(
+                llms=self._llm_policy.build_llms_for_agent('voice_synthesizer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('image_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('video_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('audio_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VIDEO_COMPOSER: VideoComposerAgent(
+                llms=self._llm_policy.build_llms_for_agent('video_composer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.QUALITY_CHECKER: QualityCheckerAgent(
+                llms=self._llm_policy.build_llms_for_agent('quality_checker'),
+                memory_services=self._memory_services,
+            ),
         }
 
         # Per-step repeat counters for policy decisions
@@ -91,6 +122,41 @@ class OrchestratorAgent(BaseAgent):
         """Clear per-step repeat counters so retries start fresh."""
         self._step_repeat_counts = {}
 
+    def _load_workflow_overview(self, workflow_id: str) -> Dict[str, Any]:
+        try:
+            value = self.fetch_memory_slot(
+                workflow_id,
+                "project.workflow_overview",
+                default={},
+                agent=self.agent_name,
+            )
+        except Exception as exc:
+            raise AgentError(f"Failed to read workflow_overview from shared memory: {exc}") from exc
+        if not isinstance(value, dict):
+            return {}
+        return dict(value)
+
+    def _store_workflow_overview(self, workflow_id: str, payload: Dict[str, Any]) -> None:
+        try:
+            self.store_memory_slot(
+                workflow_id,
+                "project.workflow_overview",
+                payload,
+                agent=self.agent_name,
+            )
+        except Exception as exc:
+            raise AgentError(f"Failed to write workflow_overview to shared memory: {exc}") from exc
+
+    def _update_workflow_overview(self, workflow_id: str, updates: Dict[str, Any], *, raise_error: bool = True) -> None:
+        try:
+            current = self._load_workflow_overview(workflow_id)
+            current.update(updates)
+            self._store_workflow_overview(workflow_id, current)
+        except AgentError as exc:
+            if raise_error:
+                raise
+            self.logger.warning("Workflow overview update skipped: %s", exc)
+
     async def _execute_impl(
         self, 
         task: Task, 
@@ -98,39 +164,43 @@ class OrchestratorAgent(BaseAgent):
         execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """Execute the complete video generation workflow using WorkflowState"""
+        """Execute the complete video generation workflow using Shared Working Memory"""
         
         self._current_task = task
+        mem_service = get_working_memory_service()
+        mem_service.create_or_get(str(task.task_id), mas_scope(str(task.task_id)))
         
-        # 创建WorkflowState对象 - MAS智能风格决策
-        workflow_state = workflow_manager.create_workflow(
-            user_prompt=input_data.get("user_prompt", ""),
-            style_preference=input_data.get("style_preference"),
-            duration=input_data.get("duration", 30),
-            aspect_ratio=input_data.get("aspect_ratio", "16:9"),
-            resolution=input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION
-        )
-        
-        self.logger.info(f"🚀 开始工作流执行，WorkflowState ID: {workflow_state.task_id}")
-        
-        # Update task status
+        # 使用 Task.task_id 作为本次工作流的 Shared WM 标识
+        wf_id = str(task.task_id)
+        self.logger.info(f"🚀 开始工作流执行，Workflow ID: {wf_id}")
+
+        # Update task status + 初始化共享黑板概览
         task.status = TaskStatus.IN_PROGRESS
         task.update_progress("Starting workflow", 0)
-        workflow_state.set_status(WorkflowStatus.INITIALIZING, "Starting workflow", 0)
+        try:
+            self.store_memory_slot(
+                wf_id,
+                "project.workflow_overview",
+                {
+                    "status": "INITIALIZING",
+                    "progress": 0,
+                    "current_step": "Starting workflow",
+                    "step_index": 0,
+                    "total_steps": len(self.workflow_order),
+                },
+                agent=self.agent_name,
+            )
+        except Exception as wm_err:
+            raise AgentError(f"Failed to initialize workflow_overview in shared memory: {wm_err}") from wm_err
         db.commit()
         
         workflow_data = input_data.copy()
         workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
         workflow_data.setdefault("target_resolution", workflow_data.get("resolution"))
-        # 不能直接传递 WorkflowState 对象，因为它不能JSON序列化
-        # 将 workflow_state_id 传递给 Agent，Agent内部通过 workflow_manager 获取状态
-        workflow_data["workflow_state_id"] = workflow_state.task_id
-
-        # 将存在的 Episode/Project 上下文注入工作流（无需配置即可生效）
-        if workflow_data.get("episode_context"):
-            setattr(workflow_state, "episode_context", workflow_data.get("episode_context"))
-        if workflow_data.get("project_context"):
-            setattr(workflow_state, "project_context", workflow_data.get("project_context"))
+        # 将 workflow_state_id 传递给 Agent，Agent 从 Shared WM 读取上下文
+        workflow_data["workflow_state_id"] = wf_id
+        # Episode/Project 上下文直接留在 workflow_data，由 _prepare_agent_context 注入到各 Agent 输入；
+        # Shared WM 作为唯一对外事实源，不再引用本地 WorkflowState 实例。
 
         workflow_results = {}
         
@@ -139,8 +209,21 @@ class OrchestratorAgent(BaseAgent):
         try:
             for step_index, agent_type in enumerate(self.workflow_order):
                 agent = self.agents[agent_type]
+                try:
+                    shared_view = ensure_mas_memory(wf_id)
+                    scope = agent_scope(wf_id, agent.agent_name)
+                    mem_service.create_or_get(
+                        wf_id,
+                        scope,
+                        owner_agent=agent.agent_name,
+                        shared_view=shared_view,
+                    )
+                except Exception as mem_err:
+                    raise AgentError(
+                        f"Failed to initialise iteration memory for {agent.agent_name}: {mem_err}"
+                    ) from mem_err
 
-                if not self._should_run_agent(agent_type, workflow_state):
+                if not self._should_run_agent(agent_type, wf_id):
                     self.logger.info(f"⏭️ Skipping {agent.agent_name} due to workflow conditions")
                     continue
                 
@@ -155,13 +238,25 @@ class OrchestratorAgent(BaseAgent):
                     db
                 )
                 
-                # Update task and workflow state progress
+                # Update task progress + 共享黑板概览
                 task.update_progress(current_step, progress_percentage)
-                workflow_state.set_status(
-                    self._get_workflow_status_for_agent(agent_type),
-                    current_step,
-                    progress_percentage
-                )
+                try:
+                    self._update_workflow_overview(
+                        wf_id,
+                        {
+                            "status": "RUNNING",
+                            "progress": progress_percentage,
+                            "current_step": current_step,
+                            "step_index": step_index + 1,
+                            "total_steps": total_steps,
+                            "current_agent": agent.agent_name,
+                        },
+                        raise_error=True,
+                    )
+                except AgentError as wm_err:
+                    raise AgentError(
+                        f"Failed to update workflow_overview in shared memory (step {step_index + 1}): {wm_err}"
+                    ) from wm_err
                 db.commit()
                 
                 self.logger.info(f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
@@ -169,7 +264,7 @@ class OrchestratorAgent(BaseAgent):
                 try:
                     # Prepare agent input with creative context (if available)
                     self.logger.info(f"🧠 DEBUG: Preparing context for {agent_type.value}")
-                    agent_input = await self._prepare_agent_context(workflow_data, agent_type, workflow_state.task_id)
+                    agent_input = await self._prepare_agent_context(workflow_data, agent_type, wf_id)
                     
                     # Debug: Check if context contains creative guidance
                     if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR]:
@@ -196,13 +291,27 @@ class OrchestratorAgent(BaseAgent):
                         mixing_mode = 'composer'
                     if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
                         try:
-                            if getattr(workflow_state, 'voice_over_assets', None):
+                            vm = self.fetch_memory_slot(
+                                str(wf_id),
+                                "project.voice_assets",
+                                default={},
+                                agent=self.agent_name,
+                            )
+                            if vm:
                                 self.logger.info("🎤 Scheduling composer to add voice-over tracks")
                                 comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
                                 comp_input = {
-                                    "workflow_state_id": workflow_state.task_id,
+                                    "workflow_state_id": wf_id,
                                     "add_voiceover": True
                                 }
+                                scope = agent_scope(wf_id, comp_agent.agent_name)
+                                shared_view = ensure_mas_memory(wf_id)
+                                mem_service.create_or_get(
+                                    wf_id,
+                                    scope,
+                                    owner_agent=comp_agent.agent_name,
+                                    shared_view=shared_view,
+                                )
                                 comp_out = await comp_agent.execute(
                                     task=task,
                                     input_data=comp_input,
@@ -212,15 +321,23 @@ class OrchestratorAgent(BaseAgent):
                                 workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_voiceover"] = comp_out
                                 workflow_data.update(comp_out)
                         except Exception as e:
-                            self.logger.warning(f"Composer add_voiceover failed: {e}")
+                            raise AgentError(f"Composer add_voiceover failed: {e}") from e
                     if agent_type == AgentType.AUDIO_GENERATOR and mixing_mode == 'composer':
                         try:
                             self.logger.info("🎼 Scheduling composer to add background music")
                             comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
                             comp_input = {
-                                "workflow_state_id": workflow_state.task_id,
+                                "workflow_state_id": wf_id,
                                 "add_bgm": True
                             }
+                            scope = agent_scope(wf_id, comp_agent.agent_name)
+                            shared_view = ensure_mas_memory(wf_id)
+                            mem_service.create_or_get(
+                                wf_id,
+                                scope,
+                                owner_agent=comp_agent.agent_name,
+                                shared_view=shared_view,
+                            )
                             comp_out = await comp_agent.execute(
                                 task=task,
                                 input_data=comp_input,
@@ -237,7 +354,7 @@ class OrchestratorAgent(BaseAgent):
                             else:
                                 workflow_results[AgentType.VIDEO_COMPOSER.value] = comp_out
                         except Exception as e:
-                            self.logger.warning(f"Composer add_bgm failed: {e}")
+                            raise AgentError(f"Composer add_bgm failed: {e}") from e
 
                     # Orchestrator policy-first decision; LLM provides optional advice
                     try:
@@ -265,7 +382,7 @@ class OrchestratorAgent(BaseAgent):
                         decision = policy_decision or await self._decide_next_step_llm(
                             current_agent=agent_type,
                             agent_output=agent_output,
-                            workflow_state=workflow_state
+                            workflow_id=wf_id
                         )
                         if decision == "repeat_agent":
                             self.logger.info(f"🔁 Orchestrator LLM decided to repeat {agent.agent_name}")
@@ -291,46 +408,50 @@ class OrchestratorAgent(BaseAgent):
                         self.logger.warning(f"⚠️ Orchestrator decision failed: {ce}. Proceeding sequentially.")
                     
                     # Handoff final results to WF (only when agent reports completion via final_* fields)
-                    try:
-                        finals = agent_output.get("final_completed_scenes") if isinstance(agent_output, dict) else None
-                        if finals and isinstance(finals, list):
-                            wf_id = workflow_state.task_id
-                            wf = workflow_manager.get_workflow(wf_id)
-                            committed = 0
-                            for rec in finals:
-                                if not isinstance(rec, dict):
-                                    continue
-                                sn = rec.get("scene_number")
-                                if sn is None:
-                                    continue
-                                # 支持图像或视频两类产物
-                                iu = rec.get("image_url") or ""
-                                ip = rec.get("image_path") or ""
-                                vu = rec.get("video_url") or ""
-                                vp = rec.get("video_path") or ""
-                                pt = rec.get("prompt_text") or ""
+                    # 仅写 Shared WM；不再回写 WorkflowState（避免双轨）
+                    finals = agent_output.get("final_completed_scenes") if isinstance(agent_output, dict) else None
+                    if agent_type == AgentType.IMAGE_GENERATOR:
+                        shared = ensure_mas_memory(str(wf_id))
+                        outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
+                        committed = len(outputs) if isinstance(outputs, dict) else 0
+                        self.logger.info("WM_COMMIT(image): agent=%s committed=%s", agent.agent_name, committed)
+                    elif finals and isinstance(finals, list):
+                        committed = 0
+                        for rec in finals:
+                            if not isinstance(rec, dict):
+                                continue
+                            sn = rec.get("scene_number")
+                            if sn is None:
+                                continue
+                            vu = rec.get("video_url") or ""
+                            vp = rec.get("video_path") or ""
+                            pt = rec.get("prompt_text") or ""
+                            if vu or vp:
                                 try:
-                                    if iu or ip:
-                                        wf.update_scene(int(sn), image_url=iu, image_path=ip, image_prompt=pt)
-                                        committed += 1
-                                    if vu or vp:
-                                        wf.update_scene(int(sn), video_url=vu, video_path=vp, video_prompt=pt)
-                                        committed += 1
-                                except Exception:
-                                    continue
-                            self.logger.info(f"WF_COMMIT: agent={agent.agent_name} scenes={len(finals)} committed={committed}")
-                    except Exception as _wf_err:
-                        self.logger.warning(f"WF_COMMIT_WARN: {str(_wf_err)}")
+                                    artifact = SceneArtifact(
+                                        video_url=vu,
+                                        video_path=vp,
+                                        prompt_text=pt,
+                                        duration=float(rec.get("duration") or 0.0),
+                                        metadata=rec.get("metadata") or {},
+                                    )
+                                    get_shared_wm().register_artifact_ref(str(wf_id), int(sn), artifact)
+                                    committed += 1
+                                except Exception as wm_err:
+                                    raise AgentError(f"Failed to register artifact for scene {sn}: {wm_err}") from wm_err
+                        self.logger.info(f"WM_COMMIT: agent={agent.agent_name} scenes={len(finals)} committed={committed}")
 
                     # Handle memory storage if this agent produced memory data
                     if agent_type == AgentType.CONCEPT_PLANNER:
                         self.logger.info("🧠 DEBUG: About to store creative guidance from ConceptPlanner")
                         await self._store_creative_guidance_from_output(agent_output)
                         
-                        # 🔧 修复：设置concept_plan到workflow_state
+                        # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
                         if "concept_plan" in agent_output:
-                            workflow_state.concept_plan = agent_output["concept_plan"]
-                            self.logger.info("🎭 设置concept_plan到workflow_state")
+                            try:
+                                self.store_memory_slot(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                            except Exception as slot_err:
+                                self.logger.warning(f"Slot write failed for concept_plan: {slot_err}")
                     else:
                         self.logger.info(f"🧠 DEBUG: No memory storage needed for {agent_type.value}")
                     
@@ -338,13 +459,10 @@ class OrchestratorAgent(BaseAgent):
 
                     # Lightweight WS signals for coarse-grained UI sync
                     try:
-                        if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(agent_output):
-                            summary = agent_output.get("summary") or {}
-                            images_cnt = 0
-                            try:
-                                images_cnt = int(summary.get("generated_successfully") or 0)
-                            except Exception:
-                                images_cnt = len(agent_output.get("final_completed_scenes") or [])
+                        if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
+                            shared = ensure_mas_memory(str(wf_id))
+                            outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
+                            images_cnt = len(outputs) if isinstance(outputs, dict) else 0
                             await self.websocket_manager.broadcast_to_task(
                                 str(task.task_id),
                                 {
@@ -379,7 +497,7 @@ class OrchestratorAgent(BaseAgent):
                     if await self._should_retry_step(agent_type, e, db):
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
                         # Retry the step
-                        agent_input = await self._prepare_agent_context(workflow_data, agent_type, workflow_state.task_id)
+                        agent_input = await self._prepare_agent_context(workflow_data, agent_type, wf_id)
                         agent_output = await agent.execute(
                             task=task,
                             input_data=agent_input,
@@ -391,8 +509,11 @@ class OrchestratorAgent(BaseAgent):
                         
                         # 🔧 修复：在重试成功后也设置concept_plan
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
-                            workflow_state.concept_plan = agent_output["concept_plan"]
-                            self.logger.info("🎭 重试后设置concept_plan到workflow_state")
+                            try:
+                                self.store_memory_slot(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                                self.logger.info("🎭 重试后设置concept_plan到共享记忆槽")
+                            except Exception as slot_err:
+                                self.logger.warning(f"重试后写入 concept_plan 失败: {slot_err}")
                     else:
                         # Mark task as failed
                         task.status = TaskStatus.FAILED
@@ -402,24 +523,66 @@ class OrchestratorAgent(BaseAgent):
             
             # Workflow completed successfully
             await self._update_progress(execution, 90, "Workflow completed, persisting data", db)
-            workflow_state.set_status(WorkflowStatus.PERSISTING_DATA, "Persisting data to database", 90)
+            try:
+                self._update_workflow_overview(
+                    wf_id,
+                    {
+                        "status": "PERSISTING",
+                        "progress": 90,
+                        "current_step": "Persisting data to database",
+                    },
+                    raise_error=True,
+                )
+            except AgentError as wm_err:
+                raise AgentError(f"Failed to mark workflow_overview as PERSISTING: {wm_err}") from wm_err
             
             # 使用DataPersistenceService统一持久化数据
             self.logger.info("💾 开始持久化工作流数据到数据库...")
-            persistence_result = await data_persistence_service.persist_workflow_results(workflow_state, db)
+            persistence_result = await data_persistence_service.persist_from_shared_wm(wf_id, db)
             
             if persistence_result["status"] == "success":
                 # Update task status
                 task.status = TaskStatus.COMPLETED
                 task.update_progress("Completed", 100)
-                workflow_state.set_status(WorkflowStatus.COMPLETED, "Workflow completed", 100)
+                try:
+                    ov = self._load_workflow_overview(wf_id)
+                    final_url = workflow_results.get("video_composer", {}).get("final_video_url")
+                    if bool(getattr(settings, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(settings, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
+                        try:
+                            latest = get_shared_wm().get_latest_artifact(wf_id, kind='video', stage='compose')
+                        except Exception as artifact_err:
+                            raise AgentError(
+                                f"Failed to read latest video artifact from Shared WM: {artifact_err}"
+                            ) from artifact_err
+                        if isinstance(latest, dict):
+                            final_url = latest.get('url') or latest.get('file_path') or final_url
+                    ov.update(
+                        {
+                            "status": "COMPLETED",
+                            "progress": 100,
+                            "current_step": "Workflow completed",
+                            "outputs": {
+                                "final_video_url": final_url
+                            },
+                        }
+                    )
+                    self._store_workflow_overview(wf_id, ov)
+                except AgentError as wm_err:
+                    raise AgentError(f"Failed to update workflow_overview on completion: {wm_err}") from wm_err
                 
                 self.logger.info(f"✅ 工作流和数据持久化完成: {persistence_result}")
             else:
                 # 持久化失败，但工作流本身成功了
                 task.status = TaskStatus.COMPLETED  # 仍然标记为完成
                 task.add_error(f"数据持久化部分失败: {persistence_result.get('error', '')}")
-                workflow_state.add_warning("数据持久化部分失败，但工作流成功完成")
+                try:
+                    ov = self._load_workflow_overview(wf_id)
+                    warn = list(ov.get("warnings") or [])
+                    warn.append("数据持久化部分失败，但工作流成功完成")
+                    ov["warnings"] = warn[-5:]
+                    self._store_workflow_overview(wf_id, ov)
+                except AgentError as wm_err:
+                    raise AgentError(f"Failed to record persistence warning in shared memory: {wm_err}") from wm_err
                 
                 self.logger.warning(f"⚠️ 工作流成功但持久化失败: {persistence_result}")
             
@@ -430,27 +593,42 @@ class OrchestratorAgent(BaseAgent):
             
             self.logger.info(f"🎉 工作流完成，任务ID: {task.task_id}")
             
+            # 最终输出：按开关改读 artifacts（若可用）
+            final_url = workflow_results.get("video_composer", {}).get("final_video_url")
+            if bool(getattr(settings, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(settings, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
+                try:
+                    latest = get_shared_wm().get_latest_artifact(wf_id, kind='video', stage='compose')
+                except Exception as artifact_err:
+                    raise AgentError(f"Failed to fetch latest compose artifact: {artifact_err}") from artifact_err
+                if isinstance(latest, dict):
+                    final_url = latest.get('url') or latest.get('file_path') or final_url
+
             return {
                 "workflow_status": "completed",
                 "total_steps": total_steps,
                 "results": workflow_results,
-                "final_video_url": workflow_results.get("video_composer", {}).get("final_video_url"),
+                "final_video_url": final_url,
                 "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
                 "persistence_status": persistence_result["status"],
-                "workflow_state_id": workflow_state.task_id
+                "workflow_state_id": wf_id
             }
             
         except Exception as e:
             # Workflow failed
             error_msg = f"Workflow failed: {str(e)}"
             
-            # 记录错误到WorkflowState
-            workflow_state.add_error(error_msg)
-            workflow_state.set_status(WorkflowStatus.FAILED, error_msg, workflow_state.progress_percentage)
+            # 记录错误到共享黑板概览
+            try:
+                ov = self._load_workflow_overview(wf_id)
+                prog = int(ov.get("progress") or 0)
+                ov.update({"status": "FAILED", "progress": prog, "last_error": error_msg})
+                self._store_workflow_overview(wf_id, ov)
+            except AgentError as wm_err:
+                raise AgentError(f"Failed to record workflow failure in shared memory: {wm_err}") from wm_err
             
             # 尝试持久化失败状态（尽力而为）
             try:
-                await data_persistence_service.persist_workflow_results(workflow_state, db)
+                await data_persistence_service.persist_from_shared_wm(wf_id, db)
                 self.logger.info("❌ 工作流失败状态已持久化")
             except Exception as persist_error:
                 self.logger.error(f"❌❌ 连持久化失败状态都失败了: {str(persist_error)}")
@@ -462,8 +640,17 @@ class OrchestratorAgent(BaseAgent):
             await self._send_workflow_failure(task, error_msg)
             
             raise AgentError(error_msg) from e
+        finally:
+            try:
+                mem_service.cleanup_workflow(wf_id)
+            except Exception as cleanup_err:
+                self.logger.warning(
+                    "Iteration memory cleanup failed for workflow %s: %s",
+                    wf_id,
+                    cleanup_err,
+                )
 
-    async def _decide_next_step_llm(self, current_agent: AgentType, agent_output: Dict[str, Any], workflow_state: WorkflowState) -> str:
+    async def _decide_next_step_llm(self, current_agent: AgentType, agent_output: Dict[str, Any], workflow_id: str) -> str:
         """Use a lightweight LLM + orchestrator_control tool to decide next step.
         Returns: 'proceed_next' | 'repeat_agent' | 'halt_workflow'
         """
@@ -553,18 +740,7 @@ class OrchestratorAgent(BaseAgent):
         # Default fallback: proceed
         return "proceed_next"
     
-    def _get_workflow_status_for_agent(self, agent_type: AgentType) -> WorkflowStatus:
-        """根据Agent类型获取对应的WorkflowStatus"""
-        status_mapping = {
-            AgentType.CONCEPT_PLANNER: WorkflowStatus.CONCEPT_PLANNING,
-            AgentType.SCRIPT_WRITER: WorkflowStatus.SCRIPT_WRITING,
-            AgentType.VOICE_SYNTHESIZER: WorkflowStatus.VOICE_SYNTHESIZING,
-            AgentType.IMAGE_GENERATOR: WorkflowStatus.IMAGE_GENERATING,
-            AgentType.VIDEO_GENERATOR: WorkflowStatus.VIDEO_GENERATING,
-            AgentType.VIDEO_COMPOSER: WorkflowStatus.VIDEO_COMPOSING,
-            AgentType.QUALITY_CHECKER: WorkflowStatus.QUALITY_CHECKING
-        }
-        return status_mapping.get(agent_type, WorkflowStatus.INITIALIZING)
+    # WorkflowStatus 已移除；概览在共享黑板 facts.workflow_overview 中维护
     
     async def _should_retry_step(
         self, 
@@ -598,18 +774,25 @@ class OrchestratorAgent(BaseAgent):
         # Default: retry on timeout and temporary errors
         return "timeout" in error_type or "temporary" in error_type
 
-    def _is_image_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+    def _is_image_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for image generation step completion."""
-        meta = agent_output.get("react_metadata") or {}
-        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
-            return True
+        try:
+            shared = ensure_mas_memory(str(workflow_id))
+            outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
+            if isinstance(outputs, dict) and outputs:
+                return True
+        except Exception:
+            pass
         summary = agent_output.get("summary") or {}
         if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
             return True
         results = agent_output.get("generation_results") or []
         if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
             return True
-        self.logger.warning("Image step not completed: no task_complete and no successful results")
+        meta = agent_output.get("react_metadata") or {}
+        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
+            return True
+        self.logger.warning("Image step not completed: no WorkingMemory outputs and no successful results")
         return False
 
     def _is_video_step_completed(self, agent_output: Dict[str, Any]) -> bool:
@@ -707,7 +890,7 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.warning("No memory data found in ConceptPlanner output")
                 return
             
-            success = await global_memory_service.store_creative_guidance(
+            success = await self.memory_service.store_creative_guidance(
                 workflow_id=memory_data["workflow_id"],
                 concept_plan=memory_data["concept_plan"],
                 agent_name=memory_data["agent_name"]
@@ -721,9 +904,13 @@ class OrchestratorAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
     
-    def _should_run_agent(self, agent_type: AgentType, workflow_state: WorkflowState) -> bool:
+    def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
-            voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
+            voice_plan = self.fetch_memory_slot(
+                workflow_state_id,
+                "project.voice_plan",
+                default={}
+            ) or {}
             if not voice_plan or not voice_plan.get("enabled"):
                 return False
             if str(voice_plan.get("mode", "none")).lower() == "none":
@@ -746,19 +933,7 @@ class OrchestratorAgent(BaseAgent):
                 episode_ctx = None
                 project_ctx = None
                 episode_ctx = workflow_data.get("episode_context")
-                if not episode_ctx:
-                    try:
-                        wf = workflow_manager.get_workflow(workflow_id)
-                        episode_ctx = getattr(wf, "episode_context", None) if wf else None
-                    except Exception:
-                        episode_ctx = None
                 project_ctx = workflow_data.get("project_context")
-                if not project_ctx:
-                    try:
-                        wf = workflow_manager.get_workflow(workflow_id)
-                        project_ctx = getattr(wf, "project_context", None) if wf else None
-                    except Exception:
-                        project_ctx = None
 
                 if episode_ctx:
                     agent_input["episode_context"] = episode_ctx
@@ -770,109 +945,43 @@ class OrchestratorAgent(BaseAgent):
                     )
                 if project_ctx:
                     agent_input["project_context"] = project_ctx
+                    try:
+                        self.logger.info(
+                            "🧠 Project context injected for %s",
+                            agent_type.value,
+                        )
+                    except Exception:
+                        pass
 
-            # 如果是需要创意指导的Agent，从记忆服务获取并添加到上下文
-            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
-
-                # 获取整体创意指导
-                overall_guidance = await global_memory_service.retrieve_creative_guidance(
-                    workflow_id=workflow_id,
-                    agent_name=f"orchestrator_for_{agent_type.value}"
+            def _merge_media_context(include_roles: bool) -> None:
+                context_bundle = build_media_agent_context(
+                    workflow_id,
+                    include_scripts=True,
+                    include_roles=include_roles,
                 )
-                
-                if overall_guidance.get("has_guidance"):
-                    agent_input["creative_guidance"] = overall_guidance.get("overall_guidance", {})
-                    
-                    # 为所有场景准备指导数据
-                    scene_guidances = {}
-                    concept_plan = workflow_data.get("concept_plan", {})
-                    scenes = concept_plan.get("scenes", [])
-                    
-                    for scene in scenes:
-                        scene_number = scene.get("scene_number")
-                        if scene_number:
-                            scene_guidance = await global_memory_service.retrieve_creative_guidance(
-                                workflow_id=workflow_id,
-                                scene_number=scene_number,
-                                agent_name=f"orchestrator_for_{agent_type.value}"
-                            )
-                            
-                            if scene_guidance.get("has_guidance"):
-                                scene_guidances[f"scene_{scene_number}"] = scene_guidance.get("scene_guidance", {})
-                    
+                for key, value in context_bundle.items():
+                    if value:
+                        agent_input[key] = value
+
+            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR]:
+                _merge_media_context(include_roles=True)
+            elif agent_type == AgentType.AUDIO_GENERATOR:
+                _merge_media_context(include_roles=False)
+            if agent_type == AgentType.IMAGE_GENERATOR:
+                image_ctx = build_image_generation_context(workflow_id)
+                if image_ctx:
+                    agent_input["image_generation_context"] = image_ctx
+
+            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
+                overall_guidance = workflow_data.get("creative_guidance")
+                if overall_guidance:
+                    agent_input["creative_guidance"] = overall_guidance
+                scene_guidances = workflow_data.get("scene_guidances")
+                if scene_guidances:
                     agent_input["scene_guidances"] = scene_guidances
 
-                    # 音频专用：注入时间线与总时长（从 WorkflowState 读取），便于音频对齐
-                    if agent_type == AgentType.AUDIO_GENERATOR:
-                        try:
-                            from ..core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(workflow_id)
-                            timeline = []
-                            total_duration = 0.0
-                            if wf:
-                                for sc in getattr(wf, 'scenes', []) or []:
-                                    try:
-                                        sn = int(getattr(sc, 'scene_number', 0) or 0)
-                                    except Exception:
-                                        sn = 0
-                                    if not sn:
-                                        continue
-                                    dur = float(getattr(sc, 'duration', 0.0) or 0.0)
-                                    st = float(getattr(sc, 'start_time', 0.0) or 0.0)
-                                    ed = float(getattr(sc, 'end_time', st + dur) or (st + dur))
-                                    total_duration += dur
-                                    timeline.append({
-                                        "scene_number": sn,
-                                        "start": st,
-                                        "end": ed,
-                                        "duration": dur,
-                                        "mood": getattr(sc, 'mood_and_atmosphere', ''),
-                                    })
-                            agent_input["audio_timeline"] = timeline
-                            agent_input["audio_total_duration"] = total_duration
-                        except Exception as _e:
-                            self.logger.warning(f"AUDIO_CTX_WARN: failed to inject timeline: {_e}")
-
-                    self.logger.info(f"🧠 Orchestrator prepared creative context for {agent_type.value} with {len(scene_guidances)} scene guidances")
-                else:
-                    self.logger.warning(f"⚠️ No creative guidance available for {agent_type.value}")
             elif agent_type == AgentType.VOICE_SYNTHESIZER:
-                try:
-                    from ..core.workflow_state import workflow_manager
-
-                    wf = workflow_manager.get_workflow(workflow_id)
-                    if wf:
-                        agent_input.setdefault("voice_plan", getattr(wf, "voice_plan", {}) or {})
-                        agent_input.setdefault("concept_plan", getattr(wf, "concept_plan", {}) or {})
-
-                        scene_payloads: List[Dict[str, Any]] = []
-                        for sc in getattr(wf, "scenes", []) or []:
-                            try:
-                                sn = int(getattr(sc, "scene_number", 0) or 0)
-                            except Exception:
-                                sn = 0
-                            if not sn:
-                                continue
-                            scene_payloads.append(
-                                {
-                                    "scene_number": sn,
-                                    "title": getattr(sc, "title", ""),
-                                    "duration": float(getattr(sc, "duration", 0.0) or 0.0),
-                                    "start_time": float(getattr(sc, "start_time", 0.0) or 0.0),
-                                    "end_time": float(getattr(sc, "end_time", 0.0) or 0.0),
-                                    "narrative_description": getattr(sc, "narrative_description", ""),
-                                    "visual_description": getattr(sc, "visual_description", ""),
-                                    "mood": getattr(sc, "mood_and_atmosphere", ""),
-                                    "video_prompt": getattr(sc, "video_prompt", ""),
-                                    "video_generation_params": getattr(sc, "video_generation_params", {}),
-                                    "video_url": getattr(sc, "video_path", None) or getattr(sc, "video_url", ""),
-                                    "script_text": getattr(sc, "script_text", ""),
-                                }
-                            )
-
-                        agent_input["voice_scenes"] = scene_payloads
-                except Exception as _e:
-                    self.logger.warning(f"VOICE_CTX_WARN: failed to assemble voice context: {_e}")
+                _merge_media_context(include_roles=True)
 
             return agent_input
             

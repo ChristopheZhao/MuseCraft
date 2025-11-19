@@ -63,20 +63,10 @@ agents/
 │
 ├── memory/                        # 记忆管理模块
 │   ├── __init__.py
-│   ├── base_memory.py            # 记忆基类
-│   ├── memory_manager.py         # 记忆管理器
-│   ├── 
-│   ├── stores/                   # 存储实现
-│   │   ├── __init__.py
-│   │   ├── redis_store.py        # Redis存储
-│   │   ├── postgres_store.py     # PostgreSQL存储
-│   │   └── vector_store.py       # 向量数据库存储
-│   │
-│   └── retrievers/               # 检索器
-│       ├── __init__.py
-│       ├── semantic_retriever.py # 语义检索
-│       ├── keyword_retriever.py  # 关键词检索
-│       └── hybrid_retriever.py   # 混合检索
+│   ├── short_term/               # 短期记忆（WorkingMemory 层）
+│   └── long_term/                # 长期记忆（语义/情景层）
+│       ├── stores/base.py        # 记忆基类 & 存储抽象
+│       └── manager/memory_manager.py  # 记忆管理器实现
 │
 ├── prompts/                       # 提示词模板管理
 │   ├── __init__.py

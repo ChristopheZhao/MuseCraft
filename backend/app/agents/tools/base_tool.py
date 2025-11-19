@@ -300,16 +300,25 @@ class BaseTool(ABC):
                 self._execute_impl(tool_input),
                 timeout=timeout
             )
-            
+
+            business_payload = result
+            if isinstance(result, dict) and "success" in result:
+                business_success = bool(result.get("success"))
+                business_payload = dict(result)
+                business_payload.pop("success", None)
+                if not business_success:
+                    error_msg = business_payload.pop("error", None) or "Business logic reported failure"
+                    raise ToolError(error_msg, error_code="business_failure")
+
             # Calculate execution time
             execution_time = time.time() - start_time
             self.last_execution_time = execution_time
             self.total_execution_time += execution_time
-            
+
             # Create successful output
             output = ToolOutput(
                 success=True,
-                result=result,
+                result=business_payload,
                 execution_time=execution_time,
                 metadata={
                     "tool_name": self.metadata.name,
@@ -467,6 +476,10 @@ class BaseTool(ABC):
 class AsyncTool(BaseTool):
     """Base class for asynchronous tools"""
     
+    def get_output_contract(self, action: str) -> Dict[str, Any]:
+        """Describe structured output fields for downstream adapters (override per tool/action)."""
+        return {}
+
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """Default async implementation - override in subclasses"""
         raise NotImplementedError("Async tools must implement _execute_impl")

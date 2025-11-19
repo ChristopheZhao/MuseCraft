@@ -19,10 +19,23 @@ async def test_video_duration():
         print(f"❌ 视频文件不存在: {video_path}")
         return False
     
-    audio_generator = AudioGeneratorAgent()
-    
+    agent = AudioGeneratorAgent()
     try:
-        duration = await audio_generator._get_video_duration(video_path)
+        # 通过统一执行器执行 FC 规划的工具调用
+        calls = [{
+            "function": {
+                "name": "ffmpeg_tool.get_video_info",
+                "arguments": {"file_path": video_path}
+            }
+        }]
+        executed = await agent.execute_tool_calls(calls)
+        if not executed:
+            print("   ❌ 工具未执行")
+            return False
+        rec = executed[0]
+        tool_out = rec.get("result")
+        payload = getattr(tool_out, 'result', tool_out) if tool_out is not None else None
+        duration = float(payload.get("duration", 0.0)) if isinstance(payload, dict) else 0.0
         print(f"   ✅ 视频时长: {duration:.1f}秒")
         return duration > 0
     except Exception as e:
@@ -51,7 +64,7 @@ async def test_audio_composition():
     audio_path = audio_files[0]
     print(f"   🎵 使用音频文件: {os.path.basename(audio_path)}")
     
-    audio_generator = AudioGeneratorAgent()
+    agent = AudioGeneratorAgent()
     
     try:
         # 创建模拟的 execution 对象
@@ -61,16 +74,23 @@ async def test_audio_composition():
         
         mock_execution = MockExecution()
         
-        # 获取视频时长
-        duration = await audio_generator._get_video_duration(video_path)
-        
-        # 测试音频合成
-        output_path = await audio_generator._compose_video_with_audio(
-            video_path=video_path,
-            audio_path=audio_path,
-            video_duration=duration,
-            execution=mock_execution
-        )
+        # 通过统一执行器执行音频合成
+        output_filename = f"final_video_with_audio_{mock_execution.id}.mp4"
+        calls = [{
+            "function": {
+                "name": "ffmpeg_tool.add_audio",
+                "arguments": {
+                    "video_file": video_path,
+                    "audio_file": audio_path,
+                    "output_filename": output_filename
+                }
+            }
+        }]
+        executed = await agent.execute_tool_calls(calls)
+        rec = executed[0] if executed else {}
+        tool_out = rec.get("result")
+        payload = getattr(tool_out, 'result', tool_out) if tool_out is not None else None
+        output_path = payload.get("output_path") if isinstance(payload, dict) else None
         
         if output_path and os.path.exists(output_path):
             file_size = os.path.getsize(output_path) / (1024 * 1024)

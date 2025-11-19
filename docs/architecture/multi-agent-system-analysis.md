@@ -143,7 +143,7 @@ async def use_tool(self, tool_name: str, action: str, parameters: Dict[str, Any]
 
 #### 记忆架构 `backend/app/agents/memory/`
 
-**基础组件** `memory/base_memory.py`: ✅
+**基础组件** `memory/long_term/stores/base.py`: ✅
 - **MemoryItem**: 记忆项数据结构
 - **MemoryType**: 短期/长期/情景/语义记忆类型
 - **MemoryImportance**: 重要性级别(LOW/MEDIUM/HIGH/CRITICAL)

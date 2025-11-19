@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     DEBUG: bool = config("DEBUG", default=False, cast=bool)
     SECRET_KEY: str = config("SECRET_KEY", default="your-secret-key-here")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = config("ACCESS_TOKEN_EXPIRE_MINUTES", default=30, cast=int)
+
+    # API Server Configuration
+    API_HOST: str = config("API_HOST", default="0.0.0.0")
+    API_PORT: int = config("API_PORT", default=8000, cast=int)
     
     # CORS Settings
     BACKEND_CORS_ORIGINS: List[str] = [
@@ -286,6 +290,18 @@ class Settings(BaseSettings):
     
     # Resource Management Settings
     MAX_MEMORY_USAGE_PERCENT: int = config("MAX_MEMORY_USAGE_PERCENT", default=85, cast=int)
+
+    # Memory backend settings
+    MEMORY_WORKFLOW_BACKEND: str = config("MEMORY_WORKFLOW_BACKEND", default="slot")
+    MEMORY_FACTS_BACKEND: str = config("MEMORY_FACTS_BACKEND", default="slot")
+    MEMORY_SLOTS_PATH: str = config(
+        "MEMORY_SLOTS_PATH",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "agents" / "memory" / "config" / "memory_slots.yaml"),
+    )
+    MEMORY_FACT_ALIASES_PATH: str = config(
+        "MEMORY_FACT_ALIASES_PATH",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "agents" / "memory" / "config" / "fact_aliases.yaml"),
+    )
     MAX_CPU_USAGE_PERCENT: int = config("MAX_CPU_USAGE_PERCENT", default=80, cast=int)
     MAX_DISK_USAGE_PERCENT: int = config("MAX_DISK_USAGE_PERCENT", default=90, cast=int)
     
@@ -303,7 +319,7 @@ class Settings(BaseSettings):
     # LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
     LOG_LEVEL: str = config("LOG_LEVEL", default="DEBUG")
     MAS_LOG_DIR: str = config("MAS_LOG_DIR", default="./backend/logs/mas")
-    MAS_LOG_LEVEL: str = config("MAS_LOG_LEVEL", default="INFO")
+    MAS_LOG_LEVEL: str = config("MAS_LOG_LEVEL", default="DEBUG")
     MAS_LOG_MAX_BYTES: int = config("MAS_LOG_MAX_BYTES", default=10_485_760, cast=int)
     MAS_LOG_BACKUP_COUNT: int = config("MAS_LOG_BACKUP_COUNT", default=5, cast=int)
     LOG_FORMAT: str = config("LOG_FORMAT", default="json")
@@ -395,7 +411,7 @@ class Settings(BaseSettings):
     ORCHESTRATOR_MAX_ITERATIONS: int = 10     # 编排Agent最大迭代次数
     ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
     # Concept Planner agent-level timeout（配置化，避免代码常量）
-    CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=240, cast=int)
+    CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=360, cast=int)
     
     # Video continuity persistence (domain policy)
     VIDEO_PERSIST_LAST_FRAME: bool = config("VIDEO_PERSIST_LAST_FRAME", default=False, cast=bool)
@@ -406,12 +422,35 @@ class Settings(BaseSettings):
     REACT_IMAGE_BATCH_SIZE: int = config("REACT_IMAGE_BATCH_SIZE", default=3, cast=int)
     ORCHESTRATOR_MAX_REPEAT_PER_STEP: int = config("ORCHESTRATOR_MAX_REPEAT_PER_STEP", default=1, cast=int)
     ORCHESTRATOR_DECISION_MODEL: str = config("ORCHESTRATOR_DECISION_MODEL", default="glm-4.5-air")
+    # 当为 True 时，编排层在汇总/输出时优先读取 SharedWM.artifacts（最新记录）
+    ORCHESTRATOR_READS_ARTIFACTS: bool = config("ORCHESTRATOR_READS_ARTIFACTS", default=False, cast=bool)
+    # 单写模式：仅写 artifacts，停止更新 facts（逐步收敛到 artifacts 为单一真实来源）
+    ARTIFACTS_SINGLE_WRITE_MODE: bool = config("ARTIFACTS_SINGLE_WRITE_MODE", default=True, cast=bool)
 
     # ReAct WF observation/commit policy
     # internal: 仅使用inner_react_state判断完成；wf: 合并WorkflowState中的已完成资产（用于超时/重试后的断点续跑）
     REACT_OBSERVE_COMPLETION_SOURCE: str = config("REACT_OBSERVE_COMPLETION_SOURCE", default="internal")
     # True: 仅在任务完成时一次性写入WF；False: 每轮生成成功后即刻写入WF（便于断点续跑）
-    REACT_WRITE_WF_ON_COMPLETE_ONLY: bool = config("REACT_WRITE_WF_ON_COMPLETE_ONLY", default=True, cast=bool)
+    # 默认关闭“仅完成时写入”，启用实时写回，避免中途产物丢失
+    REACT_WRITE_WF_ON_COMPLETE_ONLY: bool = config("REACT_WRITE_WF_ON_COMPLETE_ONLY", default=False, cast=bool)
+    # 是否启用首轮 plan-only（tools=[]）回合；默认关闭，采用“单段式纯 ReAct”
+    REACT_PLAN_ONLY_ENABLED: bool = config("REACT_PLAN_ONLY_ENABLED", default=False, cast=bool)
+    # OBS 压缩与契约校验（Config over Constants）
+    REACT_OBS_SCENE_THRESHOLD: int = config("REACT_OBS_SCENE_THRESHOLD", default=8, cast=int)
+    REACT_OBS_SIZE_THRESHOLD: int = config("REACT_OBS_SIZE_THRESHOLD", default=2000, cast=int)
+    REACT_OBS_SCHEMA_STRICT: bool = config("REACT_OBS_SCHEMA_STRICT", default=True, cast=bool)
+    # 是否启用观察压缩（基于 LLM 的结构化概览）。默认关闭，保持 OBS 仅包含事实。
+    REACT_OBS_AUGMENT_ENABLED: bool = config("REACT_OBS_AUGMENT_ENABLED", default=False, cast=bool)
+    REACT_EPISODIC_LOG_ENABLED: bool = config("REACT_EPISODIC_LOG_ENABLED", default=False, cast=bool)
+    REACT_CONTEXT_INCLUDE_RECENT_STEPS: bool = config("REACT_CONTEXT_INCLUDE_RECENT_STEPS", default=True, cast=bool)
+    REACT_CONTEXT_RECENT_STEPS_K: int = config("REACT_CONTEXT_RECENT_STEPS_K", default=3, cast=int)
+    REACT_CONTEXT_INCLUDE_NOTES: bool = config("REACT_CONTEXT_INCLUDE_NOTES", default=False, cast=bool)
+    REACT_CONTEXT_NOTES_LIMIT: int = config("REACT_CONTEXT_NOTES_LIMIT", default=5, cast=int)
+    REACT_CONTEXT_INCLUDE_ARTIFACT_PREVIEW: bool = config("REACT_CONTEXT_INCLUDE_ARTIFACT_PREVIEW", default=False, cast=bool)
+    # WorkingMemory 中“最近步骤摘要”的窗口大小（k≈3–5）。
+    REACT_WM_RECENT_STEPS_K: int = config("REACT_WM_RECENT_STEPS_K", default=3, cast=int)
+    # 事件标签映射（仅用于日志标签，不驱动控制流）：JSON 字符串或 dict
+    REACT_ACTION_LABEL_MAP: Dict[str, Any] = config("REACT_ACTION_LABEL_MAP", default='{}')
     
     
     # Content preview configuration for ReAct text observations
@@ -423,6 +462,9 @@ class Settings(BaseSettings):
     REACT_INJECT_SCRATCHPAD: bool = config("REACT_INJECT_SCRATCHPAD", default=True, cast=bool)
     REACT_SCRATCHPAD_STEPS: int = config("REACT_SCRATCHPAD_STEPS", default=2, cast=int)
     REACT_SCRATCHPAD_MAX_CHARS: int = config("REACT_SCRATCHPAD_MAX_CHARS", default=800, cast=int)
+
+    # Progress snapshot (agent-internal, per-iteration reference records)
+    ENABLE_PROGRESS_SNAPSHOT: bool = config("ENABLE_PROGRESS_SNAPSHOT", default=True, cast=bool)
 
     # Tool/runtime timeouts (config over constants)
     DEFAULT_TOOL_TIMEOUT: int = config("DEFAULT_TOOL_TIMEOUT", default=120, cast=int)  # 默认工具超时
@@ -441,6 +483,22 @@ class Settings(BaseSettings):
     )  # 超时后是否做一次“绕过系统代理”的直连重试（默认关闭，保持供应商/环境无关）
     # Agent-level end-to-end timeouts
     VIDEO_GENERATOR_TIMEOUT_SECONDS: int = config("VIDEO_GENERATOR_TIMEOUT_SECONDS", default=1800, cast=int)
+    SCENE_JOURNAL_MAX_EVENTS: int = config("SCENE_JOURNAL_MAX_EVENTS", default=5, cast=int)
+    # LLM context budgets (model-driven)
+    LLM_CONTEXT_TOKENS_DEFAULT: int = config("LLM_CONTEXT_TOKENS_DEFAULT", default=128000, cast=int)
+    # JSON string mapping or dict; e.g. {"zhipu/glm-4.5": 128000}
+    LLM_MODEL_CONTEXT_TOKENS: Dict[str, Any] = config("LLM_MODEL_CONTEXT_TOKENS", default='{}')
+    CONTEXT_INPUT_BUDGET_RATIO: float = config("CONTEXT_INPUT_BUDGET_RATIO", default=0.6, cast=float)
+    CONTEXT_OUTPUT_RESERVE_TOKENS: int = config("CONTEXT_OUTPUT_RESERVE_TOKENS", default=4000, cast=int)
+
+    # OBS observables (Iter -> OBS attachments) configuration
+    REACT_OBS_INCLUDE_OBSERVABLES: bool = config("REACT_OBS_INCLUDE_OBSERVABLES", default=True, cast=bool)
+    # At most K scenes to inject full assets payloads into OBS per round
+    REACT_OBS_ASSETS_MAX_SCENES: int = config("REACT_OBS_ASSETS_MAX_SCENES", default=2, cast=int)
+    # Soft cap for total chars of one scene's assets payload injected into OBS
+    REACT_OBS_ASSETS_MAX_CHARS: int = config("REACT_OBS_ASSETS_MAX_CHARS", default=1024, cast=int)
+    # MemRef 严格模式：当 memref.scene_number 与调用参数不一致，或场景未知时，直接报错；默认关闭（宽松为跳过）
+    REACT_MEMREF_STRICT: bool = config("REACT_MEMREF_STRICT", default=False, cast=bool)
     
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -462,6 +520,40 @@ class Settings(BaseSettings):
                 raise ValueError("IMAGE_TOOL_PROMPT_RULES must be JSON string") from exc
             if not isinstance(parsed, dict):
                 raise ValueError("IMAGE_TOOL_PROMPT_RULES must be dict")
+            return parsed
+        return v or {}
+    
+    @field_validator("LLM_MODEL_CONTEXT_TOKENS", mode="before")
+    @classmethod
+    def parse_llm_model_context_tokens(cls, v):
+        if isinstance(v, str):
+            text = (v or "").strip()
+            if not text:
+                return {}
+            import json
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("LLM_MODEL_CONTEXT_TOKENS must be JSON string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("LLM_MODEL_CONTEXT_TOKENS must be dict")
+            return parsed
+        return v or {}
+
+    @field_validator("REACT_ACTION_LABEL_MAP", mode="before")
+    @classmethod
+    def parse_action_label_map(cls, v):
+        if isinstance(v, str):
+            text = (v or "").strip()
+            if not text:
+                return {}
+            import json
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("REACT_ACTION_LABEL_MAP must be JSON string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("REACT_ACTION_LABEL_MAP must be dict")
             return parsed
         return v or {}
     

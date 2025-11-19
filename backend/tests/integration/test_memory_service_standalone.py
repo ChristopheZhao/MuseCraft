@@ -13,9 +13,8 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # 直接导入需要的组件，避免循环导入
-from app.agents.memory.memory_manager import MemoryManager
-from app.agents.memory.dict_memory_store import DictMemoryStore
-from app.agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+from app.agents.memory.long_term.manager import MemoryManager
+from app.agents.memory.long_term.stores import DictMemoryStore, MemoryItem, MemoryType, MemoryImportance
 
 async def test_memory_service_data_structures():
     """测试记忆服务对新MAS数据结构的支持"""

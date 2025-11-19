@@ -274,7 +274,7 @@ class SystemValidator:
             registry = get_tool_registry()
             
             # Test memory manager
-            from app.agents.memory.memory_manager import MemoryManager
+            from app.agents.memory.long_term.manager import MemoryManager
             memory_manager = MemoryManager()
             
             # Test template manager
@@ -346,8 +346,8 @@ class SystemValidator:
         status = "PASS"
         
         try:
-            from app.agents.memory.memory_manager import MemoryManager
-            from app.agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+            from app.agents.memory.long_term.manager import MemoryManager
+            from app.agents.memory.long_term.stores import MemoryItem, MemoryType, MemoryImportance
             
             # Test memory manager initialization
             memory_manager = MemoryManager(config={

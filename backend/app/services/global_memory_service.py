@@ -1,68 +1,30 @@
-"""
-Global Memory Service - System-level memory management for multi-agent collaboration
-"""
+"""Global Memory Service facade with injectable dependencies."""
+
+from __future__ import annotations
 
 import logging
-import os
-from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from ..agents.memory.memory_manager import MemoryManager
-from ..agents.memory.dict_memory_store import DictMemoryStore
-try:
-    from ..agents.memory.sqlite_memory_store import SQLiteMemoryStore  # optional
-except Exception:
-    SQLiteMemoryStore = None  # type: ignore
-from ..agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+from ..agents.memory.long_term.stores import MemoryImportance, MemoryItem, MemoryType
+from ..agents.memory.managers import (
+    MemoryManagement,
+    build_memory_management,
+    get_default_memory_management,
+)
 
 
 class GlobalMemoryService:
-    """
-    系统级记忆服务 - 为所有Agent提供统一的记忆管理
-    
-    设计原则：
-    1. 单例模式：确保整个系统只有一个记忆实例
-    2. 线程安全：支持并发的Agent访问
-    3. 工作流隔离：不同工作流的记忆相互隔离
-    """
-    
-    _instance = None
-    _initialized = False
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
-        
+    """System-level facade that coordinates shared slots and long-term stores."""
+
+    def __init__(self, management: MemoryManagement) -> None:
         self.logger = logging.getLogger("global_memory_service")
-        
-        # 初始化记忆管理器（禁用后台任务避免事件循环问题）
-        # 默认使用 SQLite 持久化；如需覆盖可设置 MEMORY_BACKEND=dict
-        backend = os.getenv("MEMORY_BACKEND", "sqlite").lower()
-        if backend == "sqlite" and SQLiteMemoryStore is not None:
-            default_store = SQLiteMemoryStore()
-            self.logger.info("Using SQLiteMemoryStore as default memory backend")
-        else:
-            default_store = DictMemoryStore()
-            if backend == "sqlite" and SQLiteMemoryStore is None:
-                self.logger.warning("MEMORY_BACKEND=sqlite set but SQLite backend unavailable, fallback to DictMemoryStore")
-        self.memory_manager = MemoryManager(
-            stores={"default": default_store},
-            config={
-                "enable_consolidation": False,  # 禁用后台任务
-                "enable_cleanup": False
-            }
-        )
-        
-        # 工作流记忆统计
-        self.workflow_stats = {}
-        
-        self._initialized = True
-        self.logger.info("🧠 Global Memory Service initialized")
+        self._management = management
+        self.memory_coordinator = management.memory_coordinator
+        self.memory_manager = management.memory_manager
+        self.workflow_stats: Dict[str, Any] = {}
+        self.logger.info("🧠 Global Memory Service initialised with injected management bundle")
     
     async def store_creative_guidance(
         self,
@@ -396,5 +358,30 @@ class GlobalMemoryService:
             return False
 
 
-# 全局单例实例
-global_memory_service = GlobalMemoryService()
+def create_global_memory_service(
+    *,
+    management: Optional[MemoryManagement] = None,
+    slots_path: Optional[Path | str] = None,
+    backend: Optional[str] = None,
+) -> GlobalMemoryService:
+    """Factory helper to build a service with explicit dependencies."""
+
+    if management is None:
+        if slots_path is not None or backend is not None:
+            path_arg: Optional[Path]
+            if isinstance(slots_path, Path):
+                path_arg = slots_path
+            elif slots_path is not None:
+                path_arg = Path(slots_path)
+            else:
+                path_arg = None
+            management = build_memory_management(
+                slots_path=path_arg,
+                storage_backend=backend,
+            )
+        else:
+            management = get_default_memory_management()
+    return GlobalMemoryService(management)
+
+
+__all__ = ["GlobalMemoryService", "create_global_memory_service"]

@@ -39,6 +39,7 @@ from .video_processing.scene_continuity_preparation_tool import SceneContinuityP
 from .memory_tool import MemoryTool
 from .orchestrator_control_tool import OrchestratorControlTool
 from .consistency_tool import ConsistencyTool
+from .video_prompt_builder_tool import VideoPromptBuilderTool
 
 # Tool registry instance
 tool_registry = get_tool_registry()
@@ -79,6 +80,7 @@ def register_default_tools():
     tool_registry.register_tool(QualityAnalysisTool)
     tool_registry.register_tool(RoleAnalysisTool)
     tool_registry.register_tool(ConsistencyTool)
+    tool_registry.register_tool(VideoPromptBuilderTool)
     # Register shared memory capability
     tool_registry.register_tool(MemoryTool)
     # Register orchestrator control
@@ -131,6 +133,7 @@ __all__ = [
     "MemoryTool",
     "OrchestratorControlTool",
     "ConsistencyTool",
+    "VideoPromptBuilderTool",
     
     # Functions
     "register_default_tools"

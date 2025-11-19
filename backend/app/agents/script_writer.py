@@ -8,11 +8,12 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Scene
-from ..core.workflow_state import WorkflowState, SceneData
-from .tools.tool_registry import get_tool_registry
-from .tools.base_tool import ToolInput as TI
+from .services.mas_shared_memory import get_shared_wm
+from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
+from .memory.short_term.working_memory import SceneSnapshot
 from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
+from .utils.artifacts import extract_tool_payload
 
 
 class ScriptWriterAgent(BaseAgent):
@@ -21,18 +22,21 @@ class ScriptWriterAgent(BaseAgent):
     专注于场景脚本、叙事结构和连续性分析，但使用BaseAgent接口
     """
     
-    def __init__(self, llms=None):
+    def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.SCRIPT_WRITER,
             agent_name="script_writer",
             timeout_seconds=600,
             max_retries=2,
             tools=[
+                # 使用已注册名称，避免依赖校验回退：
+                "script_generation",
                 "scene_continuity_analysis_tool",
-                "script_generation_tool", 
-                "narrative_structure_generation_tool"
+                "narrative_structure_generation_tool",
+                "role_analysis_tool",
             ],
-            llms=llms
+            llms=llms,
+            memory_services=memory_services,
         )
         
     async def _execute_impl(
@@ -55,22 +59,29 @@ class ScriptWriterAgent(BaseAgent):
                 dynamic_timeout = min(max_timeout, base + scene_count * per_scene)
                 self.timeout_seconds = int(dynamic_timeout)
 
-            # 获取workflow_state
+            # 读取 Shared WM 作为上下文
             workflow_state_id = input_data.get("workflow_state_id")
-            from ..core.workflow_state import workflow_manager
-            workflow_state = workflow_manager.get_workflow(workflow_state_id) if workflow_state_id else None
-
-            if not workflow_state:
-                return {
-                    "success": False,
-                    "error": "No workflow state available",
-                    "workflow_state_updated": False,
-                    "results": []
-                }
+            view = get_shared_wm().get_task(str(workflow_state_id)) if workflow_state_id else None
+            if not view:
+                return {"success": False, "error": "No shared working memory available", "workflow_state_updated": False, "results": []}
 
             # 直接读取上下文（存在即用），不依赖配置开关；缺失则自然降级
-            episode_context = input_data.get("episode_context") or getattr(workflow_state, "episode_context", None)
-            project_context = input_data.get("project_context") or getattr(workflow_state, "project_context", None)
+            store = self.shared_memory_store
+            wf_id_str = str(workflow_state_id)
+
+            episode_context = input_data.get("episode_context")
+            if episode_context is None:
+                try:
+                    episode_context = store.get(wf_id_str, "episode_context", default=None)
+                except SharedMemoryStoreError:
+                    episode_context = None
+
+            project_context = input_data.get("project_context")
+            if project_context is None:
+                try:
+                    project_context = store.get(wf_id_str, "project_context", default=None)
+                except SharedMemoryStoreError:
+                    project_context = None
             approved_script_text = ""
             if episode_context:
                 approved_script_text = str(episode_context.get("approved_script", "") or "").strip()
@@ -88,8 +99,13 @@ class ScriptWriterAgent(BaseAgent):
                 ]
 
             # 获取场景和概念规划
-            scenes = getattr(workflow_state, 'scenes', [])
-            concept_plan = getattr(workflow_state, 'concept_plan', {})
+            scenes_map = view.scenes or {}
+            scenes = [scenes_map[k] for k in sorted(scenes_map.keys())]
+            concept_plan = self.fetch_memory_slot(
+                workflow_state_id,
+                "project.concept_plan",
+                default={}
+            ) or {}
 
             if not scenes:
                 return {
@@ -103,7 +119,7 @@ class ScriptWriterAgent(BaseAgent):
             return await self._batch_generate_scripts(
                 scenes,
                 concept_plan,
-                workflow_state,
+                str(workflow_state_id),
                 task,
                 episode_context=episode_context,
                 project_context=project_context,
@@ -121,10 +137,10 @@ class ScriptWriterAgent(BaseAgent):
             }
 
     async def _batch_generate_scripts(
-        self, 
-        scenes: List[SceneData], 
+        self,
+        scenes: List[SceneSnapshot],
         concept_plan: Dict[str, Any],
-        workflow_state: WorkflowState,
+        workflow_state_id: str,
         task: Task,
         *,
         episode_context: Optional[Dict[str, Any]] = None,
@@ -144,7 +160,12 @@ class ScriptWriterAgent(BaseAgent):
         except Exception:
             episode_character_ids = []
 
-        voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
+        # 旁白规划从记忆槽读取
+        voice_plan = self.fetch_memory_slot(
+            workflow_state_id,
+            "project.voice_plan",
+            default={}
+        ) or {}
         voice_plan_enabled = True
         if isinstance(voice_plan, dict):
             enabled_raw = voice_plan.get("enabled")
@@ -171,11 +192,16 @@ class ScriptWriterAgent(BaseAgent):
                     continue
                 voice_guidance_map[sn] = entry
 
-        # 筛选需要脚本的场景
-        scenes_needing_scripts = [
-            scene for scene in scenes 
-            if not scene.script_text or len(scene.script_text.strip()) < 50
-        ]
+        # 筛选需要脚本的场景（兼容 SceneSnapshot：可能没有 script_text/title 字段）
+        scenes_needing_scripts = []
+        for scene in scenes:
+            try:
+                script_text = getattr(scene, "script_text", None)
+                needs = (not script_text) or (isinstance(script_text, str) and len(script_text.strip()) < 50)
+            except Exception:
+                needs = True
+            if needs:
+                scenes_needing_scripts.append(scene)
         
         if not scenes_needing_scripts:
             return {
@@ -189,14 +215,27 @@ class ScriptWriterAgent(BaseAgent):
             self.logger.info(f"开始批量生成{len(scenes_needing_scripts)}个场景脚本")
             
             # 准备批量生成参数
-            batch_scenes = [
-                {
-                    "scene_number": scene.scene_number,
-                    "title": scene.title,
-                    "duration": scene.duration,
-                    "narrative_description": scene.narrative_description
-                } for scene in scenes_needing_scripts
-            ]
+            batch_scenes = []
+            for scene in scenes_needing_scripts:
+                try:
+                    batch_scenes.append(
+                        {
+                            "scene_number": int(getattr(scene, "scene_number")),
+                            "title": str(getattr(scene, "title", "") or ""),
+                            "duration": float(getattr(scene, "duration", 0.0) or 0.0),
+                            "narrative_description": str(getattr(scene, "narrative_description", "") or ""),
+                        }
+                    )
+                except Exception:
+                    # 遇到异常时尽力而为，填充最小字段以不中断批量
+                    batch_scenes.append(
+                        {
+                            "scene_number": getattr(scene, "scene_number", None),
+                            "title": "",
+                            "duration": 0.0,
+                            "narrative_description": "",
+                        }
+                    )
             
             # 逐场景生成脚本（使用 script_generation 工具的 generate_scene_script 动作）
             scripts_map: Dict[str, Any] = {}
@@ -209,12 +248,18 @@ class ScriptWriterAgent(BaseAgent):
                     enriched_style = dict(intelligent_style)
                     enriched_style['taxonomy'] = taxonomy_match
                     intelligent_style = enriched_style
-                    try:
-                        if isinstance(concept_plan, dict):
-                            concept_plan['intelligent_style_design'] = enriched_style
-                        workflow_state.intelligent_style_design = enriched_style
-                    except Exception:
-                        pass
+                    if isinstance(concept_plan, dict):
+                        concept_plan['intelligent_style_design'] = enriched_style
+                        try:
+                            self.store_memory_slot(
+                                workflow_state_id,
+                                "project.concept_plan",
+                                concept_plan,
+                            )
+                        except Exception as slot_err:
+                            raise AgentError(
+                                f"Slot update failed while persisting enriched concept_plan: {slot_err}"
+                            ) from slot_err
             # 读取脚本写作模型与token预算（来自ai_config）
             try:
                 from ..core.ai_config import get_ai_config
@@ -307,17 +352,21 @@ class ScriptWriterAgent(BaseAgent):
                         "emotion": gd.get("emotion", ""),
                         "objective": gd.get("objective", ""),
                     }
-                    one = await self.use_tool(
-                        "script_generation",
-                        "generate_scene_script",
-                        tool_params
-                    )
-                    payload = getattr(one, 'result', one)
-                    if isinstance(payload, dict):
-                        if not payload.get("success", True):
-                            raise AgentError(
-                                f"场景 {scene.scene_number} 脚本生成失败: {payload.get('error', 'unknown error')}"
-                            )
+                    # 改为通过 FC 执行：构造 function_call 并统一走 BaseAgent.execute_tool_calls
+                    # 优先使用兼容名 "script_generation.generate_scene_script"；若工具暴露的是
+                    # scene_script_generation_tool.generate_scene_script，Base 的前置校验会提示。
+                    call = {
+                        "function": {
+                            "name": "script_generation.generate_scene_script",
+                            "arguments": tool_params,
+                        }
+                    }
+                    executed = await self.execute_tool_calls([call])
+                    if not executed:
+                        raise AgentError(f"场景 {scene.scene_number} 脚本生成失败：无执行结果")
+                    rec = executed[0]
+                    payload = extract_tool_payload(rec.get('result')) if isinstance(rec, dict) else None
+                    if isinstance(payload, dict) and (rec.get('success', True)):
                         script_section = payload.get("script") if isinstance(payload.get("script"), dict) else {}
                         voice_line = (
                             payload.get("voice_over_text")
@@ -357,6 +406,36 @@ class ScriptWriterAgent(BaseAgent):
                             "voice_guidance": tool_params["voice_guidance"],
                             "motion_beats": motion_beats,
                         }
+                    else:
+                        # 定位返回结构异常：在抛错前输出结构诊断
+                        try:
+                            payload_type = type(payload).__name__
+                            rec_success = rec.get('success', None) if isinstance(rec, dict) else None
+                            inner_type = None
+                            try:
+                                raw = rec.get('result') if isinstance(rec, dict) else None
+                                if hasattr(raw, 'result'):
+                                    inner_type = type(getattr(raw, 'result')).__name__
+                            except Exception:
+                                inner_type = None
+                            preview = None
+                            if not isinstance(payload, dict):
+                                try:
+                                    preview = str(payload)
+                                    if isinstance(preview, str) and len(preview) > 200:
+                                        preview = preview[:200]
+                                except Exception:
+                                    preview = None
+                            self.logger.error(
+                                "脚本生成返回结构异常 scene=%s payload_type=%s rec_success=%s inner_result_type=%s preview=%s",
+                                scene.scene_number, payload_type, rec_success, inner_type, preview,
+                            )
+                        except Exception:
+                            pass
+                        err = None
+                        if isinstance(rec, dict):
+                            err = rec.get('error')
+                        raise AgentError(f"场景 {scene.scene_number} 脚本生成失败: {err or 'payload_not_dict'}")
                 except AgentError as ae:
                     hard_failed_voice_scenes.append({
                         "scene_number": scene.scene_number,
@@ -393,12 +472,20 @@ class ScriptWriterAgent(BaseAgent):
                     "narrative_flow": concept_plan.get('genre_and_theme', {}).get('theme', ''),
                     "main_message": ":".join(concept_plan.get('key_messages', [])) if concept_plan.get('key_messages') else ""
                 }
-                cont_res = await self.use_tool(
-                    "scene_continuity_analysis_tool",
-                    "analyze_all_scenes_continuity",
-                    cont_params
-                )
-                continuity_analysis = getattr(cont_res, 'result', cont_res)
+                call = {
+                    "function": {
+                        "name": "scene_continuity_analysis_tool.analyze_all_scenes_continuity",
+                        "arguments": cont_params,
+                    }
+                }
+                cont_exec = await self.execute_tool_calls([call])
+                continuity_analysis = {}
+                if cont_exec and isinstance(cont_exec[0], dict):
+                    payload = extract_tool_payload(cont_exec[0].get('result'))
+                    if isinstance(payload, dict):
+                        continuity_analysis = payload
+                if not isinstance(continuity_analysis, dict) or not continuity_analysis:
+                    continuity_analysis = {"warning": "连续性分析失败"}
             except Exception as e:
                 self.logger.warning(f"连续性分析失败，继续脚本生成: {e}")
                 continuity_analysis = {"warning": "连续性分析失败"}
@@ -416,20 +503,36 @@ class ScriptWriterAgent(BaseAgent):
                             (w.get("warning") for w in warning_voice_scenes if w.get("scene_number") == scene.scene_number),
                             None,
                         )
-                        workflow_state.update_scene(
-                            scene.scene_number,
-                            script_text=scene_script_data.get("script_text", ""),
-                            voice_over_text=scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
-                            narrative_description=scene_script_data.get("narrative_description", scene.narrative_description),
-                            background_music_style=scene_script_data.get("background_music_style", ""),
-                            sound_effects=scene_script_data.get("sound_effects", []),
-                            pacing_and_timing={
-                                "pace_tag": voice_guidance.get("pace_tag"),
-                                "target_char_count": voice_guidance.get("target_char_count"),
-                                "should_narrate": voice_guidance.get("should_narrate"),
-                            },
-                            motion_beats=scene_script_data.get("motion_beats", []),
-                        )
+                        # 将脚本结果写入项目级脚本槽
+                        try:
+                            existing_scripts = self.fetch_memory_slot(
+                                workflow_state_id,
+                                "project.scene_scripts",
+                                default={}
+                            ) or {}
+                            entry = dict(existing_scripts.get(str(scene.scene_number), {}))
+                            entry.update({
+                                "script_text": scene_script_data.get("script_text", ""),
+                                "voice_over_text": scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
+                                "narrative_description": scene_script_data.get("narrative_description", scene.narrative_description),
+                                "background_music_style": scene_script_data.get("background_music_style", ""),
+                                "sound_effects": scene_script_data.get("sound_effects", []),
+                                "pacing_and_timing": {
+                                    "pace_tag": voice_guidance.get("pace_tag"),
+                                    "target_char_count": voice_guidance.get("target_char_count"),
+                                    "should_narrate": voice_guidance.get("should_narrate"),
+                                },
+                                "motion_beats": scene_script_data.get("motion_beats", []),
+                            })
+                            self.store_memory_slot(
+                                workflow_state_id,
+                                "project.scene_scripts",
+                                {str(scene.scene_number): entry},
+                            )
+                        except Exception as slot_err:
+                            raise AgentError(
+                                f"Failed to persist scene_scripts for scene {scene.scene_number}: {slot_err}"
+                            ) from slot_err
                         try:
                             if isinstance(concept_plan, dict):
                                 for sc_def in concept_plan.get('scenes', []) or []:
@@ -466,48 +569,38 @@ class ScriptWriterAgent(BaseAgent):
                         "error": "no_scripts_map"
                     })
 
-            # 将连续性分析结果写回到 WorkflowState.scenes（用于 Image/Video 连续性处理）
+            # 将连续性分析结果写回 Shared WM 场景（用于 Image/Video 连续性处理）
             try:
                 decisions = (continuity_analysis or {}).get("continuity_decisions", {}) if isinstance(continuity_analysis, dict) else {}
                 if decisions:
-                    # 遍历所有场景，依据决策落地字段
-                    for sc in getattr(workflow_state, 'scenes', []) or []:
-                        sn = getattr(sc, 'scene_number', None)
-                        if not sn:
+                    # 遍历所有场景，依据决策落地到 Shared WM 的 SceneSnapshot（仅更新依赖/引导字段）
+                    view = get_shared_wm().get_task(str(workflow_state_id))
+                    for sn_key, snap in (view.scenes or {}).items():
+                        try:
+                            sn = int(sn_key)
+                        except Exception:
                             continue
-                        key = str(sn)
-                        d = decisions.get(key)
+                        d = decisions.get(str(sn))
                         if not isinstance(d, dict):
-                            # 对缺失决策的场景，保持现状，不强行覆盖
                             continue
                         strategy = d.get("strategy", "new")
-                        reason = d.get("reason", "")
                         try:
                             confidence = float(d.get("confidence", 0.8))
                         except Exception:
                             confidence = 0.8
-
-                        if strategy == "continue_from_previous" and sn > 1:
-                            depends = sn - 1
-                            workflow_state.update_scene(
-                                sn,
-                                depends_on_scene=depends,
-                                requires_continuity_from=depends,
-                                continuity_reason=reason,
-                                continuity_confidence=confidence,
-                                image_generation_strategy="continue_from_previous",
-                            )
-                        else:
-                            # 标记为独立生成；清理依赖
-                            workflow_state.update_scene(
-                                sn,
-                                depends_on_scene=None,
-                                requires_continuity_from=None,
-                                continuity_reason=reason,
-                                continuity_confidence=confidence,
-                                image_generation_strategy="new",
-                            )
-                    self.logger.info("✅ 连续性决策已写回 WorkflowState.scenes")
+                        reason = d.get("reason", "")
+                        depends = (sn - 1) if (strategy == "continue_from_previous" and sn > 1) else None
+                        new_snap = SceneSnapshot(
+                            scene_number=sn,
+                            depends_on_scene=depends,
+                            duration=float(getattr(snap, 'duration', 0.0) or 0.0),
+                            visual_description=getattr(snap, 'visual_description', ''),
+                            narrative_description=getattr(snap, 'narrative_description', ''),
+                            image_url=getattr(snap, 'image_url', ''),
+                            motion_beats=d.get("motion_beats", getattr(snap, 'motion_beats', [])) or [],
+                        )
+                        get_shared_wm().upsert_scene(str(workflow_state_id), new_snap)
+                    self.logger.info("✅ 连续性决策已写回 Shared WM 场景")
             except Exception as ce:
                 self.logger.warning(f"连续性结果写回失败：{ce}")
 
@@ -587,25 +680,45 @@ class ScriptWriterAgent(BaseAgent):
                             char_lib[n] = desc
 
                 # 基于脚本文本标注每个场景
-                for sc in getattr(workflow_state, 'scenes', []) or []:
-                    try:
-                        text = (getattr(sc, 'script_text', '') or '') + ' ' + (getattr(sc, 'narrative_description', '') or '')
-                        present = []
-                        descs = []
-                        for name, desc in char_lib.items():
-                            if not name:
-                                continue
-                            # 名称包含或近似匹配（前缀/后缀），提升跨语言/缩写鲁棒性
-                            if (name in text) or text.startswith(name) or text.endswith(name):
-                                present.append(name)
-                                descs.append(f"{name}：{desc}")
-                        if present:
-                            workflow_state.update_scene(sc.scene_number, characters_present=present, character_descriptions=descs)
-                    except Exception:
-                        continue
-                self.logger.info("✅ 角色一致性标注已写回 WorkflowState.scenes")
+                view = get_shared_wm().get_task(str(workflow_state_id))
+                for sn_key, sc in (view.scenes or {}).items():
+                    text = (getattr(sc, 'script_text', '') or '') + ' ' + (getattr(sc, 'narrative_description', '') or '')
+                    present = []
+                    descs = []
+                    for name, desc in char_lib.items():
+                        if not name:
+                            continue
+                        # 名称包含或近似匹配（前缀/后缀），提升跨语言/缩写鲁棒性
+                        if (name in text) or text.startswith(name) or text.endswith(name):
+                            present.append(name)
+                            descs.append(f"{name}：{desc}")
+                    if present:
+                        try:
+                            sn = int(getattr(sc, 'scene_number', 0))
+                        except Exception as parse_err:
+                            raise AgentError("Failed to parse scene_number during character consistency sync") from parse_err
+                        if sn:
+                            existing_scripts = self.fetch_memory_slot(
+                                workflow_state_id,
+                                "project.scene_scripts",
+                                default={}
+                            ) or {}
+                            entry = dict(existing_scripts.get(str(sn), {}))
+                            entry.update({"characters_present": present, "character_descriptions": descs})
+                            try:
+                                self.store_memory_slot(
+                                    workflow_state_id,
+                                    "project.scene_scripts",
+                                    {str(sn): entry},
+                                )
+                            except Exception as slot_err:
+                                raise AgentError(
+                                    f"Failed to persist character annotations for scene {sn}: {slot_err}"
+                                ) from slot_err
+                self.logger.info("✅ 角色一致性标注已写回 scene_scripts slot")
             except Exception as ce:
-                self.logger.warning(f"角色一致性标注失败（跳过）：{ce}")
+                self.logger.error(f"角色一致性标注失败: {ce}")
+                raise AgentError("Shared WM update failed during scene character annotation") from ce
 
             self.logger.info(f"批量脚本生成完成: {generated_count}/{len(scenes_needing_scripts)}")
             
@@ -713,18 +826,39 @@ class ScriptWriterAgent(BaseAgent):
                                 continue
                             brief = char_desc_map.get(nm_str) or ''
                             descs.append(f"{nm_str}：{brief}" if brief else nm_str)
-                        workflow_state.update_scene(sn, characters_present=present, character_descriptions=descs)
+                        try:
+                            sn = int(sn_key)
+                        except Exception:
+                            continue
+                        # 将角色提示写到 facts.scene_scripts 下以场景为键
+                        existing_scripts = self.fetch_memory_slot(
+                            workflow_state_id,
+                            "project.scene_scripts",
+                            default={}
+                        ) or {}
+                        entry = dict(existing_scripts.get(str(sn), {}))
+                        entry.update({"characters_present": present, "character_descriptions": descs})
+                        try:
+                            self.store_memory_slot(
+                                workflow_state_id,
+                                "project.scene_scripts",
+                                {str(sn): entry},
+                            )
+                        except Exception as slot_err:
+                            raise AgentError(
+                                f"Failed to persist concept-derived character descriptors for scene {sn}: {slot_err}"
+                            ) from slot_err
                 self.logger.info("✅ 角色记忆已写回（concept→WF.scene）")
             except Exception as ce:
-                self.logger.warning(f"角色记忆写回失败（跳过）：{ce}")
+                self.logger.error(f"角色记忆写回失败: {ce}")
+                raise AgentError("Shared WM update failed during concept-to-scene character sync") from ce
 
             # 角色分析工具（结构化）：不改变 Agent 自主性，仅调用工具并将结果写回 WF
             try:
-                registry = get_tool_registry()
-                role_tool = registry.get_tool("role_analysis_tool")
                 # 组装场景文本
                 scene_payload: List[Dict[str, Any]] = []
-                for sc in getattr(workflow_state, 'scenes', []) or []:
+                view = get_shared_wm().get_task(str(workflow_state_id))
+                for sn_key, sc in (view.scenes or {}).items():
                     scene_payload.append({
                         "scene_number": getattr(sc, 'scene_number', None),
                         "title": getattr(sc, 'title', ''),
@@ -732,14 +866,35 @@ class ScriptWriterAgent(BaseAgent):
                         "narrative_description": getattr(sc, 'narrative_description', ''),
                         "script_text": getattr(sc, 'script_text', '')
                     })
-                # 抽取通用风格/场景线索，参数化传入，保持工具通用性
+                # 抽取通用风格/场景线索
                 style_hint = ""
                 try:
-                    # workflow_state 风格偏好
-                    sw = getattr(workflow_state, 'style_preference', '') or ''
-                    if isinstance(sw, str) and sw.strip():
-                        style_hint = sw.strip()
-                    # 概念计划智能风格设计摘要
+                    # 1) 项目上下文/Shared WM中的风格偏好（若存在）
+                    if isinstance(project_context, dict):
+                        sw = (
+                            project_context.get('style_preference')
+                            or project_context.get('style')
+                            or project_context.get('video_style')
+                            or ''
+                        )
+                        if isinstance(sw, str) and sw.strip():
+                            style_hint = sw.strip()
+                    if not style_hint:
+                        try:
+                            sw = self.fetch_memory_slot(
+                                str(workflow_state_id),
+                                "project.style_preference",
+                                default="",
+                            )
+                            if isinstance(sw, str) and sw.strip():
+                                style_hint = sw.strip()
+                            elif isinstance(sw, dict):
+                                raw_hint = sw.get("value") if isinstance(sw.get("value"), str) else None
+                                if raw_hint and raw_hint.strip():
+                                    style_hint = raw_hint.strip()
+                        except Exception:
+                            pass
+                    # 2) 概念计划智能风格设计摘要（作为补充）
                     if not style_hint and isinstance(concept_plan, dict):
                         isd = (concept_plan or {}).get('intelligent_style_design') or {}
                         if isinstance(isd, dict) and isd:
@@ -780,19 +935,37 @@ class ScriptWriterAgent(BaseAgent):
                 except Exception:
                     pass
 
-                res = await role_tool.execute(TI(action="analyze_roles_and_scenes", parameters={
-                    "scenes": scene_payload,
-                    "concept_plan": concept_plan or {},
-                    "target_style": style_hint,
-                    "scenario_hint": scenario_hint
-                }))
-                payload = getattr(res, 'result', res)
-                per_scene = (payload or {}).get('per_scene_roles') or {}
-                global_roles = (payload or {}).get('roles') or []
+                role_call = {
+                    "function": {
+                        "name": "role_analysis_tool.analyze_roles_and_scenes",
+                        "arguments": {
+                            "scenes": scene_payload,
+                            "concept_plan": concept_plan or {},
+                            "target_style": style_hint,
+                            "scenario_hint": scenario_hint
+                        }
+                    }
+                }
+                role_exec = await self.execute_tool_calls([role_call])
+                payload = extract_tool_payload(role_exec[0].get('result')) if (role_exec and isinstance(role_exec[0], dict)) else None
+                if not isinstance(payload, dict):
+                    self.logger.warning(
+                        "角色分析返回结构异常（跳过写回）：type=%s preview=%s",
+                        type(payload).__name__,
+                        (str(payload)[:200].replace('\n',' ') if payload is not None else 'None')
+                    )
+                    per_scene = {}
+                    global_roles = []
+                else:
+                    per_scene = payload.get('per_scene_roles') or {}
+                    global_roles = payload.get('roles') or []
                 # 合并写回各场景（不覆盖已有，做集合并集）
-                for sc in getattr(workflow_state, 'scenes', []) or []:
-                    sn = getattr(sc, 'scene_number', None)
-                    if sn is None:
+                for sn_key, sc in (view.scenes or {}).items():
+                    try:
+                        sn = int(getattr(sc, 'scene_number', 0))
+                    except Exception:
+                        sn = None
+                    if not sn:
                         continue
                     key = str(sn)
                     scene_roles = per_scene.get(key) or []
@@ -823,19 +996,30 @@ class ScriptWriterAgent(BaseAgent):
                             if parts:
                                 descs.append("；".join(parts))
                     if names or descs:
-                        merged_names = list(set((getattr(sc, 'characters_present', []) or []) + names))
-                        merged_descs = list(set((getattr(sc, 'character_descriptions', []) or []) + descs))
-                        workflow_state.update_scene(sn, characters_present=merged_names, character_descriptions=merged_descs)
-                self.logger.info("✅ 角色分析结果已写回 WorkflowState.scenes")
+                        existing_scripts = self.fetch_memory_slot(
+                            workflow_state_id,
+                            "project.scene_scripts",
+                            default={}
+                        ) or {}
+                        entry = dict(existing_scripts.get(str(sn), {}))
+                        merged_names = list(set((entry.get('characters_present', []) or []) + names))
+                        merged_descs = list(set((entry.get('character_descriptions', []) or []) + descs))
+                        entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
+                        try:
+                            self.store_memory_slot(
+                                workflow_state_id,
+                                "project.scene_scripts",
+                                {str(sn): entry},
+                            )
+                        except Exception as slot_err:
+                            raise AgentError(
+                                f"Failed to persist role analysis output for scene {sn}: {slot_err}"
+                            ) from slot_err
+                self.logger.info("✅ 角色分析结果已写回 scene_scripts slot")
 
                 # 将角色一致性快照作为 EPISODIC 记忆写入（无开关，作为系统保障；若记忆不可用则优雅降级）
                 try:
-                    # Prefer workflow_state.task_id; fallback to task.task_id if available
-                    wf_id = (
-                        getattr(workflow_state, 'task_id', None)
-                        or (str(getattr(task, 'task_id', '')) if task else "")
-                        or ""
-                    )
+                    wf_id = str(workflow_state_id or "")
                     if wf_id:
                         from ..services.memory_writer import memory_writer
                         from ..models.task import TaskType
@@ -852,7 +1036,8 @@ class ScriptWriterAgent(BaseAgent):
                 except Exception as _mw:
                     self.logger.warning(f"角色一致性快照写入记忆失败（跳过）：{_mw}")
             except Exception as re:
-                self.logger.warning(f"角色分析执行/写回失败（跳过，不阻断）：{re}")
+                self.logger.error(f"角色分析执行/写回失败：{re}")
+                raise AgentError("Role analysis failed to execute or persist results") from re
 
             overall_success = len(hard_failed_voice_scenes) == 0
             if hard_failed_voice_scenes:
@@ -995,10 +1180,9 @@ class ScriptWriterAgent(BaseAgent):
         try:
             workflow_state_id = input_data.get("workflow_state_id")
             if workflow_state_id:
-                from ..core.workflow_state import workflow_manager
-                ws = workflow_manager.get_workflow(workflow_state_id)
-                if ws and getattr(ws, 'scenes', None):
-                    return len(ws.scenes)
+                view = get_shared_wm().get_task(str(workflow_state_id))
+                if view and (view.scenes or {}):
+                    return len(view.scenes)
             return 6  # 默认估算
-        except:
+        except Exception:
             return 6

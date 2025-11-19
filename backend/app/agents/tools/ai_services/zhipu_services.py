@@ -169,6 +169,20 @@ class ZhipuLLMService(LLMServiceInterface):
                     raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
             else:
                 raise RuntimeError("Zhipu LLM API request timeout")
+        except httpx.ConnectError as conn_err:
+            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
+                try:
+                    try:
+                        self.logger.warning(
+                            f"Zhipu.chat_completion proxy connect error; fallback direct with timeout={float(effective_timeout):.1f}s ({conn_err})"
+                        )
+                    except Exception:
+                        pass
+                    result = await _post_once(float(effective_timeout), False)
+                except Exception as e2:
+                    raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
+            else:
+                raise RuntimeError(f"Zhipu LLM chat completion connection failed: {str(conn_err)}")
         except Exception as e:
             raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e)}")
 
@@ -306,6 +320,20 @@ class ZhipuLLMService(LLMServiceInterface):
                     raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
             else:
                 raise RuntimeError("Zhipu Function Call API request timeout")
+        except httpx.ConnectError as conn_err:
+            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
+                try:
+                    try:
+                        self.logger.warning(
+                            f"Zhipu.function_call proxy connect error; fallback direct with timeout={float(effective_timeout):.1f}s ({conn_err})"
+                        )
+                    except Exception:
+                        pass
+                    result = await _post_once(float(effective_timeout), False)
+                except Exception as e2:
+                    raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
+            else:
+                raise RuntimeError(f"Zhipu Function Call connection failed: {str(conn_err)}")
         except Exception as e:
             raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
 

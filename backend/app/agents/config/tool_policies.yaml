@@ -1,0 +1,57 @@
+agents:
+  video_generator:
+    video_generation:
+      expose: true
+      allowed_actions:
+        - generate_with_continuity
+    image_generation:
+      expose: true
+      allowed_actions:
+        - generate_with_autoprompt
+    scene_continuity_preparation:
+      expose: true
+      allowed_actions:
+        - prepare_scene_input
+    consistency_tool:
+      expose: true
+      allowed_actions:
+        - get_prompt_assets
+
+  image_generator:
+    image_generation:
+      expose: true
+      allowed_actions:
+        - generate_with_autoprompt
+    consistency_tool:
+      expose: true
+      allowed_actions:
+        - get_prompt_assets
+      # 可选：声明可观测附件的导出规则（Iter->OBS），用于通用抽取器（当前实现对 assets 进行通用白名单抽取，此配置为将来细化预留）
+      obs_export:
+        source: result.assets
+        fields:
+          style:
+            keys: [color_palette, mood, composition, lighting, style_tags]
+          characters:
+            keys: [name, traits, prompt_snippet, descriptions]
+          environment:
+            keys: [title, visual_description, narrative_description, props]
+          continuity:
+            keys: [prev_scene_no, motion_guidance, tail_frame_ref]
+
+  script_writer:
+    # 脚本生成：仅暴露场景脚本生成动作
+    script_generation:
+      expose: true
+      allowed_actions:
+        - generate_scene_script
+    # 场景连续性分析：用于基于脚本文本推断场景延续关系
+    scene_continuity_analysis_tool:
+      expose: true
+      allowed_actions:
+        - analyze_all_scenes_continuity
+    # 角色分析：产出全局角色 + 分场景角色出现（结构化），用于后续一致性
+    role_analysis_tool:
+      expose: true
+      allowed_actions:
+        - analyze_roles_and_scenes

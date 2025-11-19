@@ -19,7 +19,7 @@ register_default_tools()
 
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.video_generator import VideoGeneratorAgent
-from app.core.workflow_state import WorkflowState, workflow_manager
+from app.agents.services.mas_shared_memory import get_shared_wm
 from app.agents.tools.agent_tool_allocation import get_agent_tools
 from app.models import AgentType
 

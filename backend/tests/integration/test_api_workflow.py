@@ -8,34 +8,31 @@ import asyncio
 import sys
 from pathlib import Path
 
+from app.services.memory_provider import build_memory_services, set_memory_services
+
 # 添加项目根目录到Python路径
 backend_path = Path(__file__).parent
 sys.path.insert(0, str(backend_path))
 
+memory_services = build_memory_services()
+set_memory_services(memory_services)
+
 async def test_workflow_creation():
-    """测试WorkflowState创建是否正常工作"""
-    print("🏗️ 测试WorkflowState创建...")
+    """测试 Shared Working Memory 的工作流事实写入是否正常"""
+    print("🏗️ 测试 Shared Working Memory 初始化...")
     
     try:
-        from app.core.workflow_state import workflow_manager
-        
-        # 测试新的智能风格决策接口
-        workflow = workflow_manager.create_workflow(
-            user_prompt="制作一个关于人工智能的短视频",
-            style_preference="希望有科技感和专业性",
-            duration=30
-        )
-        
-        print(f"   ✅ WorkflowState创建成功")
-        print(f"   任务ID: {workflow.task_id}")
-        print(f"   用户需求: {workflow.user_prompt}")
-        print(f"   风格偏好: {workflow.style_preference}")
-        print(f"   智能风格设计: {workflow.intelligent_style_design}")
-        
+        from app.agents.services.mas_shared_memory import get_shared_wm
+        wf_id = "wf-api-test"
+        shared = get_shared_wm()
+        store = memory_services.fact_store
+        store.put(wf_id, "project.concept_plan", {"overview": "制作一个关于人工智能的短视频", "intelligent_style_design": {"style_name": "tech"}})
+        plan = store.get(wf_id, "project.concept_plan")
+        assert plan, "concept_plan 未写入共享记忆"
+        print(f"   ✅ Shared WM 初始化成功，wf_id={wf_id}")
         return True
-        
     except Exception as e:
-        print(f"   ❌ WorkflowState创建失败: {e}")
+        print(f"   ❌ Shared WM 初始化失败: {e}")
         return False
 
 async def test_concept_planner_tools():
@@ -122,10 +119,10 @@ async def main():
         print("❌ 多项适配失败，需要进一步修复")
     
     print("\n🎯 关键适配验证:")
-    print("1. WorkflowState支持intelligent_style_design字段")
+    print("1. Shared WM 支撑概念计划与风格事实")
     print("2. API接口移除硬编码video_style参数")
     print("3. ConceptPlannerAgent可以使用ConceptGenerationTool")
-    print("4. 用户原始需求和智能风格设计都得到保留")
+    print("4. 用户原始需求与风格设计通过记忆层保留")
 
 if __name__ == "__main__":
     asyncio.run(main())

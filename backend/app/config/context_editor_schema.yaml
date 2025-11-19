@@ -1,0 +1,16 @@
+required_list_keys:
+  - ready
+  - dependencies
+  - failures
+
+required_dict_keys:
+  - summary
+  - global_stats
+
+# Mapping of full id collections to their visible subsets
+# The validator will ensure visible_* ids are subset of all_* ids
+id_collections:
+  all_ready_ids: visible_ready
+  all_failure_ids: visible_failures
+  all_dependency_ids: visible_dependencies
+

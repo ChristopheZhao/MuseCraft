@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Union, Type
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from .base_memory import (
+from ..stores import (
     MemoryItem, MemoryQuery, MemoryType, MemoryImportance,
     BaseMemoryStore, BaseMemoryRetriever,
     MemoryError, MemoryStorageError, MemoryRetrievalError

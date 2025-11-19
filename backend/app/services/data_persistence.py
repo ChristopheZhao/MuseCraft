@@ -16,6 +16,9 @@ from sqlalchemy.exc import IntegrityError, DataError
 from ..core.workflow_state import WorkflowState, SceneData, WorkflowStatus
 from ..models import Task, Scene, Resource, AgentExecution, AgentType, ResourceType, SceneType, TaskType, TaskStatus
 from ..core.config import settings
+from ..agents.memory.long_term.snapshots import export_shared_wm_snapshot
+from ..services.memory_provider import get_memory_services, MemoryServices
+from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
 
 
 class DataValidationError(Exception):
@@ -32,8 +35,10 @@ class DataPersistenceService:
     2. MAS兼容性：支持Agent间状态共享和通信
     """
     
-    def __init__(self):
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
         self.logger = self._get_logger()
+        self._memory_services = memory_services or get_memory_services()
+        self._fact_store = self._memory_services.fact_store
 
     def _get_logger(self):
         import logging
@@ -114,6 +119,232 @@ class DataPersistenceService:
                 "error": str(e),
                 "persistence_time": datetime.now().isoformat()
             }
+
+    async def persist_from_shared_wm(self, task_id: str, db: Session) -> Dict[str, Any]:
+        """Persist results by reading snapshot from Shared Working Memory.
+
+        This path decouples persistence from WorkflowState and uses the memory-first design.
+        """
+        self.logger.info(f"🗄️ 开始基于 Shared WM 持久化任务 {task_id} 的数据")
+        try:
+            snapshot = export_shared_wm_snapshot(task_id, memory_services=self._memory_services)
+            store = self._fact_store
+            # 1) upsert task
+            task = await self._persist_task_from_snapshot(snapshot, store, db)
+            # 2) scenes
+            scene_results = await self._persist_scenes_from_snapshot(task, snapshot, db)
+            # 3) resources (video, voice)
+            resource_results = await self._persist_resources_from_snapshot(task, snapshot, db)
+            resource_results += await self._persist_task_level_resources_from_snapshot(task, snapshot, db)
+            # 4) logs: skipped (not in WM snapshot)
+            db.commit()
+            return {
+                "task_id": task.id,
+                "external_task_id": task_id,
+                "status": "success",
+                "scenes_persisted": len(scene_results),
+                "resources_persisted": len(resource_results),
+                "persistence_time": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"❌ 基于 Shared WM 的数据持久化失败: {e}")
+            return {
+                "task_id": task_id,
+                "status": "failed",
+                "error": str(e),
+                "persistence_time": datetime.now().isoformat(),
+            }
+
+    async def _persist_task_from_snapshot(
+        self,
+        snapshot: Dict[str, Any],
+        store,
+        db: Session,
+    ) -> Task:
+        ext_id = str(snapshot.get("task_id") or "")
+        try:
+            concept_plan = store.get(ext_id, "concept_plan", default={}) or {}
+        except SharedMemoryStoreError:
+            concept_plan = {}
+        try:
+            voice_plan = store.get(ext_id, "voice_plan", default={}) or {}
+        except SharedMemoryStoreError:
+            voice_plan = {}
+        intelligent_style_design = {}
+        content_elements = {}
+        if isinstance(concept_plan, dict):
+            intelligent_style_design = concept_plan.get("intelligent_style_design", {}) or {}
+            content_elements = concept_plan.get("content_elements", {}) or {}
+        # upsert task by external task_id
+        task = db.query(Task).filter(Task.task_id == ext_id).first()
+        if not task:
+            task = Task(
+                task_id=ext_id,
+                title="Short Video Task",
+                description="",
+                task_type=TaskType.VIDEO_GENERATION,
+                status=TaskStatus.PERSISTING,
+                progress_percentage=90,
+                current_step="Persisting data",
+                input_parameters={
+                    "intelligent_style_design": intelligent_style_design,
+                    "voice_plan": voice_plan,
+                    "content_elements": content_elements,
+                },
+            )
+            db.add(task)
+            db.flush()
+        # output metadata
+        if hasattr(task, "output_metadata"):
+            task.output_metadata = {
+                "concept_plan": concept_plan,
+                "intelligent_style_design": intelligent_style_design,
+                "voice_plan": voice_plan,
+                "content_elements": content_elements,
+            }
+        db.flush()
+        return task
+
+    async def _persist_scenes_from_snapshot(self, task: Task, snapshot: Dict[str, Any], db: Session) -> List[Dict[str, Any]]:
+        scenes = snapshot.get("scenes") or []
+        results: List[Dict[str, Any]] = []
+        self.logger.info(f"🎬 基于 Shared WM 持久化 {len(scenes)} 个场景")
+        for sd in scenes:
+            if not isinstance(sd, dict):
+                continue
+            sn = sd.get("scene_number")
+            if sn is None:
+                continue
+            existing = db.query(Scene).filter(Scene.task_id == task.id, Scene.scene_number == sn).first()
+            if existing:
+                scene = existing
+                status = "updated"
+            else:
+                scene = Scene(task_id=task.id, scene_number=sn)
+                db.add(scene)
+                status = "created"
+            self._update_scene_from_snapshot_dict(scene, sd)
+            db.flush()
+            results.append({"scene_id": scene.id, "scene_number": scene.scene_number, "status": status})
+        return results
+
+    async def _persist_resources_from_snapshot(self, task: Task, snapshot: Dict[str, Any], db: Session) -> List[Dict[str, Any]]:
+        scenes = snapshot.get("scenes") or []
+        results: List[Dict[str, Any]] = []
+        for sd in scenes:
+            if not isinstance(sd, dict):
+                continue
+            sn = sd.get("scene_number")
+            if sn is None:
+                continue
+            scene = db.query(Scene).filter(Scene.task_id == task.id, Scene.scene_number == sn).first()
+            if not scene:
+                continue
+            # video resource
+            vu = (sd.get("video_url") or "") if isinstance(sd.get("video_url"), str) else ""
+            vp = (sd.get("video_path") or "") if isinstance(sd.get("video_path"), str) else ""
+            if vu or vp:
+                try:
+                    res = Resource(
+                        task_id=task.id,
+                        scene_id=scene.id,
+                        filename=f"scene_{sn}_video.{(vp or 'mp4').split('.')[-1]}",
+                        file_path=vp or "",
+                        file_url=vu or None,
+                        resource_type=ResourceType.VIDEO,
+                        generation_parameters=sd.get("video_generation_params", {}),
+                        processing_status="completed" if (vp or vu) else "pending",
+                        is_generated=True,
+                    )
+                    db.add(res)
+                    results.append({"type": "video", "scene": sn, "status": "created"})
+                except Exception as e:
+                    self.logger.error(f"❌ 视频资源持久化失败: {e}")
+            # voice resource
+            vu2 = (sd.get("voice_over_audio_url") or "") if isinstance(sd.get("voice_over_audio_url"), str) else ""
+            vp2 = (sd.get("voice_over_audio_path") or "") if isinstance(sd.get("voice_over_audio_path"), str) else ""
+            if vu2 or vp2:
+                try:
+                    res = Resource(
+                        task_id=task.id,
+                        scene_id=scene.id,
+                        filename=f"scene_{sn}_voice.{(vp2 or 'wav').split('.')[-1]}",
+                        file_path=vp2 or "",
+                        file_url=vu2 or None,
+                        resource_type=self._resolve_voice_resource_type(),
+                        generation_parameters=sd.get("voice_over_audio_metadata", {}),
+                        processing_status="completed" if (vp2 or vu2) else "pending",
+                        is_generated=True,
+                    )
+                    db.add(res)
+                    results.append({"type": "voice_over", "scene": sn, "status": "created"})
+                except Exception as e:
+                    self.logger.error(f"❌ 配音资源持久化失败: {e}")
+        return results
+
+    async def _persist_task_level_resources_from_snapshot(self, task: Task, snapshot: Dict[str, Any], db: Session) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        final_video = snapshot.get("final_video") or {}
+        if isinstance(final_video, dict):
+            path = final_video.get("path") or ""
+            url = final_video.get("url") or ""
+            if path or url:
+                try:
+                    res = Resource(
+                        task_id=task.id,
+                        scene_id=None,
+                        filename=(path or url).split("/")[-1] or "final_video.mp4",
+                        file_path=path or "",
+                        file_url=url or None,
+                        resource_type=ResourceType.VIDEO,
+                        processing_status="completed" if (path or url) else "pending",
+                        is_generated=True,
+                        is_final_output=True,
+                        generation_parameters={"mix": final_video.get("mix")},
+                        storage_provider=(final_video.get("storage") or {}).get("provider", "local"),
+                    )
+                    db.add(res)
+                    results.append({"type": "final_video", "status": "created"})
+                except Exception as e:
+                    self.logger.error(f"❌ Final video persistence failed: {e}")
+        return results
+
+    def _update_scene_from_snapshot_dict(self, scene: Scene, d: Dict[str, Any]) -> None:
+        # type-safe mapping with defaults
+        def _s(key: str) -> str:
+            v = d.get(key)
+            return v if isinstance(v, str) else (str(v) if v is not None else "")
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                return float(d.get(key, default) or default)
+            except Exception:
+                return default
+
+        scene.scene_type = SceneType.MAIN_CONTENT
+        scene.title = _s("title")
+        scene.description = _s("description")
+        scene.duration = _f("duration", 0.0)
+        scene.start_time = _f("start_time", 0.0)
+        scene.end_time = _f("end_time", scene.start_time + scene.duration)
+
+        scene.visual_description = _s("visual_description")
+        scene.narrative_description = _s("narrative_description")
+        scene.mood_and_atmosphere = _s("mood_and_atmosphere")
+        scene.camera_angle = _s("camera_angle")
+        scene.lighting_style = _s("lighting_style")
+        scene.art_style = _s("art_style")
+
+        scene.script_text = _s("script_text")
+        scene.voice_over_text = _s("voice_over_text")
+
+        scene.background_music_style = _s("background_music_style")
+        scene.image_prompt = _s("image_prompt")
+        scene.image_url = _s("image_url")
+        scene.image_path = _s("image_path")
+        scene.video_prompt = _s("video_prompt")
+        scene.video_url = _s("video_url")
+        scene.video_path = _s("video_path")
     
     async def _validate_and_clean_data(self, workflow_state: WorkflowState) -> WorkflowState:
         """验证和清理工作流数据 - 防止数据库字段长度错误"""
@@ -601,3 +832,8 @@ class DataPersistenceService:
 
 # 全局服务实例
 data_persistence_service = DataPersistenceService()
+
+
+def configure_data_persistence(memory_services: MemoryServices) -> None:
+    global data_persistence_service
+    data_persistence_service = DataPersistenceService(memory_services)

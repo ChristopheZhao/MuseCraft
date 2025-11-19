@@ -12,13 +12,17 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
-from ...services.global_memory_service import GlobalMemoryService
+from ...services.memory_provider import get_memory_services, MemoryServices
 from ...core.scene_continuity_memory import get_scene_continuity_memory
-from ...agents.memory.base_memory import MemoryType, MemoryImportance
+from ...agents.memory.long_term.stores import MemoryType, MemoryImportance
 from ...services.monitoring_service import MonitoringService, MetricType
 
 
 class MemoryTool(AsyncTool):
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
+        super().__init__()
+        self._memory_services = memory_services or get_memory_services()
+
     @classmethod
     def get_metadata(cls) -> ToolMetadata:
         return ToolMetadata(
@@ -33,7 +37,7 @@ class MemoryTool(AsyncTool):
         )
 
     def _initialize(self):
-        self.gms = GlobalMemoryService()
+        self.gms = self._memory_services.global_service
         self._max_items = int(os.getenv("MEMORY_TOOL_MAX_ITEMS", "5"))
         self._mon = MonitoringService()
 

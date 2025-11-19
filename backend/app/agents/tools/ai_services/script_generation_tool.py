@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Dict, Any, List, Optional
 
-from ..base_tool import AsyncTool, ToolMetadata, ToolType
+from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 
 
 class ScriptGenerationTool(AsyncTool):
@@ -272,12 +272,14 @@ class ScriptGenerationTool(AsyncTool):
                 raise ValueError(f"Failed to parse LLM response as JSON: {exc}")
                 
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"场景脚本生成失败: {str(e)}",
-                "duration": _default_dur,  # ✅ 即使错误也遵循离散时长约束
-                "duration_reasoning": "发生错误，使用默认时长"
-            }
+            raise ToolError(
+                f"场景脚本生成失败: {str(e)}",
+                error_code="scene_script_failed",
+                details={
+                    "duration": _default_dur,
+                    "duration_reasoning": "发生错误，使用默认时长",
+                },
+            )
     
     async def _generate_narrative_structure(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成叙事结构"""
@@ -332,14 +334,10 @@ class ScriptGenerationTool(AsyncTool):
                     "scene_connections": ["场景间自然过渡"],
                     "emotional_curve": "渐进式情感发展",
                     "key_moments": ["各场景重点时刻"],
-                    "success": True
                 }
-                
+
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"叙事结构生成失败: {str(e)}"
-            }
+            raise ToolError(f"叙事结构生成失败: {str(e)}", error_code="narrative_structure_failed")
     
     async def _optimize_dialogue(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """优化对话内容"""
@@ -373,20 +371,11 @@ class ScriptGenerationTool(AsyncTool):
                 return {
                     "optimized_script": optimized_text,
                     "optimization_notes": "对话语调和流畅度优化",
-                    "success": True
                 }
-            return {
-                "optimized_script": script_text,
-                "optimization_notes": "优化失败，返回原始脚本",
-                "success": False
-            }
-                
+            raise ToolError("未生成优化结果", error_code="dialogue_optimize_empty")
+
         except Exception as e:
-            return {
-                "optimized_script": script_text,
-                "success": False,
-                "error": f"对话优化失败: {str(e)}"
-            }
+            raise ToolError(f"对话优化失败: {str(e)}", error_code="dialogue_optimize_failed")
     
     async def _analyze_script_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """分析脚本连续性"""
@@ -434,8 +423,6 @@ class ScriptGenerationTool(AsyncTool):
             if llm_content:
                 try:
                     analysis_data = json.loads(llm_content)
-                    if "success" not in analysis_data:
-                        analysis_data["success"] = True
                     return analysis_data
                 except json.JSONDecodeError:
                     return {
@@ -443,18 +430,12 @@ class ScriptGenerationTool(AsyncTool):
                         "analysis": llm_content,
                         "weak_points": [],
                         "suggestions": ["基于LLM分析进行优化"],
-                        "success": True
                     }
-            return {
-                "continuity_score": 0.5,
-                "analysis": "连续性分析失败",
-                "suggestions": ["手动检查脚本连贯性"],
-                "success": False
-            }
-                
+            raise ToolError(
+                "连续性分析失败",
+                error_code="continuity_analysis_failed",
+                details={"suggestions": ["手动检查脚本连贯性"]},
+            )
+
         except Exception as e:
-            return {
-                "continuity_score": 0.5,
-                "success": False,
-                "error": f"连续性分析失败: {str(e)}"
-            }
+            raise ToolError(f"连续性分析失败: {str(e)}", error_code="continuity_analysis_failed")

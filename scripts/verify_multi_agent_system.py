@@ -190,7 +190,7 @@ class MultiAgentSystemVerifier:
         memory_root = backend_root / "app/agents/memory"
         
         # 检查基础记忆类
-        base_memory_path = memory_root / "base_memory.py"
+        base_memory_path = memory_root / "long_term" / "stores" / "base.py"
         base_memory_features = {
             "file_exists": self.check_file_exists(base_memory_path),
             "has_memory_item": self.check_class_in_file(base_memory_path, "MemoryItem"),
@@ -199,7 +199,7 @@ class MultiAgentSystemVerifier:
         }
         
         # 检查记忆管理器
-        memory_manager_path = memory_root / "memory_manager.py"
+        memory_manager_path = memory_root / "long_term" / "manager" / "memory_manager.py"
         manager_features = {
             "file_exists": self.check_file_exists(memory_manager_path),
             "has_manager": self.check_class_in_file(memory_manager_path, "MemoryManager"),

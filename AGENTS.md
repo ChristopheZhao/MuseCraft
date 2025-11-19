@@ -6,13 +6,25 @@ Principles for Agents and Tools
 - Anti-Hardcoding: Do not encode LLM decisions in code via regex or if/else. Express priors and constraints in system/context messages and tool schemas; let the LLM choose within schema.
 - Prompt Neutrality: Prompts must not include tool names, parameter names, or value ranges. Expose capabilities exclusively via tools schema; let validation happen in tools.
 - Fallbacks as System Guarantees: Fail fast on missing capabilities at tool level, provide minimal, safe fallbacks only where explicitly designed. Surface diagnostics early (keys, endpoints, capabilities).
-- Non-Pipeline Autonomy: Agents应以 ReAct 循环和工作流状态驱动决策，而非硬编码的顺序或遍历；即便 orchestrator 暂时使用固定顺序调度，也必须保留按任务特征动态插入/跳过阶段的能力，为后续自主化升级预留空间。
+- Non-Pipeline Autonomy: Agents should always follow the ReAct loop (observe → plan → act → reflect) instead of relying on hard-coded pipelines. Even if an orchestrator schedules agents in a fixed order today, the agent must still retain the freedom to skip/insert stages based on task traits so it can evolve toward higher autonomy later.
 - Root‑Cause First (TDD mindset): When a failure or mismatch appears, diagnose and fix the root cause before adding case‑specific workarounds. Avoid “for this case only” hardcoding. For LLM JSON outputs that require structure, always request `response_format={"type":"json_object"}` and ensure messages/payloads are JSON‑serializable primitives (no runtime objects). Keep supplier constraints in tool schemas; where a supplier cannot guarantee a constraint (e.g., precise audio duration), treat it as a soft hint and enforce exactness via post‑processing tools. Add small tests/telemetry to prevent regressions and capture fallback_reason when degradation occurs.
+- Contract‑First Normalization (no patchy fixes): Normalize and validate model/tool outputs at the contract boundary (parse/adapter) with explicit diagnostics. Do not add silent “consumption‑site” workarounds that mask errors. Temporary guards must be traceable and removed after root cause is fixed.
 - Error Transparency: In agent flows, prefer surfacing explicit errors or prominent diagnostics over silent fallbacks—never mask unexpected states just to keep the run alive unless the product spec mandates a controlled downgrade.
-- Correct Proven-Erroneous Designs: 一旦确认某段设计或流程本身存在问题，必须直接修复或替换，禁止为错误行为保留兼容层或兜底逻辑，避免旧问题在系统中延续。
+- Correct Proven-Erroneous Designs: Once a design is confirmed faulty, fix or replace it outright—do not preserve compatibility layers or silent fallbacks for incorrect behaviour.
+- Rework Over Residual Compatibility: During refactors, do not assume legacy implementations are valid when they conflict with new architecture. If an older approach is wrong, plan for the necessary breaking change, manage risk, and replace it instead of layering temporary shims.
 - ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; update workflow state and continuity memory each turn; stop on clear success criteria.
 - Content Safety: Prompts and templates must avoid explicit or sensitive body-part phrasing and NSFW content. Prefer neutral, professional descriptions of attire, posture, and composition.
 - Config over Constants: Enforce constraints via schemas driven by config (e.g., video durations from provider config) and environment (.env) for timeouts and limits.
+
+References
+- Composer Agent + Tools usage and ReAct guidelines: see docs/agents/composer_guidelines.md
+
+## Working Memory and Context Editing Principles
+
+- **Separate fact storage from context editing**: use working memory as the source of truth for iterate facts only (actions, observations, references). Keep context trimming/summary/usage receipts in a dedicated context editor layer with explicit contracts and budgets.
+- **Prefer model-driven compaction with explicit diagnostics**: use LLM-based compaction or summarisation first, validate against a schema, and surface errors if the compacted view is still over budget or structurally invalid—never rely on silent fallbacks.
+- **Drive policies through configuration**: express context budgets/quotas in configurable strategies; agents select strategies rather than hard-coding thresholds.
+- **Load external state via adapters**: converting workflow state (or other business sources) into working memory snapshots should be handled by dedicated builders/adapters so agents depend on abstractions and retain single responsibility.
 
 Archived Modules
 
@@ -31,15 +43,12 @@ Environment
 
 - Use a Linux-compatible shell for local orchestration. WSL2 (Ubuntu) is verified and recommended when developing on Windows; keep tooling aligned with the container/runtime configuration.
 
-## FC 暴露策略与工具分配（中文补充）
+## Function-Call Exposure and Tool Assignment
 
-- 工具分配（allocated_tools）用于为 Agent 注入“可用的工具集合”（工具级权限）。
-- FC 暴露（Function Call schema）用于控制“在已分配工具中，哪些动作允许 LLM 自主选择”（动作级白名单）。
-- 最小暴露：默认不对 LLM 暴露高风险/副作用工具与动作（如存储、记忆、外部写操作）。必要时由策略显式开放。
-- 策略来源：
-  - 工具默认可见性：各工具可通过 `get_fc_visibility()` 给出默认建议（如 `{"expose": true, "allowed_actions": [...]}`）。
-  - 全局策略：`backend/config/mas/fc_policies.yaml` 可集中覆盖（支持 `per_agent`）。
-  - BaseAgent 构建 FC schema 时动态加载策略与工具元数据，热生效，无需重启。
+- Assign tools explicitly per agent to define the available capability set; do not call providers directly from agent code.
+- Expose function-call schemas selectively so the LLM may invoke only the safe/desired actions; high-risk operations should require explicit policy opt-in.
+- Policies should be defined centrally (e.g., configuration files) and merged with tool metadata at runtime so changes take effect without code edits.
+ - Tools are execution-only: do not split a tool into “plan” vs “execute” semantics at the agent layer. One FC round should produce the function calls and execute them in the same round; avoid maintaining intermediate planned_calls state in agents.
 
 ## ReAct 编排器（FC化）
 

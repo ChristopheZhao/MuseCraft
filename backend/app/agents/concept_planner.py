@@ -14,6 +14,8 @@ from ..models import Task, AgentExecution, AgentType, Scene, SceneType
 from ..core.prompt_manager import get_prompt_manager
 from ..core.story_plan import normalize_character_elements
 from .utils import SceneDurationCalculator,safe_json_loads
+from .services.mas_shared_memory import get_shared_wm
+from .memory.short_term.working_memory import SceneSnapshot
 
 
 class ConceptPlannerAgent(BaseAgent):
@@ -21,13 +23,14 @@ class ConceptPlannerAgent(BaseAgent):
 
     SCENE_BATCH_SIZE = 2
 
-    def __init__(self, llms=None):
+    def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.CONCEPT_PLANNER,
             agent_name="concept_planner",
             timeout_seconds=getattr(settings, "CONCEPT_PLANNER_TIMEOUT_SECONDS", 200),
             max_retries=2,
             llms=llms,
+            memory_services=memory_services,
         )
 
     async def _execute_impl(
@@ -67,17 +70,18 @@ class ConceptPlannerAgent(BaseAgent):
         aspect_ratio = input_data.get("aspect_ratio", "16:9")
         workflow_state_id = input_data["workflow_state_id"]
 
-        from ..core.workflow_state import workflow_manager
-
-        workflow_state = workflow_manager.get_workflow(workflow_state_id)
-        if not workflow_state:
-            raise AgentError(f"WorkflowState {workflow_state_id} not found")
-
+        # 移除 WorkflowState 依赖：从 Shared WM facts 读取已有风格（如有）
         if not predefined_style_profile:
             try:
-                predefined_style_profile = getattr(workflow_state, "intelligent_style_design", None)
+                existing_plan = self.fetch_memory_slot(
+                    workflow_state_id,
+                    "project.concept_plan",
+                    default={}
+                ) or {}
             except Exception:
-                predefined_style_profile = None
+                existing_plan = {}
+            if isinstance(existing_plan, dict):
+                predefined_style_profile = existing_plan.get("intelligent_style_design") or None
 
         project_character_bible = input_data.get("character_bible") or {}
         if not project_character_bible:
@@ -164,7 +168,6 @@ class ConceptPlannerAgent(BaseAgent):
             temperature=skeleton_temperature,
         )
         self._update_token_usage(execution, skeleton_usage)
-        workflow_state.concept_outline = skeleton_payload
 
         skeleton_json = self._compact_json(skeleton_payload)
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
@@ -228,9 +231,21 @@ class ConceptPlannerAgent(BaseAgent):
         content_elements = content_elements_raw
         consistency_hints = style_bundle["payload"].get("consistency_hints", {})
 
-        workflow_state.intelligent_style_design = intelligent_style_design
-        workflow_state.content_elements = content_elements
-        workflow_state.consistency_hints = consistency_hints
+        if intelligent_style_design:
+            try:
+                self.logger.info(
+                    "🎨 风格规划完成：intelligent_style_design=%s",
+                    intelligent_style_design,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self.logger.warning("⚠️ 风格规划输出为空，需排查 style 生成链路")
+            except Exception:
+                pass
+
+        # 共享记忆作为事实源，WorkflowState 写回移除
 
         voice_plan_raw = voice_bundle["payload"].get("voice_plan", {})
         voice_plan = self._normalize_voice_plan(voice_plan_raw)
@@ -238,7 +253,7 @@ class ConceptPlannerAgent(BaseAgent):
             voice_plan,
             skeleton_payload,
         )
-        workflow_state.voice_plan = voice_plan
+        # 共享记忆作为事实源，WorkflowState 写回移除
 
         await self._update_progress(execution, 65, "Detailing scenes", db)
 
@@ -287,12 +302,70 @@ class ConceptPlannerAgent(BaseAgent):
             total_planned_duration,
         )
 
-        workflow_state.concept_plan = concept_plan
+        # 共享记忆作为事实源，WorkflowState 写回移除
+
+        # --- Write to Shared Working Memory (facts + scenes) ---
+        try:
+            self.store_memory_slot(workflow_state_id, "project.concept_plan", concept_plan)
+        except Exception as _slot_err:
+            self.logger.warning(f"Slot write failed for concept_plan: {_slot_err}")
+
+        try:
+            self.store_memory_slot(workflow_state_id, "project.voice_plan", voice_plan)
+        except Exception as _slot_err:
+            self.logger.warning(f"Slot write failed for voice_plan: {_slot_err}")
+
+        try:
+            shared = get_shared_wm()
+            try:
+                self.logger.info(
+                    "SHARED_FACT_WRITE concept_plan keys=%s",
+                    list((intelligent_style_design or {}).keys()),
+                )
+            except Exception:
+                pass
+            shared.set_facts(
+                workflow_state_id,
+                {
+                    "intelligent_style_design": intelligent_style_design,
+                    "content_elements": content_elements,
+                },
+            )
+
+            # Project concept scenes into shared scene snapshots
+            for s in concept_plan.get("scenes", []) or []:
+                try:
+                    sn = int(s.get("scene_number") or 0)
+                except Exception:
+                    sn = 0
+                if sn <= 0:
+                    continue
+                try:
+                    dur = float(s.get("final_duration", s.get("duration", 0.0)) or 0.0)
+                except Exception:
+                    dur = 0.0
+                snap = SceneSnapshot(
+                    scene_number=sn,
+                    depends_on_scene=None,
+                    duration=dur,
+                    visual_description=s.get("visual_description", ""),
+                    narrative_description=s.get("narrative_description", ""),
+                    image_url=s.get("image_url", ""),
+                    motion_beats=s.get("motion_beats", []) if isinstance(s.get("motion_beats"), list) else [],
+                )
+                shared.upsert_scene(workflow_state_id, snap)
+        except Exception as _wm_err:
+            # Fail-fast is reserved for agent core flow; memory write is best-effort
+            self.logger.warning(f"Shared WM write failed (non-fatal): {_wm_err}")
 
         if concept_mode == "project":
-            scenes_data: List[Scene] = []
+            scenes_data: List[Dict[str, Any]] = []
         else:
-            scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
+            # 直接使用 concept_plan.scenes（已写入 Shared WM 场景快照）
+            try:
+                scenes_data = list(concept_plan.get("scenes", []) or []) if isinstance(concept_plan, dict) else []
+            except Exception:
+                scenes_data = []
 
         try:
             memory_stored = await self.store_creative_guidance(
@@ -343,6 +416,15 @@ class ConceptPlannerAgent(BaseAgent):
             agent_sys = pm.render_template(
                 "concept_planner", "system", variables={}, use_cache=True, auto_reload=False
             )
+            # 根因定位：记录模板来源文件，避免串味/误加载
+            try:
+                mas_cfg = pm.get_config("mas_system")
+                ag_cfg = pm.get_config("concept_planner")
+                mas_src = getattr(mas_cfg, "source_path", None) if mas_cfg else None
+                ag_src = getattr(ag_cfg, "source_path", None) if ag_cfg else None
+                self.logger.info(f"SYSTEM_SRC concept_planner mas={mas_src} agent={ag_src}")
+            except Exception:
+                pass
             parts: List[str] = []
             if mas_sys and isinstance(mas_sys, str) and mas_sys.strip():
                 parts.append(mas_sys.strip())
@@ -409,6 +491,7 @@ class ConceptPlannerAgent(BaseAgent):
             response.get("content", ""),
             logger=self.logger,
             context="skeleton_generation",
+            allow_fallback=False,
         )
         if not isinstance(payload, dict):
             raise AgentError("Skeleton generation returned invalid payload")
@@ -473,13 +556,56 @@ class ConceptPlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
             context_description="style_elements_generation",
         )
-        payload = safe_json_loads(
-            response.get("content", ""),
-            logger=self.logger,
-            context="style_elements_generation",
-        )
+        try:
+            payload = safe_json_loads(
+                response.get("content", ""),
+                logger=self.logger,
+                context="style_elements_generation",
+                allow_fallback=False,
+            )
+        except Exception as _pe:
+            # 打印原始返回内容的更完整快照，便于定位非JSON根因
+            try:
+                raw = response.get("content", "")
+                clen = len(raw or "")
+                try:
+                    max_len = int(getattr(settings, 'CONTENT_PREVIEW_CHARS', 1000))
+                except Exception:
+                    max_len = 1000
+                preview = (raw or "")[:max_len].replace("\n", " ")
+                meta = {
+                    "finish_reason": response.get("finish_reason"),
+                    "model": response.get("model"),
+                    "provider": response.get("provider"),
+                    "usage": response.get("usage"),
+                    "len": clen,
+                }
+                self.logger.warning(
+                    "Style elements raw response snapshot: meta=%s preview=%r",
+                    meta,
+                    preview,
+                )
+            except Exception:
+                pass
+            raise
         if not isinstance(payload, dict) or "intelligent_style_design" not in payload:
+            # 定位是什么问题
+            if not isinstance(payload, dict):
+                self.logger.info("Style generation payload is not a dict: %s", payload)
+            elif "intelligent_style_design" not in payload:
+                self.logger.info("Style generation missing intelligent_style_design: %s", payload)
             raise AgentError("Style generation returned invalid payload")
+        # 调试：直接打印 consistency_hints（不改变行为）
+        try:
+            ch = payload.get("consistency_hints", {})
+            import json as _json
+            ch_text = _json.dumps(ch, ensure_ascii=False)
+            # 控制长度，避免刷屏
+            if len(ch_text) > 1500:
+                ch_text = ch_text[:1500] + "...<trunc>"
+            self.logger.info(f"CONSISTENCY_HINTS: {ch_text}")
+        except Exception:
+            pass
         return {"payload": payload, "usage": response.get("usage", {}).get("total_tokens", 0)}
 
     async def _generate_voice_plan(
@@ -522,6 +648,7 @@ class ConceptPlannerAgent(BaseAgent):
             response.get("content", ""),
             logger=self.logger,
             context="voice_plan_generation",
+            allow_fallback=False,
         )
         if not isinstance(payload, dict) or "voice_plan" not in payload:
             raise AgentError("Voice plan generation returned invalid payload")
@@ -591,6 +718,7 @@ class ConceptPlannerAgent(BaseAgent):
                 response.get("content", ""),
                 logger=self.logger,
                 context=f"scene_detail_batch_generation_batch_{batch_index+1}",
+                allow_fallback=False,
             )
             if not isinstance(payload, dict) or "scenes" not in payload:
                 raise AgentError("Scene detail generation returned invalid payload")
@@ -759,7 +887,35 @@ class ConceptPlannerAgent(BaseAgent):
     ) -> Dict[str, str]:
         visual_hint = consistency_hints.get("visual") if isinstance(consistency_hints, dict) else ""
         narrative_hint = consistency_hints.get("narrative") if isinstance(consistency_hints, dict) else ""
-        color_hint = ", ".join(consistency_hints.get("color_palette", [])) if isinstance(consistency_hints, dict) else ""
+        # 根因定位日志：记录 consistency_hints.color_palette 的结构，用于后续契约化修复
+        cp = []
+        if isinstance(consistency_hints, dict):
+            cp = consistency_hints.get("color_palette", [])
+        try:
+            head = (cp[:5] if isinstance(cp, (list, tuple)) else cp)
+            head_types = (
+                [type(x).__name__ for x in head] if isinstance(head, (list, tuple)) else [type(head).__name__]
+            )
+            self.logger.info(
+                f"STYLE_DIAG consistency_hints_type={type(consistency_hints).__name__} "
+                f"color_palette_type={type(cp).__name__} head_types={head_types} head={head}"
+            )
+        except Exception:
+            pass
+        # 保持原有行为：直接 join，若结构不合规让错误暴露出来（便于定位根因）
+        if isinstance(consistency_hints, dict):
+            try:
+                color_hint = ", ".join(cp)
+            except Exception as e:
+                try:
+                    self.logger.error(
+                        f"STYLE_JOIN_ERROR color_palette not flat-str-list: type={type(cp).__name__} err={e}"
+                    )
+                except Exception:
+                    pass
+                raise
+        else:
+            color_hint = ""
 
         scene_consistency = "; ".join(scene_notes.get("consistency", [])) if scene_notes else ""
 

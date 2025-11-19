@@ -184,23 +184,52 @@ def start_celery_worker():
     
     print("Starting Celery worker with watchdog hot reload...")
     
-    # 使用 watchmedo 实现真正的热重载
-    celery_cmd = [
-        "uv", "run", "watchmedo", "auto-restart",
-        "--directory=./",
-        "--pattern=*.py",
-        "--recursive",
-        "--",
+    # 允许用环境变量控制关键参数（不改业务）：
+    #  CELERY_LOG_LEVEL=debug|info（默认 info）
+    #  CELERY_WORKER_POOL=solo|prefork（默认 solo，开发期 Ctrl+C 更友好）
+    #  CELERY_WORKER_CONCURRENCY=1（默认 1，便于调试）
+    #  CELERY_QUEUES=celery,video_processing（监听的队列列表）
+    #  CELERY_SOFT_TIME_LIMIT/CELERY_TIME_LIMIT（可选，单位秒）
+    # 优先使用 CELERY_LOG_LEVEL；未设置时回退到全局 LOG_LEVEL，再回退到 info
+    log_level = (os.getenv("CELERY_LOG_LEVEL") or os.getenv("LOG_LEVEL") or "info").lower()
+    print(f"[dev] Celery worker effective log level: {log_level}")
+    pool = os.getenv("CELERY_WORKER_POOL", "solo")
+    concurrency = os.getenv("CELERY_WORKER_CONCURRENCY", "1")
+    queues = os.getenv("CELERY_QUEUES", "celery,video_processing")
+    soft_tl = os.getenv("CELERY_SOFT_TIME_LIMIT")
+    hard_tl = os.getenv("CELERY_TIME_LIMIT")
+
+    # 使用 watchmedo 实现热重载；允许通过 CELERY_DISABLE_WATCHDOG=1 关闭
+    use_watchdog = os.getenv("CELERY_DISABLE_WATCHDOG", "0") != "1"
+
+    base_cmd = [
         "celery", "-A", "app.services.celery_app", "worker",
-        "--loglevel=info",
-        "--concurrency=1",  # 减少并发以便于调试
-        "--queues=celery,video_processing",  # 监听默认队列和视频处理队列
-        "--without-gossip",  # 修复Windows/WSL任务执行问题
+        f"--loglevel={log_level}",
+        f"--concurrency={concurrency}",
+        f"--queues={queues}",
+        "--without-gossip",
         "--without-mingle",
         "--without-heartbeat",
         "-Ofair",
-        "--pool=solo"  # 单线程模式，确保任务执行
+        f"--pool={pool}",
     ]
+    if soft_tl:
+        base_cmd.append(f"--soft-time-limit={soft_tl}")
+    if hard_tl:
+        base_cmd.append(f"--time-limit={hard_tl}")
+
+    celery_cmd = (
+        [
+            "uv", "run", "watchmedo", "auto-restart",
+            "--directory=./",
+            "--pattern=*.py",
+            "--recursive",
+            "--",
+        ]
+        + base_cmd
+        if use_watchdog
+        else ["uv", "run", *base_cmd]
+    )
     
     try:
         env = _build_env_with_no_proxy()
@@ -234,9 +263,12 @@ def start_celery_beat():
     
     print("Starting Celery beat...")
     
+    # 优先使用 CELERY_BEAT_LOG_LEVEL；未设置时回退到全局 LOG_LEVEL，再回退到 info
+    beat_log_level = (os.getenv("CELERY_BEAT_LOG_LEVEL") or os.getenv("LOG_LEVEL") or "info").lower()
+    print(f"[dev] Celery beat effective log level: {beat_log_level}")
     beat_cmd = [
         "uv", "run", "celery", "-A", "app.services.celery_app", "beat",
-        "--loglevel=info"
+        f"--loglevel={beat_log_level}"
     ]
     
     try:
@@ -268,13 +300,17 @@ def start_celery_beat():
 
 def start_api_server():
     """Start FastAPI server"""
-    
+
     print("Starting FastAPI server...")
-    
+
+    # Read API server configuration from environment
+    api_host = os.getenv("API_HOST", "0.0.0.0")
+    api_port = os.getenv("API_PORT", "8000")
+
     api_cmd = [
         "uv", "run", "uvicorn", "app.main:app",
-        "--host", "0.0.0.0",
-        "--port", "8000",
+        "--host", api_host,
+        "--port", api_port,
         "--log-level", "info"
     ]
 
@@ -325,10 +361,10 @@ def start_api_server():
                 preexec_fn=os.setsid
             )
         if enable_reload:
-            print("✓ FastAPI server started on http://localhost:8000 (reload ON)")
+            print(f"✓ FastAPI server started on http://localhost:{api_port} (reload ON)")
         else:
-            print("✓ FastAPI server started on http://localhost:8000 (reload OFF)")
-        print("✓ API accessible at http://127.0.0.1:8000 (bypassing proxy)")
+            print(f"✓ FastAPI server started on http://localhost:{api_port} (reload OFF)")
+        print(f"✓ API accessible at http://127.0.0.1:{api_port} (bypassing proxy)")
         
         # Wait a moment and check if it's actually running
         import time
@@ -465,10 +501,11 @@ def main():
         if not api_process:
             sys.exit(1)
         
+        api_port = os.getenv("API_PORT", "8000")
         print("\n" + "=" * 60)
         print("🎉 All services started successfully!")
-        print("📚 API Documentation: http://localhost:8000/docs")
-        print("❤️  Health Check: http://localhost:8000/health")
+        print(f"📚 API Documentation: http://localhost:{api_port}/docs")
+        print(f"❤️  Health Check: http://localhost:{api_port}/health")
         print("")
         print("🔄 Development Tips:")
         print("   • Press Ctrl+C to stop all services")
