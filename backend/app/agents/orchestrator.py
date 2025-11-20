@@ -444,28 +444,28 @@ class OrchestratorAgent(BaseAgent):
 
                     # Lightweight WS signals for coarse-grained UI sync
                     try:
+                        from .adapters.state.memory_state import build_memory_state
+                        shared = ensure_mas_memory(str(wf_id))
+                        state_view = build_memory_state(shared)
+
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
-                            shared = ensure_mas_memory(str(wf_id))
-                            outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
-                            images_cnt = len(outputs) if isinstance(outputs, dict) else 0
                             await self.websocket_manager.broadcast_to_task(
                                 str(task.task_id),
                                 {
                                     "type": "image_assets_ready",
                                     "task_id": str(task.task_id),
-                                    "images_count": images_cnt,
+                                    "images_count": int(state_view.get("outputs", {}).get("image", 0)),
+                                    "state": state_view,
                                 }
                             )
                         if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(wf_id, agent_output):
-                            shared = ensure_mas_memory(str(wf_id))
-                            outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
-                            videos_cnt = len(outputs) if isinstance(outputs, dict) else 0
                             await self.websocket_manager.broadcast_to_task(
                                 str(task.task_id),
                                 {
                                     "type": "video_assets_ready",
                                     "task_id": str(task.task_id),
-                                    "videos_count": videos_cnt,
+                                    "videos_count": int(state_view.get("outputs", {}).get("video", 0)),
+                                    "state": state_view,
                                 }
                             )
                     except Exception as _ws_sig_err:
