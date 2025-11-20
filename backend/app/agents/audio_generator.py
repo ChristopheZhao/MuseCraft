@@ -212,7 +212,8 @@ class AudioGeneratorAgent(ReActAgent):
         # 写回 WM（失败抛错）
         style_name = ""
         try:
-            concept_plan = self.fetch_memory_slot(wf_id, "project.concept_plan", default={}) or {}
+            from .utils.memory_helpers import read_shared_fact
+            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {}) or {}
             if isinstance(concept_plan, dict):
                 sg = concept_plan.get("intelligent_style_design") or {}
                 style_name = (sg or {}).get("style_name", "")
