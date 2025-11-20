@@ -508,12 +508,10 @@ class ScriptWriterAgent(BaseAgent):
                             None,
                         )
                         # 将脚本结果写入项目级脚本槽
+                        entry = {}
                         try:
-                            existing_scripts = self.fetch_memory_slot(
-                                workflow_state_id,
-                                "project.scene_scripts",
-                                default={}
-                            ) or {}
+                            from .utils.memory_helpers import read_shared_fact, write_shared_fact
+                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
                             entry = dict(existing_scripts.get(str(scene.scene_number), {}))
                             entry.update({
                                 "script_text": scene_script_data.get("script_text", ""),
@@ -528,6 +526,10 @@ class ScriptWriterAgent(BaseAgent):
                                 },
                                 "motion_beats": scene_script_data.get("motion_beats", []),
                             })
+                            merged = dict(existing_scripts)
+                            merged[str(scene.scene_number)] = entry
+                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
+                            # 兼容 slot 写入
                             self.store_memory_slot(
                                 workflow_state_id,
                                 "project.scene_scripts",
@@ -702,13 +704,13 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception as parse_err:
                             raise AgentError("Failed to parse scene_number during character consistency sync") from parse_err
                         if sn:
-                            existing_scripts = self.fetch_memory_slot(
-                                workflow_state_id,
-                                "project.scene_scripts",
-                                default={}
-                            ) or {}
+                            from .utils.memory_helpers import read_shared_fact, write_shared_fact
+                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
                             entry = dict(existing_scripts.get(str(sn), {}))
                             entry.update({"characters_present": present, "character_descriptions": descs})
+                            merged = dict(existing_scripts)
+                            merged[str(sn)] = entry
+                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
                             try:
                                 self.store_memory_slot(
                                     workflow_state_id,
@@ -719,7 +721,7 @@ class ScriptWriterAgent(BaseAgent):
                                 raise AgentError(
                                     f"Failed to persist character annotations for scene {sn}: {slot_err}"
                                 ) from slot_err
-                self.logger.info("✅ 角色一致性标注已写回 scene_scripts slot")
+                self.logger.info("✅ 角色一致性标注已写回 scene_scripts")
             except Exception as ce:
                 self.logger.error(f"角色一致性标注失败: {ce}")
                 raise AgentError("Shared WM update failed during scene character annotation") from ce
@@ -835,13 +837,13 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception:
                             continue
                         # 将角色提示写到 facts.scene_scripts 下以场景为键
-                        existing_scripts = self.fetch_memory_slot(
-                            workflow_state_id,
-                            "project.scene_scripts",
-                            default={}
-                        ) or {}
+                        from .utils.memory_helpers import read_shared_fact, write_shared_fact
+                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
                         entry = dict(existing_scripts.get(str(sn), {}))
                         entry.update({"characters_present": present, "character_descriptions": descs})
+                        merged = dict(existing_scripts)
+                        merged[str(sn)] = entry
+                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
                         try:
                             self.store_memory_slot(
                                 workflow_state_id,
@@ -1000,15 +1002,15 @@ class ScriptWriterAgent(BaseAgent):
                             if parts:
                                 descs.append("；".join(parts))
                     if names or descs:
-                        existing_scripts = self.fetch_memory_slot(
-                            workflow_state_id,
-                            "project.scene_scripts",
-                            default={}
-                        ) or {}
+                        from .utils.memory_helpers import read_shared_fact, write_shared_fact
+                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
                         entry = dict(existing_scripts.get(str(sn), {}))
                         merged_names = list(set((entry.get('characters_present', []) or []) + names))
                         merged_descs = list(set((entry.get('character_descriptions', []) or []) + descs))
                         entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
+                        merged = dict(existing_scripts)
+                        merged[str(sn)] = entry
+                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
                         try:
                             self.store_memory_slot(
                                 workflow_state_id,
