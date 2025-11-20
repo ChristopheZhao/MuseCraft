@@ -438,10 +438,6 @@ class OrchestratorAgent(BaseAgent):
                                 write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
                             except Exception:
                                 pass
-                            try:
-                                self.store_memory_slot(wf_id, "project.concept_plan", agent_output["concept_plan"])
-                            except Exception as slot_err:
-                                self.logger.warning(f"Slot write failed for concept_plan: {slot_err}")
                     else:
                         self.logger.info(f"🧠 DEBUG: No memory storage needed for {agent_type.value}")
                     

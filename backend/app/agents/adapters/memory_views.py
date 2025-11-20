@@ -25,23 +25,21 @@ def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
 
 def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
     """Fetch per-scene script facts from the workflow fact store."""
-    scripts: Dict[int, Dict[str, Any]] = {}
     try:
         wm = ensure_mas_memory(workflow_id)
         payload = wm.get("project.scene_scripts", {})
         if isinstance(payload, dict):
-            scripts = _normalize_scene_dict(payload)
-            if scripts:
-                return scripts
+            return _normalize_scene_dict(payload)
     except Exception:
-        scripts = {}
+        pass
+    # fallback to fact_store for legacy data
     store = _fact_store()
     if store is None:
-        return scripts
+        return {}
     try:
         payload = store.get(workflow_id, "project.scene_scripts", default={})
     except WorkflowFactStoreError:
-        return scripts
+        return {}
     return _normalize_scene_dict(payload)
 
 
@@ -61,10 +59,11 @@ def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
     try:
         wm = ensure_mas_memory(workflow_id)
         plan = wm.get("project.concept_plan", {}) or {}
-        if isinstance(plan, dict) and plan:
+        if isinstance(plan, dict):
             return plan
     except Exception:
         plan = {}
+    # fallback for legacy data
     store = _fact_store()
     if store is None:
         return plan if isinstance(plan, dict) else {}
