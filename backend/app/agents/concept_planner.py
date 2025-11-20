@@ -306,10 +306,20 @@ class ConceptPlannerAgent(BaseAgent):
 
         # --- Write to Shared Working Memory (facts + scenes) ---
         try:
+            from .utils.memory_helpers import write_shared_fact
+            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan)
+        except Exception as _wm_err:
+            self.logger.warning(f"WM write failed for concept_plan: {_wm_err}")
+        try:
+            from .utils.memory_helpers import write_shared_fact
+            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan)
+        except Exception:
+            pass
+        # 保留 slot 写入兼容路径（待彻底迁移后可删除）
+        try:
             self.store_memory_slot(workflow_state_id, "project.concept_plan", concept_plan)
         except Exception as _slot_err:
             self.logger.warning(f"Slot write failed for concept_plan: {_slot_err}")
-
         try:
             self.store_memory_slot(workflow_state_id, "project.voice_plan", voice_plan)
         except Exception as _slot_err:

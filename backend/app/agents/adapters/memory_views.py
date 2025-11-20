@@ -8,6 +8,7 @@ from ..services.mas_shared_memory import get_shared_wm
 from ..memory.short_term.workflow_facts import WorkflowFactStoreError
 from .video import VideoMemoryAdapter
 from ...services.memory_provider import get_memory_services
+from ..utils.memory_helpers import ensure_mas_memory
 
 
 def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
@@ -24,13 +25,23 @@ def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
 
 def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
     """Fetch per-scene script facts from the workflow fact store."""
+    scripts: Dict[int, Dict[str, Any]] = {}
+    try:
+        wm = ensure_mas_memory(workflow_id)
+        payload = wm.get("project.scene_scripts", {})
+        if isinstance(payload, dict):
+            scripts = _normalize_scene_dict(payload)
+            if scripts:
+                return scripts
+    except Exception:
+        scripts = {}
     store = _fact_store()
     if store is None:
-        return {}
+        return scripts
     try:
         payload = store.get(workflow_id, "project.scene_scripts", default={})
     except WorkflowFactStoreError:
-        return {}
+        return scripts
     return _normalize_scene_dict(payload)
 
 
@@ -47,9 +58,16 @@ def load_roles_context(workflow_id: str) -> Dict[str, Any]:
 
 
 def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
+    try:
+        wm = ensure_mas_memory(workflow_id)
+        plan = wm.get("project.concept_plan", {}) or {}
+        if isinstance(plan, dict) and plan:
+            return plan
+    except Exception:
+        plan = {}
     store = _fact_store()
     if store is None:
-        return {}
+        return plan if isinstance(plan, dict) else {}
     try:
         plan = store.get(workflow_id, "project.concept_plan", default={}) or {}
     except WorkflowFactStoreError:

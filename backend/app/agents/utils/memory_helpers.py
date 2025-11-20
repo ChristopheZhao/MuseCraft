@@ -10,6 +10,7 @@ from typing import Optional
 
 from app.agents.memory.short_term import WorkingMemory, get_working_memory_service
 from app.agents.memory.short_term.service import MemoryNotInitializedError
+from typing import Any
 
 MAS_SCOPE_PREFIX = "mas"
 AGENT_SCOPE_PREFIX = "agent"
@@ -44,4 +45,16 @@ def ensure_agent_memory(workflow_id: str, agent_name: str, *, shared_view: Optio
         return service.create_or_get(workflow_id, scope, owner_agent=agent_name, shared_view=shared)
 
 
-__all__ = ["agent_scope", "mas_scope", "ensure_mas_memory", "ensure_agent_memory"]
+def write_shared_fact(workflow_id: str, key: str, value: Any) -> None:
+    """Write a fact into MAS WorkingMemory under facts.<key>."""
+    wm = ensure_mas_memory(workflow_id)
+    wm.put(key, value)
+
+
+def read_shared_fact(workflow_id: str, key: str, default: Any = None) -> Any:
+    """Read a fact from MAS WorkingMemory, with default fallback."""
+    wm = ensure_mas_memory(workflow_id)
+    return wm.get(key, default)
+
+
+__all__ = ["agent_scope", "mas_scope", "ensure_mas_memory", "ensure_agent_memory", "write_shared_fact", "read_shared_fact"]

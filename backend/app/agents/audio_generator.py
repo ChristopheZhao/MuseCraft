@@ -61,7 +61,11 @@ class AudioGeneratorAgent(ReActAgent):
         observation: Dict[str, Any] = dict(base_observation or {})
         view = get_shared_wm().get_task(wf_id)
         store = self.shared_memory_store
-        concept_plan = self.fetch_memory_slot(wf_id, "project.concept_plan", default={}) or {}
+        try:
+            from .utils.memory_helpers import read_shared_fact
+            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
+        except Exception:
+            concept_plan = self.fetch_memory_slot(wf_id, "project.concept_plan", default={}) or {}
         final_video_info = store.get(wf_id, "project.final_video", default={}) or {}
         final_video_path = final_video_info.get("path", "")
         # 优先使用 orchestrator 注入的时间线与总时长

@@ -101,11 +101,15 @@ class ScriptWriterAgent(BaseAgent):
             # 获取场景和概念规划
             scenes_map = view.scenes or {}
             scenes = [scenes_map[k] for k in sorted(scenes_map.keys())]
-            concept_plan = self.fetch_memory_slot(
-                workflow_state_id,
-                "project.concept_plan",
-                default={}
-            ) or {}
+            try:
+                from .utils.memory_helpers import read_shared_fact
+                concept_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
+            except Exception:
+                concept_plan = self.fetch_memory_slot(
+                    workflow_state_id,
+                    "project.concept_plan",
+                    default={}
+                ) or {}
 
             if not scenes:
                 return {

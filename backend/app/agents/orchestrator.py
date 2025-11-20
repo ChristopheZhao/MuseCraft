@@ -434,6 +434,11 @@ class OrchestratorAgent(BaseAgent):
                         # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
                         if "concept_plan" in agent_output:
                             try:
+                                from .utils.memory_helpers import write_shared_fact
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                            except Exception:
+                                pass
+                            try:
                                 self.store_memory_slot(wf_id, "project.concept_plan", agent_output["concept_plan"])
                             except Exception as slot_err:
                                 self.logger.warning(f"Slot write failed for concept_plan: {slot_err}")
@@ -943,16 +948,16 @@ class OrchestratorAgent(BaseAgent):
                 if image_ctx:
                     agent_input["image_generation_context"] = image_ctx
 
-            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
-                overall_guidance = workflow_data.get("creative_guidance")
-                if overall_guidance:
-                    agent_input["creative_guidance"] = overall_guidance
-                scene_guidances = workflow_data.get("scene_guidances")
-                if scene_guidances:
-                    agent_input["scene_guidances"] = scene_guidances
+        if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
+            overall_guidance = workflow_data.get("creative_guidance")
+            if overall_guidance:
+                agent_input["creative_guidance"] = overall_guidance
+            scene_guidances = workflow_data.get("scene_guidances")
+            if scene_guidances:
+                agent_input["scene_guidances"] = scene_guidances
 
-            elif agent_type == AgentType.VOICE_SYNTHESIZER:
-                _merge_media_context(include_roles=True)
+        elif agent_type == AgentType.VOICE_SYNTHESIZER:
+            _merge_media_context(include_roles=True)
 
             return agent_input
             
