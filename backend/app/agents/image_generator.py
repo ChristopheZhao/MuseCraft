@@ -7,11 +7,15 @@ from sqlalchemy.orm import Session
 
 from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
-from .utils.artifacts import normalize_executed_calls_to_artifacts
+from .utils.artifacts import (
+    normalize_executed_calls_to_artifacts,
+    persist_scene_outputs,
+    finalize_scene_outputs,
+)
 from .utils.memory_helpers import ensure_mas_memory
 from ..models import Task, AgentExecution, AgentType
 from ..core.config import settings
-from .adapters.memory_views import load_scene_overview, load_scene_scripts, build_image_generation_context
+from .adapters.memory_views import build_image_generation_context
 from .adapters.state.scene_iteration import SceneIterationStateBuilder
 
 
@@ -221,7 +225,12 @@ class ImageGeneratorAgent(ReActAgent):
             "scenes": parsed_scenes,
             "tools": sorted(set(executed_tools)),
         }
-        self._record_last_action_summary(summary_payload)
+        # 仅日志纪录，不再保留跨轮摘要
+        try:
+            cleaned = json.loads(json.dumps(summary_payload, ensure_ascii=False, default=str))
+            self.logger.info("ACT_SUMMARY %s", json.dumps(cleaned, ensure_ascii=False))
+        except Exception:
+            pass
         # 构造本轮 obs 事件摘要，暂挂在结果中供后续情景记忆/调试使用
         try:
             from .utils.obs_events import build_obs_events_from_executed_calls
@@ -263,125 +272,32 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
     
-    def _record_last_action_summary(self, summary: Optional[Dict[str, Any]]) -> None:
-        """记录上一轮 ACT 行为摘要，供下一轮观察引用。"""
-        if not summary:
-            self.set_last_action_summary(None)
-            return
-        try:
-            cleaned = json.loads(json.dumps(summary, ensure_ascii=False, default=str))
-        except Exception:
-            cleaned = {"message": str(summary)}
-        # 审计用途：保持在日志，不放入 Agent 状态
-        try:
-            self.logger.info("ACT_SUMMARY %s", json.dumps(cleaned, ensure_ascii=False))
-        except Exception:
-            pass
-        self.set_last_action_summary(cleaned)
-
     async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """标准化工具产物并写入 WorkingMemory facts，无需手动同步 SceneSnapshot。"""
-        results = normalize_executed_calls_to_artifacts(executed_calls, kind="image", include_prompt=True)
-        if not results:
-            return []
         wf_id = str(self.workflow_state_id or "")
-        wm = self.wm
         shared_wm = ensure_mas_memory(wf_id) if wf_id else None
-        if wm is None and shared_wm is None:
-            return results
-        artifacts = wm.get("scene_outputs.image", {}) if wm is not None else {}
-        if not isinstance(artifacts, dict):
-            artifacts = {}
-        shared_artifacts = (
-            shared_wm.get("scene_outputs.image", {})
-            if shared_wm is not None
-            else {}
+        return await persist_scene_outputs(
+            executed_calls=executed_calls,
+            kind="image",
+            agent_memory=self.wm,
+            shared_memory=shared_wm,
+            include_prompt=True,
         )
-        if not isinstance(shared_artifacts, dict):
-            shared_artifacts = {}
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            scene_number = item.get("scene_number")
-            try:
-                sn = int(scene_number)
-            except Exception:
-                continue
-            normalized = {
-                "scene_number": sn,
-                "image_url": item.get("image_url"),
-                "image_path": item.get("image_path")
-                or item.get("file_path")
-                or item.get("output_path")
-                or item.get("local_path"),
-                "prompt_text": item.get("prompt_text"),
-                "metadata": item.get("metadata"),
-            }
-            artifacts[sn] = normalized
-            shared_artifacts[sn] = dict(normalized)
-        if wm is not None:
-            wm.put("scene_outputs.image", artifacts)
-        if shared_wm is not None:
-            shared_wm.put("scene_outputs.image", shared_artifacts)
-        return results
 
     async def _finalize_success_results(self, final_action_result: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """打包最终产出：从 Shared WM 聚合（单一事实源），构造 orchestrator 所需结构。
-        返回字段：final_completed_scenes / final_failed_scenes / react_metadata
+        返回字段：final_completed_scenes / final_failed_scenes
         """
-        finals: List[Dict[str, Any]] = []
-        finals_failed: List[Dict[str, Any]] = []
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        shared_wm = ensure_mas_memory(str(wf_id)) if wf_id else None
-        artifacts = (
-            shared_wm.get("scene_outputs.image")
-            if shared_wm is not None
-            else {}
+        finals, finals_failed = finalize_scene_outputs(
+            kind="image",
+            workflow_id=str(wf_id) if wf_id else None,
+            agent_memory=self.wm,
         )
-        if isinstance(artifacts, dict):
-            for sn, rec in artifacts.items():
-                entry = rec if isinstance(rec, dict) else {}
-                sid = entry.get("scene_number", sn)
-                try:
-                    sid = int(sid)
-                except Exception:
-                    continue
-                finals.append(
-                    {
-                        "scene_number": sid,
-                        "image_url": entry.get("image_url"),
-                        "image_path": entry.get("image_path"),
-                        "prompt_text": entry.get("prompt_text"),
-                        "metadata": entry.get("metadata") or {},
-                    }
-                )
-        scene_overview = load_scene_overview(str(wf_id)) if wf_id else None
-        if isinstance(scene_overview, dict):
-            for scene in scene_overview.get("scenes", []) or []:
-                if not isinstance(scene, dict):
-                    continue
-                if not scene.get("failed"):
-                    continue
-                sid = _coerce_int(scene.get("scene_number"))
-                if sid is None:
-                    continue
-                finals_failed.append(
-                    {
-                        "scene_number": sid,
-                        "error": scene.get("failure_reason") or scene.get("reason") or "generation_failed",
-                    }
-                )
 
         return {
             **(final_action_result or {}),
             "final_completed_scenes": finals,
             "final_failed_scenes": finals_failed,
-            "react_metadata": {
-                "total_iterations": len(context.get("iteration_history", [])),
-                "success": True,
-                "completion_type": "task_complete",
-                "agent": self.agent_name,
-            },
         }
     
     @emit_progress_snapshot

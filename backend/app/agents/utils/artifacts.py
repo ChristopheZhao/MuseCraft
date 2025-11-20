@@ -7,9 +7,14 @@
 """
 from __future__ import annotations
 
-import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
 import os
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+from ..memory.short_term.working_memory import WorkingMemory
+from ..memory.config.scene_output_schema import load_scene_output_schema
+from ..adapters.memory_views import load_scene_overview, extract_failed_scenes
+from .memory_helpers import ensure_mas_memory
 
 
 def extract_tool_payload(result: Any) -> Any:
@@ -70,6 +75,108 @@ async def ensure_persisted_videos(
         except Exception:
             updated.append(r)
     return updated
+
+
+async def persist_scene_outputs(
+    *,
+    kind: str,
+    agent_memory: Optional[WorkingMemory],
+    shared_memory: Optional[WorkingMemory],
+    executed_calls: Optional[List[Dict[str, Any]]] = None,
+    artifacts: Optional[List[Dict[str, Any]]] = None,
+    include_prompt: bool = True,
+) -> List[Dict[str, Any]]:
+    """Standardize tool outputs and store them as scene_outputs facts."""
+    results: List[Dict[str, Any]] = list(artifacts or [])
+    if not results and executed_calls:
+        results = normalize_executed_calls_to_artifacts(
+            executed_calls,
+            kind=kind,
+            include_prompt=include_prompt,
+        )
+    if not results:
+        return []
+
+    schema = load_scene_output_schema(kind)
+    fields = schema.get("fields", {})
+    key = f"scene_outputs.{kind}"
+    agent_bucket = agent_memory.get(key, {}) if agent_memory is not None else {}
+    if not isinstance(agent_bucket, dict):
+        agent_bucket = {}
+    shared_bucket = shared_memory.get(key, {}) if shared_memory is not None else {}
+    if shared_memory is not None and not isinstance(shared_bucket, dict):
+        shared_bucket = {}
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        mapped = _map_scene_output(fields, item)
+        if not mapped:
+            continue
+        sn = mapped.get("scene_number")
+        if sn is None:
+            continue
+        if agent_memory is not None:
+            agent_bucket[sn] = dict(mapped)
+        if shared_memory is not None:
+            shared_bucket[sn] = dict(mapped)
+
+    if agent_memory is not None:
+        agent_memory.put(key, agent_bucket)
+    if shared_memory is not None:
+        shared_memory.put(key, shared_bucket)
+    return results
+
+
+def collect_scene_outputs(
+    *,
+    kind: str,
+    memory: Optional[WorkingMemory],
+    return_fields: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Collect persisted scene outputs from WorkingMemory based on schema."""
+    if memory is None:
+        return []
+    schema = load_scene_output_schema(kind)
+    fields = schema.get("return_fields") or return_fields
+    key = f"scene_outputs.{kind}"
+    bucket = memory.get(key, {})
+    if not isinstance(bucket, dict):
+        return []
+    results: List[Dict[str, Any]] = []
+    for record in bucket.values():
+        if not isinstance(record, dict):
+            continue
+        if fields:
+            entry = {name: record.get(name) for name in fields if name in record}
+        else:
+            entry = dict(record)
+        if not entry:
+            continue
+        results.append(entry)
+    results.sort(key=lambda item: item.get("scene_number") or 0)
+    return results
+
+
+def finalize_scene_outputs(
+    *,
+    kind: str,
+    workflow_id: Optional[str],
+    agent_memory: Optional[WorkingMemory],
+    shared_memory: Optional[WorkingMemory] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Collect completion/failure payloads for a given scene output kind."""
+    wf_id = str(workflow_id) if workflow_id else None
+    shared = shared_memory
+    if shared is None and wf_id:
+        try:
+            shared = ensure_mas_memory(wf_id)
+        except Exception:
+            shared = None
+    completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)
+    overview = load_scene_overview(wf_id) if wf_id else None
+    failed = extract_failed_scenes(overview)
+    return completed, failed
 
 
 def make_storage_uploader(
@@ -268,3 +375,31 @@ def normalize_executed_calls_to_artifacts(
             item["prompt_text"] = args.get("prompt") or payload.get("prompt_text") or payload.get("prompt") or ""
         out.append(item)
     return out
+
+
+def _map_scene_output(fields: Dict[str, Dict[str, Any]], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not fields:
+        return {}
+    result: Dict[str, Any] = {}
+    for target, conf in fields.items():
+        sources = conf.get("source")
+        if not sources:
+            continue
+        if not isinstance(sources, (list, tuple)):
+            sources = [sources]
+        value = None
+        for src in sources:
+            if src in payload and payload[src] not in (None, ""):
+                value = payload[src]
+                break
+        if value is None and conf.get("required"):
+            return None
+        if value is None:
+            continue
+        if conf.get("coerce") == "int":
+            try:
+                value = int(value)
+            except Exception:
+                return None
+        result[target] = value
+    return result

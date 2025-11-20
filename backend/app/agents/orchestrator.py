@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, TaskStatus, AgentType
 from .services.mas_shared_memory import get_shared_wm
-from .memory.short_term.working_memory import SceneArtifact
 from .adapters.memory_views import build_media_agent_context, build_image_generation_context
 from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
@@ -409,37 +408,23 @@ class OrchestratorAgent(BaseAgent):
                     
                     # Handoff final results to WF (only when agent reports completion via final_* fields)
                     # 仅写 Shared WM；不再回写 WorkflowState（避免双轨）
-                    finals = agent_output.get("final_completed_scenes") if isinstance(agent_output, dict) else None
+                    tracked_kind = None
                     if agent_type == AgentType.IMAGE_GENERATOR:
+                        tracked_kind = "image"
+                    elif agent_type == AgentType.VIDEO_GENERATOR:
+                        tracked_kind = "video"
+                    elif agent_type == AgentType.AUDIO_GENERATOR:
+                        tracked_kind = "audio"
+                    if tracked_kind:
                         shared = ensure_mas_memory(str(wf_id))
-                        outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
-                        committed = len(outputs) if isinstance(outputs, dict) else 0
-                        self.logger.info("WM_COMMIT(image): agent=%s committed=%s", agent.agent_name, committed)
-                    elif finals and isinstance(finals, list):
-                        committed = 0
-                        for rec in finals:
-                            if not isinstance(rec, dict):
-                                continue
-                            sn = rec.get("scene_number")
-                            if sn is None:
-                                continue
-                            vu = rec.get("video_url") or ""
-                            vp = rec.get("video_path") or ""
-                            pt = rec.get("prompt_text") or ""
-                            if vu or vp:
-                                try:
-                                    artifact = SceneArtifact(
-                                        video_url=vu,
-                                        video_path=vp,
-                                        prompt_text=pt,
-                                        duration=float(rec.get("duration") or 0.0),
-                                        metadata=rec.get("metadata") or {},
-                                    )
-                                    get_shared_wm().register_artifact_ref(str(wf_id), int(sn), artifact)
-                                    committed += 1
-                                except Exception as wm_err:
-                                    raise AgentError(f"Failed to register artifact for scene {sn}: {wm_err}") from wm_err
-                        self.logger.info(f"WM_COMMIT: agent={agent.agent_name} scenes={len(finals)} committed={committed}")
+                        bucket = shared.get(f"scene_outputs.{tracked_kind}", {}) if shared is not None else {}
+                        committed = len(bucket) if isinstance(bucket, dict) else 0
+                        self.logger.info(
+                            "WM_COMMIT(%s): agent=%s committed=%s",
+                            tracked_kind,
+                            agent.agent_name,
+                            committed,
+                        )
 
                     # Handle memory storage if this agent produced memory data
                     if agent_type == AgentType.CONCEPT_PLANNER:
@@ -471,13 +456,10 @@ class OrchestratorAgent(BaseAgent):
                                     "images_count": images_cnt,
                                 }
                             )
-                        if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(agent_output):
-                            summary = agent_output.get("summary") or {}
-                            videos_cnt = 0
-                            try:
-                                videos_cnt = int(summary.get("generated_successfully") or 0)
-                            except Exception:
-                                videos_cnt = len(agent_output.get("final_completed_scenes") or [])
+                        if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(wf_id, agent_output):
+                            shared = ensure_mas_memory(str(wf_id))
+                            outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
+                            videos_cnt = len(outputs) if isinstance(outputs, dict) else 0
                             await self.websocket_manager.broadcast_to_task(
                                 str(task.task_id),
                                 {
@@ -656,7 +638,7 @@ class OrchestratorAgent(BaseAgent):
         """
         # Build observation (concise)
         summary = agent_output.get("summary") or {}
-        meta = agent_output.get("react_metadata") or {}
+        meta = {}
         gen_results = agent_output.get("generation_results") or []
         success_count = sum(1 for r in gen_results if isinstance(r, dict) and r.get("success"))
         fail_count = sum(1 for r in gen_results if isinstance(r, dict) and not r.get("success"))
@@ -783,30 +765,19 @@ class OrchestratorAgent(BaseAgent):
                 return True
         except Exception:
             pass
-        summary = agent_output.get("summary") or {}
-        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
-            return True
-        results = agent_output.get("generation_results") or []
-        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
-            return True
-        meta = agent_output.get("react_metadata") or {}
-        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
-            return True
-        self.logger.warning("Image step not completed: no WorkingMemory outputs and no successful results")
+        self.logger.warning("Image step not completed: no scene_outputs.image found in MAS WM")
         return False
 
-    def _is_video_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+    def _is_video_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for video generation step completion."""
-        meta = agent_output.get("react_metadata") or {}
-        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
-            return True
-        summary = agent_output.get("summary") or {}
-        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
-            return True
-        results = agent_output.get("generation_results") or []
-        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
-            return True
-        self.logger.warning("Video step not completed: no task_complete and no successful results")
+        try:
+            shared = ensure_mas_memory(str(workflow_id))
+            outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
+            if isinstance(outputs, dict) and outputs:
+                return True
+        except Exception:
+            pass
+        self.logger.warning("Video step not completed: no scene_outputs.video found in MAS WM")
         return False
     
     async def _send_workflow_completion(self, task: Task, results: Dict[str, Any]):

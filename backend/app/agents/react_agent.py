@@ -226,7 +226,7 @@ class ReActAgent(BaseAgent, ABC):
         self.logger.warning(f"⚠️ Iterative loop ended after {iteration + 1} iterations")
         
         final_result = await self._finalize_incomplete_results({
-            "total_iterations": iteration + 1,
+                "total_iterations": iteration + 1,
             "last_action_result": last_action_result,
         }, task)
         await self._update_progress(execution, 90, "processing", db)
@@ -432,15 +432,7 @@ class ReActAgent(BaseAgent, ABC):
         
         可以被子类重写以定制结果格式
         """
-        total_iters = int(context.get("total_iterations") or 0)
-        return {
-            **final_action_result,
-            "react_metadata": {
-                "total_iterations": total_iters,
-                "success": True,
-                "completion_type": "task_complete"
-            }
-        }
+        return dict(final_action_result or {})
     
     async def _finalize_incomplete_results(
         self, 
@@ -453,18 +445,11 @@ class ReActAgent(BaseAgent, ABC):
         可以被子类重写以提供fallback逻辑
         """
         # 优先返回最后一次行动的结果（若存在）
-        total_iters = int(context.get("total_iterations") or 0)
         last_action_result = context.get("last_action_result")
         if isinstance(last_action_result, dict):
-            return {
-                **last_action_result,
-                "react_metadata": {
-                    "total_iterations": total_iters,
-                    "success": False,
-                    "completion_type": "incomplete_but_partial_results"
-                }
-            }
+            return dict(last_action_result)
         # 无部分结果可返回，抛出明确错误
+        total_iters = int(context.get("total_iterations") or 0)
         raise AgentError(f"Iterative loop ended without results after {total_iters} iterations")
     
     async def _handle_iteration_error(

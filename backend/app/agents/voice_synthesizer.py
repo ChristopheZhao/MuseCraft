@@ -10,8 +10,9 @@ from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
 from ..models import Task, AgentExecution, AgentType
 from ..core.config import settings
-from .utils.artifacts import normalize_executed_calls_to_artifacts
+from .utils.artifacts import normalize_executed_calls_to_artifacts, persist_scene_outputs
 from .utils.fc_messages import build_neutral_act_messages
+from .utils.memory_helpers import ensure_mas_memory
 
 
 class VoiceSynthesizerAgent(ReActAgent):
@@ -564,6 +565,14 @@ class VoiceSynthesizerAgent(ReActAgent):
             kind="audio",
             include_prompt=False,
         )
+        shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+        await persist_scene_outputs(
+            artifacts=artifacts,
+            kind="voice",
+            agent_memory=self.wm,
+            shared_memory=shared_wm,
+            include_prompt=False,
+        )
         store = self.shared_memory_store
         voice_settings = self._resolve_voice_settings(
             wf_id,
@@ -649,10 +658,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         }
         if len(remaining) == 0:
             result["completed_reason"] = summary
-        result["react_metadata"] = {
-            "pending_remaining": len(remaining),
-            "success": bool(action_result.get("success")),
-        }
         return result
 
     def _truncate_text(self, text: str) -> str:

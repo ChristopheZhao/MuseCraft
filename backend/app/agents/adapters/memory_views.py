@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Shared memory view helpers for orchestrator → agent context construction."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..services.mas_shared_memory import get_shared_wm
 from ..memory.short_term.workflow_facts import WorkflowFactStoreError
@@ -146,6 +146,29 @@ def build_image_generation_context(workflow_id: str) -> Dict[str, Any]:
     }
 
 
+def extract_failed_scenes(overview: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return failed scene records from a scene overview projection."""
+    if not isinstance(overview, dict):
+        return []
+    failed_payloads: List[Dict[str, Any]] = []
+    for scene in (overview.get("scenes") or []):
+        if not isinstance(scene, dict) or not scene.get("failed"):
+            continue
+        sn = _coerce_int(scene.get("scene_number"))
+        if sn is None:
+            continue
+        reason = scene.get("failure_reason") or scene.get("reason") or "generation_failed"
+        entry = {
+            "scene_number": sn,
+            "error": reason,
+        }
+        metadata = scene.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            entry["metadata"] = metadata
+        failed_payloads.append(entry)
+    return failed_payloads
+
+
 def _normalize_scene_dict(payload: Any) -> Dict[int, Dict[str, Any]]:
     result: Dict[int, Dict[str, Any]] = {}
     if isinstance(payload, dict):
@@ -176,6 +199,15 @@ def _normalize_scene_dict(payload: Any) -> Dict[int, Dict[str, Any]]:
     return result
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
 def _fact_store():
     services = get_memory_services()
     return getattr(services, "fact_store", None)
@@ -188,4 +220,5 @@ __all__ = [
     "load_concept_plan",
     "build_media_agent_context",
     "build_image_generation_context",
+    "extract_failed_scenes",
 ]

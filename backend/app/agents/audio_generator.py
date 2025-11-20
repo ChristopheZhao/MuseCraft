@@ -13,7 +13,8 @@ from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
  
 from ..core.config import settings
 from .services.mas_shared_memory import get_shared_wm
-from .utils.artifacts import pick_artifact_path_from_results
+from .utils.artifacts import pick_artifact_path_from_results, persist_scene_outputs
+from .utils.memory_helpers import ensure_mas_memory
 
 
 class AudioGeneratorAgent(ReActAgent):
@@ -238,6 +239,25 @@ class AudioGeneratorAgent(ReActAgent):
             )
         except Exception:
             pass
+        stored_results: List[Dict[str, Any]] = []
+        if ok:
+            shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+            stored_results = await persist_scene_outputs(
+                artifacts=[
+                    {
+                        "scene_number": 0,
+                        "audio_url": audio_url or "",
+                        "audio_path": music_path or "",
+                        "duration_sec": float(total_duration or 0),
+                        "metadata": {"source": "audio_generator"},
+                    }
+                ],
+                kind="audio",
+                agent_memory=self.wm,
+                shared_memory=shared_wm,
+                include_prompt=False,
+            )
+
         from ..core.config import settings as _cfg
         if not bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
             try:
@@ -248,8 +268,9 @@ class AudioGeneratorAgent(ReActAgent):
         ok = bool(audio_url or music_path)
         return {
             "success": ok,
-            "generation_results": [{"success": ok, "audio_url": audio_url, "file_path": music_path}],
-            "react_metadata": {"success": ok, "agent": self.agent_name},
+            "generation_results": stored_results
+            if stored_results
+            else [{"success": ok, "audio_url": audio_url, "file_path": music_path}],
             "executed_calls": executed_calls,
             "subtask_state": "complete" if ok else "partial",
             "loop_end_reason": "natural_complete" if ok else "incomplete",

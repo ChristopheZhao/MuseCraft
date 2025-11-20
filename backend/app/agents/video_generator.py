@@ -20,9 +20,14 @@ from ..core.config import settings
  
 from ..core.video_config_manager import get_video_config
 from .utils import ensure_persisted_videos, make_storage_uploader
-from .utils.artifacts import normalize_executed_calls_to_artifacts
+from .utils.artifacts import (
+    normalize_executed_calls_to_artifacts,
+    persist_scene_outputs,
+    finalize_scene_outputs,
+)
 from .memory.short_term.working_memory import WorkingMemory, SceneArtifact, SceneSnapshot
 from .utils.progress_snapshot import emit_progress_snapshot
+from .utils.memory_helpers import ensure_mas_memory
 
 
 
@@ -280,6 +285,12 @@ class VideoGeneratorAgent(ReActAgent):
             if not planned_calls:
                 return {"action_performed": "observe", "generation_results": [], "executed_calls": []}
             plan_llm = params.get("plan_llm")
+            wf_id = (
+                runtime.workflow_state_id
+                or input_data.get("workflow_state_id")
+                or self.workflow_state_id
+            )
+            wf_id = str(wf_id) if wf_id else ""
 
             # 执行规划好的调用序列（顺序执行，不做阶段过滤）
             executed_calls = await self.execute_tool_calls(planned_calls)
@@ -297,6 +308,14 @@ class VideoGeneratorAgent(ReActAgent):
                     "metadata": {},
                 })
             normalized_results = await self._ensure_video_persistence(normalized_results)
+            shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+            normalized_results = await persist_scene_outputs(
+                artifacts=normalized_results,
+                kind="video",
+                agent_memory=self.wm,
+                shared_memory=shared_wm,
+                include_prompt=True,
+            )
 
             # 执行摘要
             success_cnt = sum(1 for r in (normalized_results or []) if r.get("success"))
@@ -386,40 +405,6 @@ class VideoGeneratorAgent(ReActAgent):
                     metadata=item.get("metadata") or {},
                 )
                 runtime.mark_completed(int(sn), artifact)
-                # 共享记忆（Shared WM）写回：便于后续连续性/合成与断点续跑
-                from ..core.config import settings as _cfg
-                write_mid = not bool(getattr(_cfg, "REACT_WRITE_WF_ON_COMPLETE_ONLY", True))
-                from ..core.config import settings as _cfg2
-                if write_mid and not bool(getattr(_cfg2, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
-                    wf_id = runtime.workflow_state_id or self.workflow_state_id
-                    if not wf_id:
-                        raise AgentError("Shared WM write failed: missing workflow_state_id")
-                    from .services.mas_shared_memory import get_shared_wm
-                    try:
-                        shared = get_shared_wm()
-                        shared.register_artifact_ref(
-                            str(wf_id),
-                            int(sn),
-                            artifact,
-                        )
-                        # 统一写回：将video-only阶段的产物追加到 artifacts 时间线（便于Composer选择最新）
-                        self.write_shared_artifact(
-                            kind="video",
-                            stage="video_only",
-                            payload={
-                                "file_path": item.get("video_path", ""),
-                                "url": item.get("video_url", ""),
-                                "duration": item.get("duration"),
-                                "prompt_text": item.get("prompt_text", ""),
-                                "metadata": item.get("metadata") or {},
-                            },
-                            scene_number=int(sn),
-                            tool="video_generation",
-                            workflow_state_id=str(wf_id),
-                        )
-                    except Exception as e:
-                        self.logger.error("Shared WM mid-write failed for scene=%s: %s", sn, e, exc_info=True)
-                        raise AgentError("Shared WM write failed (mid-iteration)") from e
             else:
                 reason = item.get("error") or "video_generation_failed"
                 # 依据可配置错误类型判定是否允许重试（默认允许）
@@ -486,17 +471,24 @@ class VideoGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         base = await super()._finalize_success_results(final_action_result, context)
         runtime = self.wm
-        finals, failed = self._build_final_scene_records(runtime)
+        wf_id = ""
+        if runtime and runtime.workflow_state_id:
+            wf_id = str(runtime.workflow_state_id)
+        elif context.get("workflow_state_id"):
+            wf_id = str(context.get("workflow_state_id"))
+
+        finals, failed = finalize_scene_outputs(
+            kind="video",
+            workflow_id=wf_id or None,
+            agent_memory=self.wm,
+        )
 
         result = dict(base or {})
         if runtime:
             result["workflow_state_id"] = runtime.workflow_state_id
             result["notes"] = list(getattr(runtime, "notes", []))
-            result["videos"] = runtime.completed_outputs()
-            result["failed"] = runtime.failed_outputs()
-        else:
-            result.setdefault("videos", [])
-            result.setdefault("failed", [])
+        result["videos"] = finals
+        result["failed"] = failed
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
         self.reset_iteration_memory_cache()
@@ -509,49 +501,28 @@ class VideoGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         base = await super()._finalize_incomplete_results(context, task)
         runtime = self.wm
-        finals, failed = self._build_final_scene_records(runtime)
+        wf_id = ""
+        if runtime and runtime.workflow_state_id:
+            wf_id = str(runtime.workflow_state_id)
+        elif context.get("workflow_state_id"):
+            wf_id = str(context.get("workflow_state_id"))
+
+        finals, failed = finalize_scene_outputs(
+            kind="video",
+            workflow_id=wf_id or None,
+            agent_memory=self.wm,
+        )
 
         result = dict(base or {})
         if runtime:
             result["workflow_state_id"] = runtime.workflow_state_id
             result["notes"] = list(getattr(runtime, "notes", []))
-            result["videos"] = runtime.completed_outputs()
-            result["failed"] = runtime.failed_outputs()
-        else:
-            result.setdefault("videos", [])
-            result.setdefault("failed", [])
+        result["videos"] = finals
+        result["failed"] = failed
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
         self.reset_iteration_memory_cache()
         return result
-
-    def _build_final_scene_records(
-        self, runtime
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        if runtime is None:
-            return [], []
-
-        finals: List[Dict[str, Any]] = []
-        for scene_number, artifact in sorted(runtime.completed.items(), key=lambda item: item[0]):
-            finals.append(
-                {
-                    "scene_number": scene_number,
-                    "video_url": artifact.video_url,
-                    "video_path": artifact.video_path,
-                    "prompt_text": artifact.prompt_text,
-                }
-            )
-
-        failed: List[Dict[str, Any]] = []
-        for scene_number, info in sorted(runtime.failed.items(), key=lambda item: item[0]):
-            failed.append(
-                {
-                    "scene_number": scene_number,
-                    "error": info.get("reason"),
-                    "metadata": info.get("metadata", {}),
-                }
-            )
-        return finals, failed
 
     # === Utilities ========================================================
     # 工具概览描述已移除：遵循 Prompt Neutrality，工具发现交由 FC schema
