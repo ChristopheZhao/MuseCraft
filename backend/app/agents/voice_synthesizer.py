@@ -10,7 +10,11 @@ from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
 from ..models import Task, AgentExecution, AgentType
 from ..core.config import settings
-from .utils.artifacts import normalize_executed_calls_to_artifacts, persist_scene_outputs
+from .utils.artifacts import (
+    normalize_executed_calls_to_artifacts,
+    persist_scene_outputs,
+    finalize_scene_outputs,
+)
 from .utils.fc_messages import build_neutral_act_messages
 from .utils.memory_helpers import ensure_mas_memory
 
@@ -652,12 +656,27 @@ class VoiceSynthesizerAgent(ReActAgent):
             summary_bits.append("本轮无新增旁白")
         summary = "；".join(summary_bits)
 
-        result = {
+        return {
             "task_complete": len(remaining) == 0,
+            "completed_reason": summary if len(remaining) == 0 else None,
             "reflection_summary": summary,
         }
-        if len(remaining) == 0:
-            result["completed_reason"] = summary
+
+    async def _finalize_success_results(
+        self,
+        final_action_result: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        base = await super()._finalize_success_results(final_action_result, context)
+        wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        finals, failed = finalize_scene_outputs(
+            kind="voice",
+            workflow_id=str(wf_id) if wf_id else None,
+            agent_memory=self.wm,
+        )
+        result = dict(base or {})
+        result["final_completed_scenes"] = finals
+        result["final_failed_scenes"] = failed
         return result
 
     def _truncate_text(self, text: str) -> str:
