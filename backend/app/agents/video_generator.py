@@ -9,9 +9,8 @@ Video Generator Agent - 基于 ReAct 的自主迭代实现。
 
 from __future__ import annotations
 
-import copy
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional
 
 from .react_agent import ReActAgent
 from .base import AgentError
@@ -25,7 +24,7 @@ from .utils.artifacts import (
     persist_scene_outputs,
     finalize_scene_outputs,
 )
-from .memory.short_term.working_memory import WorkingMemory, SceneArtifact, SceneSnapshot
+from .memory.short_term.working_memory import WorkingMemory
 from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.memory_helpers import ensure_mas_memory
 
@@ -54,51 +53,6 @@ class VideoGeneratorAgent(ReActAgent):
         return self.wm
 
 
-    async def _build_observation_view(self, wm: WorkingMemory) -> Tuple[Dict[str, Any], List[int], List[int]]:
-        # 加载该 Agent 的上下文策略（不在 Agent 内做裁剪，仅传递策略给编辑器）
-        from ..core.obs_strategy import get_strategy_for_agent
-        strategy = get_strategy_for_agent(self.agent_name)
-
-        ready_limit = int(strategy.get("ready_limit", 5)) if isinstance(strategy, dict) else 5
-        completed_limit_cfg = None
-        from ..core.obs_strategy import get_strategy_for_agent
-        _strategy = get_strategy_for_agent(self.agent_name)
-        if isinstance(_strategy, dict):
-            completed_limit_cfg = _strategy.get("completed_limit")
-        try:
-            completed_limit = int(completed_limit_cfg) if completed_limit_cfg is not None else -1
-        except (TypeError, ValueError):
-            completed_limit = -1
-        ready_scene_ids = wm.ready_scene_numbers()
-        if ready_limit > 0:
-            ready_scene_ids = ready_scene_ids[:ready_limit]
-
-        completed_ids_raw = sorted(getattr(wm, "completed", {}) or {})
-        if completed_limit > 0:
-            completed_ids_raw = completed_ids_raw[-completed_limit:]
-        completed_ids = [int(sn) for sn in completed_ids_raw]
-        scenes_payload: List[Dict[str, Any]] = []
-        for sn, snapshot in sorted((wm.scenes or {}).items()):
-            payload = snapshot.as_fact() if snapshot else {"scene_number": sn}
-            if not isinstance(payload, dict):
-                payload = {"scene_number": sn}
-            if sn in wm.completed:
-                payload["completed"] = True
-            if sn in wm.failed:
-                payload["failed"] = True
-            scenes_payload.append(payload)
-        prepared_refs = self._collect_prepared_refs(wm)
-        fact_view = {
-            "scenes": scenes_payload,
-            "completed_scene_numbers": completed_ids,
-            "failed_scene_numbers": sorted(int(sn) for sn in (wm.failed or {}).keys()),
-            "prepared_assets_refs": prepared_refs,
-            "notes": list((wm.notes or [])[-6:]),
-        }
-        return fact_view, ready_scene_ids, completed_ids
-
-    # 已移除：上下文裁剪逻辑由 Context Editor 统一处理
-
     # === OBSERVE ==========================================================
     async def _observe_current_state(
         self,
@@ -109,26 +63,29 @@ class VideoGeneratorAgent(ReActAgent):
         runtime = self._ensure_working_memory(input_data)
         observation = dict(base_observation or {})
 
+        # 场景概览（事实）：来自 orchestrator 注入或 WM
+        overview = input_data.get("scene_overview") or self.wm.get("scene_overview")
+        if isinstance(overview, dict):
+            observation["scenes"] = list(overview.get("scenes") or [])
+            observation["failed_scene_numbers"] = _coerce_int_list(overview.get("failed_scene_numbers"))
+        else:
+            observation.setdefault("scenes", [])
+            observation.setdefault("failed_scene_numbers", [])
+
+        # 已完成场景：从 WM 的 scene_outputs.video 推导
+        outputs = self.wm.get("scene_outputs.video", {}) if self.wm is not None else {}
+        if isinstance(outputs, dict):
+            completed_ids = sorted(int(sn) for sn in outputs.keys() if str(sn).isdigit())
+        else:
+            completed_ids = []
+        observation["completed_scene_numbers"] = completed_ids
+
+        # 备注：只读 WM notes，限制长度
         notes = getattr(runtime, "notes", []) or []
         if notes:
-            observation.setdefault("notes", notes[-6:])
-
-        # 补充 WorkingMemory 投影的详细视图，防止基础观察缺少领域字段
-        try:
-            fact_view, _ready_ids, _completed_ids = await self._build_observation_view(runtime)
-        except Exception:
-            fact_view = None
-        if isinstance(fact_view, dict) and fact_view:
-            for key in ("scenes", "completed_scene_numbers", "failed_scene_numbers", "prepared_assets_refs", "notes"):
-                if key in fact_view and fact_view.get(key) is not None:
-                    observation[key] = fact_view[key]
-
-        observation.setdefault("scenes", [])
-        observation.setdefault("completed_scene_numbers", sorted(int(s) for s in (runtime.completed or {}).keys()))
-        observation.setdefault("failed_scene_numbers", sorted(int(sn) for sn in (runtime.failed or {}).keys()))
-        observation.setdefault("prepared_assets_refs", [])
-        if "notes" not in observation:
-            observation["notes"] = []
+            observation["notes"] = notes[-6:]
+        else:
+            observation.setdefault("notes", [])
 
         from .utils.obs_builder import compute_obs_digest
         digest = compute_obs_digest(observation)
@@ -325,8 +282,6 @@ class VideoGeneratorAgent(ReActAgent):
                 len(executed_calls or []),
                 success_cnt,
             )
-            # 写回内存（完成/失败）
-            self._integrate_generation_results(runtime, normalized_results)
             return {
                 "action_performed": "batch_video_generation",
                 "generation_results": normalized_results,
@@ -369,50 +324,6 @@ class VideoGeneratorAgent(ReActAgent):
         )
         return self._video_uploader
 
-    def _integrate_generation_results(
-        self,
-        runtime,
-        results: List[Dict[str, Any]],
-    ) -> None:
-        for item in results or []:
-            sn = item.get("scene_number")
-            if sn is None:
-                continue
-            if item.get("success"):
-                # 若该场景尚未注册到 WM 的场景列表，补充最小快照，确保后续 OBSERVE 能统计到 completed
-                try:
-                    if not runtime.has_scene(int(sn)):
-                        try:
-                            dur = float(item.get("duration") or 0)
-                        except Exception:
-                            dur = 0.0
-                        snap = SceneSnapshot(
-                            scene_number=int(sn),
-                            duration=dur,
-                            visual_description="",
-                            narrative_description="",
-                            image_url=str(item.get("image_url") or ""),
-                            motion_beats=[],
-                        )
-                        runtime.upsert_scene(snap)
-                except Exception:
-                    pass
-                artifact = SceneArtifact(
-                    video_url=item.get("video_url", ""),
-                    video_path=item.get("video_path", ""),
-                    prompt_text=item.get("prompt_text", ""),
-                    duration=float(item.get("duration") or 0),
-                    metadata=item.get("metadata") or {},
-                )
-                runtime.mark_completed(int(sn), artifact)
-            else:
-                reason = item.get("error") or "video_generation_failed"
-                # 依据可配置错误类型判定是否允许重试（默认允许）
-                err_type = (item.get("metadata") or {}).get("error_type") or item.get("error_type")
-                hard_block_types = set(getattr(settings, "REACT_HARD_BLOCK_ERROR_TYPES", []) or [])
-                retryable = not (err_type in hard_block_types)
-                runtime.mark_failed(int(sn), reason, item.get("metadata"), retryable=retryable)
-
     # === REFLECT ==========================================================
     @emit_progress_snapshot
     async def _reflect_on_results(
@@ -422,10 +333,6 @@ class VideoGeneratorAgent(ReActAgent):
         task: Task,
         iteration: int,
     ) -> Dict[str, Any]:
-        runtime = self.wm
-        if runtime is None:
-            return {"success": True, "task_complete": False, "reflection_summary": "无运行时"}
-
         performed = action_result.get("action_performed")
         if performed in {"observe"}:
             return {
@@ -451,9 +358,13 @@ class VideoGeneratorAgent(ReActAgent):
             summary_bits.append(f"{len(failed_now)} 个场景失败")
         summary_text = "；".join(summary_bits) if summary_bits else "本轮无新增产物"
 
-        total = len(getattr(runtime, "scenes", {}) or {})
-        completed = len(getattr(runtime, "completed", {}) or {})
-        task_complete = total == 0 or completed >= total
+        try:
+            total = len(current_state.get("scenes") or [])
+        except Exception:
+            total = 0
+        outputs = self.wm.get("scene_outputs.video", {}) if self.wm is not None else {}
+        completed = len(outputs) if isinstance(outputs, dict) else 0
+        task_complete = total > 0 and completed >= total
         result = {
             "success": True,
             "task_complete": task_complete,
@@ -528,3 +439,20 @@ class VideoGeneratorAgent(ReActAgent):
     # 工具概览描述已移除：遵循 Prompt Neutrality，工具发现交由 FC schema
 
     # 旧版决策解析/Schema 已移除
+
+
+def _coerce_int_list(values: Any) -> List[int]:
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        try:
+            values = list(values) if isinstance(values, (set, tuple)) else [values]
+        except Exception:
+            values = [values]
+    nums: List[int] = []
+    for v in values:
+        try:
+            nums.append(int(v))
+        except Exception:
+            continue
+    return sorted(set(nums))
