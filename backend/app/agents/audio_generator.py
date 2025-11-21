@@ -13,7 +13,11 @@ from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
  
 from ..core.config import settings
 from .services.mas_shared_memory import get_shared_wm
-from .utils.artifacts import pick_artifact_path_from_results, persist_scene_outputs
+from .utils.artifacts import (
+    pick_artifact_path_from_results,
+    persist_scene_outputs,
+    finalize_scene_outputs,
+)
 from .utils.memory_helpers import ensure_mas_memory
 
 
@@ -281,6 +285,23 @@ class AudioGeneratorAgent(ReActAgent):
             "loop_end_reason": "natural_complete" if ok else "incomplete",
             "plan_llm": plan_llm,
         }
+
+    async def _finalize_success_results(
+        self,
+        final_action_result: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        base = await super()._finalize_success_results(final_action_result, context)
+        wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        finals, failed = finalize_scene_outputs(
+            kind="audio",
+            workflow_id=str(wf_id) if wf_id else None,
+            agent_memory=self.wm,
+        )
+        result = dict(base or {})
+        result["final_completed_scenes"] = finals
+        result["final_failed_scenes"] = failed
+        return result
 
     async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
         ok = bool(action_result.get("success"))
