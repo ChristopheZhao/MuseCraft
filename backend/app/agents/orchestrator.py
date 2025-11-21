@@ -493,10 +493,11 @@ class OrchestratorAgent(BaseAgent):
                         # 🔧 修复：在重试成功后也设置concept_plan
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
                             try:
-                                self.store_memory_slot(wf_id, "project.concept_plan", agent_output["concept_plan"])
-                                self.logger.info("🎭 重试后设置concept_plan到共享记忆槽")
-                            except Exception as slot_err:
-                                self.logger.warning(f"重试后写入 concept_plan 失败: {slot_err}")
+                                from .utils.memory_helpers import write_shared_fact
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                                self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
+                            except Exception:
+                                pass
                     else:
                         # Mark task as failed
                         task.status = TaskStatus.FAILED
