@@ -355,43 +355,6 @@ class BaseAgent(ABC):
         except Exception:
             return args
 
-    # --- Memory slot helper methods -------------------------------------------------
-
-    def store_memory_slot(
-        self,
-        workflow_id: Any,
-        slot_id: str,
-        value: Any,
-        *,
-        agent: Optional[str] = None,
-    ) -> None:
-        if self.shared_memory_store is None:
-            raise AgentError("Shared memory store not initialized; cannot persist facts.")
-        wf_id = str(workflow_id)
-        agent_name = agent or self.agent_name
-        try:
-            self.shared_memory_store.put(wf_id, slot_id, value, agent=agent_name)
-        except SharedMemoryStoreError as exc:
-            raise AgentError(f"Failed to write slot {slot_id}: {exc}") from exc
-
-    def fetch_memory_slot(
-        self,
-        workflow_id: Any,
-        slot_id: str,
-        default: Any = None,
-        *,
-        agent: Optional[str] = None,
-    ) -> Any:
-        if self.shared_memory_store is None:
-            raise AgentError("Shared memory store not initialized; cannot fetch facts.")
-        wf_id = str(workflow_id)
-        agent_name = agent or self.agent_name
-        try:
-            return self.shared_memory_store.get(wf_id, slot_id, agent=agent_name, default=default)
-        except SharedMemoryStoreError as exc:
-            self.logger.warning("Shared memory slot %s read failed: %s", slot_id, exc)
-            return default
-
     def _apply_tool_output_contract(
         self,
         *,

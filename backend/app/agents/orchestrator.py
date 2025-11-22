@@ -870,11 +870,8 @@ class OrchestratorAgent(BaseAgent):
     
     def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
-            voice_plan = self.fetch_memory_slot(
-                workflow_state_id,
-                "project.voice_plan",
-                default={}
-            ) or {}
+            from .utils.memory_helpers import read_shared_fact
+            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}) or {}
             if not voice_plan or not voice_plan.get("enabled"):
                 return False
             if str(voice_plan.get("mode", "none")).lower() == "none":

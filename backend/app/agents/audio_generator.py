@@ -63,11 +63,8 @@ class AudioGeneratorAgent(ReActAgent):
         # Orchestrator 负责预建 WorkingMemory；此处只读访问
         _ = self.wm
         observation: Dict[str, Any] = dict(base_observation or {})
-        try:
-            from .utils.memory_helpers import read_shared_fact
-            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
-        except Exception:
-            concept_plan = self.fetch_memory_slot(wf_id, "project.concept_plan", default={}) or {}
+        from .utils.memory_helpers import read_shared_fact
+        concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
         wm = ensure_mas_memory(wf_id)
         final_video_info = wm.get("project.final_video", {}) or {}
         final_video_path = final_video_info.get("path", "") if isinstance(final_video_info, dict) else ""

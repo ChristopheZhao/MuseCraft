@@ -72,14 +72,8 @@ class ConceptPlannerAgent(BaseAgent):
 
         # 移除 WorkflowState 依赖：从 Shared WM facts 读取已有风格（如有）
         if not predefined_style_profile:
-            try:
-                existing_plan = self.fetch_memory_slot(
-                    workflow_state_id,
-                    "project.concept_plan",
-                    default={}
-                ) or {}
-            except Exception:
-                existing_plan = {}
+            from .utils.memory_helpers import read_shared_fact
+            existing_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
             if isinstance(existing_plan, dict):
                 predefined_style_profile = existing_plan.get("intelligent_style_design") or None
 
