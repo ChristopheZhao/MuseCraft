@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from app.agents.image_generator import ImageGeneratorAgent
 from app.services.memory_provider import build_memory_services, set_memory_services
 from app.agents.memory.short_term import get_working_memory_service
-from app.agents.utils.memory_helpers import agent_scope, ensure_agent_memory
+from app.agents.utils.memory_helpers import agent_scope, ensure_agent_working_memory
 from app.agents.services.mas_shared_memory import get_shared_wm
 from app.agents.memory.short_term.working_memory import SceneSnapshot
 from app.agents.tools.tool_registry import get_tool_registry
@@ -60,7 +60,7 @@ def _seed_concept_plan(wf_id: str):
 
 def _seed_working_memory(wf_id: str, agent_name: str):
     """通过迭代记忆服务创建/获取 WorkingMemory，确保与 Agent.wm 对接一致。"""
-    wm = ensure_agent_memory(wf_id, agent_name)
+    wm = ensure_agent_working_memory(wf_id, agent_name)
     return wm, {}
 
 

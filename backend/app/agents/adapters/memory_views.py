@@ -8,7 +8,7 @@ from ..services.mas_shared_memory import get_shared_wm
 from ..memory.short_term.workflow_facts import WorkflowFactStoreError
 from .video import VideoMemoryAdapter
 from ...services.memory_provider import get_memory_services
-from ..utils.memory_helpers import ensure_mas_memory
+from ..utils.memory_helpers import get_mas_working_memory
 
 
 def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
@@ -26,7 +26,7 @@ def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
 def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
     """Fetch per-scene script facts from the workflow fact store."""
     try:
-        wm = ensure_mas_memory(workflow_id)
+        wm = get_mas_working_memory(workflow_id)
         payload = wm.get("project.scene_scripts", {})
         if isinstance(payload, dict):
             return _normalize_scene_dict(payload)
@@ -57,7 +57,7 @@ def load_roles_context(workflow_id: str) -> Dict[str, Any]:
 
 def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
     try:
-        wm = ensure_mas_memory(workflow_id)
+        wm = get_mas_working_memory(workflow_id)
         plan = wm.get("project.concept_plan", {}) or {}
         if isinstance(plan, dict):
             return plan

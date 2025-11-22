@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from ..memory.short_term.working_memory import WorkingMemory
 from ..memory.config.scene_output_schema import load_scene_output_schema
 from ..adapters.memory_views import load_scene_overview, extract_failed_scenes
-from .memory_helpers import ensure_mas_memory
+from .memory_helpers import get_mas_working_memory
 
 
 def extract_tool_payload(result: Any) -> Any:
@@ -170,7 +170,7 @@ def finalize_scene_outputs(
     shared = shared_memory
     if shared is None and wf_id:
         try:
-            shared = ensure_mas_memory(wf_id)
+            shared = get_mas_working_memory(wf_id)
         except Exception:
             shared = None
     completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)

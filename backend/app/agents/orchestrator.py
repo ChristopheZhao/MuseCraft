@@ -15,7 +15,7 @@ from .adapters.memory_views import build_media_agent_context, build_image_genera
 from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
 from .memory.short_term import get_working_memory_service
-from .utils.memory_helpers import agent_scope, mas_scope, ensure_mas_memory
+from .utils.memory_helpers import agent_scope, mas_scope, get_mas_working_memory
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -199,7 +199,7 @@ class OrchestratorAgent(BaseAgent):
             for step_index, agent_type in enumerate(self.workflow_order):
                 agent = self.agents[agent_type]
                 try:
-                    shared_view = ensure_mas_memory(wf_id)
+                    shared_view = get_mas_working_memory(wf_id)
                     scope = agent_scope(wf_id, agent.agent_name)
                     mem_service.create_or_get(
                         wf_id,
@@ -294,7 +294,7 @@ class OrchestratorAgent(BaseAgent):
                                     "add_voiceover": True
                                 }
                                 scope = agent_scope(wf_id, comp_agent.agent_name)
-                                shared_view = ensure_mas_memory(wf_id)
+                                shared_view = get_mas_working_memory(wf_id)
                                 mem_service.create_or_get(
                                     wf_id,
                                     scope,
@@ -320,7 +320,7 @@ class OrchestratorAgent(BaseAgent):
                                 "add_bgm": True
                             }
                             scope = agent_scope(wf_id, comp_agent.agent_name)
-                            shared_view = ensure_mas_memory(wf_id)
+                            shared_view = get_mas_working_memory(wf_id)
                             mem_service.create_or_get(
                                 wf_id,
                                 scope,
@@ -406,7 +406,7 @@ class OrchestratorAgent(BaseAgent):
                     elif agent_type == AgentType.AUDIO_GENERATOR:
                         tracked_kind = "audio"
                     if tracked_kind:
-                        shared = ensure_mas_memory(str(wf_id))
+                        shared = get_mas_working_memory(str(wf_id))
                         bucket = shared.get(f"scene_outputs.{tracked_kind}", {}) if shared is not None else {}
                         committed = len(bucket) if isinstance(bucket, dict) else 0
                         self.logger.info(
@@ -437,7 +437,7 @@ class OrchestratorAgent(BaseAgent):
                     try:
                         from .adapters.state.memory_state import build_memory_state
                         from .adapters.state.mas_state import build_mas_state_view
-                        shared = ensure_mas_memory(str(wf_id))
+                        shared = get_mas_working_memory(str(wf_id))
                         wm_state = build_memory_state(shared)
                         mas_state = build_mas_state_view(str(wf_id))
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
@@ -752,7 +752,7 @@ class OrchestratorAgent(BaseAgent):
     def _is_image_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for image generation step completion."""
         try:
-            shared = ensure_mas_memory(str(workflow_id))
+            shared = get_mas_working_memory(str(workflow_id))
             outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
             if isinstance(outputs, dict) and outputs:
                 return True
@@ -764,7 +764,7 @@ class OrchestratorAgent(BaseAgent):
     def _is_video_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for video generation step completion."""
         try:
-            shared = ensure_mas_memory(str(workflow_id))
+            shared = get_mas_working_memory(str(workflow_id))
             outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
             if isinstance(outputs, dict) and outputs:
                 return True

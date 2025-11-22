@@ -26,7 +26,7 @@ from .utils.artifacts import (
 )
 from .memory.short_term.working_memory import WorkingMemory
 from .utils.progress_snapshot import emit_progress_snapshot
-from .utils.memory_helpers import ensure_mas_memory
+from .utils.memory_helpers import get_mas_working_memory
 
 
 
@@ -265,7 +265,7 @@ class VideoGeneratorAgent(ReActAgent):
                     "metadata": {},
                 })
             normalized_results = await self._ensure_video_persistence(normalized_results)
-            shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+            shared_wm = get_mas_working_memory(wf_id) if wf_id else None
             normalized_results = await persist_scene_outputs(
                 artifacts=normalized_results,
                 kind="video",

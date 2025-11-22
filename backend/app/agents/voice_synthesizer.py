@@ -16,7 +16,7 @@ from .utils.artifacts import (
     finalize_scene_outputs,
 )
 from .utils.fc_messages import build_neutral_act_messages
-from .utils.memory_helpers import ensure_mas_memory
+from .utils.memory_helpers import get_mas_working_memory
 
 
 class VoiceSynthesizerAgent(ReActAgent):
@@ -569,7 +569,7 @@ class VoiceSynthesizerAgent(ReActAgent):
             kind="audio",
             include_prompt=False,
         )
-        shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+        shared_wm = get_mas_working_memory(wf_id) if wf_id else None
         await persist_scene_outputs(
             artifacts=artifacts,
             kind="voice",

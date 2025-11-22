@@ -12,7 +12,7 @@ from .utils.artifacts import (
     persist_scene_outputs,
     finalize_scene_outputs,
 )
-from .utils.memory_helpers import ensure_mas_memory
+from .utils.memory_helpers import get_mas_working_memory
 from ..models import Task, AgentExecution, AgentType
 from ..core.config import settings
 from .adapters.memory_views import build_image_generation_context
@@ -274,7 +274,7 @@ def _coerce_int(value: Any) -> Optional[int]:
     
     async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         wf_id = str(self.workflow_state_id or "")
-        shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+        shared_wm = get_mas_working_memory(wf_id) if wf_id else None
         return await persist_scene_outputs(
             executed_calls=executed_calls,
             kind="image",

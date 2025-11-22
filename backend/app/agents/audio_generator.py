@@ -18,7 +18,7 @@ from .utils.artifacts import (
     persist_scene_outputs,
     finalize_scene_outputs,
 )
-from .utils.memory_helpers import ensure_mas_memory
+from .utils.memory_helpers import get_mas_working_memory
 
 
 class AudioGeneratorAgent(ReActAgent):
@@ -65,7 +65,7 @@ class AudioGeneratorAgent(ReActAgent):
         observation: Dict[str, Any] = dict(base_observation or {})
         from .utils.memory_helpers import read_shared_fact
         concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
-        wm = ensure_mas_memory(wf_id)
+        wm = get_mas_working_memory(wf_id)
         final_video_info = wm.get("project.final_video", {}) or {}
         final_video_path = final_video_info.get("path", "") if isinstance(final_video_info, dict) else ""
         # 优先使用 orchestrator 注入的时间线与总时长
@@ -204,8 +204,8 @@ class AudioGeneratorAgent(ReActAgent):
         # 计算总时长：优先从 Shared WM 时间线推导
         total_duration = 0.0
         try:
-            from .utils.memory_helpers import ensure_mas_memory
-            overview = ensure_mas_memory(wf_id).get("scene_overview", {}) or {}
+            from .utils.memory_helpers import get_mas_working_memory
+            overview = get_mas_working_memory(wf_id).get("scene_overview", {}) or {}
             tl = []
             cursor = 0.0
             for scene in overview.get("scenes", []) or []:
@@ -258,7 +258,7 @@ class AudioGeneratorAgent(ReActAgent):
             pass
         stored_results: List[Dict[str, Any]] = []
         if ok:
-            shared_wm = ensure_mas_memory(wf_id) if wf_id else None
+            shared_wm = get_mas_working_memory(wf_id) if wf_id else None
             stored_results = await persist_scene_outputs(
                 artifacts=[
                     {
