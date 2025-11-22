@@ -202,13 +202,19 @@ class AudioGeneratorAgent(ReActAgent):
         # 计算总时长：优先从 Shared WM 时间线推导
         total_duration = 0.0
         try:
-            view = get_shared_wm().get_task(wf_id)
+            from .utils.memory_helpers import ensure_mas_memory
+            overview = ensure_mas_memory(wf_id).get("scene_overview", {}) or {}
             tl = []
             cursor = 0.0
-            for sn in sorted((view.scenes or {}).keys()):
-                snap = (view.scenes or {}).get(sn)
-                dur = float(getattr(snap, 'duration', 0.0) or 0.0) if snap else 0.0
-                tl.append({"scene_number": int(sn), "start": cursor, "end": cursor + dur, "duration": dur})
+            for scene in overview.get("scenes", []) or []:
+                if not isinstance(scene, dict):
+                    continue
+                try:
+                    sn = int(scene.get("scene_number"))
+                except Exception:
+                    continue
+                dur = float(scene.get("duration") or 0.0)
+                tl.append({"scene_number": sn, "start": cursor, "end": cursor + dur, "duration": dur})
                 cursor += dur
             total_duration = cursor
         except Exception:
