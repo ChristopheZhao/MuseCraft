@@ -446,17 +446,18 @@ class OrchestratorAgent(BaseAgent):
                     # Lightweight WS signals for coarse-grained UI sync
                     try:
                         from .adapters.state.memory_state import build_memory_state
+                        from .adapters.state.mas_state import build_mas_state_view
                         shared = ensure_mas_memory(str(wf_id))
-                        state_view = build_memory_state(shared)
-
+                        wm_state = build_memory_state(shared)
+                        mas_state = build_mas_state_view(str(wf_id))
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
                             await self.websocket_manager.broadcast_to_task(
                                 str(task.task_id),
                                 {
                                     "type": "image_assets_ready",
                                     "task_id": str(task.task_id),
-                                    "images_count": int(state_view.get("outputs", {}).get("image", 0)),
-                                    "state": state_view,
+                                    "images_count": int(wm_state.get("outputs", {}).get("image", 0)),
+                                    "state": mas_state,
                                 }
                             )
                         if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(wf_id, agent_output):
@@ -465,8 +466,8 @@ class OrchestratorAgent(BaseAgent):
                                 {
                                     "type": "video_assets_ready",
                                     "task_id": str(task.task_id),
-                                    "videos_count": int(state_view.get("outputs", {}).get("video", 0)),
-                                    "state": state_view,
+                                    "videos_count": int(wm_state.get("outputs", {}).get("video", 0)),
+                                    "state": mas_state,
                                 }
                             )
                     except Exception as _ws_sig_err:
