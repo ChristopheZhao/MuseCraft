@@ -122,29 +122,19 @@ class OrchestratorAgent(BaseAgent):
         self._step_repeat_counts = {}
 
     def _load_workflow_overview(self, workflow_id: str) -> Dict[str, Any]:
+        from .utils.memory_helpers import read_shared_fact
         try:
-            value = self.fetch_memory_slot(
-                workflow_id,
-                "project.workflow_overview",
-                default={},
-                agent=self.agent_name,
-            )
+            value = read_shared_fact(workflow_id, "workflow_overview", {})
         except Exception as exc:
-            raise AgentError(f"Failed to read workflow_overview from shared memory: {exc}") from exc
-        if not isinstance(value, dict):
-            return {}
-        return dict(value)
+            raise AgentError(f"Failed to read workflow_overview from MAS WM: {exc}") from exc
+        return dict(value) if isinstance(value, dict) else {}
 
     def _store_workflow_overview(self, workflow_id: str, payload: Dict[str, Any]) -> None:
+        from .utils.memory_helpers import write_shared_fact
         try:
-            self.store_memory_slot(
-                workflow_id,
-                "project.workflow_overview",
-                payload,
-                agent=self.agent_name,
-            )
+            write_shared_fact(workflow_id, "workflow_overview", payload or {})
         except Exception as exc:
-            raise AgentError(f"Failed to write workflow_overview to shared memory: {exc}") from exc
+            raise AgentError(f"Failed to write workflow_overview to MAS WM: {exc}") from exc
 
     def _update_workflow_overview(self, workflow_id: str, updates: Dict[str, Any], *, raise_error: bool = True) -> None:
         try:

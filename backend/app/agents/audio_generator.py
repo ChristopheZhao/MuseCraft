@@ -267,13 +267,6 @@ class AudioGeneratorAgent(ReActAgent):
                 include_prompt=False,
             )
 
-        from ..core.config import settings as _cfg
-        if not bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
-            try:
-                self.store_memory_slot(wf_id, "project.background_music", bgm_facts)
-            except Exception as exc:
-                self.logger.error("WM_BGM_WRITE_FAIL: err=%s facts=%s", exc, bgm_facts, exc_info=True)
-                raise AgentError(f"Shared WM write failed (background_music): {exc}") from exc
         ok = bool(audio_url or music_path)
         return {
             "success": ok,
