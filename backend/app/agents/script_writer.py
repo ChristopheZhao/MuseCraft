@@ -105,11 +105,12 @@ class ScriptWriterAgent(BaseAgent):
                 from .utils.memory_helpers import read_shared_fact
                 concept_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
             except Exception:
-                concept_plan = self.fetch_memory_slot(
-                    workflow_state_id,
-                    "project.concept_plan",
-                    default={}
-                ) or {}
+            concept_plan = {}
+            try:
+                from .utils.memory_helpers import read_shared_fact
+                concept_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
+            except Exception:
+                pass
 
             if not scenes:
                 return {
@@ -165,11 +166,11 @@ class ScriptWriterAgent(BaseAgent):
             episode_character_ids = []
 
         # 旁白规划从记忆槽读取
-        voice_plan = self.fetch_memory_slot(
-            workflow_state_id,
-            "project.voice_plan",
-            default={}
-        ) or {}
+        try:
+            from .utils.memory_helpers import read_shared_fact
+            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}) or {}
+        except Exception:
+            voice_plan = {}
         voice_plan_enabled = True
         if isinstance(voice_plan, dict):
             enabled_raw = voice_plan.get("enabled")
@@ -529,16 +530,10 @@ class ScriptWriterAgent(BaseAgent):
                             merged = dict(existing_scripts)
                             merged[str(scene.scene_number)] = entry
                             write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
-                            # 兼容 slot 写入
-                            self.store_memory_slot(
-                                workflow_state_id,
-                                "project.scene_scripts",
-                                {str(scene.scene_number): entry},
-                            )
-                        except Exception as slot_err:
+                        except Exception as err:
                             raise AgentError(
-                                f"Failed to persist scene_scripts for scene {scene.scene_number}: {slot_err}"
-                            ) from slot_err
+                                f"Failed to persist scene_scripts for scene {scene.scene_number}: {err}"
+                            ) from err
                         try:
                             if isinstance(concept_plan, dict):
                                 for sc_def in concept_plan.get('scenes', []) or []:
@@ -886,20 +881,14 @@ class ScriptWriterAgent(BaseAgent):
                         if isinstance(sw, str) and sw.strip():
                             style_hint = sw.strip()
                     if not style_hint:
-                        try:
-                            sw = self.fetch_memory_slot(
-                                str(workflow_state_id),
-                                "project.style_preference",
-                                default="",
-                            )
-                            if isinstance(sw, str) and sw.strip():
-                                style_hint = sw.strip()
-                            elif isinstance(sw, dict):
-                                raw_hint = sw.get("value") if isinstance(sw.get("value"), str) else None
-                                if raw_hint and raw_hint.strip():
-                                    style_hint = raw_hint.strip()
-                        except Exception:
-                            pass
+                        from .utils.memory_helpers import read_shared_fact
+                        sw = read_shared_fact(str(workflow_state_id), "project.style_preference", "")
+                        if isinstance(sw, str) and sw.strip():
+                            style_hint = sw.strip()
+                        elif isinstance(sw, dict):
+                            raw_hint = sw.get("value") if isinstance(sw.get("value"), str) else None
+                            if raw_hint and raw_hint.strip():
+                                style_hint = raw_hint.strip()
                     # 2) 概念计划智能风格设计摘要（作为补充）
                     if not style_hint and isinstance(concept_plan, dict):
                         isd = (concept_plan or {}).get('intelligent_style_design') or {}
