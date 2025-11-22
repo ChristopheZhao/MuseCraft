@@ -10,12 +10,9 @@
 - 异常上抛，工具层决定降级策略
 """
 
-from .facts_provider import FactsProvider, DefaultFactsProvider
 from .memory_provider import MemoryProvider, DefaultMemoryProvider
 
 __all__ = [
-    "FactsProvider",
-    "DefaultFactsProvider",
     "MemoryProvider",
     "DefaultMemoryProvider",
 ]
