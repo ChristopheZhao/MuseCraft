@@ -63,15 +63,14 @@ class AudioGeneratorAgent(ReActAgent):
         # Orchestrator 负责预建 WorkingMemory；此处只读访问
         _ = self.wm
         observation: Dict[str, Any] = dict(base_observation or {})
-        view = get_shared_wm().get_task(wf_id)
-        store = self.shared_memory_store
         try:
             from .utils.memory_helpers import read_shared_fact
             concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
         except Exception:
             concept_plan = self.fetch_memory_slot(wf_id, "project.concept_plan", default={}) or {}
-        final_video_info = store.get(wf_id, "project.final_video", default={}) or {}
-        final_video_path = final_video_info.get("path", "")
+        wm = ensure_mas_memory(wf_id)
+        final_video_info = wm.get("project.final_video", {}) or {}
+        final_video_path = final_video_info.get("path", "") if isinstance(final_video_info, dict) else ""
         # 优先使用 orchestrator 注入的时间线与总时长
         timeline = input_data.get("audio_timeline") or []
         total_duration = float(input_data.get("audio_total_duration") or 0.0)
@@ -79,11 +78,17 @@ class AudioGeneratorAgent(ReActAgent):
         if not timeline:
             cursor = 0.0
             timeline = []
-            for sn in sorted((view.scenes or {}).keys()):
-                snap = (view.scenes or {}).get(sn)
-                dur = float(getattr(snap, 'duration', 0.0) or 0.0) if snap else 0.0
+            overview = wm.get("scene_overview", {}) if wm else {}
+            for scene in (overview.get("scenes") or []) if isinstance(overview, dict) else []:
+                if not isinstance(scene, dict):
+                    continue
+                try:
+                    sn = int(scene.get("scene_number"))
+                except Exception:
+                    continue
+                dur = float(scene.get("duration") or 0.0)
                 timeline.append({
-                    "scene_number": int(sn),
+                    "scene_number": sn,
                     "start": cursor,
                     "end": cursor + dur,
                     "duration": dur,

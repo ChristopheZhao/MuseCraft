@@ -197,11 +197,8 @@ class VideoComposerAgent(BaseAgent):
                         },
                     }
                     # 始终写入 final_video 事实：供持久化读取最终交付物
-                    self.store_memory_slot(
-                        str(workflow_state_id),
-                        "project.final_video",
-                        fv,
-                    )
+                    from .utils.memory_helpers import write_shared_fact
+                    write_shared_fact(str(workflow_state_id), "project.final_video", fv)
                     # 统一写回：记录本轮 Composer 产物（作为阶段性artifact）
                     self.write_shared_artifact(
                         kind="video",
