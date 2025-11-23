@@ -22,6 +22,7 @@ from .tools.agent_tool_allocation import get_agent_tools, validate_agent_tools
 from .prompts.template_manager import get_template_manager
 from .utils.tool_contracts import extract_contract_slot_writes
 from .utils.obs_builder import derive_action_facts
+from .utils.memref import walk_memref
 from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
 from ..services.memory_provider import get_memory_services, MemoryServices
 from .memory.short_term import (
@@ -217,141 +218,13 @@ class BaseAgent(ABC):
         通用 MemRef 适配层：仅当入参中包含 "$memref" 标记时，基于 WorkingMemory（短期记忆）进行就地替换；
         不做函数名判断，不做默认合并，不覆盖模型已明确给定的普通字段。
 
-        支持形态（示例）：
-        {"style_guidance": {"$memref": {"source": "wm.prepared_assets", "scene_number": 3, "select": ["style"]}}}
-        {"scene_data": {"$memref": {"source": "wm.prepared_assets", "select": ["environment","characters"]}}}  # scene_number 省略时取 args.scene_number
+        prepared_assets 兼容路径已废弃，source 需显式传入 wm.<key>。
         """
         if not isinstance(args, dict):
             return args
 
-        wm = self.wm
-
-        def _coerce_int(v):
-            try:
-                return int(v) if (v is not None and str(v).isdigit()) else None
-            except Exception:
-                return None
-
-        def _default_scene_number(local_args: Dict[str, Any]) -> Optional[int]:
-            try:
-                return _coerce_int(local_args.get('scene_number')) if isinstance(local_args, dict) else None
-            except Exception:
-                return None
-
-        def _resolve_memref(node: Dict[str, Any], local_args: Dict[str, Any]) -> Any:
-            ref = node.get('$memref') if isinstance(node, dict) else None
-            if not isinstance(ref, dict):
-                return node
-            source = str(ref.get('source') or 'wm.prepared_assets')
-            sn = ref.get('scene_number')
-            sn = _coerce_int(sn) if sn is not None else _default_scene_number(local_args)
-            selected = ref.get('select')
-            if source == 'wm.prepared_assets' and wm is not None and sn is not None:
-                try:
-                    try:
-                        strict = bool(getattr(settings, 'REACT_MEMREF_STRICT', False))
-                    except Exception:
-                        strict = False
-                    # 场景一致性校验：若本次调用参数存在 scene_number，要求与 memref 一致
-                    try:
-                        arg_sn = _default_scene_number(local_args)
-                        if arg_sn is not None and arg_sn != sn:
-                            try:
-                                self.logger.info(
-                                    f"MEMREF_SCENE_MISMATCH source={source} arg_sn={arg_sn} ref_sn={sn} -> skip"
-                                )
-                            except Exception:
-                                pass
-                            if strict:
-                                raise ValueError("memref scene mismatch")
-                            else:
-                                return {}
-                    except Exception:
-                        pass
-                    # 存量场景校验：仅对已知场景进行解引用
-                    try:
-                        if hasattr(wm, 'has_scene') and not wm.has_scene(sn):
-                            try:
-                                self.logger.info(
-                                    f"MEMREF_SCENE_UNKNOWN source={source} sn={sn} -> skip"
-                                )
-                            except Exception:
-                                pass
-                            if strict:
-                                raise ValueError("memref scene unknown")
-                            else:
-                                return {}
-                    except Exception:
-                        pass
-                    prepared = None
-                    if hasattr(wm, 'get_prepared_assets'):
-                        prepared = wm.get_prepared_assets(sn)
-                    if not isinstance(prepared, dict) or not prepared:
-                        try:
-                            self.logger.info(
-                                f"MEMREF_EMPTY source={source} sn={sn} select={selected} -> skip"
-                            )
-                        except Exception:
-                            pass
-                        if strict:
-                            raise ValueError("memref empty")
-                        else:
-                            return {}
-                    if isinstance(selected, (list, tuple)) and selected:
-                        out = {}
-                        for k in selected:
-                            if isinstance(k, str) and k in prepared:
-                                out[k] = prepared[k]
-                        try:
-                            self.logger.info(
-                                f"MEMREF_RESOLVE source={source} sn={sn} keys={list(out.keys())}"
-                            )
-                        except Exception:
-                            pass
-                        return out
-                    try:
-                        self.logger.info(
-                            f"MEMREF_RESOLVE source={source} sn={sn} keys={list(prepared.keys())}"
-                        )
-                    except Exception:
-                        pass
-                    return prepared
-                except Exception:
-                    return {}
-            # 未知 source：安全返回空
-            return {}
-
-        def _walk(value: Any, local_args: Dict[str, Any]) -> Any:
-            if isinstance(value, str) and value.startswith("memref:"):
-                ref_key = value[len("memref:") :].strip()
-                if not ref_key:
-                    return {}
-                resolved = _resolve_memref(
-                    {
-                        "$memref": {
-                            "source": "wm.prepared_assets",
-                            "select": [ref_key],
-                        }
-                    },
-                    local_args,
-                )
-                if isinstance(resolved, dict) and len(resolved) == 1 and ref_key in resolved:
-                    return resolved[ref_key]
-                return resolved
-            # dict with $memref at top-level
-            if isinstance(value, dict) and '$memref' in value:
-                return _resolve_memref(value, local_args)
-            if isinstance(value, dict):
-                out = {}
-                for k, v in value.items():
-                    out[k] = _walk(v, local_args)
-                return out
-            if isinstance(value, list):
-                return [_walk(v, local_args) for v in value]
-            return value
-
         try:
-            return _walk(args, args)
+            return walk_memref(args, self.wm)
         except Exception:
             return args
 
