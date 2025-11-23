@@ -6,11 +6,13 @@
 - 不做裁剪/决策，裁剪/窗口策略由上层配置（默认不裁剪）。
 - 仅作用于 Agent WM；共享产物仍由 MAS WM 提供。
 
-当前为占位实现，待迭代循环重构时补充具体读取逻辑。
+当前实现：读取 Agent WM 的 facts、scene_outputs.*、obs_records，以及可选的状态视图，默认不裁剪；提供 max_turn/max_token_budget 参数占位，当前仅支持截断 obs_records 长度。
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from .memory_helpers import get_agent_working_memory
 
 
 def build_agent_context(
@@ -18,9 +20,47 @@ def build_agent_context(
     agent_name: str,
     *,
     state_view: Optional[Dict[str, Any]] = None,
+    max_turn: Optional[int] = None,
+    max_token_budget: Optional[int] = None,  # 占位，暂未实现基于 token 的裁剪
 ) -> Dict[str, Any]:
-    """占位：返回基础上下文骨架，后续填充 WM 读取逻辑。"""
+    """从 Agent WM 构建上下文，可选按 max_turn 截断 obs_records。"""
     ctx: Dict[str, Any] = {}
+    if not workflow_id or not agent_name:
+        return ctx
+    wm = get_agent_working_memory(str(workflow_id), agent_name)
+
+    # 基础 facts
+    try:
+        facts = wm.get("facts", {}) if hasattr(wm, "facts") else {}
+        if isinstance(facts, dict):
+            ctx["facts"] = dict(facts)
+    except Exception:
+        pass
+
+    # 产物：按 scene_outputs.* 聚合
+    try:
+        outputs_bucket = {}
+        facts_all = wm.get("facts", {}) if hasattr(wm, "facts") else {}
+        if isinstance(facts_all, dict):
+            for key, val in facts_all.items():
+                if isinstance(key, str) and key.startswith("scene_outputs."):
+                    outputs_bucket[key] = val
+        if outputs_bucket:
+            ctx["scene_outputs"] = outputs_bucket
+    except Exception:
+        pass
+
+    # OBS 记录（若有）
+    try:
+        obs_records = wm.get("obs_records", [])
+        if isinstance(obs_records, list) and obs_records:
+            if max_turn and max_turn > 0:
+                ctx["obs_records"] = list(obs_records)[-int(max_turn):]
+            else:
+                ctx["obs_records"] = list(obs_records)
+    except Exception:
+        pass
+
     if state_view and isinstance(state_view, dict):
         ctx["state_view"] = state_view
     return ctx

@@ -74,17 +74,18 @@ class ReActAgent(BaseAgent, ABC):
             self.logger.info(f"🔄 Iteration {iteration + 1}/{self.max_iterations}")
             
             try:
-                # 上下文由 WM/context manager 提供（占位：直接使用注入的 base_observation）
+                # 上下文由 context manager 基于 Agent WM/状态视图构建
                 try:
                     from .utils.context_manager import build_agent_context
-                    base_ctx = build_agent_context(
+                    current_iter_context = build_agent_context(
                         workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
                         agent_name=self.agent_name,
                         state_view=None,
+                        max_turn=None,
+                        max_token_budget=None,
                     )
                 except Exception:
-                    base_ctx = {}
-                current_iter_context = base_ctx
+                    current_iter_context = {}
                 pending_action_facts = None
 
                 # THINK & PLAN
@@ -99,7 +100,22 @@ class ReActAgent(BaseAgent, ABC):
                     action_plan, input_data, execution, db, iteration
                 )
                 action_facts = self._derive_action_facts_payload(action_plan, action_result)
-                # OBS/产物写回由具体 Agent 处理（persist_scene_outputs 等）；占位：不在此写入 WM
+                try:
+                    from .utils.wm_obs import append_obs_to_wm
+
+                    obs_record: Dict[str, Any] = {
+                        "iteration": iteration,
+                        "action_plan": action_plan,
+                        "action_result": action_result,
+                        "observation": current_iter_context,
+                    }
+                    append_obs_to_wm(
+                        workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
+                        agent_name=self.agent_name,
+                        obs_record=obs_record,
+                    )
+                except Exception:
+                    pass
                 pending_action_facts = action_facts
                 if isinstance(action_result, dict):
                     last_action_result = action_result
