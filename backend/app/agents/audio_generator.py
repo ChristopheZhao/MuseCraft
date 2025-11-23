@@ -12,7 +12,6 @@ from .react_agent import ReActAgent, AgentError
 from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
  
 from ..core.config import settings
-from .services.mas_shared_memory import get_shared_wm
 from .utils.artifacts import (
     pick_artifact_path_from_results,
     persist_scene_outputs,
