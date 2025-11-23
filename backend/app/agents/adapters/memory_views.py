@@ -4,23 +4,24 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..services.mas_shared_memory import get_shared_wm
-from ..memory.short_term.workflow_facts import WorkflowFactStoreError
 from .video import VideoMemoryAdapter
-from ...services.memory_provider import get_memory_services
 from ..utils.memory_helpers import get_mas_working_memory
 
 
 def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
     """Return MAS working-memory projection for scenes/state."""
+    wm = get_mas_working_memory(str(workflow_id))
+    if wm is None:
+        return {}
+    overview = wm.get("scene_overview", {})
+    if isinstance(overview, dict) and overview:
+        return overview
+    # legacy path: adapt VideoMemoryAdapter over WM if snapshot present
     try:
-        shared_view = get_shared_wm().get_task(workflow_id)
+        adapter = VideoMemoryAdapter(wm)
+        return adapter.build_fact_observation()
     except Exception:
         return {}
-    if shared_view is None:
-        return {}
-    adapter = VideoMemoryAdapter(shared_view)
-    return adapter.build_fact_observation()
 
 
 def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
@@ -31,16 +32,8 @@ def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
         if isinstance(payload, dict):
             return _normalize_scene_dict(payload)
     except Exception:
-        pass
-    # fallback to fact_store for legacy data
-    store = _fact_store()
-    if store is None:
         return {}
-    try:
-        payload = store.get(workflow_id, "project.scene_scripts", default={})
-    except WorkflowFactStoreError:
-        return {}
-    return _normalize_scene_dict(payload)
+    return {}
 
 
 def load_roles_context(workflow_id: str) -> Dict[str, Any]:
@@ -62,16 +55,8 @@ def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
         if isinstance(plan, dict):
             return plan
     except Exception:
-        plan = {}
-    # fallback for legacy data
-    store = _fact_store()
-    if store is None:
-        return plan if isinstance(plan, dict) else {}
-    try:
-        plan = store.get(workflow_id, "project.concept_plan", default={}) or {}
-    except WorkflowFactStoreError:
-        plan = {}
-    return plan if isinstance(plan, dict) else {}
+        pass
+    return {}
 
 
 def build_media_agent_context(
@@ -223,11 +208,6 @@ def _coerce_int(value: Any) -> Optional[int]:
         return int(value)
     except Exception:
         return None
-
-
-def _fact_store():
-    services = get_memory_services()
-    return getattr(services, "fact_store", None)
 
 
 __all__ = [
