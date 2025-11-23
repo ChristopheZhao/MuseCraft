@@ -14,9 +14,8 @@ from ..models import Task, AgentExecution, AgentType, Scene, Resource, ResourceT
 from ..services.file_storage import FileStorageService
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
-from .services.mas_shared_memory import get_shared_wm
 from ..services.memory_provider import MemoryServices
-from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
+from .utils.memory_helpers import read_shared_fact, write_shared_fact
 
 
 class VideoComposerAgent(BaseAgent):
@@ -50,26 +49,23 @@ class VideoComposerAgent(BaseAgent):
         self._validate_input(input_data, ["workflow_state_id"])
         
         workflow_state_id = input_data["workflow_state_id"]
-        # 读取 Shared Working Memory 视图（记忆不可用时降级到最小上下文，而非中断）
+        # 读取 MAS WorkingMemory 视图（不可用时降级到最小上下文，而非中断）
+        from .utils.memory_helpers import get_mas_working_memory
+        wm = None
         try:
-            shared_view = get_shared_wm().get_task(str(workflow_state_id))
+            wm = get_mas_working_memory(str(workflow_state_id))
         except Exception as _wm_err:
-            self.logger.warning(f"Shared WM unavailable, degrading: {str(_wm_err)}")
-            shared_view = type("_EmptySharedView", (), {"facts": {}, "scenes": {}})()  # 轻量占位
-        store = self.shared_memory_store
+            self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
 
         # Unified ReAct planning: let the model decide VO/BGM composition steps
         # Build neutral observation (no tool names), include hints but do not hard-branch
         await self._update_progress(execution, 10, "Gathering composition context", db)
-        final_video_facts = store.get(str(workflow_state_id), "project.final_video", default={}) or {}
+        final_video_facts = wm.get("project.final_video", {}) if wm else {}
         video_path = input_data.get("final_video_path") or final_video_facts.get("path", '')
-        bgm_facts = store.get(str(workflow_state_id), "project.background_music", default={}) or {}
-        voice_settings = store.get(str(workflow_state_id), "project.voice_settings", default={}) or {}
-        voice_assets_facts = store.get(str(workflow_state_id), "project.voice_assets", default={}) or {}
-        try:
-            vm_state = store.get(str(workflow_state_id), "project.voice_mixing_state", default={}) or {}
-        except SharedMemoryStoreError:
-            vm_state = {}
+        bgm_facts = wm.get("project.background_music", {}) if wm else {}
+        voice_settings = wm.get("project.voice_settings", {}) if wm else {}
+        voice_assets_facts = wm.get("project.voice_assets", {}) if wm else {}
+        vm_state = wm.get("project.voice_mixing_state", {}) if wm else {}
 
         # 单写模式：从 artifacts 收集可用资产（compose/bgm/voiceover/video_only）
         try:
@@ -78,53 +74,37 @@ class VideoComposerAgent(BaseAgent):
         except Exception:
             single_write = False
         if single_write:
+        # 兼容单写模式：从 MAS WM facts/scene_outputs 读取最新资产
+        if single_write:
+            # 优先使用已写入 facts，scene_outputs 中的音视频可选读取
             try:
-                from .services.mas_shared_memory import get_shared_wm as _get_wm
-                art_list = _get_wm().list_artifacts(str(workflow_state_id))
-                # 最新compose
-                latest_comp = _get_wm().get_latest_artifact(str(workflow_state_id), kind='video', stage='compose')
-                if isinstance(latest_comp, dict):
-                    video_path = latest_comp.get('file_path') or latest_comp.get('url') or video_path
-                # 最新bgm
-                latest_bgm = _get_wm().get_latest_artifact(str(workflow_state_id), kind='audio', stage='bgm')
-                if isinstance(latest_bgm, dict):
-                    bgm_facts = {
-                        'audio_path': latest_bgm.get('file_path', ''),
-                        'audio_url': latest_bgm.get('url', ''),
-                        'duration': latest_bgm.get('duration_sec') or 0.0,
-                        'style': (voice_settings.get('style_name') if isinstance(voice_settings, dict) else ''),
-                        'available': True,
-                    }
-                # 按场景聚合 voiceover 最新
-                voice_assets_facts = {}
-                if isinstance(art_list, list):
-                    # pick latest per scene where kind=voice stage=voiceover
-                    latest_by_scene: Dict[int, Dict[str, Any]] = {}
-                    for r in art_list:
-                        try:
-                            if not isinstance(r, dict):
-                                continue
-                            if r.get('kind') != 'voice' or (r.get('stage') not in (None, '', 'voiceover')):
-                                continue
-                            sn = r.get('scene_number')
-                            if sn is None:
-                                continue
-                            sid = int(sn) if str(sn).isdigit() else None
-                            if sid is None:
-                                continue
-                            prev = latest_by_scene.get(sid)
-                            if (prev is None) or (int(r.get('id') or 0) > int(prev.get('id') or 0)):
-                                latest_by_scene[sid] = r
-                        except Exception:
-                            continue
-                    for sid, r in latest_by_scene.items():
-                        voice_assets_facts[sid] = {
-                            'audio_url': r.get('url', ''),
-                            'local_path': r.get('file_path', ''),
-                            'duration': r.get('duration_sec') or 0.0,
-                        }
+                scene_outputs = wm.get("scene_outputs", {}) if wm else {}
             except Exception:
-                pass
+                scene_outputs = {}
+            # compose 视频
+            if not video_path:
+                try:
+                    video_bucket = scene_outputs.get("scene_outputs.video") or scene_outputs.get("video") or {}
+                    latest_video = max(video_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(video_bucket, dict) else {}
+                    if isinstance(latest_video, dict):
+                        video_path = latest_video.get("file_path") or latest_video.get("url") or video_path
+                except Exception:
+                    pass
+            # bgm
+            if not bgm_facts:
+                try:
+                    audio_bucket = scene_outputs.get("scene_outputs.audio") or scene_outputs.get("audio") or {}
+                    latest_audio = max(audio_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(audio_bucket, dict) else {}
+                    if isinstance(latest_audio, dict):
+                        bgm_facts = {
+                            "audio_path": latest_audio.get("file_path", ""),
+                            "audio_url": latest_audio.get("url", ""),
+                            "duration": latest_audio.get("duration_sec") or 0.0,
+                            "style": voice_settings.get("style_name") if isinstance(voice_settings, dict) else "",
+                            "available": True,
+                        }
+                except Exception:
+                    pass
 
         obs_unified = {
             "final_video": {"path": video_path, "url": final_video_facts.get("url", "")},
