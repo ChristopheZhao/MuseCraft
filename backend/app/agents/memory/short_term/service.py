@@ -113,7 +113,7 @@ class WorkingMemoryService:
             )
             raise
 
-    def delete(self, workflow_state_id: str, scope: str, *, sync_to_slots: bool = True) -> None:
+    def delete(self, workflow_state_id: str, scope: str, *, sync_to_slots: bool = False) -> None:
         """Delete cached WorkingMemory for a given agent/workflow."""
         key = (str(workflow_state_id), str(scope))
         with self._lock:
@@ -122,7 +122,7 @@ class WorkingMemoryService:
             return
         try:
             if sync_to_slots:
-                # WorkingMemoryAssembler handles syncing during invalidate if needed.
+                # Legacy slot sync disabled by default
                 self._assembler.invalidate(key[0], key[1])
         finally:
             self._logger.info("WM_DELETE workflow=%s scope=%s sync=%s", key[0], key[1], sync_to_slots)
@@ -146,7 +146,7 @@ class WorkingMemoryService:
         except Exception:
             self._logger.debug("WorkingMemoryService.invalidate failed for %s/%s", key[0], key[1], exc_info=True)
 
-    def reset_workflow(self, workflow_state_id: str, *, sync_to_slots: bool = True) -> None:
+    def reset_workflow(self, workflow_state_id: str, *, sync_to_slots: bool = False) -> None:
         """Invalidate all agent memories for a workflow."""
         wf_id = str(workflow_state_id)
         keys_to_drop = []
@@ -171,7 +171,7 @@ class WorkingMemoryService:
     # Backwards-compatible alias
     def cleanup_workflow(self, workflow_state_id: str) -> None:
         """Alias for reset_workflow for orchestrator compatibility."""
-        self.reset_workflow(workflow_state_id, sync_to_slots=True)
+        self.reset_workflow(workflow_state_id, sync_to_slots=False)
 
 __all__ = [
     "WorkingMemoryService",

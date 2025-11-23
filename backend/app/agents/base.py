@@ -23,7 +23,6 @@ from .prompts.template_manager import get_template_manager
 from .utils.tool_contracts import extract_contract_slot_writes
 from .utils.obs_builder import derive_action_facts
 from .utils.memref import walk_memref
-from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
 from ..services.memory_provider import get_memory_services, MemoryServices
 from .memory.short_term import (
     get_working_memory_service,
@@ -99,7 +98,7 @@ class BaseAgent(ABC):
             
         self.allocated_tools = list(self._available_tools.keys())
         
-        # 记忆管理器 - 🧠 ACTIVATED! 实现真正的MAS记忆共享
+        # 记忆管理器 - 🧠 MAS 共享记忆
         if memory_services is None:
             memory_services = get_memory_services()
         self._memory_services: MemoryServices = memory_services
@@ -107,11 +106,6 @@ class BaseAgent(ABC):
         self.memory_service = memory_services.global_service
         self.memory_coordinator = memory_services.coordinator
         self.long_term_memory = memory_services.long_term
-        self.shared_memory_store = memory_services.fact_store
-        if self.memory_coordinator is None:
-            self.logger.warning("Memory Coordinator not available; falling back to legacy Shared WM")
-        else:
-            self.logger.info("🧠 %s memory coordinator activated", self.agent_name)
         
         # 统一提示词管理器 - 支持YAML配置和模板渲染
         from ..core.prompt_manager import get_prompt_manager
@@ -242,49 +236,8 @@ class BaseAgent(ABC):
             return
         if tool_obj is None or not hasattr(tool_obj, "get_output_contract"):
             return
-        try:
-            contract = tool_obj.get_output_contract(action_name or "")
-        except Exception as exc:
-            self.logger.debug(
-                f"tool contract fetch skipped for {tool_name}.{action_name}: {exc}"
-            )
-            return
-        if not contract:
-            return
-        try:
-            writes = extract_contract_slot_writes(
-                payload,
-                contract,
-                default_scene=scene_number,
-            )
-        except Exception as exc:
-            self.logger.debug(
-                f"tool contract parse skipped for {tool_name}.{action_name}: {exc}"
-            )
-            return
-        if not writes:
-            return
-        for write in writes:
-            if write.scene_number is None:
-                continue
-            keys_info = None
-            if isinstance(write.value, dict):
-                keys_info = list(write.value.keys())[:6]
-            op_label = f"{tool_name or 'tool'}.{action_name or 'action'}:{write.slot}"
-
-            def _apply_patch(memory):
-                memory.set_slot_value(write.slot, write.scene_number, write.value)
-
-            try:
-                self.memory_write(_apply_patch, operation=op_label)
-                self.logger.info(
-                    f"WM_SLOT_WRITE tool={tool_name} action={action_name} slot={write.slot} "
-                    f"scene={write.scene_number} keys={keys_info} path={write.source_path}"
-                )
-            except Exception as exc:
-                self.logger.debug(
-                    f"WM slot write failed slot={write.slot} scene={write.scene_number}: {exc}"
-                )
+        # legacy contract → slot 写回已弃用；保持空实现以兼容旧工具
+        return
 
     # --- Unified SharedWM artifact writer ---------------------------------
     def write_shared_artifact(

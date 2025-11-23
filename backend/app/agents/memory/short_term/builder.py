@@ -50,7 +50,7 @@ class WorkingMemoryBuilder:
         target.facts = deepcopy(getattr(shared_view, "facts", {}))
         target.notes = list(getattr(shared_view, "notes", []) or [])
         target.workflow_facts = deepcopy(getattr(shared_view, "workflow_facts", {}))
-        target.facts_slots = deepcopy(getattr(shared_view, "facts_slots", {}))
+        target.facts_slots = {}
         target.event_streams = deepcopy(getattr(shared_view, "event_streams", {}))
         artifacts = list(getattr(shared_view, "iteration_artifacts", []) or [])
         target.iteration_artifacts.clear()
