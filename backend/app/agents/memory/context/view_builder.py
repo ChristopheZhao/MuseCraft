@@ -19,7 +19,6 @@ def build_react_context_view(
         "scenes": [],
         "completed_scene_numbers": [],
         "failed_scene_numbers": [],
-        "prepared_assets_refs": [],
         "notes": [],
         "act_log": act_log or [],
         "recent_events": [],
@@ -40,17 +39,6 @@ def build_react_context_view(
         base_view["recent_events"] = wm.get_recent_step_summaries(10)
     except Exception:
         base_view["recent_events"] = []
-
-    slots = getattr(wm, "facts_slots", {}) or {}
-    prepared_bucket = slots.get("prepared_assets") or {}
-    prepared_refs = []
-    if isinstance(prepared_bucket, dict):
-        for key in prepared_bucket.keys():
-            try:
-                prepared_refs.append(int(key))
-            except Exception:
-                continue
-    base_view["prepared_assets_refs"] = sorted(set(prepared_refs))
 
     return base_view
 

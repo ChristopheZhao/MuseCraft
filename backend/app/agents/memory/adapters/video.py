@@ -26,8 +26,6 @@ export_observation = _ops.export_observation
 completed_outputs = _ops.completed_outputs
 failed_outputs = _ops.failed_outputs
 latest_iteration_artifacts = _ops.latest_iteration_artifacts
-set_prepared_assets = _ops.set_prepared_assets
-get_prepared_assets = _ops.get_prepared_assets
 
 __all__ = [
     "SceneSnapshot",
@@ -45,6 +43,4 @@ __all__ = [
     "completed_outputs",
     "failed_outputs",
     "latest_iteration_artifacts",
-    "set_prepared_assets",
-    "get_prepared_assets",
 ]

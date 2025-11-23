@@ -123,30 +123,13 @@ def ready_scene_numbers(wm) -> List[int]:
 
 
 def set_prepared_assets(wm, scene_number: int, assets: Dict[str, Any]) -> None:
-    try:
-        sn = int(scene_number)
-    except Exception:
-        return
-    whitelist = {"style", "characters", "environment", "continuity", "scene_references"}
-    normalized: Dict[str, Any] = {}
-    if isinstance(assets, dict):
-        for key in whitelist:
-            value = assets.get(key)
-            if value:
-                normalized[key] = value
-    if not normalized:
-        wm.prepared_assets.pop(sn, None)
-        return
-    merged = dict(wm.prepared_assets.get(sn, {}))
-    merged.update(normalized)
-    wm.prepared_assets[sn] = merged
+    """Legacy helper no-op (prepared_assets deprecated)."""
+    return
 
 
 def get_prepared_assets(wm, scene_number: int) -> Optional[Dict[str, Any]]:
-    try:
-        return wm.prepared_assets.get(int(scene_number))
-    except Exception:
-        return None
+    """Legacy helper no-op (prepared_assets deprecated)."""
+    return None
 
 
 def scene_view(wm, scene_number: int, *, max_events: int = 5) -> Dict[str, Any]:
@@ -161,9 +144,6 @@ def scene_view(wm, scene_number: int, *, max_events: int = 5) -> Dict[str, Any]:
     dq = list(wm.scene_events.get(sn) or [])
     if dq and max_events > 0:
         view["events"] = dq[-max_events:]
-    prepared = wm.prepared_assets.get(sn)
-    if prepared:
-        view["prepared_assets_keys"] = list(prepared.keys())
     return view
 
 
@@ -178,7 +158,8 @@ def classify_scenes(
     total = len(wm.scenes)
     completed = len(wm.completed)
     failed = len(wm.failed)
-    ready = len(ready_scene_numbers(wm))
+    ready_numbers = ready_scene_numbers(wm)
+    ready = len(ready_numbers)
     summary = {
         "total": total,
         "completed": completed,
@@ -186,7 +167,7 @@ def classify_scenes(
         "ready": ready,
         "pending": max(total - completed - failed, 0),
     }
-    ready_views = [scene_view(wm, sn, max_events=ready_event_limit) for sn in ready_scene_numbers(wm)[:ready_limit]]
+    ready_views = [scene_view(wm, sn, max_events=ready_event_limit) for sn in ready_numbers[:ready_limit]]
     dep_views: List[Dict[str, Any]] = []
     for sn, dep in wm.depends_map.items():
         if dep and dep not in wm.completed:
@@ -194,15 +175,7 @@ def classify_scenes(
         if len(dep_views) >= dependency_limit:
             break
     failure_views = [scene_view(wm, sn, max_events=ready_event_limit) for sn in list(wm.failed.keys())[:failure_limit]]
-    retry_hotspots = [
-        {
-            "scene_number": sn,
-            "retries": wm.retry_counts.get(sn, 0),
-            "retryable": wm.failed_retryable.get(sn, True),
-            "failure_reason": (wm.failed.get(sn) or {}).get("reason"),
-        }
-        for sn in list(wm.failed.keys())[:failure_limit]
-    ]
+    retry_hotspots = []
     global_stats = {
         "total_scenes": total,
         "completed_scenes": completed,

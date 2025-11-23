@@ -95,13 +95,6 @@ def build_observation_from_wm(
             if isinstance(facts, dict)
             else []
         )
-        observation["prepared_assets_refs"] = _coerce_int_list(
-            facts.get("prepared_assets_refs", [])
-            if isinstance(facts, dict)
-            else []
-        )
-        # 保持中立：不在 OBS 中承载 LLM 生成的建议类字段（如 prepared_prompts），
-        # 但包含状态事实（如 prepared_assets_refs）以便 PLAN 基于事实做决策
     else:
         observation["scenes"] = []
         observation["completed_scene_numbers"] = []
@@ -139,16 +132,7 @@ def compute_obs_digest(obs: Dict[str, Any]) -> Dict[str, Any]:
             payload_chars = 0
     keys_present: List[str] = []
     try:
-        for k in (
-            "scenes",
-            "completed_scene_numbers",
-            "failed_scene_numbers",
-            "prepared_assets_refs",
-            "prepared_prompts",
-            "exec_outcomes",
-            "aug_meta",
-            "aug",
-        ):
+        for k in ("scenes", "completed_scene_numbers", "failed_scene_numbers", "exec_outcomes", "aug_meta", "aug"):
             if k in obs:
                 keys_present.append(k)
     except Exception:

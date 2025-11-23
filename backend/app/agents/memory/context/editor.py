@@ -16,7 +16,6 @@ def edit_context(
         - Enforces list of scenes with integer scene_number
         - Converts completed/failed IDs to integer lists
         - Drops legacy fields (summary/ready/etc.)
-        - Ensures prepared_assets_refs always exists
     """
     if not isinstance(raw_view, dict):
         raw_view = {}
@@ -26,9 +25,6 @@ def edit_context(
         "completed_scene_numbers": _coerce_int_list(raw_view.get("completed_scene_numbers")),
         "failed_scene_numbers": _coerce_int_list(raw_view.get("failed_scene_numbers")),
         "notes": _sanitize_notes(raw_view.get("notes")),
-        "prepared_assets_refs": _coerce_int_list(
-            raw_view.get("prepared_assets_refs") or (raw_view.get("prepared_assets_detail") or {}).keys()
-        ),
     }
     if "act_log" in raw_view and isinstance(raw_view["act_log"], list):
         normalized["act_log"] = list(raw_view["act_log"])

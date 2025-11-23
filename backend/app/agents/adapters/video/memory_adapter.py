@@ -180,9 +180,6 @@ class VideoMemoryAdapter:
         dq = list(state.scene_events.get(sn) or [])
         if dq and max_events > 0:
             view["events"] = dq[-max_events:]
-        prepared = self.get_prepared_assets(sn)
-        if prepared:
-            view["prepared_assets_keys"] = list(prepared.keys())
         return view
 
     def classify_scenes(
@@ -255,12 +252,10 @@ class VideoMemoryAdapter:
             scenes.append(payload)
         completed_numbers = sorted(state.completed.keys())
         failed_numbers = sorted(state.failed.keys())
-        prepared_refs = sorted((self._wm.facts_slots.get("prepared_assets") or {}).keys())
         return {
             "scenes": scenes,
             "completed_scene_numbers": completed_numbers,
             "failed_scene_numbers": failed_numbers,
-            "prepared_assets_refs": prepared_refs,
             "notes": list(self._wm.notes or []),
         }
 
@@ -283,38 +278,6 @@ class VideoMemoryAdapter:
             "input_budget_tokens": None,
         }
         return view, receipt
-
-    # ------------------------------------------------------------------
-    # Prepared assets slot helpers
-    # ------------------------------------------------------------------
-    def set_prepared_assets(self, scene_number: int, assets: Dict[str, Any]) -> None:
-        try:
-            sn = int(scene_number)
-        except Exception:
-            return
-        whitelist = {"style", "characters", "environment", "continuity", "scene_references"}
-        normalized: Dict[str, Any] = {}
-        if isinstance(assets, dict):
-            for key in whitelist:
-                value = assets.get(key)
-                if value:
-                    normalized[key] = value
-        if not normalized:
-            (self._wm.facts_slots.setdefault("prepared_assets", {})).pop(sn, None)
-            return
-        bucket = self._wm.facts_slots.setdefault("prepared_assets", {})
-        merged = dict(bucket.get(sn, {}))
-        merged.update(normalized)
-        bucket[sn] = merged
-
-    def get_prepared_assets(self, scene_number: int) -> Optional[Dict[str, Any]]:
-        try:
-            sn = int(scene_number)
-        except Exception:
-            return None
-        bucket = self._wm.facts_slots.get("prepared_assets") or {}
-        record = bucket.get(sn)
-        return dict(record) if isinstance(record, dict) else None
 
     # ------------------------------------------------------------------
     # Artifact helpers
