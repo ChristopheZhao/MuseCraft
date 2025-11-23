@@ -66,14 +66,7 @@ class VideoMemoryAdapter:
             except Exception:
                 pass
         dq.append(event)
-        self._wm.record_event(
-            f"video_scene:{sn}",
-            action=action,
-            success=success,
-            error_type=error_type,
-            dur_sec=dur_sec,
-            tags={"scene_number": sn},
-        )
+
 
     # ------------------------------------------------------------------
     # Basic scene operations

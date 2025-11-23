@@ -270,7 +270,7 @@ class AudioGeneratorAgent(ReActAgent):
                     }
                 ],
                 kind="audio",
-                agent_memory=self.wm,
+                agent_memory=None,
                 shared_memory=shared_wm,
                 include_prompt=False,
             )

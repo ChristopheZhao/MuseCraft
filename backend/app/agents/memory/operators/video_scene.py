@@ -73,7 +73,6 @@ def mark_scene_completed(wm, scene_number: int, artifact: SceneArtifact) -> None
     wm.failed.pop(sn, None)
     wm.retry_counts.pop(sn, None)
     wm.failed_retryable.pop(sn, None)
-    wm.record_event(sn, action="scene_completed", success=True)
 
 
 def mark_scene_failed(
@@ -88,7 +87,6 @@ def mark_scene_failed(
     wm.failed[sn] = {"reason": reason, "metadata": metadata or {}}
     wm.failed_retryable[sn] = bool(retryable)
     wm.retry_counts[sn] = int(wm.retry_counts.get(sn, 0) or 0) + 1
-    wm.record_event(sn, action="scene_failed", success=False, error_type=(metadata or {}).get("error_type"))
 
 
 def set_scene_failed_state(
@@ -327,4 +325,3 @@ def latest_iteration_artifacts(
         if len(samples) >= max_items:
             break
     return samples
-

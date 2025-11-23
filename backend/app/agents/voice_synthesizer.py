@@ -573,7 +573,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         await persist_scene_outputs(
             artifacts=artifacts,
             kind="voice",
-            agent_memory=self.wm,
+            agent_memory=None,
             shared_memory=shared_wm,
             include_prompt=False,
         )

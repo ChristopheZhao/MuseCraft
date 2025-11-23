@@ -398,23 +398,9 @@ class BaseAgent(ABC):
             if isinstance(write.value, dict):
                 keys_info = list(write.value.keys())[:6]
             op_label = f"{tool_name or 'tool'}.{action_name or 'action'}:{write.slot}"
-            event_cfg = write.spec.get("record_event") if isinstance(write.spec, dict) else None
 
             def _apply_patch(memory):
                 memory.set_slot_value(write.slot, write.scene_number, write.value)
-                if (
-                    event_cfg
-                    and isinstance(event_cfg, dict)
-                    and hasattr(memory, "record_event")
-                ):
-                    action_label = event_cfg.get("action")
-                    if action_label:
-                        memory.record_event(
-                            scene_number=write.scene_number,
-                            action=action_label,
-                            success=bool(event_cfg.get("success", True)),
-                            error_type=event_cfg.get("error_type"),
-                        )
 
             try:
                 self.memory_write(_apply_patch, operation=op_label)

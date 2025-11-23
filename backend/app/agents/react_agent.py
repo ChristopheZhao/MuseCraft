@@ -59,7 +59,7 @@ class ReActAgent(BaseAgent, ABC):
         
         self.logger.info(f"🔄 Starting iterative loop for {self.agent_name} (max_iterations={self.max_iterations})")
         
-        # 不跨轮保存状态；每轮所需信息均从 WM 推导
+        # 不跨轮保存状态；每轮上下文显式从 WM / 状态视图读取
         pending_action_facts: Optional[Dict[str, Any]] = None
         last_action_result: Optional[Dict[str, Any]] = None
         for iteration in range(self.max_iterations):
@@ -74,33 +74,23 @@ class ReActAgent(BaseAgent, ABC):
             self.logger.info(f"🔄 Iteration {iteration + 1}/{self.max_iterations}")
             
             try:
-                self.logger.debug("👁️ OBSERVE: Preparing observation...")
-                current_state = await self._observe(
-                    input_data=input_data,
-                    iteration=iteration,
-                    action_facts=pending_action_facts,
-                )
-                pending_action_facts = None
-                # 统一归一化仅用于日志观测，不驱动控制流
-                # 通用观测摘要（不改变行为）：仅输出依据事实推导的计数，避免耦合领域规则
+                # 上下文由 WM/context manager 提供（占位：直接使用注入的 base_observation）
                 try:
-                    from .utils.obs_builder import compute_obs_digest
-                    digest = compute_obs_digest(current_state)
-                    if isinstance(digest, dict) and digest:
-                        self.logger.info(
-                            "OBS_PAYLOAD: scenes=%d, chars=%d",
-                            int(digest.get("scenes_count", 0) or 0),
-                            int(digest.get("payload_chars", 0) or 0),
-                        )
+                    from .utils.context_manager import build_agent_context
+                    base_ctx = build_agent_context(
+                        workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
+                        agent_name=self.agent_name,
+                        state_view=None,
+                    )
                 except Exception:
-                    pass
-                
-                # 首轮不再特殊分支：统一走 THINK→PLAN→ACT→REFLECT 循环
+                    base_ctx = {}
+                current_iter_context = base_ctx
+                pending_action_facts = None
 
-                # THINK & PLAN（常规回合）
+                # THINK & PLAN
                 self.logger.debug(f"🧠 THINK & PLAN: Developing action strategy...")
                 action_plan = await self._think_and_plan(
-                    current_state, task, execution, iteration
+                    current_iter_context, task, execution, iteration
                 )
                 
                 # ACT
@@ -109,15 +99,13 @@ class ReActAgent(BaseAgent, ABC):
                     action_plan, input_data, execution, db, iteration
                 )
                 action_facts = self._derive_action_facts_payload(action_plan, action_result)
-                self._write_executed_calls_to_iter_wm(
-                    action_result.get('executed_calls') if isinstance(action_result, dict) else []
-                )
+                # OBS/产物写回由具体 Agent 处理（persist_scene_outputs 等）；占位：不在此写入 WM
                 pending_action_facts = action_facts
                 if isinstance(action_result, dict):
                     last_action_result = action_result
                 await self._log_react_iteration_event(
                     iteration=iteration,
-                    observation=current_state,
+                    observation=current_iter_context,
                     action_plan=action_plan,
                     action_result=action_result,
                     action_facts=action_facts,
@@ -127,7 +115,7 @@ class ReActAgent(BaseAgent, ABC):
                 # REFLECT（子类规约 + 合同回执融合）
                 self.logger.debug(f"🤔 REFLECT: Evaluating results...")
                 reflection = await self._reflect_on_results(
-                    action_result, current_state, task, iteration
+                    action_result, current_iter_context, task, iteration
                 )
                 # 与 PLAN 响应的合同回执融合：
                 # 1) 优先使用 action_result['contract']（若存在并符合键约束）
@@ -165,7 +153,7 @@ class ReActAgent(BaseAgent, ABC):
                     self.logger.info(
                         "ITER_LOG iter=%d obs=%s plan=%s result=%s refl=%s",
                         iteration + 1,
-                        summarize_observation(current_state),
+                        summarize_observation(current_iter_context),
                         summarize_plan(action_plan),
                         summarize_action_result(action_result),
                         reflection.get("reflection_summary") if isinstance(reflection, dict) else "",
@@ -695,64 +683,6 @@ class ReActAgent(BaseAgent, ABC):
             "fc_plan": fc,
         }
 
-    def _write_executed_calls_to_iter_wm(self, executed_calls: List[Dict[str, Any]]) -> None:
-        """将本轮执行过的工具调用写入 WorkingMemory 的中立事件流（短期记忆）。
-
-        - 仅写入中立 action 标签与成败/错误类型；不包含供应商/工具实现名。
-        - 仅当存在可解析的 scene_number 时写入；scene_number 优先来自参数，缺失时若目标场景唯一可回退。
-        - Shared WM 的静态事实不在此处改动；此处仅更新本 Agent 的工作记忆。
-        """
-        if not executed_calls:
-            return
-        wm = self.wm
-        if wm is None:
-            return
-        try:
-            from .memory.short_term.working_memory import WorkingMemory  # type: ignore
-        except Exception:
-            WorkingMemory = None  # type: ignore
-        if (WorkingMemory is not None) and (not isinstance(wm, WorkingMemory)):
-            return
-
-        def _coerce_scene_number(val: Any) -> Optional[int]:
-            try:
-                if val is None:
-                    return None
-                s = str(val)
-                return int(s) if s.isdigit() else None
-            except Exception:
-                return None
-
-        def _infer_scene_number(args: Any) -> Optional[int]:
-            if isinstance(args, dict) and (args.get("scene_number") is not None):
-                sn = _coerce_scene_number(args.get("scene_number"))
-                if sn is not None:
-                    return sn
-            return None
-
-        from .utils.react_helpers import resolve_action_label
-
-        for call in executed_calls:
-            try:
-                fn = call.get("tool") or ((call.get("function") or {}).get("name"))
-                args = call.get("args") or ((call.get("function") or {}).get("arguments") or {})
-                sn = _infer_scene_number(args)
-                if sn is None:
-                    continue
-                success = bool(call.get("success"))
-                error_type = call.get("error_type") or (call.get("metadata") or {}).get("error_type")
-                action_label = resolve_action_label(str(fn))
-                try:
-                    wm.record_event(
-                        scene_number=sn,
-                        action=action_label,
-                        success=success,
-                        error_type=error_type,
-                    )
-                except Exception:
-                    continue
-            except Exception:
-                continue
 
     def _derive_action_facts_payload(
         self,

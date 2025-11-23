@@ -80,7 +80,7 @@ async def ensure_persisted_videos(
 async def persist_scene_outputs(
     *,
     kind: str,
-    agent_memory: Optional[WorkingMemory],
+    agent_memory: Optional[WorkingMemory] = None,
     shared_memory: Optional[WorkingMemory],
     executed_calls: Optional[List[Dict[str, Any]]] = None,
     artifacts: Optional[List[Dict[str, Any]]] = None,
@@ -100,9 +100,8 @@ async def persist_scene_outputs(
     schema = load_scene_output_schema(kind)
     fields = schema.get("fields", {})
     key = f"scene_outputs.{kind}"
-    agent_bucket = agent_memory.get(key, {}) if agent_memory is not None else {}
-    if not isinstance(agent_bucket, dict):
-        agent_bucket = {}
+    # Agent WM 不再存副本；只写共享 WM
+    agent_bucket = {}
     shared_bucket = shared_memory.get(key, {}) if shared_memory is not None else {}
     if shared_memory is not None and not isinstance(shared_bucket, dict):
         shared_bucket = {}
@@ -116,13 +115,9 @@ async def persist_scene_outputs(
         sn = mapped.get("scene_number")
         if sn is None:
             continue
-        if agent_memory is not None:
-            agent_bucket[sn] = dict(mapped)
         if shared_memory is not None:
             shared_bucket[sn] = dict(mapped)
 
-    if agent_memory is not None:
-        agent_memory.put(key, agent_bucket)
     if shared_memory is not None:
         shared_memory.put(key, shared_bucket)
     return results

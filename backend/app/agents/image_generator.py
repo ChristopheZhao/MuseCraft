@@ -278,7 +278,7 @@ def _coerce_int(value: Any) -> Optional[int]:
         return await persist_scene_outputs(
             executed_calls=executed_calls,
             kind="image",
-            agent_memory=self.wm,
+            agent_memory=None,
             shared_memory=shared_wm,
             include_prompt=True,
         )

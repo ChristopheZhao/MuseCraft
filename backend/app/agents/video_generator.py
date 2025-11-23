@@ -269,7 +269,7 @@ class VideoGeneratorAgent(ReActAgent):
             normalized_results = await persist_scene_outputs(
                 artifacts=normalized_results,
                 kind="video",
-                agent_memory=self.wm,
+                agent_memory=None,
                 shared_memory=shared_wm,
                 include_prompt=True,
             )
