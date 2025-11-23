@@ -58,46 +58,41 @@ class QualityCheckerAgent(BaseAgent):
             self.logger.warning(f"⚠️ QualityChecker: 记忆检索失败 - {e}")
         
         # 从 Shared Working Memory 读取事实视图
-        from .services.mas_shared_memory import get_shared_wm
-        view = get_shared_wm().get_task(str(workflow_state_id))
-        store = self.shared_memory_store
+        from .utils.memory_helpers import get_mas_working_memory, read_shared_fact
+        wm = None
+        try:
+            wm = get_mas_working_memory(str(workflow_state_id))
+        except Exception as _wm_err:
+            self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
+        view = wm.get("scene_overview", {}) if wm else {"scenes": {}}
         
         await self._update_progress(execution, 10, "Loading final video from workflow", db)
         
-        # Get final video facts from Shared WM
-        fv = store.get(str(workflow_state_id), "project.final_video", default={}) or {}
+        # Get final video facts from MAS WM
+        fv = wm.get("project.final_video", {}) if wm else {}
         final_video_url = fv.get("url") or fv.get("path") or ""
-        # 单写/优先 artifacts：尝试从 artifacts 获取最新 compose
-        try:
-            from ..core.config import settings as _cfg
-            prefer_artifacts = bool(getattr(_cfg, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False))
-        except Exception:
-            prefer_artifacts = False
-        if prefer_artifacts:
-            try:
-                latest = get_shared_wm().get_latest_artifact(str(workflow_state_id), kind='video', stage='compose')
-                if isinstance(latest, dict):
-                    final_video_url = latest.get('url') or latest.get('file_path') or final_video_url
-            except Exception:
-                pass
-        concept_plan = store.get(str(workflow_state_id), "project.concept_plan", default={}) or {}
+        concept_plan = wm.get("project.concept_plan", {}) if wm else {}
         
-        # 组合时间线：从场景快照推导（start/end/duration）
+        # 组合时间线：从场景概览推导（start/end/duration）
         composition_timeline = []
         try:
+            scenes = view.get("scenes") if isinstance(view, dict) else []
             cursor = 0.0
-            for sn in sorted((view.scenes or {}).keys()):
-                snap = (view.scenes or {}).get(sn)
-                if not snap:
+            for scene in scenes or []:
+                if not isinstance(scene, dict):
                     continue
                 try:
-                    dur = float(getattr(snap, 'duration', 0.0) or 0.0)
+                    sn = int(scene.get("scene_number"))
+                except Exception:
+                    continue
+                try:
+                    dur = float(scene.get("duration") or 0.0)
                 except Exception:
                     dur = 0.0
                 start = cursor
                 end = start + dur
                 composition_timeline.append({
-                    "scene_number": int(sn),
+                    "scene_number": sn,
                     "start": start,
                     "end": end,
                     "duration": dur,
@@ -115,18 +110,17 @@ class QualityCheckerAgent(BaseAgent):
                 video_metadata = {}
         
         if not final_video_url:
-            # If no final video, try to get from scenes (fallback)
-            scenes_map = view.scenes or {}
-            scenes_data = [scenes_map[k] for k in sorted(scenes_map.keys())]
+            # If no final video, try to get from scene_overview (fallback)
+            scenes_data = view.get("scenes") if isinstance(view, dict) else []
             if scenes_data and len(scenes_data) > 0:
-                # Use first scene video as temporary final video for quality check
-                first_scene = scenes_data[0]
-                if first_scene.video_url:
-                    final_video_url = first_scene.video_url
+                first_scene = scenes_data[0] if isinstance(scenes_data[0], dict) else {}
+                if first_scene.get("video_url"):
+                    final_video_url = first_scene.get("video_url")
                     self.logger.warning("Using first scene video for quality check - no final composed video available")
                 else:
                     # 检查是否有图像可用（降级场景）
-                    if any(scene.image_path or scene.image_url for scene in scenes_data):
+                    has_image = any(isinstance(s, dict) and (s.get("image_path") or s.get("image_url")) for s in scenes_data)
+                    if has_image:
                         self.logger.warning("No videos available, performing image-based quality check")
                         return await self._perform_image_based_quality_check(scenes_data, input_data, execution, db)
                     else:
