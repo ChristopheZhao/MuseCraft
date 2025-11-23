@@ -14,8 +14,8 @@ from ..models import Task, AgentExecution, AgentType, Scene, SceneType
 from ..core.prompt_manager import get_prompt_manager
 from ..core.story_plan import normalize_character_elements
 from .utils import SceneDurationCalculator,safe_json_loads
-from .services.mas_shared_memory import get_shared_wm
-from .memory.short_term.working_memory import SceneSnapshot
+from .adapters.video.models import SceneSnapshot
+from .utils.memory_helpers import read_shared_fact, write_shared_fact
 
 
 class ConceptPlannerAgent(BaseAgent):
@@ -72,7 +72,6 @@ class ConceptPlannerAgent(BaseAgent):
 
         # 移除 WorkflowState 依赖：从 Shared WM facts 读取已有风格（如有）
         if not predefined_style_profile:
-            from .utils.memory_helpers import read_shared_fact
             existing_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
             if isinstance(existing_plan, dict):
                 predefined_style_profile = existing_plan.get("intelligent_style_design") or None
@@ -239,15 +238,16 @@ class ConceptPlannerAgent(BaseAgent):
             except Exception:
                 pass
 
-        # 共享记忆作为事实源，WorkflowState 写回移除
-
         voice_plan_raw = voice_bundle["payload"].get("voice_plan", {})
         voice_plan = self._normalize_voice_plan(voice_plan_raw)
         voice_plan = self._apply_voice_plan_pacing(
             voice_plan,
             skeleton_payload,
         )
-        # 共享记忆作为事实源，WorkflowState 写回移除
+        try:
+            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan)
+        except Exception:
+            self.logger.warning("voice_plan 写回 MAS WM 失败，忽略")
 
         await self._update_progress(execution, 65, "Detailing scenes", db)
 
@@ -298,36 +298,18 @@ class ConceptPlannerAgent(BaseAgent):
 
         # 共享记忆作为事实源，WorkflowState 写回移除
 
-        # --- Write to Shared Working Memory (facts + scenes) ---
+        # --- 写回 MAS WorkingMemory (facts + scenes) ---
         try:
-            from .utils.memory_helpers import write_shared_fact
             write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan)
         except Exception as _wm_err:
             self.logger.warning(f"WM write failed for concept_plan: {_wm_err}")
         try:
-            from .utils.memory_helpers import write_shared_fact
             write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan)
         except Exception:
             pass
 
         try:
-            shared = get_shared_wm()
-            try:
-                self.logger.info(
-                    "SHARED_FACT_WRITE concept_plan keys=%s",
-                    list((intelligent_style_design or {}).keys()),
-                )
-            except Exception:
-                pass
-            shared.set_facts(
-                workflow_state_id,
-                {
-                    "intelligent_style_design": intelligent_style_design,
-                    "content_elements": content_elements,
-                },
-            )
-
-            # Project concept scenes into shared scene snapshots
+            scenes_payload: List[Dict[str, Any]] = []
             for s in concept_plan.get("scenes", []) or []:
                 try:
                     sn = int(s.get("scene_number") or 0)
@@ -339,19 +321,26 @@ class ConceptPlannerAgent(BaseAgent):
                     dur = float(s.get("final_duration", s.get("duration", 0.0)) or 0.0)
                 except Exception:
                     dur = 0.0
-                snap = SceneSnapshot(
-                    scene_number=sn,
-                    depends_on_scene=None,
-                    duration=dur,
-                    visual_description=s.get("visual_description", ""),
-                    narrative_description=s.get("narrative_description", ""),
-                    image_url=s.get("image_url", ""),
-                    motion_beats=s.get("motion_beats", []) if isinstance(s.get("motion_beats"), list) else [],
+                scenes_payload.append(
+                    {
+                        "scene_number": sn,
+                        "duration": dur,
+                        "visual_description": s.get("visual_description", ""),
+                        "narrative_description": s.get("narrative_description", ""),
+                        "image_url": s.get("image_url", ""),
+                        "motion_beats": s.get("motion_beats", []) if isinstance(s.get("motion_beats"), list) else [],
+                    }
                 )
-                shared.upsert_scene(workflow_state_id, snap)
+            if scenes_payload:
+                overview = {
+                    "scenes": scenes_payload,
+                    "completed_scene_numbers": [],
+                    "failed_scene_numbers": [],
+                }
+                write_shared_fact(workflow_state_id, "scene_overview", overview)
         except Exception as _wm_err:
-            # Fail-fast is reserved for agent core flow; memory write is best-effort
-            self.logger.warning(f"Shared WM write failed (non-fatal): {_wm_err}")
+            # Fail-fast 是核心流程，记忆写回为尽力而为
+            self.logger.warning(f"scene_overview write failed (non-fatal): {_wm_err}")
 
         if concept_mode == "project":
             scenes_data: List[Dict[str, Any]] = []
