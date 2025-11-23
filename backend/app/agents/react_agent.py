@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, AgentType
 from .utils.obs_builder import derive_action_facts
-from .memory.context.view_builder import build_react_context_view
 # LLM 服务通过依赖注入提供（BaseAgent._llms）
 
 
@@ -309,20 +308,19 @@ class ReActAgent(BaseAgent, ABC):
             input_data=input_data,
             iteration=iteration,
         )
+        observation: Dict[str, Any] = {}
         try:
-            wm = self.wm
-        except AgentError:
-            wm = None
+            from .utils.context_manager import build_agent_context
 
-        act_log = None
-        if isinstance(action_facts, dict):
-            act_log = action_facts.get("act_log")
-
-        observation = build_react_context_view(
-            wm,
-            iteration=iteration,
-            act_log=act_log,
-        )
+            observation = build_agent_context(
+                workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
+                agent_name=self.agent_name,
+                state_view=None,
+                max_turn=None,
+                max_token_budget=None,
+            )
+        except Exception:
+            observation = {}
         observation = await self._observe_current_state(
             input_data,
             observation,
