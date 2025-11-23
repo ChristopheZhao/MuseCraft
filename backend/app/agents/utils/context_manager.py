@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .memory_helpers import get_agent_working_memory
+from ..adapters.state.mas_state import build_mas_state_view
 
 
 def build_agent_context(
@@ -23,7 +24,10 @@ def build_agent_context(
     max_turn: Optional[int] = None,
     max_token_budget: Optional[int] = None,  # 占位，暂未实现基于 token 的裁剪
 ) -> Dict[str, Any]:
-    """从 Agent WM 构建上下文，可选按 max_turn 截断 obs_records。"""
+    """从 Agent WM 构建上下文，可选按 max_turn 截断 obs_records。
+
+    state_view 不传时仅返回 WM 数据，不自动构建 MAS 状态视图。
+    """
     ctx: Dict[str, Any] = {}
     if not workflow_id or not agent_name:
         return ctx
