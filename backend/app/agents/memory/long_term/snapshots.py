@@ -10,9 +10,9 @@ Shared WM Snapshot Exporter（长期记忆视图）
 
 from typing import Any, Dict, List, Optional
 
-from ...services.mas_shared_memory import get_shared_wm
 from ..short_term.workflow_facts import WorkflowFactStoreError
 from ....services.memory_provider import get_memory_services, MemoryServices
+from ..short_term import get_working_memory_service
 
 
 def _coerce_int(v: Any, default: int = 0) -> int:
@@ -30,29 +30,29 @@ def _coerce_float(v: Any, default: float = 0.0) -> float:
 
 
 def export_shared_wm_snapshot(task_id: str, memory_services: Optional[MemoryServices] = None) -> Dict[str, Any]:
-    """导出指定任务在 Shared WM 中的整体快照。"""
+    """导出指定任务在 MAS WorkingMemory 中的整体快照（基于 WM facts/scene_outputs）。"""
     services = memory_services or get_memory_services()
-    view = get_shared_wm().get_task(str(task_id))
-    store = services.fact_store
-    coordinator = services.coordinator
-    try:
-        concept_plan = store.get(str(task_id), "concept_plan", default={}) or {}
-    except WorkflowFactStoreError:
-        concept_plan = {}
-    try:
-        voice_plan = store.get(str(task_id), "voice_plan", default={}) or {}
-    except WorkflowFactStoreError:
-        voice_plan = {}
+    wm_service = get_working_memory_service()
+    mas_wm = wm_service.get_optional(scope=f"mas:{task_id}", workflow_state_id=str(task_id))
+    if mas_wm is None:
+        raise WorkflowFactStoreError(f"MAS WorkingMemory not initialised for workflow {task_id}")
+
+    def _get_fact(key: str, default: Any = None) -> Any:
+        try:
+            val = mas_wm.get(key, default)
+        except Exception:
+            val = default
+        return val if val is not None else default
+
+    concept_plan = _get_fact("project.concept_plan", {}) or {}
+    voice_plan = _get_fact("project.voice_plan", {}) or {}
     style_design = concept_plan.get("intelligent_style_design") if isinstance(concept_plan, dict) else {}
     if not isinstance(style_design, dict):
         style_design = {}
     content_elements = concept_plan.get("content_elements") if isinstance(concept_plan, dict) else {}
     if not isinstance(content_elements, dict):
         content_elements = {}
-    try:
-        voice_assets = store.get(str(task_id), "voice_assets", default={}) or {}
-    except WorkflowFactStoreError:
-        voice_assets = {}
+    voice_assets = _get_fact("voice_assets", {}) or {}
 
     scenes: List[Dict[str, Any]] = []
 
@@ -86,56 +86,45 @@ def export_shared_wm_snapshot(task_id: str, memory_services: Optional[MemoryServ
             scenes.append(entry)
     else:
         # fallback to shared WM scene snapshots (minimal)
-        for sn, snap in (view.scenes or {}).items():
-            if not snap:
+        overview = _get_fact("scene_overview", {}) or {}
+        for snap in (overview.get("scenes") or []) if isinstance(overview, dict) else []:
+            if not isinstance(snap, dict):
                 continue
             scenes.append(
                 {
-                    "scene_number": _coerce_int(sn, 0),
-                    "title": "",
-                    "duration": _coerce_float(getattr(snap, "duration", 0.0), 0.0),
-                    "start_time": 0.0,
-                    "end_time": 0.0,
-                    "narrative_description": getattr(snap, "narrative_description", ""),
-                    "visual_description": getattr(snap, "visual_description", ""),
-                    "mood_and_atmosphere": "",
-                    "video_prompt": "",
-                    "video_generation_params": {},
-                    "script_text": "",
+                    "scene_number": _coerce_int(snap.get("scene_number"), 0),
+                    "title": snap.get("title", ""),
+                    "duration": _coerce_float(snap.get("duration", 0.0), 0.0),
+                    "start_time": _coerce_float(snap.get("start_time", 0.0), 0.0),
+                    "end_time": _coerce_float(snap.get("end_time", 0.0), 0.0),
+                    "narrative_description": snap.get("narrative_description", ""),
+                    "visual_description": snap.get("visual_description", ""),
+                    "mood_and_atmosphere": snap.get("mood_and_atmosphere", ""),
+                    "video_prompt": snap.get("video_prompt", ""),
+                    "video_generation_params": snap.get("video_generation_params", {}),
+                    "script_text": snap.get("script_text", ""),
                     "video_url": "",
                     "video_path": "",
-                    "image_url": getattr(snap, "image_url", ""),
+                    "image_url": snap.get("image_url", ""),
                     "image_path": "",
                 }
             )
 
-    # Merge video artifacts (if any)
-    # 优先使用 artifacts 中的 video_only（按 scene 取最新），否则 fallback 到 view.completed
+    # Merge video artifacts (if any) from MAS WM scene_outputs.video
     try:
-        arts_vo = get_shared_wm().list_artifacts(str(task_id), kind="video", stage="video_only")
-        latest_by_scene: Dict[int, Dict[str, Any]] = {}
-        for r in arts_vo or []:
-            if not isinstance(r, dict):
-                continue
-            sn = r.get("scene_number")
-            if sn is None:
-                continue
-            try:
-                sn_int = int(sn)
-            except Exception:
-                continue
-            latest_by_scene[sn_int] = r
+        outputs = _get_fact("scene_outputs.video", {}) or {}
+        if not isinstance(outputs, dict):
+            outputs = {}
         for entry in scenes:
             sn = _coerce_int(entry.get("scene_number"), 0)
             if sn <= 0:
                 continue
-            art = latest_by_scene.get(sn)
+            art = outputs.get(sn)
             if not isinstance(art, dict):
                 continue
-            entry["video_url"] = art.get("url") or ""
-            entry["video_path"] = art.get("file_path") or ""
+            entry["video_url"] = art.get("video_url") or art.get("url") or ""
+            entry["video_path"] = art.get("video_path") or art.get("file_path") or ""
     except Exception:
-        # fallback: nothing to merge
         pass
 
     # voice assets merge: attach simple flags/urls per scene if needed
@@ -173,32 +162,30 @@ def export_shared_wm_snapshot(task_id: str, memory_services: Optional[MemoryServ
         pass
 
     try:
-        final_video = store.get(str(task_id), "final_video", default={}) or {}
-        if isinstance(final_video, dict):
+        final_video_fact = _get_fact("final_video", {}) or {}
+        if isinstance(final_video_fact, dict):
             final_video = {
-                "path": final_video.get("path") or "",
-                "url": final_video.get("url") or "",
-                "remote_path": final_video.get("remote_path") or "",
-                "storage": final_video.get("storage") or {},
-                "mix": final_video.get("mix") or "",
+                "path": final_video_fact.get("path") or "",
+                "url": final_video_fact.get("url") or "",
+                "remote_path": final_video_fact.get("remote_path") or "",
+                "storage": final_video_fact.get("storage") or {},
+                "mix": final_video_fact.get("mix") or "",
             }
         else:
             final_video = {}
-    except WorkflowFactStoreError:
+    except Exception:
         final_video = {}
 
     # Export artifacts timeline (lightweight fields only)
+    # Export artifacts timeline from MAS WM (artifacts list if present)
     try:
-        artifacts = get_shared_wm().list_artifacts(str(task_id))
-        # keep only essential keys to avoid large blobs
+        artifacts = _get_fact("artifacts", [])
         sanitized: List[Dict[str, Any]] = []
         for r in artifacts or []:
             if not isinstance(r, dict):
                 continue
             sanitized.append(
                 {
-                    "id": r.get("id"),
-                    "created_at": r.get("created_at"),
                     "kind": r.get("kind"),
                     "stage": r.get("stage"),
                     "scene_number": r.get("scene_number"),

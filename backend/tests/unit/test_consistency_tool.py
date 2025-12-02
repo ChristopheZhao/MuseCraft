@@ -4,9 +4,9 @@ import pytest
 
 from app.agents.tools import register_default_tools
 from app.agents.tools.consistency_tool import ConsistencyTool
-from app.agents.services.mas_shared_memory import get_shared_wm
-from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import get_working_memory_service
+from app.agents.memory.short_term import SceneSnapshot
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 from app.core.scene_continuity_memory import get_scene_continuity_memory
 
 
@@ -16,10 +16,9 @@ async def test_consistency_tool_collects_assets():
     tool = ConsistencyTool()
 
     wf_id = "wf-consistency-tool"
-    shared = get_shared_wm()
-    memory_services = build_memory_services()
-    set_memory_services(memory_services)
-    store = memory_services.fact_store
+    wm_service = get_working_memory_service()
+    # 初始化 MAS 级 WM scope
+    shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
     # 写入概念计划（含风格）到 Shared WM facts
     concept_plan = {
         "consistency_guidelines": {
@@ -47,7 +46,7 @@ async def test_consistency_tool_collects_assets():
             }
         ],
     }
-    store.put(wf_id, "project.concept_plan", concept_plan)
+    shared.put("project.concept_plan", concept_plan)
     # 写入场景快照
     scene = SceneSnapshot(
         scene_number=1,
@@ -58,14 +57,14 @@ async def test_consistency_tool_collects_assets():
         motion_beats=[],
     )
     # 扩展：在 scene_scripts facts 中写入角色提示
-    shared.upsert_scene(wf_id, scene)
+    shared.put("scene_overview", {"scenes": [scene.as_fact()]})
     scripts = {
         "1": {
             "characters_present": ["画魂师"],
             "character_descriptions": ["白发苍苍，素色长袍"],
         }
     }
-    store.put(wf_id, "project.scene_scripts", scripts)
+    shared.put("project.scene_scripts", scripts)
 
     memory = get_scene_continuity_memory()
     await memory.clear_all()
@@ -139,12 +138,13 @@ async def test_consistency_tool_empty_assets_without_concept_plan():
     tool = ConsistencyTool()
 
     wf_id = "wf-consistency-empty"
-    shared = get_shared_wm()
+    wm_service = get_working_memory_service()
+    shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
     memory = get_scene_continuity_memory()
     await memory.clear_all()
 
-    shared.upsert_scene(
-        wf_id,
+    video_adapter = VideoMemoryAdapter(shared)
+    video_adapter.upsert_scene(
         SceneSnapshot(
             scene_number=1,
             duration=10.0,
@@ -152,7 +152,7 @@ async def test_consistency_tool_empty_assets_without_concept_plan():
             narrative_description="缺少概念计划",
             image_url="",
             motion_beats=[],
-        ),
+        )
     )
     # 不写入 concept_plan / roles，让工具无法收集资产
 

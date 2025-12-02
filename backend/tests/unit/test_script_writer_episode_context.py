@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from app.agents.script_writer import ScriptWriterAgent
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import SceneSnapshot
 
 
 def test_script_writer_passes_episode_context(monkeypatch):

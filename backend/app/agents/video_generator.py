@@ -53,50 +53,6 @@ class VideoGeneratorAgent(ReActAgent):
         return self.wm
 
 
-    # === OBSERVE ==========================================================
-    async def _observe_current_state(
-        self,
-        input_data: Dict[str, Any],
-        base_observation: Dict[str, Any],
-        iteration: int,
-    ) -> Dict[str, Any]:
-        runtime = self._ensure_working_memory(input_data)
-        observation = dict(base_observation or {})
-
-        # 场景概览（事实）：来自 orchestrator 注入或 WM
-        overview = input_data.get("scene_overview") or self.wm.get("scene_overview")
-        if isinstance(overview, dict):
-            observation["scenes"] = list(overview.get("scenes") or [])
-            observation["failed_scene_numbers"] = _coerce_int_list(overview.get("failed_scene_numbers"))
-        else:
-            observation.setdefault("scenes", [])
-            observation.setdefault("failed_scene_numbers", [])
-
-        # 已完成场景：从 WM 的 scene_outputs.video 推导
-        outputs = self.wm.get("scene_outputs.video", {}) if self.wm is not None else {}
-        if isinstance(outputs, dict):
-            completed_ids = sorted(int(sn) for sn in outputs.keys() if str(sn).isdigit())
-        else:
-            completed_ids = []
-        observation["completed_scene_numbers"] = completed_ids
-
-        # 备注：只读 WM notes，限制长度
-        notes = getattr(runtime, "notes", []) or []
-        if notes:
-            observation["notes"] = notes[-6:]
-        else:
-            observation.setdefault("notes", [])
-
-        from .utils.obs_builder import compute_obs_digest
-        digest = compute_obs_digest(observation)
-        if isinstance(digest, dict) and digest:
-            self.logger.info(
-                "OBS_PAYLOAD(video): scenes=%d, chars=%d",
-                int(digest.get("scenes_count", 0) or 0),
-                int(digest.get("payload_chars", 0) or 0),
-            )
-        return observation
-
     # === PLAN =============================================================
     # 首轮 plan-only 已默认关闭，且不再自定义消息构造
 

@@ -67,6 +67,11 @@ def build_agent_context(
 
     if state_view and isinstance(state_view, dict):
         ctx["state_view"] = state_view
+    elif workflow_id:
+        try:
+            ctx["state_view"] = build_mas_state_view(workflow_id)
+        except Exception as e:
+            raise f"构建 MAS 状态视图失败: {e}"
     return ctx
 
 

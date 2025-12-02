@@ -1321,24 +1321,14 @@ class VideoGenerationTool(AsyncTool):
             pass
 
     def _get_outdegree_from_wf_or_active(self, wf_id: Optional[str], scene_no: int) -> int:
-        """估算某场景的出度（被多少场景依赖）。使用 Shared WM 的 scenes 快照，无全局遍历。"""
+        """估算某场景的出度（被多少场景依赖）。调用方应提供依赖信息，工具不再读取 shared_wm。"""
         try:
-            if not wf_id:
-                return 0
-            from ...services.mas_shared_memory import get_shared_wm
-            view = get_shared_wm().get_task(str(wf_id))
-            scenes = view.scenes or {}
-            outdeg = 0
-            for sn, snap in scenes.items():
-                try:
-                    dep = getattr(snap, 'depends_on_scene', None)
-                    if dep is not None and int(dep) == int(scene_no):
-                        outdeg += 1
-                except Exception:
-                    continue
-            return outdeg
+            deps = self.config.get("scene_dependencies") if isinstance(self.config, dict) else None
+            if isinstance(deps, dict):
+                return sum(1 for _, dep in deps.items() if dep is not None and int(dep) == int(scene_no))
         except Exception:
             return 0
+        return 0
 
     async def _emit_last_frame(self, video_url: str, scene_no: Optional[int] = None) -> Optional[str]:
         if not video_url:

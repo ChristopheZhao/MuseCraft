@@ -13,11 +13,6 @@ from typing import Dict, Any
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-from app.services.memory_provider import build_memory_services, set_memory_services
-
-memory_services = build_memory_services()
-set_memory_services(memory_services)
-
 async def test_suno_client():
     """测试 Suno AI 客户端功能"""
     print("\n🎵 测试 1: Suno AI 客户端功能")
@@ -74,16 +69,16 @@ async def test_audio_generator_agent():
         from app.agents.audio_generator import AudioGeneratorAgent
         from app.models.agent import AgentExecution, AgentType
         from app.models.task import Task
-        from app.agents.services.mas_shared_memory import get_shared_wm
-        from app.agents.memory.short_term.working_memory import SceneSnapshot
+        from app.agents.memory.short_term import get_working_memory_service
+        from app.agents.memory.short_term import SceneSnapshot
         
         # 构造 Shared WM：概念计划 + 场景
         wf_id = "wf-audio-gen"
-        shared = get_shared_wm()
-        store = memory_services.fact_store
+        wm_service = get_working_memory_service()
+        shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
         
         # 添加概念计划（模拟）
-        store.put(wf_id, "project.concept_plan", {
+        shared.put("project.concept_plan", {
             "core_message": "展示旅行的美好时光",
             "target_audience": "年轻人",
             "visual_style": "现代",
@@ -94,9 +89,7 @@ async def test_audio_generator_agent():
         scene1 = SceneSnapshot(scene_number=1, duration=10, visual_description="美丽的山景")
         scene2 = SceneSnapshot(scene_number=2, duration=10, visual_description="热闹的城市街道")
         scene3 = SceneSnapshot(scene_number=3, duration=10, visual_description="海边日落")
-        shared.upsert_scene(wf_id, scene1)
-        shared.upsert_scene(wf_id, scene2)
-        shared.upsert_scene(wf_id, scene3)
+        shared.put("scene_overview", {"scenes": [scene1.as_fact(), scene2.as_fact(), scene3.as_fact()]})
         
         # 创建 AudioGenerator
         audio_agent = AudioGeneratorAgent()
@@ -132,7 +125,7 @@ async def test_audio_generator_agent():
         # 测试音乐需求分析
         # 直接调用内部分析逻辑（与 Shared WM 无关，传入已构造数据）
         scene_list = [scene1, scene2, scene3]
-        concept_plan = store.get(wf_id, "project.concept_plan", default={})
+        concept_plan = shared.get("project.concept_plan", {})
         music_requirements = audio_agent._extract_music_requirements(concept_plan, scene_list, {"duration": 30})
         
         print(f"✅ 音乐需求分析成功:")
@@ -154,12 +147,11 @@ async def test_video_composer_integration():
     print("\n🎵 测试 3: VideoComposer 音乐集成")
     
     try:
-        from app.agents.services.mas_shared_memory import get_shared_wm
+        from app.agents.memory.short_term import get_working_memory_service
 
         wf_id = "wf-composer-bgm"
-        shared = get_shared_wm()
-        store = memory_services.fact_store
-        store.put(wf_id, "project.background_music", {
+        shared = get_working_memory_service().create_or_get(wf_id, f"mas:{wf_id}")
+        shared.put("project.background_music", {
             "audio_url": "http://example.com/test_music.mp3",
             "audio_path": "/path/to/test_music.mp3",
             "title": "Test Background Music",

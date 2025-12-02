@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 from .working_memory import WorkingMemory
 from .builder import WorkingMemoryBuilder
+from ..storage.in_memory import ShortTermMemoryStore, InMemoryShortTermStore
 
 
 class WorkingMemoryAssembler:
@@ -18,8 +19,10 @@ class WorkingMemoryAssembler:
     def __init__(
         self,
         journal_max_events: int = 5,
+        store_factory: Optional[callable[[], ShortTermMemoryStore]] = None,
     ):
-        self._builder = WorkingMemoryBuilder(journal_max_events)
+        self._store_factory = store_factory or (lambda: InMemoryShortTermStore())
+        self._builder = WorkingMemoryBuilder(journal_max_events, store_factory=self._store_factory)
         # cache key: (task_id, agent_name)
         self._cache: Dict[tuple[str, str], WorkingMemory] = {}
 

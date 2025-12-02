@@ -50,63 +50,6 @@ class AudioGeneratorAgent(ReActAgent):
         """Delegate to ReAct loop (ReActAgent)."""
         return await super()._execute_impl(task, input_data, execution, db)
 
-    # ===== ReAct 专用：OBSERVE → PLAN → ACT → REFLECT =====
-    async def _observe_current_state(
-        self,
-        input_data: Dict[str, Any],
-        base_observation: Dict[str, Any],
-        iteration: int
-    ) -> Dict[str, Any]:
-        self._validate_input(input_data, ["workflow_state_id"])
-        wf_id = str(input_data["workflow_state_id"])
-        # Orchestrator 负责预建 WorkingMemory；此处只读访问
-        _ = self.wm
-        observation: Dict[str, Any] = dict(base_observation or {})
-        from .utils.memory_helpers import read_shared_fact
-        concept_plan = read_shared_fact(wf_id, "project.concept_plan", {})
-        wm = get_mas_working_memory(wf_id)
-        final_video_info = wm.get("project.final_video", {}) or {}
-        final_video_path = final_video_info.get("path", "") if isinstance(final_video_info, dict) else ""
-        # 优先使用 orchestrator 注入的时间线与总时长
-        timeline = input_data.get("audio_timeline") or []
-        total_duration = float(input_data.get("audio_total_duration") or 0.0)
-        # 如果未注入，则从 WM 场景顺序推导时间线
-        if not timeline:
-            cursor = 0.0
-            timeline = []
-            overview = wm.get("scene_overview", {}) if wm else {}
-            for scene in (overview.get("scenes") or []) if isinstance(overview, dict) else []:
-                if not isinstance(scene, dict):
-                    continue
-                try:
-                    sn = int(scene.get("scene_number"))
-                except Exception:
-                    continue
-                dur = float(scene.get("duration") or 0.0)
-                timeline.append({
-                    "scene_number": sn,
-                    "start": cursor,
-                    "end": cursor + dur,
-                    "duration": dur,
-                    "mood": "",
-                })
-                cursor += dur
-            total_duration = total_duration or cursor
-        duration = total_duration
-        observation.update({
-            "summary": {"duration": duration, "has_final_video": bool(final_video_path)},
-            "concept_plan": concept_plan,
-            "timeline": timeline,
-        })
-        # 上下文不在 Agent 内部保存，按需从 WM/Shared WM 读取
-        # 适度诊断（不包裹）
-        scenes = observation.get("scenes") or []
-        ch = len(timeline)
-        self.logger.debug(
-            f"FC_FACTS(audio): scenes={len(scenes)}, total_duration={duration:.1f}s, "
-            f"timeline_entries={ch}, style={'yes' if concept_plan.get('intelligent_style_design') else 'no'}"
-        )
-        return observation
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, execution: AgentExecution, iteration: int) -> Dict[str, Any]:
         """PLAN：仅产生 call_tools（不执行），ACT 统一执行 BaseAgent.execute_tool_calls。"""

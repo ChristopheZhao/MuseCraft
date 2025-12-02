@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from time import time as _now
 from typing import Any, Deque, Dict, List, Optional
+
+from ..storage.in_memory import ShortTermMemoryStore, InMemoryShortTermStore
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,16 @@ class WorkingMemory:
         scope: str,
         goal_text: str,
         journal_max_events: int = 5,
+        store: Optional[ShortTermMemoryStore] = None,
     ) -> None:
         self.workflow_state_id = workflow_state_id
         self.scope = scope
         self.goal_text = goal_text
         self.journal_max_events = int(journal_max_events)
-        self.facts: Dict[str, Any] = {}
-        self.event_streams: Dict[str, Deque[Dict[str, Any]]] = {}
+        self._store = store or InMemoryShortTermStore()
+        self.event_streams: Dict[str, Deque[Dict[str, Any]]] = getattr(self._store, "event_streams", lambda: {})()
         self.notes: List[str] = []
-        self.iteration_artifacts: Deque[Dict[str, Any]] = deque(maxlen=32)
-        self.facts_slots: Dict[str, Dict[int, Any]] = {}
+        self.iteration_artifacts: Deque[Dict[str, Any]] = self._store.new_event_queue(32)
         self.workflow_facts: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -36,19 +37,19 @@ class WorkingMemory:
     # ------------------------------------------------------------------
     def put(self, key: str, value: Any) -> None:
         """Store arbitrary data payload referenced by a string key."""
-        self.facts[str(key)] = value
+        self._store.put(key, value)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Return stored payload for key or default when absent."""
-        return self.facts.get(str(key), default)
+        return self._store.get(key, default)
 
     def delete(self, key: str) -> None:
         """Remove payload associated with key when it exists."""
-        self.facts.pop(str(key), None)
+        self._store.delete(key)
 
     def list_keys(self) -> List[str]:
         """Return a snapshot list of current data keys."""
-        return list(self.facts.keys())
+        return self._store.list_keys()
 
     # Backwards-compatible aliases (to be removed once callers migrate)
     def set_fact(self, key: str, value: Any) -> None:
@@ -64,7 +65,7 @@ class WorkingMemory:
     # Event helpers
     # ------------------------------------------------------------------
     def _new_event_queue(self) -> Deque[Dict[str, Any]]:
-        return deque(maxlen=self.journal_max_events)
+        return self._store.new_event_queue(self.journal_max_events)
 
     def _normalize_stream_id(self, stream_id: Any) -> str:
         if isinstance(stream_id, (tuple, list)):
@@ -205,16 +206,6 @@ class WorkingMemory:
             if len(samples) >= max_items:
                 break
         return samples
-
-    def set_slot_value(self, slot: str, scene_number: Optional[int], payload: Any) -> None:
-        if payload is None or scene_number is None:
-            return
-        bucket = self.facts_slots.setdefault(str(slot), {})
-        bucket[int(scene_number)] = payload
-
-    def get_slot_value(self, slot: str, scene_number: int) -> Optional[Any]:
-        bucket = self.facts_slots.get(str(slot)) or {}
-        return bucket.get(int(scene_number))
 
     def append_note(self, note: str) -> None:
         if note:

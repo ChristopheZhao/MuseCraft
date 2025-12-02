@@ -43,101 +43,7 @@ class ImageGeneratorAgent(ReActAgent):
     # 覆盖基类的上下文注入：本 Agent 交给通用 FC 逻辑处理上下文提示
     def build_react_context_messages(self) -> List[Dict[str, Any]]:
         return []
-    
 
-    def get_observation_schema(self) -> Dict[str, Any]:
-        """观测 Schema：仅暴露 WorkingMemory 的客观事实。"""
-        return {
-            "type": "object",
-            "properties": {
-                "scenes": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "scene_number": {
-                                "oneOf": [
-                                    {"type": "integer"},
-                                    {"type": "string", "pattern": "^[0-9]+$"}
-                                ]
-                            },
-                            "depends_on_scene": {"type": ["integer", "string", "null"]},
-                            "completed": {"type": "boolean"},
-                            "failed": {"type": "boolean"},
-                            "visual_description": {"type": "string"},
-                            "narrative_description": {"type": "string"},
-                            "image_url": {"type": "string"},
-                            "motion_beats": {"type": "array"}
-                        },
-                        "required": ["scene_number"],
-                        "additionalProperties": True
-                    }
-                },
-                "completed_scene_numbers": {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {"type": "integer"},
-                            {"type": "string", "pattern": "^[0-9]+$"}
-                        ]
-                    }
-                },
-                "failed_scene_numbers": {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {"type": "integer"},
-                            {"type": "string", "pattern": "^[0-9]+$"}
-                        ]
-                    }
-                }
-            },
-            "required": ["scenes"]
-        }
-
-    async def _observe_current_state(
-        self,
-        input_data: Dict[str, Any],
-        base_observation: Dict[str, Any],
-        iteration: int
-    ) -> Dict[str, Any]:
-        """OBSERVE: 使用内部工作状态推导当前可执行集合"""
-        observation: Dict[str, Any] = dict(base_observation or {})
-        context_window = input_data.get("image_generation_context")
-        if not context_window:
-            wf_id = input_data.get("workflow_state_id")
-            if wf_id:
-                context_window = build_image_generation_context(str(wf_id))
-                input_data["image_generation_context"] = context_window
-        scene_overview = input_data.get("scene_overview") or self.wm.get("scene_overview")
-        if isinstance(scene_overview, dict):
-            observation["scenes"] = list(scene_overview.get("scenes") or [])
-            observation["completed_scene_numbers"] = _coerce_int_list(scene_overview.get("completed_scene_numbers"))
-            observation["failed_scene_numbers"] = _coerce_int_list(scene_overview.get("failed_scene_numbers"))
-        else:
-            observation.setdefault("scenes", [])
-            observation.setdefault("completed_scene_numbers", [])
-            observation.setdefault("failed_scene_numbers", [])
-
-        # 不再从 Agent 读取 last_action；如需上一轮摘要请从 WM 事件推导
-
-        from .utils.obs_builder import compute_obs_digest
-        digest = compute_obs_digest(observation)
-        if isinstance(digest, dict) and digest:
-            self.logger.info(
-                "OBS_PAYLOAD(image): scenes=%d, chars=%d",
-                int(digest.get("scenes_count", 0) or 0),
-                int(digest.get("payload_chars", 0) or 0),
-            )
-
-        state_summary = self._scene_state_builder.build(self.wm, overview=scene_overview)
-        if state_summary:
-            observation["iteration_state"] = state_summary
-
-        if observation.get("scenes") is None:
-            raise AgentError("Working memory view unavailable for observation")
-
-        return observation
 
     async def maybe_augment_observation(self, observation: Dict[str, Any]) -> Dict[str, Any]:
         """ImageAgent 使用最小观察视图，不做额外压缩或总结。"""
@@ -166,7 +72,7 @@ class ImageGeneratorAgent(ReActAgent):
                 "executed_calls": 0,
                 "success": 0,
             }
-            self._record_last_action_summary(summary)
+            self.logger.info("🚀 ACT: no tool calls to execute: %s", summary)
             return {
                 "action_performed": action_label,
                 "executed_calls": [],
@@ -248,30 +154,29 @@ class ImageGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
             "obs_event": obs_event,
         }
-
-
-def _coerce_int_list(values: Any) -> List[int]:
-    if not values:
-        return []
-    result: List[int] = []
-    candidates = values if isinstance(values, list) else list(values)
-    for item in candidates:
-        try:
-            result.append(int(item))
-        except Exception:
-            continue
-    return sorted(set(result))
-
-
-def _coerce_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except Exception:
-        return None
-
     
+    @staticmethod
+    def _coerce_int_list(values: Any) -> List[int]:
+        if not values:
+            return []
+        result: List[int] = []
+        candidates = values if isinstance(values, list) else list(values)
+        for item in candidates:
+            try:
+                result.append(int(item))
+            except Exception:
+                continue
+        return sorted(set(result))
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
     async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         wf_id = str(self.workflow_state_id or "")
         shared_wm = get_mas_working_memory(wf_id) if wf_id else None

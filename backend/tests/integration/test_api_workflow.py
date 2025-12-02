@@ -22,14 +22,14 @@ async def test_workflow_creation():
     print("🏗️ 测试 Shared Working Memory 初始化...")
     
     try:
-        from app.agents.services.mas_shared_memory import get_shared_wm
+        from app.agents.memory.short_term import get_working_memory_service
         wf_id = "wf-api-test"
-        shared = get_shared_wm()
-        store = memory_services.fact_store
-        store.put(wf_id, "project.concept_plan", {"overview": "制作一个关于人工智能的短视频", "intelligent_style_design": {"style_name": "tech"}})
-        plan = store.get(wf_id, "project.concept_plan")
-        assert plan, "concept_plan 未写入共享记忆"
-        print(f"   ✅ Shared WM 初始化成功，wf_id={wf_id}")
+        wm_service = get_working_memory_service()
+        mas = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+        mas.put("project.concept_plan", {"overview": "制作一个关于人工智能的短视频", "intelligent_style_design": {"style_name": "tech"}})
+        plan = mas.get("project.concept_plan")
+        assert plan, "concept_plan 未写入 MAS WM"
+        print(f"   ✅ MAS WM 初始化成功，wf_id={wf_id}")
         return True
     except Exception as e:
         print(f"   ❌ Shared WM 初始化失败: {e}")

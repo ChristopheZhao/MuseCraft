@@ -18,7 +18,6 @@ from ..models import Task, Scene, Resource, AgentExecution, AgentType, ResourceT
 from ..core.config import settings
 from ..agents.memory.long_term.snapshots import export_shared_wm_snapshot
 from ..services.memory_provider import get_memory_services, MemoryServices
-from ..agents.memory.short_term.workflow_facts import WorkflowFactStoreError as SharedMemoryStoreError
 
 
 class DataValidationError(Exception):
@@ -38,7 +37,6 @@ class DataPersistenceService:
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         self.logger = self._get_logger()
         self._memory_services = memory_services or get_memory_services()
-        self._fact_store = self._memory_services.fact_store
 
     def _get_logger(self):
         import logging
@@ -120,23 +118,15 @@ class DataPersistenceService:
                 "persistence_time": datetime.now().isoformat()
             }
 
-    async def persist_from_shared_wm(self, task_id: str, db: Session) -> Dict[str, Any]:
-        """Persist results by reading snapshot from Shared Working Memory.
-
-        This path decouples persistence from WorkflowState and uses the memory-first design.
-        """
-        self.logger.info(f"🗄️ 开始基于 Shared WM 持久化任务 {task_id} 的数据")
+    async def persist_from_mas_wm(self, task_id: str, db: Session) -> Dict[str, Any]:
+        """Persist results by reading snapshot from MAS WorkingMemory (facts/scene_outputs)."""
+        self.logger.info(f"🗄️ 开始基于 MAS WM 持久化任务 {task_id} 的数据")
         try:
             snapshot = export_shared_wm_snapshot(task_id, memory_services=self._memory_services)
-            store = self._fact_store
-            # 1) upsert task
-            task = await self._persist_task_from_snapshot(snapshot, store, db)
-            # 2) scenes
+            task = await self._persist_task_from_snapshot(snapshot, db)
             scene_results = await self._persist_scenes_from_snapshot(task, snapshot, db)
-            # 3) resources (video, voice)
             resource_results = await self._persist_resources_from_snapshot(task, snapshot, db)
             resource_results += await self._persist_task_level_resources_from_snapshot(task, snapshot, db)
-            # 4) logs: skipped (not in WM snapshot)
             db.commit()
             return {
                 "task_id": task.id,
@@ -148,7 +138,7 @@ class DataPersistenceService:
             }
         except Exception as e:
             db.rollback()
-            self.logger.error(f"❌ 基于 Shared WM 的数据持久化失败: {e}")
+            self.logger.error(f"❌ 基于 MAS WM 的数据持久化失败: {e}")
             return {
                 "task_id": task_id,
                 "status": "failed",
@@ -159,18 +149,12 @@ class DataPersistenceService:
     async def _persist_task_from_snapshot(
         self,
         snapshot: Dict[str, Any],
-        store,
         db: Session,
     ) -> Task:
         ext_id = str(snapshot.get("task_id") or "")
-        try:
-            concept_plan = store.get(ext_id, "concept_plan", default={}) or {}
-        except SharedMemoryStoreError:
-            concept_plan = {}
-        try:
-            voice_plan = store.get(ext_id, "voice_plan", default={}) or {}
-        except SharedMemoryStoreError:
-            voice_plan = {}
+        facts = snapshot.get("facts") or {}
+        concept_plan = facts.get("concept_plan", {}) if isinstance(facts, dict) else {}
+        voice_plan = facts.get("voice_plan", {}) if isinstance(facts, dict) else {}
         intelligent_style_design = {}
         content_elements = {}
         if isinstance(concept_plan, dict):
@@ -209,7 +193,7 @@ class DataPersistenceService:
     async def _persist_scenes_from_snapshot(self, task: Task, snapshot: Dict[str, Any], db: Session) -> List[Dict[str, Any]]:
         scenes = snapshot.get("scenes") or []
         results: List[Dict[str, Any]] = []
-        self.logger.info(f"🎬 基于 Shared WM 持久化 {len(scenes)} 个场景")
+        self.logger.info(f"🎬 基于 MAS WM 持久化 {len(scenes)} 个场景")
         for sd in scenes:
             if not isinstance(sd, dict):
                 continue

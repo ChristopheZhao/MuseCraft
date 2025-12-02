@@ -77,13 +77,13 @@ async def test_complete_system_integration():
     
     try:
         # Create Shared WM context
-        from app.agents.services.mas_shared_memory import get_shared_wm
-        from app.agents.memory.short_term.working_memory import SceneSnapshot
-        shared = get_shared_wm()
-        store = memory_services.fact_store
+        from app.agents.memory.short_term import get_working_memory_service
+        from app.agents.memory.short_term import SceneSnapshot
+        wm_service = get_working_memory_service()
+        mas = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
         wf_id = "wf-final-integration"
         # Add concept and scenes
-        store.put(wf_id, "project.concept_plan", {
+        mas.put("project.concept_plan", {
             "core_message": "展示旅行的美好时光",
             "target_audience": "年轻人", 
             "visual_style": "现代",
@@ -92,7 +92,7 @@ async def test_complete_system_integration():
         
         # Create test scenes
         for sn, desc in [(1, "美丽的山景"), (2, "热闹的城市街道"), (3, "海边日落")]:
-            shared.upsert_scene(wf_id, SceneSnapshot(scene_number=sn, duration=10, visual_description=desc))
+            mas.put("scene_overview", {"scenes": [SceneSnapshot(scene_number=sn, duration=10, visual_description=desc).as_fact()]})
         
         # Test music requirements extraction
         # Music requirements extraction (pure function) remains the same
@@ -112,7 +112,7 @@ async def test_complete_system_integration():
         print(f"      Title: {music_requirements['title']}")
         
         # Test background music update in workflow state
-        store.put(wf_id, "project.background_music", {
+        mas.put("project.background_music", {
             "audio_url": "http://example.com/test_music.mp3",
             "audio_path": "/path/to/test_music.mp3",
             "title": music_requirements['title'],
@@ -124,7 +124,7 @@ async def test_complete_system_integration():
         print("   ✅ Workflow state updated with background music")
         
         # Test VideoComposer integration
-        background_music = store.get(wf_id, "project.background_music", default={})
+        background_music = mas.get("project.background_music", {})
         print(f"   ✅ VideoComposer extracted music info:")
         print(f"      Available: {background_music['available']}")  
         print(f"      Title: {background_music['title']}")

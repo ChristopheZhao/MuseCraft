@@ -28,7 +28,6 @@ _DEFAULT_MANAGEMENT: Optional[MemoryManagement] = None
 
 def build_memory_management(
     *,
-    slots_path: Optional[Path] = None,
     storage_backend: Optional[str] = None,
     stores: Optional[Dict[str, BaseMemoryStore]] = None,
     backend_options: Optional[Dict[str, Any]] = None,
@@ -36,15 +35,13 @@ def build_memory_management(
 ) -> MemoryManagement:
     """Create a new set of memory subsystem components."""
 
-    backend_name = (storage_backend or os.getenv("MEMORY_STORAGE_BACKEND") or "slot").lower()
+    backend_name = (storage_backend or os.getenv("MEMORY_STORAGE_BACKEND") or "dict").lower()
     backend_kwargs = dict(backend_options or {})
-    if slots_path is not None:
-        backend_kwargs.setdefault("slots_path", Path(slots_path))
     try:
         workflow_backend = create_workflow_backend(kind=backend_name, **backend_kwargs)
     except ValueError as exc:
-        _LOGGER.warning("Memory backend '%s' unavailable (%s); falling back to slot", backend_name, exc)
-        workflow_backend = create_workflow_backend(kind="slot", **backend_kwargs)
+        _LOGGER.warning("Memory backend '%s' unavailable (%s); falling back to dict backend", backend_name, exc)
+        workflow_backend = create_workflow_backend(kind="dict", **backend_kwargs)
     coordinator = MemoryCoordinator(backend=workflow_backend)
 
     store_backend_name = (os.getenv("MEMORY_BACKEND", "sqlite")).lower()

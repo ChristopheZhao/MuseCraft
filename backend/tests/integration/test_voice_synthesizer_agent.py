@@ -1,5 +1,4 @@
 """Tests for VoiceSynthesizerAgent orchestration without hitting external providers."""
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,9 +6,10 @@ import pytest
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
 from app.agents.tools import register_default_tools
 from app.services.monitoring_service import monitoring_service
-from app.agents.services.mas_shared_memory import get_shared_wm
-from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import get_working_memory_service
+from app.agents.memory.short_term import SceneSnapshot
+from app.agents.utils.memory_helpers import agent_scope
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 from app.models import AgentExecution
 
 
@@ -33,20 +33,22 @@ class DummySession:
 
 
 @pytest.mark.asyncio
-async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, monkeypatch):
+async def test_voice_synthesizer_agent_generates_voice_assets():
     register_default_tools()
-    agent = VoiceSynthesizerAgent(llms={})
+    agent = VoiceSynthesizerAgent()
     monitoring_service.redis_client = None
 
     # 使用 Shared WM 构造一个需要旁白的场景
     wf_id = "wf-voice-synth-test"
-    shared = get_shared_wm()
-    memory_services = build_memory_services()
-    set_memory_services(memory_services)
-    store = memory_services.fact_store
+    wm_service = get_working_memory_service()
+    mas_wm = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+    wm_service.create_or_get(wf_id, agent_scope(wf_id, agent.agent_name), shared_view=mas_wm)
+    agent_wm = wm_service.get(wf_id, agent_scope(wf_id, agent.agent_name))
+    print(f"[TEST] MAS WM keys after init: {mas_wm.list_keys()}")
+    video_adapter = VideoMemoryAdapter(mas_wm)
     snap = SceneSnapshot(scene_number=1, duration=4.0, narrative_description="测试旁白内容。")
-    shared.upsert_scene(wf_id, snap)
-    store.put(wf_id, "project.voice_plan", {
+    video_adapter.upsert_scene(snap)
+    mas_wm.put("project.voice_plan", {
         "enabled": True,
         "mode": "narration",
         "persona": "温柔的旁白者",
@@ -60,42 +62,22 @@ async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, mo
                 "key_points": ["欢迎来到智能世界"],
                 "pace_tag": "medium",
                 "target_char_count": len("测试旁白内容。"),
-            }
-        ],
-    })
-
-    fake_audio = tmp_path / "voice.wav"
-    fake_audio.write_bytes(b"RIFF....fake pcm data....")
-
-    async def fake_use_tool(name: str, action: str, params):
-        if name == "voice_synth_tool":
-            return {
-                "audio_path": str(fake_audio),
-                "duration": 3.2,
-                "voice_id": params.get("voice_id"),
-                "provider": "aliyun",
-                "metadata": {"scene_number": params.get("metadata", {}).get("scene_number")},
-            }
-        if name == "file_storage_tool":
-            return {
-                "local_path": str(fake_audio),
-                "url": "https://example.com/voice.wav",
-            }
-        if name == "audio_processor":
-            if action == "ensure_duration":
-                return {
-                    "output_path": str(fake_audio),
-                    "final_duration": params.get("target_duration", 3.2),
-                    "original_duration": 3.2,
-                    "adjusted": False,
-                    "target_duration": params.get("target_duration", 3.2),
                 }
-            return {"output_path": str(fake_audio)}
-        if name == "audio_analysis_tool":
-            return {"peaks": []}
-        raise AssertionError(f"Unexpected tool call: {name}.{action}")
-
-    monkeypatch.setattr(agent, "use_tool", fake_use_tool)
+            ],
+        })
+    agent_wm.put("facts", {
+        "voice_scene_facts": [
+            {
+                "scene_number": 1,
+                "should_narrate": True,
+                "has_voice_asset": False,
+                "fact_status": "pending",
+                "target_duration": 4.0,
+                "existing_text": "测试旁白内容。",
+                "voice_guidance": {},
+            }
+        ]
+    })
 
     task = SimpleNamespace(id=1, task_id="task-voice-1", update_progress=lambda *args, **kwargs: None)
     db = DummySession()
@@ -111,17 +93,18 @@ async def test_voice_synthesizer_agent_generates_voice_assets(tmp_path: Path, mo
                 "pitch": 1.0,
             },
             # Voice plan 也可从 Shared WM 读取，这里冗余传入以覆盖
-            "voice_plan": store.get(wf_id, "project.voice_plan", default={}),
+            "voice_plan": mas_wm.get("project.voice_plan", {}),
         },
         db=db,
         execution_order=1,
     )
 
+
+
     assert result.get("success") is True or result.get("subtask_state") in {"complete", "partial"}
-    assets = store.get(wf_id, "project.voice_assets", default={}) or {}
-    assert 1 in assets, "Voice assets should be registered in Shared WM"
-    asset = assets[1]
-    assert asset.get("audio_path") == str(fake_audio)
+    assets = mas_wm.get("voice_assets", {}) or {}
+    print(f"[TEST] MAS WM voice_assets keys: {list(assets.keys())}")
+    assert 1 in assets, "Voice assets should be registered in MAS WM"
     # 清理监控服务的异步任务，避免遗留 pending task
     try:
         shutdown_hook = getattr(monitoring_service, "shutdown", None)

@@ -11,9 +11,10 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from app.agents.services.mas_shared_memory import get_shared_wm
+from app.agents.memory.short_term import get_working_memory_service
 from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import SceneSnapshot
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 
 memory_services = build_memory_services()
 set_memory_services(memory_services)
@@ -39,9 +40,9 @@ async def test_complete_mas_system():
     
     # 创建 Shared WM 工作流上下文
     wf_id = "wf-e2e-complete"
-    shared = get_shared_wm()
-    store = memory_services.fact_store
-    store.put(wf_id, "project.concept_plan", {"overview": user_prompt, "genre_and_theme": {"theme": video_style}, "key_messages": []})
+    wm_service = get_working_memory_service()
+    shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+    shared.put("project.concept_plan", {"overview": user_prompt, "genre_and_theme": {"theme": video_style}, "key_messages": []})
     workflow_id = wf_id
     print(f"🆔 工作流ID: {workflow_id}")
     print()
@@ -94,7 +95,8 @@ async def test_complete_mas_system():
         
         # 检查新的输出结构
         # 以 Shared WM 场景快照作为后续 Agent 输入
-        shared.upsert_scene(workflow_id, SceneSnapshot(scene_number=1, duration=6.0, visual_description="Friends laughing and playing in a bright pool area"))
+        video_adapter = VideoMemoryAdapter(shared)
+        video_adapter.upsert_scene(SceneSnapshot(scene_number=1, duration=6.0, visual_description="Friends laughing and playing in a bright pool area"))
         print(f"✅ 场景已写入 Shared WM：scene #1")
         
     except Exception as e:

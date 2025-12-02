@@ -9,6 +9,10 @@ import signal
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
+
 # -----------------------------
 # Proxy helper: compose NO_PROXY
 # -----------------------------

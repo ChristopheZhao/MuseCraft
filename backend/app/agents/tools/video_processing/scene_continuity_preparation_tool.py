@@ -76,7 +76,7 @@ class SceneContinuityPreparationTool(AsyncTool):
                     },
                     "workflow_state_id": {
                         "type": "string",
-                        "description": "可选：明确指定 WorkflowState，确保连续性解析限定在当前任务内"
+                        "description": "可选：Workflow id（由调用方控制），工具本身不读取共享记忆"
                     }
                 },
                 "required": ["scene_number"],
@@ -140,49 +140,7 @@ class SceneContinuityPreparationTool(AsyncTool):
                     memory_scene_number=None
                 )
                 if not final_frame_result.get("success"):
-                    # 覆盖URL失败（如403）：尝试按依赖自动解析（内存/上游视频）作为兜底（Shared WM）
-                    try:
-                        prev_scene_no_fb: Optional[int] = None
-                        current_scene_image_url_fb: str = ""
-                        wf_id = params.get("workflow_state_id")
-                        if wf_id:
-                            from ...services.mas_shared_memory import get_shared_wm as _get_wm
-                            view = _get_wm().get_task(str(wf_id))
-                            sc = (view.scenes or {}).get(int(scene_number)) if view else None
-                            if sc is not None:
-                                current_scene_image_url_fb = getattr(sc, 'image_url', '') or ''
-                                depv = getattr(sc, 'depends_on_scene', None)
-                                if isinstance(depv, (int, str)) and str(depv).isdigit():
-                                    prev_scene_no_fb = int(depv)
-                        if prev_scene_no_fb is not None:
-                            # 先查内存
-                            alt = await self._extract_final_frame(video_url=None, memory_scene_number=prev_scene_no_fb)
-                            if alt.get('success') and isinstance(alt.get('frame_data'), str):
-                                fd = alt.get('frame_data')
-                                if fd.startswith('http'):
-                                    self.logger.info("♻️  覆盖URL失败，复用内存中的连续性帧URL")
-                                    return {
-                                        "success": True,
-                                        "scene_number": scene_number,
-                                        "image_url": fd,
-                                        "continuity_used": True,
-                                        "processing_type": "continuity_frame_reuse",
-                                        "message": f"场景 {scene_number} 复用上游已存连续性帧"
-                                    }
-                                # 非URL：上传后复用
-                                up = await self._upload_frame_to_oss(fd, scene_number)
-                                if up.get('success'):
-                                    return {
-                                        "success": True,
-                                        "scene_number": scene_number,
-                                        "image_url": up.get('url'),
-                                        "continuity_used": True,
-                                        "processing_type": "continuity_frame_reuse",
-                                        "message": f"场景 {scene_number} 复用上游已存连续性帧（上传后）"
-                                    }
-                        # 仍不可用：保留原有兜底（fallback_image_url 或当前场景 image_url）
-                    except Exception:
-                        pass
+                    # 覆盖URL失败：不再依赖 shared_wm，直接回退
                     raise ToolError(
                         f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
                         self.metadata.name
@@ -218,20 +176,14 @@ class SceneContinuityPreparationTool(AsyncTool):
                     "warning": f"当前场景尾帧处理失败，使用兜底图像"
                 }
 
-        # 自动依赖解析：使用 Shared Working Memory 的场景快照 depends_on_scene
+        # 自动依赖解析：依赖由调用方上下文注入（参数），不再读取 shared_wm
         prev_scene_no: Optional[int] = None
         current_scene_image_url: str = ""
         try:
-            wf_id = params.get("workflow_state_id")
-            if wf_id:
-                from ...services.mas_shared_memory import get_shared_wm as _get_wm
-                view = _get_wm().get_task(str(wf_id))
-                sc = (view.scenes or {}).get(int(scene_number)) if view else None
-                if sc is not None:
-                    current_scene_image_url = getattr(sc, 'image_url', '') or ''
-                    dep = getattr(sc, 'depends_on_scene', None)
-                    if isinstance(dep, (int, str)) and str(dep).isdigit():
-                        prev_scene_no = int(dep)
+            prev_scene_no_param = params.get("depends_on_scene")
+            if isinstance(prev_scene_no_param, (int, str)) and str(prev_scene_no_param).isdigit():
+                prev_scene_no = int(prev_scene_no_param)
+            current_scene_image_url = params.get("current_scene_image_url") or fallback_image_url or ""
         except Exception:
             prev_scene_no = None
 
@@ -280,18 +232,9 @@ class SceneContinuityPreparationTool(AsyncTool):
             if not frame_data:
                 prev_video_url = None
                 prev_video_path = None
-                try:
-                    # 通过共享黑板读取上游已完成视频产物
-                    wf_id = params.get("workflow_state_id")
-                    if wf_id and prev_scene_no:
-                        from ...services.mas_shared_memory import get_shared_wm
-                        view = get_shared_wm().get_task(str(wf_id))
-                        art = (view.completed or {}).get(int(prev_scene_no)) if prev_scene_no is not None else None
-                        if art is not None:
-                            prev_video_url = getattr(art, 'video_url', '') or ''
-                            prev_video_path = getattr(art, 'video_path', '') or ''
-                except Exception:
-                    prev_video_url, prev_video_path = None, None
+                # 由调用方提供上游视频源，工具不再读取 shared_wm
+                prev_video_url = params.get("previous_scene_video_url") or None
+                prev_video_path = params.get("previous_scene_video_path") or None
 
                 source = prev_video_url or prev_video_path
                 if not source:

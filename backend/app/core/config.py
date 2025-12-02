@@ -319,7 +319,7 @@ class Settings(BaseSettings):
     # LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
     LOG_LEVEL: str = config("LOG_LEVEL", default="DEBUG")
     MAS_LOG_DIR: str = config("MAS_LOG_DIR", default="./backend/logs/mas")
-    MAS_LOG_LEVEL: str = config("MAS_LOG_LEVEL", default="DEBUG")
+    MAS_LOG_LEVEL: str = config("MAS_LOG_LEVEL", default="INFO")
     MAS_LOG_MAX_BYTES: int = config("MAS_LOG_MAX_BYTES", default=10_485_760, cast=int)
     MAS_LOG_BACKUP_COUNT: int = config("MAS_LOG_BACKUP_COUNT", default=5, cast=int)
     LOG_FORMAT: str = config("LOG_FORMAT", default="json")

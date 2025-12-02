@@ -7,6 +7,17 @@
   - `video_composer`：上下文和资产读取改用 MAS WM facts/scene_outputs，移除 shared_wm/fact_store 访问。
   - `quality_checker`：上下文/最终视频信息来源改为 MAS WM facts 和 `scene_overview`，移除 shared_wm。
   - `audio_generator`：移除 shared_wm import（保持 MAS WM 读取）。
+- **工具/入口/持久化迁移**
+  - BaseAgent 写 artifact、Orchestrator workflow_overview、DataPersistenceService、snapshots 全部改为 MAS WM 路径。
+  - 工具层 `scene_continuity_preparation_tool.py`、`video_generation_tool_v2.py` 去掉 shared_wm 读写，保持纯执行输出。
+- **OBS 精简**
+  - ReActAgent `_observe` 统一返回 obs_record（iteration + action_result，3000 token 限制），去掉生产 Agent 中的 `_observe_current_state`。
+- **测试迁移**
+  - 集成/端到端/单测替换 `get_shared_wm` 为 MAS WorkingMemory（归档代码保留）。
+- **短期存储抽象**
+  - 引入 `ShortTermMemoryStore` 接口 + 默认内存后端，可通过 `short_term_store_factory` 注入其他实现；WorkingMemory/Service 仅依赖接口。
+- **Slot 退役（部分完成）**
+  - WorkingMemory slot API 移除，`sync_to_slots` 入口删除，workflow backend 改为轻量 dict 后端；SlotRegistry 单测删除。
 - **基础层瘦身**
   - BaseAgent 去掉 shared_wm wiring，工具合约 slot 写回改为空实现。
   - WorkingMemoryService/builder 默认不再同步 slots，缓存清理不再触发 slot invalidate。
@@ -18,18 +29,14 @@
   - `8edb4ff` BaseAgent/WM service 去掉 slot 同步 + shared_wm wiring
 
 ### 待办/未完成
-- **工具层 shared_wm 依赖未清理**
-  - `scene_continuity_preparation_tool.py`：覆盖 URL 提帧失败时仍尝试通过 shared_wm 复用场景帧，需移除，改为纯执行（提帧→上传→返回）。
-  - `video_generation_tool_v2.py` 等工具仍有 shared_wm 访问，需要改为“只返回产物，写回由调用方完成”。
-- **其他 shared_wm 引用**
-  - `orchestrator.py`、部分长程/测试路径（如 `memory/long_term/snapshots.py`）尚未迁移。
+- **上下文外移**
+  - ✅ context manager 默认注入 `build_mas_state_view`，ReActAgent 直接消费；后续可在编排层按需裁剪。
 - **slot 接口彻底移除评估**
-  - WorkingMemory 的 `set_slot_value/get_slot_value` 仍存在但无主路径使用，后续可删除并更新文档/测试。
-- **文档/测试同步**
-  - 测试中仍有 fact_store/shared_wm 依赖需调整。
+  - ✅ 生产路径已无 slot 调用；如需启用可选后端需新实现适配层，否则保留归档。
+- **文档同步**
+  - ⚠️ 本页与 `react_memory_alignment.md` 需持续刷新，注明 slot/fact_store 已退役，补充 voice_assets 迁移细节。
 
 ### 下一步建议
-1) 清理工具层：移除工具对 shared_wm/MAS WM 的直接读写，只保留纯执行输出；调用方用 `write_shared_fact`/`persist_scene_outputs` 落盘。
-2) 清理 `orchestrator.py` 等核心路径的 shared_wm 读取，统一 MAS WM facts/scene_outputs。
-3) 评估并删除剩余 slot 接口与配置（如 `memory_slots.yaml`）后更新测试。
-4) 同步文档/测试，确保新架构只依赖 MAS WM facts/scene_outputs。
+1) 上下文外移：由编排层/context manager 构建上下文并注入 Agent，避免在 OBS/Agent 内拼装领域上下文，必要时合并 MAS state view。
+2) 评估并删除剩余 slot 接口与配置（如 `memory_slots.yaml`）后更新测试。
+3) 同步文档，确认生产路径仅依赖 MAS WM facts/scene_outputs，归档代码注明 legacy。

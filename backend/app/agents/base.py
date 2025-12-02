@@ -269,7 +269,7 @@ class BaseAgent(ABC):
             wf_id = workflow_state_id or self.workflow_state_id
             if not wf_id:
                 self.logger.warning(
-                    "SharedWM write skipped: missing workflow_state_id (kind=%s, stage=%s)",
+                    "Artifact write skipped: missing workflow_state_id (kind=%s, stage=%s)",
                     kind,
                     stage,
                 )
@@ -310,10 +310,17 @@ class BaseAgent(ABC):
                 "tool": tool or "",
                 "metadata": meta,
             }
-            from .services.mas_shared_memory import get_shared_wm  # lazy import to avoid cycles
-            return get_shared_wm().add_artifact(str(wf_id), rec)
+            from .utils.memory_helpers import get_mas_working_memory
+
+            wm = get_mas_working_memory(str(wf_id))
+            bucket = wm.get("artifacts", [])
+            if not isinstance(bucket, list):
+                bucket = []
+            bucket.append(rec)
+            wm.put("artifacts", bucket)
+            return len(bucket)
         except Exception as e:
-            self.logger.error("SharedWM artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
+            self.logger.error("Artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
             return None
     
     async def execute(
@@ -613,7 +620,9 @@ class BaseAgent(ABC):
                 kwargs["max_tokens"] = self.max_tokens_thinking if t_enabled else self.max_tokens_standard
 
             # 调用注入的 LLM（plan/act 优先其后 default）
-            llm_service = self._resolve_llm_for_role('plan')
+            # llm_service = self._resolve_llm_for_role('plan')
+            llm_service = self.get_llm("plan")
+
             try:
                 llm_response = await llm_service.function_call(
                     messages=complete_messages,
@@ -865,13 +874,23 @@ class BaseAgent(ABC):
                 self.agent_name,
                 policy_path,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            raise AgentError(
+                f"Failed to log LLM policy load for agent {self.agent_name},err happend: {e} "
+            )
 
         return llm_handles
 
     # === LLM依赖注入访问器 ===
     def _resolve_llm_for_role(self, role: str):
+        """根据角色解析注入的 LLM 句柄，支持按角色区分 plan/act/default 等。
+        若指定角色未注入，则回退到 default 角色。
+        若均未注入，则抛出异常。
+        """
+        try:
+            self.logger.debug("LLM_RESOLVE agent=%s role=%s handles=%s", self.agent_name, role, list(self._llms.keys()))
+        except Exception:
+            pass
         if role in self._llms and self._llms[role] is not None:
             return self._llms[role]
         if 'default' in self._llms and self._llms['default'] is not None:
@@ -881,32 +900,9 @@ class BaseAgent(ABC):
     def get_llm(self, role: str = None):
         """Public accessor for injected llm handles."""
         r = role or 'default'
+        self.logger.debug("LLM_GET agent=%s role=%s self._llms=%s", self.agent_name, r, list(self._llms.keys()) if self._llms else None)
         if (not self._llms) or all(handle is None for handle in self._llms.values()):
-            self._llms = self._load_llms_from_policy()
-        return self._resolve_llm_for_role(r)
-    
-    async def _execute_function_call(self, function_name: str, function_args: Dict[str, Any]) -> Any:
-        """执行LLM选择的工具调用"""
-        # 仅通过映射进行稳定路由（不再做字符串猜测）
-        if hasattr(self, "_fc_function_map") and function_name in getattr(self, "_fc_function_map", {}):
-            tool_name, action = self._fc_function_map[function_name]
-            return await self.use_tool(tool_name, action, function_args)
-        raise ValueError(
-            f"No matching tool for function '{function_name}'. Registered: {list(getattr(self, '_fc_function_map', {}).keys())}"
-        )
-
-    # === LLM依赖注入访问器 ===
-    def _resolve_llm_for_role(self, role: str):
-        if role in self._llms and self._llms[role] is not None:
-            return self._llms[role]
-        if 'default' in self._llms and self._llms['default'] is not None:
-            return self._llms['default']
-        raise AgentError(f"LLM not injected for agent {self.agent_name} (role={role})")
-
-    def get_llm(self, role: str = None):
-        """Public accessor for injected llm handles."""
-        r = role or 'default'
-        if (not self._llms) or all(handle is None for handle in self._llms.values()):
+            self.logger.debug("LLM_GET entered lazy load for agent=%s", self.agent_name)
             self._llms = self._load_llms_from_policy()
         return self._resolve_llm_for_role(r)
     

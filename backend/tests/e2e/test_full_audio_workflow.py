@@ -7,13 +7,10 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from app.agents.services.mas_shared_memory import get_shared_wm
-from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import get_working_memory_service
+from app.agents.memory.short_term import SceneSnapshot
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 from app.agents.audio_generator import AudioGeneratorAgent
-
-memory_services = build_memory_services()
-set_memory_services(memory_services)
 
 
 async def test_full_audio_generator_workflow():
@@ -32,11 +29,11 @@ async def test_full_audio_generator_workflow():
         # 1. 创建 Shared WM 上下文
         print("🔧 创建 Shared WM 上下文...")
         wf_id = "test-audio-workflow"
-        shared = get_shared_wm()
-        store = memory_services.fact_store
-        store.put(wf_id, "project.final_video", {"path": video_path, "url": f"file://{video_path}"})
+        wm_service = get_working_memory_service()
+        shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+        shared.put("project.final_video", {"path": video_path, "url": f"file://{video_path}"})
         # 添加概念计划（AudioGenerator 需要这个）
-        store.put(wf_id, "project.concept_plan", {
+        shared.put("project.concept_plan", {
             "overview": "一只小老虎遇险记",
             "visual_style_guidance": {
                 "color_palette": ["warm orange", "cool blues", "soft yellows"]
@@ -46,8 +43,9 @@ async def test_full_audio_generator_workflow():
         })
         
         # 添加场景数据
+        video_adapter = VideoMemoryAdapter(shared)
         for sn, dur in [(1,5.0),(2,8.0),(3,4.0),(4,4.0)]:
-            shared.upsert_scene(wf_id, SceneSnapshot(scene_number=sn, duration=dur))
+            video_adapter.upsert_scene(SceneSnapshot(scene_number=sn, duration=dur))
         
         print(f"✅ 工作流状态创建成功，视频路径: {video_path}")
         

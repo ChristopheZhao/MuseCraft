@@ -53,51 +53,6 @@ class VoiceSynthesizerAgent(ReActAgent):
     ) -> Dict[str, Any]:
         return await super()._execute_impl(task, input_data, execution, db)
 
-    async def _observe_current_state(
-        self,
-        input_data: Dict[str, Any],
-        base_observation: Dict[str, Any],
-        iteration: int,
-    ) -> Dict[str, Any]:
-        self._validate_input(input_data, ["workflow_state_id"])
-        wf_id = str(input_data["workflow_state_id"])
-        wm = self.wm
-        observation: Dict[str, Any] = dict(base_observation or {})
-        store = self.shared_memory_store
-
-        voice_settings = self._resolve_voice_settings(
-            wf_id,
-            incoming=input_data.get("voice_settings") or {},
-            store=store,
-            persist=True,
-        )
-        voice_plan = self._resolve_voice_plan(
-            wf_id,
-            incoming=input_data.get("voice_plan"),
-            store=store,
-        )
-        concept_plan = self._resolve_concept_plan(
-            wf_id,
-            store=store,
-        )
-        voice_assets = self._load_voice_assets(wf_id, store)
-        scenes_payload = input_data.get("voice_scenes")
-        scene_facts = self._build_voice_scene_facts(
-            wm=wm,
-            scenes_payload=scenes_payload,
-            voice_plan=voice_plan,
-            concept_plan=concept_plan,
-            voice_assets=voice_assets,
-        )
-
-        observation.update({
-            "voice_settings": voice_settings,
-            "voice_plan": voice_plan,
-            "concept_plan_overview": concept_plan.get("overview") if isinstance(concept_plan, dict) else "",
-            "voice_scene_facts": scene_facts,
-            "max_chars_per_request": self._max_chars,
-        })
-        return observation
 
     def _resolve_voice_settings(
         self,
@@ -111,12 +66,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         stored: Dict[str, Any] = {}
         if store is not None:
             try:
-                stored = store.get(
-                    str(workflow_state_id),
-                    "voice_settings",
-                    agent=self.agent_name,
-                    default={},
-                ) or {}
+                stored = store.get("voice_settings", {}) or {}
             except Exception as exc:
                 self.logger.error("Shared memory read voice_settings failed: %s", exc, exc_info=True)
                 raise AgentError("Shared memory read failed (voice_settings)") from exc
@@ -125,12 +75,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         if persist and store is not None:
             try:
                 if settings_payload != stored:
-                    store.put(
-                        str(workflow_state_id),
-                        "voice_settings",
-                        settings_payload,
-                        agent=self.agent_name,
-                    )
+                    store.put("voice_settings", settings_payload)
             except Exception as exc:
                 self.logger.error("Shared memory write voice_settings failed: %s", exc, exc_info=True)
                 raise AgentError("Shared memory write failed (voice_settings)") from exc
@@ -199,7 +144,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         if isinstance(incoming, dict) and incoming:
             if store is not None:
                 try:
-                    store.put(str(workflow_state_id), "voice_plan", incoming, agent=self.agent_name)
+                    store.put("voice_plan", incoming)
                 except Exception as exc:
                     self.logger.error("Shared memory write voice_plan failed: %s", exc, exc_info=True)
                     raise AgentError("Shared memory write failed (voice_plan)") from exc
@@ -207,12 +152,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         if store is None:
             return {}
         try:
-            return store.get(
-                str(workflow_state_id),
-                "voice_plan",
-                agent=self.agent_name,
-                default={},
-            ) or {}
+            return store.get("voice_plan", {}) or {}
         except Exception as exc:
             self.logger.error("Shared memory read voice_plan failed: %s", exc, exc_info=True)
             raise AgentError("Shared memory read failed (voice_plan)") from exc
@@ -226,12 +166,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         if store is None:
             return {}
         try:
-            return store.get(
-                str(workflow_state_id),
-                "concept_plan",
-                agent=self.agent_name,
-                default={},
-            ) or {}
+            return store.get("concept_plan", {}) or {}
         except Exception as exc:
             self.logger.error("Shared memory read concept_plan failed: %s", exc, exc_info=True)
             raise AgentError("Shared memory read failed (concept_plan)") from exc
@@ -240,12 +175,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         if store is None:
             return {}
         try:
-            assets = store.get(
-                str(workflow_state_id),
-                "voice_assets",
-                agent=self.agent_name,
-                default={},
-            ) or {}
+            assets = store.get("voice_assets", {}) or {}
         except Exception as exc:
             self.logger.error("Shared memory read voice_assets failed: %s", exc, exc_info=True)
             raise AgentError("Shared memory read failed (voice_assets)") from exc
@@ -428,14 +358,9 @@ class VoiceSynthesizerAgent(ReActAgent):
     ) -> None:
         if not artifacts:
             return
-        store = self.shared_memory_store
+        shared_wm = get_mas_working_memory(str(workflow_state_id))
         try:
-            assets = store.get(
-                str(workflow_state_id),
-                "voice_assets",
-                agent=self.agent_name,
-                default={},
-            ) or {}
+            assets = shared_wm.get("voice_assets", {}) or {}
         except Exception as exc:
             self.logger.error("Shared memory read voice_assets failed: %s", exc, exc_info=True)
             raise AgentError("Shared memory read failed (voice_assets)") from exc
@@ -482,12 +407,7 @@ class VoiceSynthesizerAgent(ReActAgent):
             from ..core.config import settings as _cfg
             if bool(getattr(_cfg, "ARTIFACTS_SINGLE_WRITE_MODE", False)):
                 return
-            store.put(
-                str(workflow_state_id),
-                "voice_assets",
-                assets,
-                agent=self.agent_name,
-            )
+            shared_wm.put("voice_assets", assets)
         except Exception as exc:
             self.logger.error("Shared memory write voice_assets failed: %s", exc, exc_info=True)
             raise AgentError("Shared memory write failed (voice_assets)") from exc
@@ -577,11 +497,10 @@ class VoiceSynthesizerAgent(ReActAgent):
             shared_memory=shared_wm,
             include_prompt=False,
         )
-        store = self.shared_memory_store
         voice_settings = self._resolve_voice_settings(
             wf_id,
             incoming={},
-            store=store,
+            store=shared_wm,
             persist=False,
         )
         self._persist_voice_artifacts(

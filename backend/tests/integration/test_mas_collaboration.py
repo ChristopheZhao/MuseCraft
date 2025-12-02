@@ -13,9 +13,10 @@ sys.path.insert(0, str(project_root))
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.script_writer import ScriptWriterAgent
 from app.agents.image_generator import ImageGeneratorAgent
-from app.agents.services.mas_shared_memory import get_shared_wm
+from app.agents.memory.short_term import get_working_memory_service
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import SceneSnapshot
 
 def test_mas_collaboration():
     """测试多智能体协作效果"""
@@ -25,10 +26,11 @@ def test_mas_collaboration():
     
     # 创建 Shared WM 工作流上下文
     wf_id = "test_mas_001"
-    shared = get_shared_wm()
+    wm_service = get_working_memory_service()
+    shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+    video_adapter = VideoMemoryAdapter(shared)
     memory_services = build_memory_services()
     set_memory_services(memory_services)
-    store = memory_services.fact_store
     print(f"🎯 用户需求: 创建一个朋友们在泳池派对中玩水的短视频")
     print(f"🎨 视频风格: bright and joyful")
     print(f"⏱️ 视频时长: 15s")
@@ -85,7 +87,7 @@ def test_mas_collaboration():
     }
     
     # 写入概念计划与场景快照到 Shared WM
-    store.put(wf_id, "project.concept_plan", concept_plan)
+    shared.put("project.concept_plan", concept_plan)
     for scene_data in concept_plan["scenes"]:
         snap = SceneSnapshot(
             scene_number=int(scene_data["scene_number"]),
@@ -93,7 +95,7 @@ def test_mas_collaboration():
             visual_description=scene_data["visual_description"],
             narrative_description=scene_data["narrative_description"],
         )
-        shared.upsert_scene(wf_id, snap)
+        video_adapter.upsert_scene(snap)
     
     print("✅ ConceptPlanner完成整体创意规划:")
     print(f"  - 整体美学: {concept_plan['visual_style_guidance']['overall_aesthetic']}")
@@ -110,7 +112,7 @@ def test_mas_collaboration():
     # 处理每个场景
     # 简化：本测试主要展示协作路径，跳过已废弃的 fallback 生成；由 ScriptWriter 写回 facts.scene_scripts
     for sn in [1, 2]:
-        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+        scripts = shared.get("project.scene_scripts", {}) or {}
         scripts[str(sn)] = {
             "script_text": "场景脚本（示例）",
             "voice_over_text": "旁白（示例）",
@@ -119,7 +121,7 @@ def test_mas_collaboration():
             "last_frame_scene_reference": {"situation": "高潮情境"},
             "content_development_arc": {"narrative_progression": "递进发展"},
         }
-        store.put(wf_id, "project.scene_scripts", scripts)
+        shared.put("project.scene_scripts", scripts)
         print(f"     ✅ 场景 {sn} 已写入场景参考（facts.scene_scripts）")
     
     print()
@@ -131,7 +133,7 @@ def test_mas_collaboration():
     image_generator = ImageGeneratorAgent()
     
     for sn in [1, 2]:
-        print(f"  🖼️ 处理场景 {scene_data.scene_number} 的视觉生成:")
+        print(f"  🖼️ 处理场景 {sn} 的视觉生成:")
         
         # 准备创意指导上下文
         creative_guidance = {
@@ -163,7 +165,7 @@ def test_mas_collaboration():
     
     # 检查场景参考是否存在
     for sn in [1, 2]:
-        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+        scripts = shared.get("project.scene_scripts", {}) or {}
         scene_script = scripts.get(str(sn), {})
         if not scene_script.get('first_frame_scene_reference'):
             print(f"❌ 场景 {sn} 缺少首帧场景参考")
@@ -187,12 +189,13 @@ def test_mas_collaboration():
     # 5. 显示最终协作结果
     print("🎊 MAS协作结果总结:")
     print("-" * 40)
-    view = shared.get_task(wf_id)
-    print(f"✨ 总场景数: {len(view.scenes)}")
+    view = video_adapter.build_fact_observation()
+    scenes = view.get("scenes", [])
+    print(f"✨ 总场景数: {len(scenes)}")
     print(f"📖 整体叙事: {concept_plan['overview']}")
     
-    for sn in sorted(view.scenes.keys()):
-        scripts = store.get(wf_id, "project.scene_scripts", default={}) or {}
+    for sn in sorted([s.get("scene_number") for s in scenes if isinstance(s, dict)]):
+        scripts = shared.get("project.scene_scripts", {}) or {}
         print(f"\n🎬 场景 {sn}")
         print(f"   📝 脚本: {(scripts.get(str(sn), {}).get('script_text',''))[:60]}...")
         first_ref = scripts.get(str(sn), {}).get('first_frame_scene_reference', {})

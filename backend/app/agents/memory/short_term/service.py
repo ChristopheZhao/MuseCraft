@@ -16,6 +16,7 @@ from typing import Callable, Dict, Optional
 
 from ..short_term.assembler import WorkingMemoryAssembler
 from ..short_term.working_memory import WorkingMemory
+from ..storage.in_memory import ShortTermMemoryStore, InMemoryShortTermStore
 
 
 class MemoryNotInitializedError(RuntimeError):
@@ -29,8 +30,14 @@ class MemoryAlreadyExistsError(RuntimeError):
 class WorkingMemoryService:
     """Central service that manages per-agent WorkingMemory instances (short-term memory)."""
 
-    def __init__(self, assembler: Optional[WorkingMemoryAssembler] = None) -> None:
-        self._assembler = assembler or WorkingMemoryAssembler()
+    def __init__(
+        self,
+        assembler: Optional[WorkingMemoryAssembler] = None,
+        *,
+        store_factory: Optional[callable[[], ShortTermMemoryStore]] = None,
+    ) -> None:
+        factory = store_factory or (lambda: InMemoryShortTermStore())
+        self._assembler = assembler or WorkingMemoryAssembler(store_factory=factory)
         self._cache: Dict[tuple[str, str], WorkingMemory] = {}
         self._lock = threading.RLock()
         self._logger = logging.getLogger("working_memory.service")
@@ -113,19 +120,14 @@ class WorkingMemoryService:
             )
             raise
 
-    def delete(self, workflow_state_id: str, scope: str, *, sync_to_slots: bool = False) -> None:
+    def delete(self, workflow_state_id: str, scope: str) -> None:
         """Delete cached WorkingMemory for a given agent/workflow."""
         key = (str(workflow_state_id), str(scope))
         with self._lock:
             wm = self._cache.pop(key, None)
         if wm is None:
             return
-        try:
-            if sync_to_slots:
-                # Legacy slot sync disabled by default
-                self._assembler.invalidate(key[0], key[1])
-        finally:
-            self._logger.info("WM_DELETE workflow=%s scope=%s sync=%s", key[0], key[1], sync_to_slots)
+        self._logger.info("WM_DELETE workflow=%s scope=%s", key[0], key[1])
 
     def get_optional(self, scope: str, workflow_state_id: Optional[str]) -> Optional[WorkingMemory]:
         if not workflow_state_id:
@@ -146,7 +148,7 @@ class WorkingMemoryService:
         except Exception:
             self._logger.debug("WorkingMemoryService.invalidate failed for %s/%s", key[0], key[1], exc_info=True)
 
-    def reset_workflow(self, workflow_state_id: str, *, sync_to_slots: bool = False) -> None:
+    def reset_workflow(self, workflow_state_id: str) -> None:
         """Invalidate all agent memories for a workflow."""
         wf_id = str(workflow_state_id)
         keys_to_drop = []
@@ -155,23 +157,12 @@ class WorkingMemoryService:
                 if key[0] == wf_id:
                     keys_to_drop.append(key)
                     self._cache.pop(key, None)
-        for _, scope in keys_to_drop:
-            try:
-                if sync_to_slots:
-                    self._assembler.invalidate(wf_id, scope)
-            except Exception:
-                self._logger.debug(
-                    "WorkingMemoryService.reset_workflow invalidate failed for %s/%s",
-                    wf_id,
-                    scope,
-                    exc_info=True,
-                )
-        self._logger.info("WM_CLEANUP workflow=%s scopes=%s sync=%s", wf_id, len(keys_to_drop), sync_to_slots)
+        self._logger.info("WM_CLEANUP workflow=%s scopes=%s", wf_id, len(keys_to_drop))
 
     # Backwards-compatible alias
     def cleanup_workflow(self, workflow_state_id: str) -> None:
         """Alias for reset_workflow for orchestrator compatibility."""
-        self.reset_workflow(workflow_state_id, sync_to_slots=False)
+        self.reset_workflow(workflow_state_id)
 
 __all__ = [
     "WorkingMemoryService",

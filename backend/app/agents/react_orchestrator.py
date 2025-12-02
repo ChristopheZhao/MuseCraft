@@ -97,6 +97,7 @@ class ReActOrchestratorAgent(BaseAgent):
         db.commit()
         
         # Initialize workflow state
+        wf_id = str(task.task_id)
         workflow_state = {
             "user_requirements": input_data,
             "current_results": {},
@@ -120,11 +121,27 @@ class ReActOrchestratorAgent(BaseAgent):
                     db
                 )
                 
-                # 1. OBSERVE - 观察当前状态
-                observation = await self._observe_current_state(workflow_state)
+                # 1. OBSERVE - 当前迭代的轻量状态信号（上下文单独构建供 PLAN 使用）
+                observation = {
+                    "iteration": iteration,
+                    "completed_actions": list(workflow_state.get("completed_actions", [])),
+                    "failed_actions": list(workflow_state.get("failed_actions", [])),
+                    "quality_scores": workflow_state.get("quality_scores", {}),
+                }
+                try:
+                    from .utils.context_manager import build_agent_context
+                    plan_context = build_agent_context(
+                        workflow_id=wf_id,
+                        agent_name=self.agent_name,
+                        state_view=None,
+                        max_turn=None,
+                        max_token_budget=None,
+                    )
+                except Exception:
+                    plan_context = {}
 
                 # 2~3. THINK/PLAN - 通过 FC 仅用 orchestrator_control 工具进行轻量决策
-                decision = await self._fc_decide_next_step(observation, workflow_state)
+                decision = await self._fc_decide_next_step(observation, workflow_state, plan_context)
                 action_plan = self._derive_action_plan_from_decision(decision, workflow_state)
                 
                 # 4. ACT - Execute the planned action
@@ -171,18 +188,8 @@ class ReActOrchestratorAgent(BaseAgent):
             db.commit()
             raise AgentError(f"Orchestrator workflow failed: {str(e)}") from e
     
-    async def _observe_current_state(self, workflow_state: Dict[str, Any]) -> Dict[str, Any]:
-        """OBSERVE: 汇总当前状态（本地计算，不依赖LLM）"""
-        return {
-            "user_requirements": workflow_state.get("user_requirements", {}),
-            "completed": list(workflow_state.get("completed_actions", [])),
-            "failed": list(workflow_state.get("failed_actions", [])),
-            "quality_scores": dict(workflow_state.get("quality_scores", {})),
-            "current_results_keys": list(workflow_state.get("current_results", {}).keys()),
-            "iteration": workflow_state.get("iteration_count", 0) + 1
-        }
     
-    async def _fc_decide_next_step(self, observation: Dict[str, Any], workflow_state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fc_decide_next_step(self, observation: Dict[str, Any], workflow_state: Dict[str, Any], plan_context: Dict[str, Any]) -> Dict[str, Any]:
         """通过 Function Call 使用 orchestrator_control 做轻量决策。"""
         pm = self.prompt_manager
         import json as _json
@@ -193,7 +200,8 @@ class ReActOrchestratorAgent(BaseAgent):
                 "completed_json": _json.dumps(observation.get('completed'), ensure_ascii=False),
                 "failed_json": _json.dumps(observation.get('failed'), ensure_ascii=False),
                 "quality_json": _json.dumps(observation.get('quality_scores'), ensure_ascii=False),
-                "iteration": observation.get('iteration')
+                "iteration": observation.get('iteration'),
+                "context_json": _json.dumps(plan_context or {}, ensure_ascii=False),
             },
             use_cache=True,
             auto_reload=False,
@@ -438,7 +446,7 @@ class ReActOrchestratorAgent(BaseAgent):
             if a.value not in completed:
                 return {"action": a.value, "parameters": {}}
         return {"action": ActionType.COMPLETE_TASK.value, "parameters": {}}
-    
+
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
         """统一使用安全解析工具，避免手写围栏剥离与静默失败。"""
         from .utils.json_utils import safe_json_loads

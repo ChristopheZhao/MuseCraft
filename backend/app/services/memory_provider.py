@@ -9,6 +9,11 @@ from ..agents.memory.services.coordinator import MemoryCoordinator
 from ..agents.memory.services.long_term import SimpleLongTermMemoryService
 from ..agents.memory.short_term.registry import set_working_memory_service
 from ..agents.memory.short_term.service import WorkingMemoryService
+from ..agents.memory.storage.in_memory import (
+    InMemoryShortTermStore,
+    ShortTermMemoryStore,
+    create_short_term_store,
+)
 from ..core.config import settings
 from .global_memory_service import GlobalMemoryService
 
@@ -24,9 +29,11 @@ class MemoryServices:
 _default_services: Optional[MemoryServices] = None
 
 
-def build_memory_services() -> MemoryServices:
+def build_memory_services(
+    *,
+    short_term_store_factory: Optional[callable[[], ShortTermMemoryStore]] = None,
+) -> MemoryServices:
     management = build_memory_management(
-        slots_path=None,
         storage_backend=settings.MEMORY_WORKFLOW_BACKEND,
     )
     global_service = GlobalMemoryService(management)
@@ -39,7 +46,8 @@ def build_memory_services() -> MemoryServices:
         coordinator=coordinator,
         long_term=long_term,
     )
-    wm_service = WorkingMemoryService()
+    factory = short_term_store_factory or (lambda: create_short_term_store(kind="memory"))
+    wm_service = WorkingMemoryService(store_factory=factory)
     set_working_memory_service(wm_service)
     return services
 

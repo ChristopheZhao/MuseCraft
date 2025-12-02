@@ -73,7 +73,7 @@ class VideoComposerAgent(BaseAgent):
             single_write = bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False))
         except Exception:
             single_write = False
-        if single_write:
+
         # 兼容单写模式：从 MAS WM facts/scene_outputs 读取最新资产
         if single_write:
             # 优先使用已写入 facts，scene_outputs 中的音视频可选读取

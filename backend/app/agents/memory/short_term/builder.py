@@ -6,13 +6,20 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from .working_memory import WorkingMemory
+from ..storage.in_memory import ShortTermMemoryStore, InMemoryShortTermStore
 
 
 class WorkingMemoryBuilder:
     """Factory responsible for creating/syncing WorkingMemory instances."""
 
-    def __init__(self, journal_max_events: int = 5) -> None:
+    def __init__(
+        self,
+        journal_max_events: int = 5,
+        *,
+        store_factory: Optional[callable[[], ShortTermMemoryStore]] = None,
+    ) -> None:
         self._journal_max_events = int(journal_max_events)
+        self._store_factory = store_factory or (lambda: InMemoryShortTermStore())
 
     def build(
         self,
@@ -32,6 +39,7 @@ class WorkingMemoryBuilder:
             scope=str(scope),
             goal_text=goal_text,
             journal_max_events=self._journal_max_events,
+            store=self._store_factory(),
         )
         if shared_view is not None:
             self.sync(wm, shared_view, owner_agent=owner_agent)
@@ -50,7 +58,6 @@ class WorkingMemoryBuilder:
         target.facts = deepcopy(getattr(shared_view, "facts", {}))
         target.notes = list(getattr(shared_view, "notes", []) or [])
         target.workflow_facts = deepcopy(getattr(shared_view, "workflow_facts", {}))
-        target.facts_slots = {}
         target.event_streams = deepcopy(getattr(shared_view, "event_streams", {}))
         artifacts = list(getattr(shared_view, "iteration_artifacts", []) or [])
         target.iteration_artifacts.clear()

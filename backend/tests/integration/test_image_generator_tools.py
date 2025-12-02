@@ -88,7 +88,7 @@ def test_image_generator_tool_system():
         mood_and_atmosphere="joyful and energetic",
     )
     
-    # 模拟创意指导
+    # 模拟创意指导（现行 agent 在 PLAN 阶段由 LLM 决策，不提供直接参数生成接口）
     creative_guidance = {
         "overall_guidance": {
             "production_guidance": {
@@ -100,10 +100,8 @@ def test_image_generator_tool_system():
         "scene_guidance": {},
         "has_guidance": True
     }
-    
-    generation_params = image_gen._get_generation_parameters_with_guidance(scene_data, creative_guidance)
-    print(f"✅ 生成参数: {generation_params}")
-    
+    print("ℹ️ 生成参数：现行 ImageGenerator 由 PLAN LLM 决策，不暴露 _get_generation_parameters_with_guidance 接口")
+
     # 测试提示词增强
     print()
     print("🎨 测试MAS协作模式提示词增强:")
@@ -128,21 +126,9 @@ def test_image_generator_tool_system():
     
     base_prompt = scene_data.visual_description
     
-    # 测试首帧增强
-    first_frame_enhanced = image_gen._enhance_prompt_for_first_frame(
-        base_prompt, scene_data, creative_guidance
-    )
-    print(f"🎬 首帧增强提示词:")
-    print(f"   原始: {base_prompt}")
-    print(f"   增强: ...{first_frame_enhanced[-100:]}")  # 显示最后100个字符
-    
-    # 测试尾帧增强
-    last_frame_enhanced = image_gen._enhance_prompt_for_last_frame(
-        base_prompt, scene_data, creative_guidance
-    )
-    print(f"🏁 尾帧增强提示词:")
-    print(f"   原始: {base_prompt}")
-    print(f"   增强: ...{last_frame_enhanced[-100:]}")   # 显示最后100个字符
+    # 提示词增强接口已移除，交由 PLAN LLM 决策，仅保留场景参考打印
+    print("🎬 首尾帧增强：已由 PLAN LLM 自主构建提示词，不再提供本地增强接口")
+    print(f"   原始描述: {base_prompt}")
     
     print()
     

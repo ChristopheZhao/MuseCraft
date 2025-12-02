@@ -1,8 +1,8 @@
 import pytest
 
-from app.agents.services.mas_shared_memory import get_shared_wm
 from app.services.memory_provider import build_memory_services, set_memory_services
-from app.agents.memory.short_term.working_memory import SceneSnapshot
+from app.agents.memory.short_term import get_working_memory_service
+from app.agents.memory.short_term import SceneSnapshot
 from app.agents.memory.long_term.snapshots import export_shared_wm_snapshot
 
 memory_services = build_memory_services()
@@ -11,12 +11,11 @@ set_memory_services(memory_services)
 
 def test_exporter_includes_final_video():
     task_id = "wm-export-final-video"
-    wm = get_shared_wm()
-    store = memory_services.fact_store
-
+    wm_service = get_working_memory_service()
+    mas = wm_service.create_or_get(task_id, f"mas:{task_id}")
     # Prepare scenes and final video facts
-    wm.upsert_scene(task_id, SceneSnapshot(scene_number=1, duration=3.0))
-    store.put(task_id, "project.final_video", {
+    mas.put("scene_overview", {"scenes": [SceneSnapshot(scene_number=1, duration=3.0).as_fact()]})
+    mas.put("final_video", {
         "path": "/tmp/final_video.mp4",
         "url": "https://example.com/final.mp4",
         "remote_path": "oss://bucket/final.mp4",

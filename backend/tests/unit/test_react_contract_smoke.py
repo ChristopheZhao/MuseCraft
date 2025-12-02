@@ -22,8 +22,6 @@ class DummyAgent(ReActAgent):
             tools=[],
         )
 
-    async def _observe_current_state(self, input_data: Dict[str, Any], context: Dict[str, Any], iteration: int) -> Dict[str, Any]:
-        return {"scenes": [], "completed_scene_numbers": [], "failed_scene_numbers": []}
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task, execution, iteration: int) -> Dict[str, Any]:
         return {"action": "noop", "parameters": {}}

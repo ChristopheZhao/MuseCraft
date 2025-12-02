@@ -10,12 +10,16 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentExecution, TaskStatus, AgentType
-from .services.mas_shared_memory import get_shared_wm
 from .adapters.memory_views import build_media_agent_context, build_image_generation_context
 from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
 from .memory.short_term import get_working_memory_service
-from .utils.memory_helpers import agent_scope, mas_scope, get_mas_working_memory
+from .utils.memory_helpers import (
+    agent_scope,
+    mas_scope,
+    get_mas_working_memory,
+    write_shared_fact,
+)
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -26,6 +30,8 @@ from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 from .tools.tool_registry import get_tool_registry
 from ..core.config import settings
+
+from typing import Optional
 
 
 class OrchestratorAgent(BaseAgent):
@@ -167,9 +173,9 @@ class OrchestratorAgent(BaseAgent):
         task.status = TaskStatus.IN_PROGRESS
         task.update_progress("Starting workflow", 0)
         try:
-            self.store_memory_slot(
+            write_shared_fact(
                 wf_id,
-                "project.workflow_overview",
+                "workflow_overview",
                 {
                     "status": "INITIALIZING",
                     "progress": 0,
@@ -177,7 +183,6 @@ class OrchestratorAgent(BaseAgent):
                     "step_index": 0,
                     "total_steps": len(self.workflow_order),
                 },
-                agent=self.agent_name,
             )
         except Exception as wm_err:
             raise AgentError(f"Failed to initialize workflow_overview in shared memory: {wm_err}") from wm_err
@@ -280,13 +285,14 @@ class OrchestratorAgent(BaseAgent):
                         mixing_mode = 'composer'
                     if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
                         try:
-                            vm = self.fetch_memory_slot(
-                                str(wf_id),
-                                "project.voice_assets",
-                                default={},
-                                agent=self.agent_name,
-                            )
-                            if vm:
+                            shared = get_mas_working_memory(str(wf_id))
+                            voice_bucket = {}
+                            try:
+                                voice_bucket = shared.get("scene_outputs.voice", {}) if shared is not None else {}
+                            except Exception:
+                                voice_bucket = {}
+                            has_voice_assets = bool(voice_bucket) if isinstance(voice_bucket, dict) else False
+                            if has_voice_assets:
                                 self.logger.info("🎤 Scheduling composer to add voice-over tracks")
                                 comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
                                 comp_input = {
@@ -513,7 +519,7 @@ class OrchestratorAgent(BaseAgent):
             
             # 使用DataPersistenceService统一持久化数据
             self.logger.info("💾 开始持久化工作流数据到数据库...")
-            persistence_result = await data_persistence_service.persist_from_shared_wm(wf_id, db)
+            persistence_result = await data_persistence_service.persist_from_mas_wm(wf_id, db)
             
             if persistence_result["status"] == "success":
                 # Update task status
@@ -522,15 +528,6 @@ class OrchestratorAgent(BaseAgent):
                 try:
                     ov = self._load_workflow_overview(wf_id)
                     final_url = workflow_results.get("video_composer", {}).get("final_video_url")
-                    if bool(getattr(settings, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(settings, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
-                        try:
-                            latest = get_shared_wm().get_latest_artifact(wf_id, kind='video', stage='compose')
-                        except Exception as artifact_err:
-                            raise AgentError(
-                                f"Failed to read latest video artifact from Shared WM: {artifact_err}"
-                            ) from artifact_err
-                        if isinstance(latest, dict):
-                            final_url = latest.get('url') or latest.get('file_path') or final_url
                     ov.update(
                         {
                             "status": "COMPLETED",
@@ -570,14 +567,6 @@ class OrchestratorAgent(BaseAgent):
             
             # 最终输出：按开关改读 artifacts（若可用）
             final_url = workflow_results.get("video_composer", {}).get("final_video_url")
-            if bool(getattr(settings, 'ORCHESTRATOR_READS_ARTIFACTS', False)) or bool(getattr(settings, 'ARTIFACTS_SINGLE_WRITE_MODE', False)):
-                try:
-                    latest = get_shared_wm().get_latest_artifact(wf_id, kind='video', stage='compose')
-                except Exception as artifact_err:
-                    raise AgentError(f"Failed to fetch latest compose artifact: {artifact_err}") from artifact_err
-                if isinstance(latest, dict):
-                    final_url = latest.get('url') or latest.get('file_path') or final_url
-
             return {
                 "workflow_status": "completed",
                 "total_steps": total_steps,
@@ -603,7 +592,7 @@ class OrchestratorAgent(BaseAgent):
             
             # 尝试持久化失败状态（尽力而为）
             try:
-                await data_persistence_service.persist_from_shared_wm(wf_id, db)
+                await data_persistence_service.persist_from_mas_wm(wf_id, db)
                 self.logger.info("❌ 工作流失败状态已持久化")
             except Exception as persist_error:
                 self.logger.error(f"❌❌ 连持久化失败状态都失败了: {str(persist_error)}")
@@ -933,16 +922,16 @@ class OrchestratorAgent(BaseAgent):
                 if image_ctx:
                     agent_input["image_generation_context"] = image_ctx
 
-        if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
-            overall_guidance = workflow_data.get("creative_guidance")
-            if overall_guidance:
-                agent_input["creative_guidance"] = overall_guidance
-            scene_guidances = workflow_data.get("scene_guidances")
-            if scene_guidances:
-                agent_input["scene_guidances"] = scene_guidances
+            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
+                overall_guidance = workflow_data.get("creative_guidance")
+                if overall_guidance:
+                    agent_input["creative_guidance"] = overall_guidance
+                scene_guidances = workflow_data.get("scene_guidances")
+                if scene_guidances:
+                    agent_input["scene_guidances"] = scene_guidances
 
-        elif agent_type == AgentType.VOICE_SYNTHESIZER:
-            _merge_media_context(include_roles=True)
+            elif agent_type == AgentType.VOICE_SYNTHESIZER:
+                _merge_media_context(include_roles=True)
 
             return agent_input
             

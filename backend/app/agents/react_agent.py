@@ -102,12 +102,11 @@ class ReActAgent(BaseAgent, ABC):
                 try:
                     from .utils.wm_obs import append_obs_to_wm
 
-                    obs_record: Dict[str, Any] = {
-                        "iteration": iteration,
-                        "action_plan": action_plan,
-                        "action_result": action_result,
-                        "observation": current_iter_context,
-                    }
+                    obs_record = await self._observe(
+                        input_data=input_data,
+                        iteration=iteration,
+                        action_result=action_result if isinstance(action_result, dict) else None,
+                    )
                     append_obs_to_wm(
                         workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
                         agent_name=self.agent_name,
@@ -273,61 +272,23 @@ class ReActAgent(BaseAgent, ABC):
                 observation["aug_meta"] = {"used": False, "reason": f"error:{exc.__class__.__name__}"}
             return observation
 
-    @abstractmethod
-    async def _observe_current_state(
-        self, 
-        input_data: Dict[str, Any], 
-        base_observation: Dict[str, Any], 
-        iteration: int
-    ) -> Dict[str, Any]:
-        """
-        基于 WorkingMemory facts 构建领域增强后的观察结果
-
-        Args:
-            input_data: 原始输入数据
-            base_observation: 已包含 WM 事实与 act 摘要的基础观察
-            iteration: 当前迭代次数
-
-        Returns:
-            当前状态的观察结果
-        """
-        pass
 
     async def _observe(
         self,
         input_data: Dict[str, Any],
         iteration: int,
-        action_facts: Optional[Dict[str, Any]] = None,
+        action_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        默认的 OBSERVE 流程：先执行 ACT→OBSERVE 归并，再构造观察视图。
-        子类如需扩展，可重写本方法或其中的 `_prepare_observation`。
-        """
+        """生成当轮 obs_record（不含 plan/context），默认不精简，仅对 action_result 做预算限制。"""
         await self._prepare_observation(
-            action_result=None,
+            action_result=action_result,
             input_data=input_data,
             iteration=iteration,
         )
-        observation: Dict[str, Any] = {}
-        try:
-            from .utils.context_manager import build_agent_context
-
-            observation = build_agent_context(
-                workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
-                agent_name=self.agent_name,
-                state_view=None,
-                max_turn=None,
-                max_token_budget=None,
-            )
-        except Exception:
-            observation = {}
-        observation = await self._observe_current_state(
-            input_data,
-            observation,
-            iteration,
-        )
-        observation = await self.maybe_augment_observation(observation)
-        return observation
+        record: Dict[str, Any] = {"iteration": iteration}
+        if action_result is not None:
+            record["action_result"] = self._truncate_action_result(action_result)
+        return record
     
     async def _prepare_observation(
         self,
@@ -341,9 +302,23 @@ class ReActAgent(BaseAgent, ABC):
         默认实现不做任何处理（不消费合同、不写入状态、不统计进度）。
         子类如需写回领域事实，可在此方法中完成，仍需遵守“无状态 Agent”与“事实写入 WM/Shared WM”的原则。
         """
-        if not isinstance(action_result, dict):
-            return
-        # 无操作：OBS 构建仅依赖 WM 事实 + 执行摘要
+        return
+
+    def _truncate_action_result(self, action_result: Dict[str, Any], max_token_budget: int = 3000) -> Any:
+        """对 action_result 做简单预算限制，超限时返回占位摘要。"""
+        try:
+            import json as _json
+            text = _json.dumps(action_result, ensure_ascii=False)
+            approx_tokens = len(text) // 4
+            if max_token_budget and approx_tokens > max_token_budget:
+                return {
+                    "truncated": True,
+                    "reason": "over_token_budget",
+                    "approx_tokens": approx_tokens,
+                }
+        except Exception:
+            pass
+        return action_result
 
     # === THINK / PLAN PHASE ==============================================
     
@@ -545,48 +520,6 @@ class ReActAgent(BaseAgent, ABC):
             {"role": "system", "content": sys_text},
             {"role": "user", "content": obs_json},
         ]
-
-    def get_observation_schema(self) -> Dict[str, Any]:
-        """默认观测 Schema（通用、领域无关）：
-        - 仅描述客观事实字段；不包含模型决策/统计/提示性信息
-        - 领域专用字段（如 image_url）应在子类重写时添加
-        """
-        scene_schema = {
-            "type": "object",
-            "properties": {
-                "scene_number": {
-                    "oneOf": [
-                        {"type": "integer"},
-                        {"type": "string", "pattern": "^[0-9]+$"},
-                    ]
-                },
-                "depends_on_scene": {"type": ["integer", "string", "null"]},
-                "visual_description": {"type": "string"},
-                "narrative_description": {"type": "string"},
-                "duration": {"type": ["number", "string"]},
-            },
-            "required": ["scene_number"],
-            "additionalProperties": True,
-        }
-        array_of_int_or_str = {
-            "type": "array",
-            "items": {
-                "oneOf": [
-                    {"type": "integer"},
-                    {"type": "string", "pattern": "^[0-9]+$"},
-                ]
-            },
-        }
-        return {
-            "type": "object",
-            "properties": {
-                "scenes": {"type": "array", "items": scene_schema},
-                "completed_scene_numbers": array_of_int_or_str,
-                "failed_scene_numbers": array_of_int_or_str,
-            },
-            "required": ["scenes"],
-            "additionalProperties": True,
-        }
 
 
     async def llm_structured_observation(self, messages: List[Dict[str, Any]], schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:

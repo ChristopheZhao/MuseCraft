@@ -18,6 +18,7 @@ from .service import WorkingMemoryService, MemoryNotInitializedError
 from .registry import get_working_memory_service, invalidate_working_memory, reset_workflow_working_memory
 from .assembler import WorkingMemoryAssembler
 from .workflow_facts import WorkflowFactStore, WorkflowFactStoreError, load_fact_aliases
+from ..storage.in_memory import ShortTermMemoryStore, InMemoryShortTermStore
 
 __all__ = [
     "WorkingMemory",
@@ -32,4 +33,6 @@ __all__ = [
     "WorkflowFactStore",
     "WorkflowFactStoreError",
     "load_fact_aliases",
+    "ShortTermMemoryStore",
+    "InMemoryShortTermStore",
 ]
