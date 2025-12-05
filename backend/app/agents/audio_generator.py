@@ -9,7 +9,7 @@ import json
 from sqlalchemy.orm import Session
 
 from .react_agent import ReActAgent, AgentError
-from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
+from ..models import Task, AgentType, Resource, ResourceType
  
 from ..core.config import settings
 from .utils.artifacts import (
@@ -44,14 +44,13 @@ class AudioGeneratorAgent(ReActAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
-        db: Session
+        db: Session = None
     ) -> Dict[str, Any]:
         """Delegate to ReAct loop (ReActAgent)."""
-        return await super()._execute_impl(task, input_data, execution, db)
+        return await super()._execute_impl(task, input_data, db)
 
 
-    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, execution: AgentExecution, iteration: int) -> Dict[str, Any]:
+    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
         """PLAN：仅产生 call_tools（不执行），ACT 统一执行 BaseAgent.execute_tool_calls。"""
         # 中立观察快照，避免在提示中泄漏工具名/参数名
         style_guidance = {}
@@ -93,7 +92,7 @@ class AudioGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], execution: AgentExecution, db: Session, iteration: int) -> Dict[str, Any]:
+    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], db: Session, iteration: int) -> Dict[str, Any]:
         """ACT：只执行规划的 call_tools；不在 Agent 内自组参数直接 use_tool。"""
         # 不在 Agent 内对 action 做白名单判断；
         # 执行层只关心是否存在规划的 call_tools，权限/范围由工具系统与 schema 控制。
@@ -264,7 +263,7 @@ class AudioGeneratorAgent(ReActAgent):
         concept_plan: Dict[str, Any],
         scenes_data: List,
         video_metadata: Dict[str, Any],
-        execution: AgentExecution
+        execution: Any
     ) -> Dict[str, Any]:
         """Deprecated legacy path. Tools must be executed via PLAN→ACT."""
         raise AgentError("Deprecated: _generate_background_music_from_concept is not used; use FC-planned calls.")
@@ -444,7 +443,7 @@ class AudioGeneratorAgent(ReActAgent):
         self, 
         music_result: Dict[str, Any], 
         task_id: int,
-        execution: AgentExecution
+        execution: Any
     ) -> str:
         """Deprecated legacy helper. Use FC-planned storage calls in ACT."""
         raise AgentError("Deprecated: _save_music_file is not used; use FC-planned calls.")

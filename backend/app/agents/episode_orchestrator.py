@@ -11,7 +11,7 @@ from .base import BaseAgent, AgentError
 from .concept_planner import ConceptPlannerAgent
 from .orchestrator import OrchestratorAgent
 from .utils.llm_policy import LLMPolicyManager
-from ..models import Task, AgentExecution, AgentType, TaskStatus, TaskType
+from ..models import Task, AgentType, TaskStatus, TaskType
 from ..core.config import settings
 from ..core.workflow_state import workflow_manager
 from ..core.story_plan import (
@@ -72,7 +72,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
     ) -> Dict[str, Any]:
         self._validate_input(input_data, ["project_id"])
@@ -159,7 +158,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
         execution.output_data = {"episodes": results}
         db.commit()
 
-        await self._update_progress(execution, 100, "Episode orchestration finished", db)
+        await self._update_progress(100, "Episode orchestration finished", db)
         task.update_progress("Episode orchestration finished", 100)
 
         if any(res.get("status") == EpisodeStatus.FAILED.value for res in results):

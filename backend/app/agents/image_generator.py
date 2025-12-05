@@ -13,7 +13,7 @@ from .utils.artifacts import (
     finalize_scene_outputs,
 )
 from .utils.memory_helpers import get_mas_working_memory
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 from ..core.config import settings
 from .adapters.memory_views import build_image_generation_context
 from .adapters.state.scene_iteration import SceneIterationStateBuilder
@@ -55,7 +55,6 @@ class ImageGeneratorAgent(ReActAgent):
         self, 
         action_plan: Dict[str, Any], 
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
         iteration: int
     ) -> Dict[str, Any]:
@@ -244,7 +243,6 @@ class ImageGeneratorAgent(ReActAgent):
         self,
         current_state: Dict[str, Any],
         task: Task,
-        execution: AgentExecution,
         iteration: int
     ) -> Dict[str, Any]:
         """PLAN：直接通过 FC 产出 tool_calls，ACT 仅执行。"""

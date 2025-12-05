@@ -212,7 +212,7 @@ class SystemValidator:
         
         # Check if models are importable
         try:
-            from app.models import Task, Scene, Resource, AgentExecution
+            from app.models import Task, Scene, Resource
         except ImportError as e:
             issues.append(f"Model import failed: {str(e)}")
             status = "CRITICAL"

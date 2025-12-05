@@ -108,7 +108,7 @@ class ScriptWriterAgent(BaseAgent):
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
         
-        await self._update_progress(execution, 10, "Loading scenes", db)
+        await self._update_progress(10, "Loading scenes", db)
         
         # Get scenes from WorkflowState instead of database
         scenes = workflow_state.scenes
@@ -116,7 +116,7 @@ class ScriptWriterAgent(BaseAgent):
         if not scenes:
             raise AgentError("No scenes found in workflow state")
         
-        await self._update_progress(execution, 20, "Generating scripts", db)
+        await self._update_progress(20, "Generating scripts", db)
         
         script_results = []
         total_scenes = len(scenes)
@@ -153,7 +153,7 @@ class ScriptWriterAgent(BaseAgent):
                 "script": scene_script
             })
         
-        await self._update_progress(execution, 85, "Generating overall narrative", db)
+        await self._update_progress(85, "Generating overall narrative", db)
         
         # Generate overall video narrative using WorkflowState scenes
         overall_narrative = await self._generate_overall_narrative_from_state(
@@ -170,12 +170,12 @@ class ScriptWriterAgent(BaseAgent):
         )
         workflow_state.estimated_reading_time = self._calculate_reading_time(script_results)
         
-        await self._update_progress(execution, 88, "Analyzing scene continuity", db)
+        await self._update_progress(88, "Analyzing scene continuity", db)
         
         # 🔗 新增：场景连续性分析
         await self._analyze_and_set_scene_continuity(workflow_state, overall_narrative, execution)
         
-        await self._update_progress(execution, 95, "Finalizing scripts", db)
+        await self._update_progress(95, "Finalizing scripts", db)
         
         # 🧠 Phase 1.2 - 实现MAS记忆共享：ScriptWriter存储场景引用数据
         try:
@@ -210,7 +210,7 @@ class ScriptWriterAgent(BaseAgent):
             "workflow_state_id": workflow_state_id  # 返回状态ID而不是对象
         }
         
-        await self._update_progress(execution, 100, "Script writing completed", db)
+        await self._update_progress(100, "Script writing completed", db)
         
         return output_data
     

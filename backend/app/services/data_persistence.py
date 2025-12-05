@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, DataError
 
 from ..core.workflow_state import WorkflowState, SceneData, WorkflowStatus
-from ..models import Task, Scene, Resource, AgentExecution, AgentType, ResourceType, SceneType, TaskType, TaskStatus
+from ..models import Task, Scene, Resource, AgentType, ResourceType, SceneType, TaskType, TaskStatus
 from ..core.config import settings
 from ..agents.memory.long_term.snapshots import export_shared_wm_snapshot
 from ..services.memory_provider import get_memory_services, MemoryServices
@@ -82,13 +82,10 @@ class DataPersistenceService:
             # 4. 持久化资源
             resource_results = await self._persist_resources(task, validated_state, db)
             
-            # 5. 持久化执行日志
-            execution_results = await self._persist_agent_logs(task, validated_state, db)
-            
-            # 6. 最终状态
+            # 5. 最终状态
             await self._finalize_task_status(task, validated_state, db)
             
-            # 7. 提交事务
+            # 6. 提交事务
             db.commit()
             
             summary = {
@@ -97,7 +94,7 @@ class DataPersistenceService:
                 "status": "success",
                 "scenes_persisted": len(scene_results),
                 "resources_persisted": len(resource_results),
-                "agent_logs_persisted": len(execution_results),
+                "agent_logs_persisted": 0,
                 "warnings": validated_state.warnings,
                 "persistence_time": datetime.now().isoformat()
             }
@@ -321,14 +318,6 @@ class DataPersistenceService:
 
         scene.script_text = _s("script_text")
         scene.voice_over_text = _s("voice_over_text")
-
-        scene.background_music_style = _s("background_music_style")
-        scene.image_prompt = _s("image_prompt")
-        scene.image_url = _s("image_url")
-        scene.image_path = _s("image_path")
-        scene.video_prompt = _s("video_prompt")
-        scene.video_url = _s("video_url")
-        scene.video_path = _s("video_path")
     
     async def _validate_and_clean_data(self, workflow_state: WorkflowState) -> WorkflowState:
         """验证和清理工作流数据 - 防止数据库字段长度错误"""
@@ -683,7 +672,7 @@ class DataPersistenceService:
             if not scene:
                 continue
             
-            # 图像资源
+            # 图像资源：仅记录引用/元数据，URL 优先，路径为备选
             if scene_data.image_path or scene_data.image_url:
                 try:
                     image_resource = Resource(
@@ -691,10 +680,11 @@ class DataPersistenceService:
                         scene_id=scene.id,
                         filename=f"scene_{scene_data.scene_number}_image.jpg",
                         file_path=scene_data.image_path or "",
+                        file_url=scene_data.image_url or None,
                         resource_type=ResourceType.IMAGE,
                         generation_prompt=scene_data.image_prompt,
                         generation_parameters=scene_data.image_generation_params,
-                        processing_status="completed" if scene_data.image_path else "pending",
+                        processing_status="completed" if (scene_data.image_path or scene_data.image_url) else "pending",
                         is_generated=True
                     )
                     db.add(image_resource)
@@ -702,7 +692,7 @@ class DataPersistenceService:
                 except Exception as e:
                     self.logger.error(f"❌ 图像资源持久化失败: {str(e)}")
             
-            # 视频资源
+            # 视频资源：仅记录引用/元数据
             if scene_data.video_path or scene_data.video_url:
                 try:
                     video_resource = Resource(
@@ -710,10 +700,11 @@ class DataPersistenceService:
                         scene_id=scene.id,
                         filename=f"scene_{scene_data.scene_number}_video.mp4",
                         file_path=scene_data.video_path or "",
+                        file_url=scene_data.video_url or None,
                         resource_type=ResourceType.VIDEO,
                         generation_prompt=scene_data.video_prompt,
                         generation_parameters=scene_data.video_generation_params,
-                        processing_status="completed" if scene_data.video_path else "pending",
+                        processing_status="completed" if (scene_data.video_path or scene_data.video_url) else "pending",
                         is_generated=True
                     )
                     db.add(video_resource)
@@ -721,7 +712,7 @@ class DataPersistenceService:
                 except Exception as e:
                     self.logger.error(f"❌ 视频资源持久化失败: {str(e)}")
 
-            # 配音资源
+            # 配音资源：仅记录引用/元数据
             if scene_data.voice_over_audio_path or scene_data.voice_over_audio_url:
                 try:
                     voice_metadata = dict(scene_data.voice_over_audio_metadata or {})
@@ -735,7 +726,7 @@ class DataPersistenceService:
                         file_url=scene_data.voice_over_audio_url or None,
                         resource_type=self._resolve_voice_resource_type(),
                         generation_parameters=voice_metadata,
-                        processing_status="completed" if scene_data.voice_over_audio_path else "pending",
+                        processing_status="completed" if (scene_data.voice_over_audio_path or scene_data.voice_over_audio_url) else "pending",
                         is_generated=True
                     )
                     db.add(voice_resource)
@@ -746,33 +737,9 @@ class DataPersistenceService:
         return resource_results
     
     async def _persist_agent_logs(self, task: Task, workflow_state: WorkflowState, db: Session) -> List[Dict[str, Any]]:
-        """持久化Agent执行日志"""
-        
-        execution_results = []
-        
-        for log_entry in workflow_state.agent_logs:
-            try:
-                agent_name = log_entry.get("agent", "unknown")
-                agent_type = self._map_agent_name_to_type(agent_name)
-                
-                execution = AgentExecution(
-                    task_id=task.id,
-                    agent_type=agent_type,
-                    status="completed" if log_entry.get("success") else "failed",
-                    input_data={"action": log_entry.get("action", "")},
-                    output_data={"result_type": log_entry.get("result_type", "")},
-                    error_message=log_entry.get("error"),
-                    execution_time=log_entry.get("duration", 0.0),
-                    created_at=datetime.fromisoformat(log_entry.get("timestamp", datetime.now().isoformat()))
-                )
-                
-                db.add(execution)
-                execution_results.append({"agent": agent_name, "status": "logged"})
-                
-            except Exception as e:
-                self.logger.error(f"❌ Agent日志持久化失败: {str(e)}")
-        
-        return execution_results
+        """已弃用：AgentExecution 审计由事件监听器负责，此处不再落库。"""
+        self.logger.info("Skip agent_logs persistence (handled by event audit sink)")
+        return []
     
     def _map_agent_name_to_type(self, agent_name: str) -> AgentType:
         """Agent名称到类型映射"""

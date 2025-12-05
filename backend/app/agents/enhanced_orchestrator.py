@@ -13,7 +13,8 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, TaskStatus, AgentType
+from ..models import Task, TaskStatus, AgentType
+from ..events.publisher import publish_state_event
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -105,7 +106,6 @@ class EnhancedOrchestratorAgent(BaseAgent):
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Execute the enhanced workflow with optimization and monitoring"""
@@ -550,27 +550,25 @@ class EnhancedOrchestratorAgent(BaseAgent):
         
         try:
             # Get performance metrics
-            performance_metrics = await monitoring_service.get_performance_summary(
-                # Note: This would require a db session, simplified for now
-            )
+            # Note: This would require a db session, simplified for now
             
-            message = {
-                "type": "enhanced_workflow_completed",
-                "task_id": str(task.task_id),
-                "status": "completed",
-                "results": workflow_result.get("results", {}),
-                "performance_metrics": workflow_result.get("execution_metrics", {}),
-                "quality_control": workflow_result.get("quality_control", {}),
-                "cost_analysis": workflow_result.get("cost_analysis", {}),
-                "performance_insights": workflow_result.get("performance_insights", {}),
-                "final_video_url": workflow_result.get("final_video_url"),
-                "quality_score": workflow_result.get("quality_score"),
-                "timestamp": int(time.time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
+            await publish_state_event(
+                status="completed",
+                extra_payload={
+                    "state": "enhanced_workflow_completed",
+                    "results": workflow_result.get("results", {}),
+                    "performance_metrics": workflow_result.get("execution_metrics", {}),
+                    "quality_control": workflow_result.get("quality_control", {}),
+                    "cost_analysis": workflow_result.get("cost_analysis", {}),
+                    "performance_insights": workflow_result.get("performance_insights", {}),
+                    "final_video_url": workflow_result.get("final_video_url"),
+                    "quality_score": workflow_result.get("quality_score"),
+                },
+                task_id=str(task.task_id),
+                task_db_id=getattr(task, "id", None),
+                workflow_state_id=str(task.task_id),
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
             )
             
         except Exception as e:
@@ -587,24 +585,24 @@ class EnhancedOrchestratorAgent(BaseAgent):
             # Get system health for diagnostics
             health_status = await monitoring_service.health_check()
             
-            message = {
-                "type": "enhanced_workflow_failed",
-                "task_id": str(task.task_id),
-                "status": "failed",
-                "error": error_message,
-                "system_health": health_status,
-                "recovery_attempted": True,
-                "support_info": {
-                    "error_id": f"error_{int(time.time())}",
-                    "task_type": task.task_type.value,
-                    "timestamp": int(time.time())
+            await publish_state_event(
+                status="failed",
+                extra_payload={
+                    "state": "enhanced_workflow_failed",
+                    "error": error_message,
+                    "system_health": health_status,
+                    "recovery_attempted": True,
+                    "support_info": {
+                        "error_id": f"error_{int(time.time())}",
+                        "task_type": getattr(task.task_type, "value", str(task.task_type)),
+                        "timestamp": int(time.time())
+                    }
                 },
-                "timestamp": int(time.time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
+                task_id=str(task.task_id),
+                task_db_id=getattr(task, "id", None),
+                workflow_state_id=str(task.task_id),
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
             )
             
         except Exception as e:

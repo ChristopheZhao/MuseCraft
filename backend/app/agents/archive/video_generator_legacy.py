@@ -69,7 +69,7 @@ class VideoGeneratorAgent(BaseAgent):
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
         
-        await self._update_progress(execution, 10, "Loading scenes and images", db)
+        await self._update_progress(10, "Loading scenes and images", db)
         
         # Get scenes from WorkflowState
         scenes_data = workflow_state.scenes
@@ -134,7 +134,7 @@ class VideoGeneratorAgent(BaseAgent):
                     "is_placeholder": True
                 })
         
-        await self._update_progress(execution, 95, "Finalizing video generation", db)
+        await self._update_progress(95, "Finalizing video generation", db)
         
         # Generate summary statistics
         successful_generations = len([vid for vid in generated_videos if not vid.get("is_placeholder")])
@@ -154,7 +154,7 @@ class VideoGeneratorAgent(BaseAgent):
             "workflow_state_id": workflow_state_id  # 传递给下一个Agent
         }
         
-        await self._update_progress(execution, 100, "Video generation completed", db)
+        await self._update_progress(100, "Video generation completed", db)
         
         return output_data
     
@@ -1150,7 +1150,7 @@ class VideoGeneratorAgent(BaseAgent):
             self.logger.info(f"🔧 Tool video_generation:generate_video executed successfully")
             
             # Track API usage
-            self._update_token_usage(execution, 0)  # Video generation doesn't use tokens
+            self._update_token_usage(0)  # Video generation doesn't use tokens
             
             # 提取工具输出的实际结果并处理None情况
             if result is None:

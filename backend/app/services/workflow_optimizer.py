@@ -18,7 +18,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy.orm import Session
 
-from ..models import Task, AgentExecution, AgentType, TaskStatus
+from ..models import Task, AgentType, TaskStatus
 from ..models.agent import AgentStatus
 from .enhanced_ai_client import enhanced_ai_client
 import redis.asyncio as redis

@@ -15,6 +15,7 @@ from .core.config import settings
 from .core.logging_utils import configure_mas_logging
 from .api.v1.api import api_router
 from .services.websocket import websocket_manager
+from .events.setup import setup_event_listeners
 
 
 # Configure logging
@@ -38,6 +39,18 @@ async def lifespan(app: FastAPI):
     from .agents.tools import register_default_tools
     register_default_tools()
     logger.info("✅ Tool registry initialized")
+
+    # Register event listeners (WS; persistence/episodic sinks可按需注入)
+    from .events.provider import get_event_bus
+    from .services.event_handlers import handle_persistence_event
+    event_bus = setup_event_listeners(
+        websocket_manager=websocket_manager,
+        persistence_sink=handle_persistence_event,
+        episodic_log_path=settings.EPISODIC_EVENT_LOG_PATH if getattr(settings, "EPISODIC_EVENT_ENABLED", False) else None,
+        bus=get_event_bus(),
+    )
+    app.state.event_bus = event_bus
+    logger.info("✅ Event bus initialized with default listeners")
     
     # Create storage directories
     os.makedirs(settings.UPLOAD_PATH, exist_ok=True)

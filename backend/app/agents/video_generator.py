@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .react_agent import ReActAgent
 from .base import AgentError
-from ..models import AgentExecution, AgentType, Task
+from ..models import AgentType, Task
 from ..core.config import settings
  
 from ..core.video_config_manager import get_video_config
@@ -33,13 +33,14 @@ from .utils.memory_helpers import get_mas_working_memory
 class VideoGeneratorAgent(ReActAgent):
     """ReAct 视频生成 Agent。"""
 
-    def __init__(self, llms=None):
+    def __init__(self, llms=None,memory_services=None):
         super().__init__(
             agent_type=AgentType.VIDEO_GENERATOR,
             agent_name="video_generator",
             max_iterations=getattr(settings, "VIDEO_GENERATOR_MAX_ITERATIONS", 12),
             timeout_seconds=getattr(settings, "VIDEO_GENERATOR_TIMEOUT_SECONDS", 900),
             llms=llms,
+            memory_services=memory_services,
         )
         self.video_config = get_video_config()
         self._video_uploader = None
@@ -60,7 +61,6 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         current_state: Dict[str, Any],
         task: Task,
-        execution: AgentExecution,
         iteration: int,
     ) -> Dict[str, Any]:
         """单段式纯 ReAct：在 PLAN 阶段一次 FC 产出完整 tool_calls，ACT 仅执行。
@@ -169,7 +169,6 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db,
         iteration: int,
     ) -> Dict[str, Any]:

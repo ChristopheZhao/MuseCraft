@@ -143,6 +143,9 @@ class Settings(BaseSettings):
 
     # Orchestration defaults
     DEFAULT_GENERATION_MODE: str = config("DEFAULT_GENERATION_MODE", default="quick")
+    # 轨迹事件日志：是否启用 episodic 事件落文件
+    EPISODIC_EVENT_ENABLED: bool = config("EPISODIC_EVENT_ENABLED", default=True, cast=bool)
+    EPISODIC_EVENT_LOG_PATH: str = config("EPISODIC_EVENT_LOG_PATH", default="./logs/episodic_events.log")
 
     # Image Generation APIs
     MIDJOURNEY_API_KEY: Optional[str] = config("MIDJOURNEY_API_KEY", default=None)

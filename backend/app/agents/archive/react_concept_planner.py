@@ -65,7 +65,7 @@ class ReActConceptPlannerAgent(BaseAgent):
             "improvement_areas": []
         }
         
-        await self._update_progress(execution, 10, "Starting ReAct concept planning", db)
+        await self._update_progress(10, "Starting ReAct concept planning", db)
         
         try:
             # Initial concept generation
@@ -74,14 +74,13 @@ class ReActConceptPlannerAgent(BaseAgent):
             )
             react_state["current_concept"] = initial_concept
             
-            await self._update_progress(execution, 30, "Initial concept generated", db)
+            await self._update_progress(30, "Initial concept generated", db)
             
             # ReAct refinement cycles
             for cycle in range(self.max_refinement_cycles):
                 react_state["cycle"] = cycle + 1
                 
                 await self._update_progress(
-                    execution, 
                     30 + (cycle + 1) * 20, 
                     f"ReAct cycle {cycle + 1}", 
                     db
@@ -115,13 +114,13 @@ class ReActConceptPlannerAgent(BaseAgent):
                 # Brief pause between cycles
                 await asyncio.sleep(0.5)
             
-            await self._update_progress(execution, 90, "Creating final concept structure", db)
+            await self._update_progress(90, "Creating final concept structure", db)
             
             # Create final scenes and output
             final_concept = react_state["current_concept"]
             scenes = await self._create_scenes(task, final_concept, db)
             
-            await self._update_progress(execution, 100, "ReAct concept planning completed", db)
+            await self._update_progress(100, "ReAct concept planning completed", db)
             
             # Prepare comprehensive output
             output_data = {

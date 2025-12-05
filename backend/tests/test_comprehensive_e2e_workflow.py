@@ -17,7 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from app.models import Task, AgentExecution, Scene, Resource, TaskStatus, AgentType
+from app.models import Task, Scene, Resource, TaskStatus, AgentType
 from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
 from app.services.websocket import websocket_manager
 from app.services.monitoring_service import monitoring_service
@@ -486,12 +486,6 @@ class TestComprehensiveE2EWorkflow:
         result = await db.execute(stmt)
         task = result.scalar_one()
         assert task.status == TaskStatus.COMPLETED
-        
-        # Verify agent executions
-        stmt = select(AgentExecution).where(AgentExecution.task_id == task.id)
-        executions_result = await db.execute(stmt)
-        executions = executions_result.scalars().all()
-        assert len(executions) >= 6  # Should have multiple agent executions
         
         # Verify scenes created
         stmt = select(Scene).where(Scene.task_id == task.id)

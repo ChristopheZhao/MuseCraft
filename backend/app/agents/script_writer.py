@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 from .adapters.video.models import SceneSnapshot
 from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
@@ -43,8 +43,8 @@ class ScriptWriterAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
-        db: Session
+        execution: Any,
+        db: Session = None
     ) -> Dict[str, Any]:
         """批量脚本生成 - 实现在 _execute_impl，使用 BaseAgent.execute 统一包装"""
         try:
@@ -506,7 +506,6 @@ class ScriptWriterAgent(BaseAgent):
                         # 将脚本结果写入项目级脚本槽
                         entry = {}
                         try:
-                            from .utils.memory_helpers import read_shared_fact, write_shared_fact
                             existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
                             entry = dict(existing_scripts.get(str(scene.scene_number), {}))
                             entry.update({

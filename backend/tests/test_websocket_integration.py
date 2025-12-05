@@ -20,7 +20,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.websocket import websocket_manager, WebSocketManager
-from app.models import Task, AgentExecution
+from app.models import Task
 
 
 @pytest.mark.websocket

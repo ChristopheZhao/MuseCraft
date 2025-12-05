@@ -10,7 +10,6 @@ from app.agents.memory.short_term import get_working_memory_service
 from app.agents.memory.short_term import SceneSnapshot
 from app.agents.utils.memory_helpers import agent_scope
 from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
-from app.models import AgentExecution
 
 
 class DummySession:
@@ -19,10 +18,6 @@ class DummySession:
 
     def add(self, obj):
         self._objects.append(obj)
-        if isinstance(obj, AgentExecution):
-            obj.output_data = obj.output_data or {}
-            obj.retry_count = obj.retry_count or 0
-            obj.progress_percentage = obj.progress_percentage or 0
 
     def commit(self):
         pass

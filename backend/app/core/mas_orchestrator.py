@@ -22,7 +22,7 @@ from .mas_communication import (
 from .mas_agent_adapter import MASAgentAdapter, get_agent_registry
 from .mas_task_decomposer import TaskDecomposer, ExecutionPlan, SubTask, TaskStatus
 from .mas_task_dispatcher import TaskDispatcher, DispatchStrategy, get_task_dispatcher
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 
 
 class OrchestratorMode(Enum):
@@ -112,7 +112,7 @@ class MASOrchestrator:
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session,
         mode: OrchestratorMode = None
     ) -> Dict[str, Any]:
@@ -213,7 +213,7 @@ class MASOrchestrator:
         state: OrchestratorState,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """
@@ -272,7 +272,7 @@ class MASOrchestrator:
         state: OrchestratorState,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """🎯 执行深度规划阶段"""
@@ -574,7 +574,7 @@ class MASOrchestrator:
         state: OrchestratorState,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """🎯 执行优化后的计划"""
@@ -616,7 +616,7 @@ class MASOrchestrator:
         self,
         state: OrchestratorState,
         dispatch_result,
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """🎯 监控计划执行"""
@@ -675,7 +675,7 @@ class MASOrchestrator:
         self,
         state: OrchestratorState,
         execution_result: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """🎯 应用质量优化"""
@@ -769,7 +769,7 @@ class MASOrchestrator:
         state: OrchestratorState,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
+        execution: Any,
         db: Session
     ) -> Dict[str, Any]:
         """🎯 Iterative协调 - 推理-行动循环"""
@@ -866,7 +866,7 @@ class MASOrchestrator:
         }
     
     async def _execute_action(
-        self, action_plan: Dict[str, Any], state: OrchestratorState, execution: AgentExecution, db: Session
+        self, action_plan: Dict[str, Any], state: OrchestratorState, execution: Any, db: Session
     ) -> Dict[str, Any]:
         """🎯 执行行动"""
         # 简化实现
@@ -888,7 +888,7 @@ class MASOrchestrator:
         }
     
     async def _orchestrate_pipeline_mode(
-        self, state: OrchestratorState, task: Task, input_data: Dict[str, Any], execution: AgentExecution, db: Session
+        self, state: OrchestratorState, task: Task, input_data: Dict[str, Any], execution: Any, db: Session
     ) -> Dict[str, Any]:
         """🎯 管道模式协调"""
         # 简化实现 - 顺序执行各个Agent
@@ -896,7 +896,7 @@ class MASOrchestrator:
         return {"success": True, "mode": "pipeline", "workflow_id": state.workflow_id}
     
     async def _orchestrate_adaptive_mode(
-        self, state: OrchestratorState, task: Task, input_data: Dict[str, Any], execution: AgentExecution, db: Session
+        self, state: OrchestratorState, task: Task, input_data: Dict[str, Any], execution: Any, db: Session
     ) -> Dict[str, Any]:
         """🎯 自适应模式协调"""
         # 根据情况选择最佳模式

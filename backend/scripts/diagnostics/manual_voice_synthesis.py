@@ -12,17 +12,13 @@ from typing import Any
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
 from app.agents.tools import register_default_tools
 from app.core.workflow_state import workflow_manager, SceneData
-from app.models import AgentExecution
 
 
 class DummySession:
     """Minimal SQLAlchemy session stub for manual runs."""
 
     def add(self, obj: Any) -> None:
-        if isinstance(obj, AgentExecution):
-            obj.output_data = obj.output_data or {}
-            obj.retry_count = obj.retry_count or 0
-            obj.progress_percentage = obj.progress_percentage or 0
+        pass
 
     def commit(self) -> None:
         pass

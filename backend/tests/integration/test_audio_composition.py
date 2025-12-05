@@ -8,7 +8,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.agents.audio_generator import AudioGeneratorAgent
-from app.models import Task, AgentExecution
+from app.models import Task
 
 
 async def test_audio_composition():

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 from ..core.config import settings
 from .utils.artifacts import (
     normalize_executed_calls_to_artifacts,
@@ -48,10 +48,9 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
-        db: Session,
+        db: Session = None,
     ) -> Dict[str, Any]:
-        return await super()._execute_impl(task, input_data, execution, db)
+        return await super()._execute_impl(task, input_data, db)
 
 
     def _resolve_voice_settings(
@@ -416,7 +415,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         current_state: Dict[str, Any],
         task: Task,
-        execution: AgentExecution,
         iteration: int,
     ) -> Dict[str, Any]:
         current_state = current_state or {}
@@ -459,7 +457,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
         iteration: int,
     ) -> Dict[str, Any]:
@@ -537,7 +534,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         target_duration: float,
         synth_payload: Dict[str, Any],
         voice_settings: Dict[str, Any],
-        execution: AgentExecution,
     ) -> str:
         # Deprecated: 工具调用应在 PLAN→ACT 中通过 execute_tool_calls 执行，不再直连。
         raise AgentError("Deprecated: _store_voice_asset is not used; use FC-planned and executed calls.")

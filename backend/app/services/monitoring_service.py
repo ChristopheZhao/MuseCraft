@@ -20,7 +20,7 @@ import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from ..models import Task, AgentExecution, AgentType, TaskStatus, AgentStatus
+from ..models import Task, AgentType, TaskStatus, AgentStatus
 from ..core.config import settings
 from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
 
@@ -323,74 +323,41 @@ class MonitoringService:
     async def record_agent_execution(
         self,
         agent_type: AgentType,
-        execution: AgentExecution,
+        execution: Dict[str, Any],
         duration: float
     ):
-        """Record agent execution metrics"""
-        
-        status_label = "completed" if execution.is_completed else "failed"
-        
+        """Record agent execution metrics（DB 审计已移除，仅记录轻量计数）。"""
+
+        status_label = 'completed'
+        try:
+            if isinstance(execution, dict):
+                status_label = str(execution.get('status') or status_label)
+        except Exception:
+            status_label = 'completed'
+
         await self.record_metric(
-            "agent_executions_total",
+            'agent_executions_total',
             1,
             MetricType.COUNTER,
             labels={
-                "agent_type": agent_type.value,
-                "status": status_label
+                'agent_type': agent_type.value,
+                'status': status_label
             },
-            description="Total number of agent executions"
+            description='Total number of agent executions'
         )
-        
+
         await self.record_metric(
-            "agent_execution_duration_seconds",
+            'agent_execution_duration_seconds',
             duration,
             MetricType.HISTOGRAM,
             labels={
-                "agent_type": agent_type.value,
-                "status": status_label
+                'agent_type': agent_type.value,
+                'status': status_label
             },
-            description="Agent execution duration in seconds"
+            description='Agent execution duration in seconds'
         )
-        
-        # Record cost metrics if available
-        if execution.cost_estimate:
-            await self.record_metric(
-                "agent_cost_usd",
-                execution.cost_estimate,
-                MetricType.HISTOGRAM,
-                labels={"agent_type": agent_type.value},
-                description="Agent execution cost in USD"
-            )
-        
-        # Record token usage if available
-        if execution.tokens_used:
-            await self.record_metric(
-                "agent_tokens_used",
-                execution.tokens_used,
-                MetricType.HISTOGRAM,
-                labels={"agent_type": agent_type.value},
-                description="Tokens used by agent"
-            )
-        
-        # Check performance thresholds
-        agent_thresholds = self.performance_thresholds.get("agent_execution_time", {}).get(agent_type.value, {})
-        if duration > agent_thresholds.get("critical", float('inf')):
-            await self._create_alert(
-                f"slow_agent_{agent_type.value}",
-                AlertLevel.CRITICAL,
-                f"Slow {agent_type.value} Execution",
-                f"Agent {agent_type.value} took {duration:.1f}s to execute",
-                source="agent_monitoring"
-            )
-        elif duration > agent_thresholds.get("warning", float('inf')):
-            await self._create_alert(
-                f"slow_agent_{agent_type.value}",
-                AlertLevel.WARNING,
-                f"Slow {agent_type.value} Execution",
-                f"Agent {agent_type.value} took {duration:.1f}s to execute",
-                source="agent_monitoring"
-            )
-    
+        # 成本/Token 统计依赖审计表，已停用
+
     async def record_ai_service_call(
         self,
         provider: AIServiceProvider,
@@ -777,35 +744,9 @@ class MonitoringService:
         completed_tasks = db.query(Task).filter(Task.status == TaskStatus.COMPLETED).count()
         failed_tasks = db.query(Task).filter(Task.status == TaskStatus.FAILED).count()
         
-        # Get average task duration
-        avg_duration_result = db.query(
-            func.avg(AgentExecution.duration)
-        ).filter(
-            AgentExecution.status == AgentStatus.COMPLETED
-        ).scalar()
-        avg_duration = avg_duration_result or 0
-        
-        # Get agent performance statistics
+        # AgentExecution 已移除，平均耗时与 agent 级统计不可用
+        avg_duration = 0
         agent_stats = {}
-        for agent_type in AgentType:
-            agent_executions = db.query(AgentExecution).filter(
-                AgentExecution.agent_type == agent_type
-            ).all()
-            
-            if agent_executions:
-                successful = len([e for e in agent_executions if e.is_completed])
-                failed = len([e for e in agent_executions if e.is_failed])
-                avg_time = sum(e.duration or 0 for e in agent_executions if e.duration) / len(agent_executions)
-                total_cost = sum(e.cost_estimate or 0 for e in agent_executions)
-                
-                agent_stats[agent_type.value] = {
-                    "total_executions": len(agent_executions),
-                    "successful_executions": successful,
-                    "failed_executions": failed,
-                    "success_rate": successful / len(agent_executions) if agent_executions else 0,
-                    "average_duration": avg_time,
-                    "total_cost": total_cost
-                }
         
         # Get AI service performance from enhanced client
         ai_service_metrics = enhanced_ai_client.get_performance_metrics()
@@ -834,25 +775,10 @@ class MonitoringService:
     async def get_cost_analysis(self, db: Session, days: int = 7) -> Dict[str, Any]:
         """Get cost analysis and optimization recommendations"""
         
+        # AgentExecution 表已移除，成本分析暂不可用
         start_date = datetime.now() - timedelta(days=days)
-        
-        # Get cost data from agent executions
-        executions = db.query(AgentExecution).filter(
-            AgentExecution.created_at >= start_date
-        ).all()
-        
-        total_cost = sum(e.cost_estimate or 0 for e in executions)
-        
-        # Cost breakdown by agent type
-        cost_by_agent = {}
-        for agent_type in AgentType:
-            agent_executions = [e for e in executions if e.agent_type == agent_type]
-            agent_cost = sum(e.cost_estimate or 0 for e in agent_executions)
-            cost_by_agent[agent_type.value] = {
-                "total_cost": agent_cost,
-                "executions": len(agent_executions),
-                "average_cost_per_execution": agent_cost / len(agent_executions) if agent_executions else 0
-            }
+        total_cost = 0.0
+        cost_by_agent = {agent_type.value: {"total_cost": 0, "executions": 0, "average_cost_per_execution": 0} for agent_type in AgentType}
         
         # Cost breakdown by AI service provider
         ai_service_costs = {}
@@ -928,56 +854,8 @@ class MonitoringService:
                     metric_evidence=[f"failure_rate: {failure_rate:.3f}"]
                 ))
         
-        # Analyze agent performance
-        for agent_type in AgentType:
-            executions = db.query(AgentExecution).filter(
-                AgentExecution.agent_type == agent_type,
-                AgentExecution.duration.isnot(None)
-            ).all()
-            
-            if len(executions) > 5:
-                avg_duration = sum(e.duration for e in executions) / len(executions)
-                failed_count = len([e for e in executions if e.is_failed])
-                failure_rate = failed_count / len(executions)
-                
-                # Check for slow performance
-                thresholds = self.performance_thresholds.get("agent_execution_time", {}).get(agent_type.value, {})
-                if avg_duration > thresholds.get("warning", float('inf')):
-                    insights.append(PerformanceInsight(
-                        category="performance",
-                        title=f"Slow {agent_type.value} Performance",
-                        description=f"Average execution time is {avg_duration:.1f}s",
-                        impact="medium",
-                        recommendation="Consider optimization or resource allocation improvements",
-                        metric_evidence=[f"avg_duration: {avg_duration:.1f}s"]
-                    ))
-                
-                # Check for high failure rate
-                if failure_rate > 0.15:  # > 15% failure rate
-                    insights.append(PerformanceInsight(
-                        category="reliability",
-                        title=f"High {agent_type.value} Failure Rate",
-                        description=f"Failure rate is {failure_rate:.1%}",
-                        impact="high",
-                        recommendation="Review error logs and improve error handling for this agent",
-                        metric_evidence=[f"failure_rate: {failure_rate:.3f}"]
-                    ))
-        
-        # Analyze AI service performance
-        ai_metrics = enhanced_ai_client.get_performance_metrics()
-        for provider, metrics in ai_metrics["providers"].items():
-            if metrics["total_requests"] > 0:
-                success_rate = metrics["successful_requests"] / metrics["total_requests"]
-                if success_rate < 0.9:  # < 90% success rate
-                    insights.append(PerformanceInsight(
-                        category="ai_services",
-                        title=f"Low {provider} Success Rate",
-                        description=f"Success rate is {success_rate:.1%}",
-                        impact="high",
-                        recommendation="Check API credentials and service health",
-                        metric_evidence=[f"success_rate: {success_rate:.3f}"]
-                    ))
-        
+        # AgentExecution 审计已移除，此处不再分析 agent 级别执行历史
+
         # Check for resource utilization issues
         try:
             memory_percent = psutil.virtual_memory().percent

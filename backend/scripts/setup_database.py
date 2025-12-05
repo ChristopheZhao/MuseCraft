@@ -15,7 +15,7 @@ async def create_database():
     
     from app.core.database import async_engine
     from app.models.base import BaseModel
-    from app.models import Task, Scene, Resource, AgentExecution
+    from app.models import Task, Scene, Resource
     
     print("Creating database tables...")
     

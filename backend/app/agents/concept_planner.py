@@ -10,12 +10,13 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..core.config import settings
-from ..models import Task, AgentExecution, AgentType, Scene, SceneType
+from ..models import Task, AgentType, Scene, SceneType
 from ..core.prompt_manager import get_prompt_manager
 from ..core.story_plan import normalize_character_elements
 from .utils import SceneDurationCalculator,safe_json_loads
 from .adapters.video.models import SceneSnapshot
 from .utils.memory_helpers import read_shared_fact, write_shared_fact
+from ..events.publisher import publish_state_event
 
 
 class ConceptPlannerAgent(BaseAgent):
@@ -37,7 +38,6 @@ class ConceptPlannerAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
     ) -> Dict[str, Any]:
         self._validate_input(input_data, ["user_prompt", "duration", "workflow_state_id"])
@@ -140,7 +140,7 @@ class ConceptPlannerAgent(BaseAgent):
         voice_temperature = min(0.7, base_temperature)
         scene_temperature = base_temperature
 
-        await self._update_progress(execution, 20, "Drafting concept skeleton", db)
+        await self._update_progress(20, "Drafting concept skeleton", db)
 
         skeleton_payload, skeleton_usage = await self._generate_skeleton(
             system_prompt=system_prompt,
@@ -160,12 +160,12 @@ class ConceptPlannerAgent(BaseAgent):
             max_tokens=skeleton_max_tokens,
             temperature=skeleton_temperature,
         )
-        self._update_token_usage(execution, skeleton_usage)
+        self._update_token_usage(skeleton_usage)
 
         skeleton_json = self._compact_json(skeleton_payload)
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
 
-        await self._update_progress(execution, 40, "Designing style and voice plan", db)
+        await self._update_progress(40, "Designing style and voice plan", db)
 
         style_task = asyncio.create_task(
             self._generate_style_bundle(
@@ -204,8 +204,8 @@ class ConceptPlannerAgent(BaseAgent):
         )
 
         style_bundle, voice_bundle = await asyncio.gather(style_task, voice_task)
-        self._update_token_usage(execution, style_bundle["usage"])
-        self._update_token_usage(execution, voice_bundle["usage"])
+        self._update_token_usage(style_bundle["usage"])
+        self._update_token_usage(voice_bundle["usage"])
 
         intelligent_style_design = style_bundle["payload"].get("intelligent_style_design", {})
         if predefined_style_profile:
@@ -249,7 +249,7 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception:
             self.logger.warning("voice_plan 写回 MAS WM 失败，忽略")
 
-        await self._update_progress(execution, 65, "Detailing scenes", db)
+        await self._update_progress(65, "Detailing scenes", db)
 
         if concept_mode == "project":
             scenes = []
@@ -280,9 +280,9 @@ class ConceptPlannerAgent(BaseAgent):
             scene_notes = scene_results["notes"]
             total_planned_duration = scene_results["total_duration"]
 
-        self._update_token_usage(execution, scene_results_usage)
+        self._update_token_usage(scene_results_usage)
 
-        await self._update_progress(execution, 85, "Finalizing concept plan", db)
+        await self._update_progress(85, "Finalizing concept plan", db)
 
         concept_plan = self._finalize_concept_plan(
             skeleton_payload,
@@ -363,21 +363,26 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception as exc:
             self.logger.warning(f"⚠️ ConceptPlanner: failed to store creative guidance - {exc}")
 
-        await self._update_progress(execution, 100, "Concept planning completed", db)
+        await self._update_progress(100, "Concept planning completed", db)
 
         if concept_mode != "project":
             try:
-                await self.websocket_manager.broadcast_to_task(
-                    str(task.task_id),
-                    {
-                        "type": "concept_plan_ready",
-                        "task_id": str(task.task_id),
+                await publish_state_event(
+                    status="completed",
+                    extra_payload={
+                        "state": "concept_plan_ready",
                         "scenes_count": len(scenes_data),
                         "estimated_duration": duration,
+                        "workflow_state_id": workflow_state_id,
                     },
+                    task_id=str(task.task_id),
+                    task_db_id=getattr(task, "id", None),
+                    workflow_state_id=workflow_state_id,
+                    agent_type=self.agent_type.value,
+                    agent_name=self.agent_name,
                 )
             except Exception as ws_err:
-                self.logger.warning(f"Failed to broadcast concept_plan_ready: {ws_err}")
+                self.logger.warning(f"Failed to publish concept_plan_ready event: {ws_err}")
 
         return {
             "concept_plan": concept_plan,

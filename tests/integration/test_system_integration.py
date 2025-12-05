@@ -83,7 +83,7 @@ class SystemIntegrationTester:
             tables = conn.execute(tables_query).fetchall()
             table_names = [table[0] for table in tables]
             
-            required_tables = ['tasks', 'scenes', 'resources', 'agent_executions']
+            required_tables = ['tasks', 'scenes', 'resources']
             for table in required_tables:
                 assert table in table_names, f"缺少表: {table}"
             

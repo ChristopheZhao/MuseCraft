@@ -66,14 +66,14 @@ class ConceptPlannerAgent(BaseAgent):
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
         
-        await self._update_progress(execution, 10, "Analyzing requirements", db)
+        await self._update_progress(10, "Analyzing requirements", db)
         
         # Prepare concept planning prompt
         concept_prompt = self._build_concept_prompt(
             user_prompt, video_style, duration, aspect_ratio
         )
         
-        await self._update_progress(execution, 30, "Generating concept plan", db)
+        await self._update_progress(30, "Generating concept plan", db)
         
         try:
             # Call AI service to generate concept plan
@@ -111,7 +111,7 @@ class ConceptPlannerAgent(BaseAgent):
             usage_info = ai_result.get("usage", {})
             self._update_token_usage(execution, usage_info.get("total_tokens", 0))
             
-            await self._update_progress(execution, 60, "Parsing concept plan", db)
+            await self._update_progress(60, "Parsing concept plan", db)
             
             # Parse the concept plan - ai_result["content"] 是AI生成的JSON字符串
             concept_plan = self._parse_concept_response(ai_result["content"])
@@ -122,7 +122,7 @@ class ConceptPlannerAgent(BaseAgent):
                 visual_desc = scene.get('visual_description', '')
                 desc = scene.get('description', '')
                 self.logger.info(f"   Scene {i+1}: visual_description='{visual_desc[:80]}...', description='{desc[:80]}...'")
-            await self._update_progress(execution, 80, "Intelligent scene planning", db)
+            await self._update_progress(80, "Intelligent scene planning", db)
             
             # 🧠 使用智能场景规划工具，让LLM决定最佳场景数量和分布
             try:
@@ -179,7 +179,7 @@ class ConceptPlannerAgent(BaseAgent):
             # Create scene data in WorkflowState (不直接操作数据库)
             scenes_data = await self._create_scenes_in_workflow_state(workflow_state, concept_plan)
             
-            await self._update_progress(execution, 95, "Finalizing concept", db)
+            await self._update_progress(95, "Finalizing concept", db)
             
             # 更新 WorkflowState 的概念计划
             workflow_state.concept_plan = concept_plan
@@ -206,7 +206,7 @@ class ConceptPlannerAgent(BaseAgent):
                 "workflow_state_id": workflow_state_id
             }
             
-            await self._update_progress(execution, 100, "Concept planning completed", db)
+            await self._update_progress(100, "Concept planning completed", db)
             
             return output_data
             

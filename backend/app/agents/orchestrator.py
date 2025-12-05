@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, TaskStatus, AgentType
+from ..models import Task, TaskStatus, AgentType
 from .adapters.memory_views import build_media_agent_context, build_image_generation_context
 from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
@@ -19,7 +19,11 @@ from .utils.memory_helpers import (
     mas_scope,
     get_mas_working_memory,
     write_shared_fact,
+    read_shared_fact,
 )
+
+from ..events.models import EventKind
+from ..events.publisher import publish_event
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -128,7 +132,6 @@ class OrchestratorAgent(BaseAgent):
         self._step_repeat_counts = {}
 
     def _load_workflow_overview(self, workflow_id: str) -> Dict[str, Any]:
-        from .utils.memory_helpers import read_shared_fact
         try:
             value = read_shared_fact(workflow_id, "workflow_overview", {})
         except Exception as exc:
@@ -136,7 +139,6 @@ class OrchestratorAgent(BaseAgent):
         return dict(value) if isinstance(value, dict) else {}
 
     def _store_workflow_overview(self, workflow_id: str, payload: Dict[str, Any]) -> None:
-        from .utils.memory_helpers import write_shared_fact
         try:
             write_shared_fact(workflow_id, "workflow_overview", payload or {})
         except Exception as exc:
@@ -156,7 +158,6 @@ class OrchestratorAgent(BaseAgent):
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Execute the complete video generation workflow using Shared Working Memory"""
@@ -169,9 +170,6 @@ class OrchestratorAgent(BaseAgent):
         wf_id = str(task.task_id)
         self.logger.info(f"🚀 开始工作流执行，Workflow ID: {wf_id}")
 
-        # Update task status + 初始化共享黑板概览
-        task.status = TaskStatus.IN_PROGRESS
-        task.update_progress("Starting workflow", 0)
         try:
             write_shared_fact(
                 wf_id,
@@ -186,7 +184,6 @@ class OrchestratorAgent(BaseAgent):
             )
         except Exception as wm_err:
             raise AgentError(f"Failed to initialize workflow_overview in shared memory: {wm_err}") from wm_err
-        db.commit()
         
         workflow_data = input_data.copy()
         workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
@@ -226,7 +223,6 @@ class OrchestratorAgent(BaseAgent):
                 current_step = f"Executing {agent.agent_name}"
                 
                 await self._update_progress(
-                    execution, 
                     progress_percentage, 
                     current_step,
                     db
@@ -251,8 +247,6 @@ class OrchestratorAgent(BaseAgent):
                     raise AgentError(
                         f"Failed to update workflow_overview in shared memory (step {step_index + 1}): {wm_err}"
                     ) from wm_err
-                db.commit()
-                
                 self.logger.info(f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
                 
                 try:
@@ -430,7 +424,6 @@ class OrchestratorAgent(BaseAgent):
                         # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
                         if "concept_plan" in agent_output:
                             try:
-                                from .utils.memory_helpers import write_shared_fact
                                 write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
                             except Exception:
                                 pass
@@ -439,7 +432,7 @@ class OrchestratorAgent(BaseAgent):
                     
                     self.logger.info(f"Completed workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
 
-                    # Lightweight WS signals for coarse-grained UI sync
+                    # 通过事件通道通知 coarse-grained UI 信号
                     try:
                         from .adapters.state.memory_state import build_memory_state
                         from .adapters.state.mas_state import build_mas_state_view
@@ -447,27 +440,35 @@ class OrchestratorAgent(BaseAgent):
                         wm_state = build_memory_state(shared)
                         mas_state = build_mas_state_view(str(wf_id))
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
-                            await self.websocket_manager.broadcast_to_task(
-                                str(task.task_id),
-                                {
-                                    "type": "image_assets_ready",
-                                    "task_id": str(task.task_id),
+                            await publish_event(
+                                kind=EventKind.STATE,
+                                payload={
+                                    "state": "image_assets_ready",
                                     "images_count": int(wm_state.get("outputs", {}).get("image", 0)),
-                                    "state": mas_state,
-                                }
+                                    "mas_state": mas_state,
+                                },
+                                task_id=str(task.task_id),
+                                task_db_id=self._task_db_id,
+                                workflow_state_id=wf_id,
+                                agent_type=self.agent_type.value,
+                                agent_name=self.agent_name,
                             )
                         if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(wf_id, agent_output):
-                            await self.websocket_manager.broadcast_to_task(
-                                str(task.task_id),
-                                {
-                                    "type": "video_assets_ready",
-                                    "task_id": str(task.task_id),
+                            await publish_event(
+                                kind=EventKind.STATE,
+                                payload={
+                                    "state": "video_assets_ready",
                                     "videos_count": int(wm_state.get("outputs", {}).get("video", 0)),
-                                    "state": mas_state,
-                                }
+                                    "mas_state": mas_state,
+                                },
+                                task_id=str(task.task_id),
+                                task_db_id=self._task_db_id,
+                                workflow_state_id=wf_id,
+                                agent_type=self.agent_type.value,
+                                agent_name=self.agent_name,
                             )
                     except Exception as _ws_sig_err:
-                        self.logger.warning(f"WS coarse signal failed: {str(_ws_sig_err)}")
+                        self.logger.warning(f"Event coarse signal failed: {str(_ws_sig_err)}")
                     
                 except Exception as e:
                     error_msg = f"Workflow failed at step {step_index + 1} ({agent.agent_name}): {str(e)}"
@@ -476,7 +477,6 @@ class OrchestratorAgent(BaseAgent):
                     # Check if we should retry the failed step
                     if await self._should_retry_step(agent_type, e, db):
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
-                        # Retry the step
                         agent_input = await self._prepare_agent_context(workflow_data, agent_type, wf_id)
                         agent_output = await agent.execute(
                             task=task,
@@ -486,24 +486,20 @@ class OrchestratorAgent(BaseAgent):
                         )
                         workflow_results[agent_type.value] = agent_output
                         workflow_data.update(agent_output)
-                        
-                        # 🔧 修复：在重试成功后也设置concept_plan
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
                             try:
-                                from .utils.memory_helpers import write_shared_fact
                                 write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
                                 self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
                             except Exception:
                                 pass
-                    else:
-                        # Mark task as failed
-                        task.status = TaskStatus.FAILED
-                        task.add_error(error_msg)
-                        db.commit()
-                        raise AgentError(error_msg) from e
+                        continue
+
+                    # 不重试：标记失败并通知
+                    await self._send_workflow_failure(task, error_msg)
+                    raise AgentError(error_msg) from e
             
             # Workflow completed successfully
-            await self._update_progress(execution, 90, "Workflow completed, persisting data", db)
+            await self._update_progress(90, "Workflow completed, persisting data", db)
             try:
                 self._update_workflow_overview(
                     wf_id,
@@ -558,8 +554,6 @@ class OrchestratorAgent(BaseAgent):
                 
                 self.logger.warning(f"⚠️ 工作流成功但持久化失败: {persistence_result}")
             
-            db.commit()
-            
             # Send final WebSocket notification
             await self._send_workflow_completion(task, workflow_results)
             
@@ -596,11 +590,6 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.info("❌ 工作流失败状态已持久化")
             except Exception as persist_error:
                 self.logger.error(f"❌❌ 连持久化失败状态都失败了: {str(persist_error)}")
-            
-            task.status = TaskStatus.FAILED
-            task.add_error(error_msg)
-            db.commit()
-            
             await self._send_workflow_failure(task, error_msg)
             
             raise AgentError(error_msg) from e
@@ -707,35 +696,22 @@ class OrchestratorAgent(BaseAgent):
     # WorkflowStatus 已移除；概览在共享黑板 facts.workflow_overview 中维护
     
     async def _should_retry_step(
-        self, 
-        agent_type: AgentType, 
-        error: Exception, 
+        self,
+        agent_type: AgentType,
+        error: Exception,
         db: Session
     ) -> bool:
         """Determine if a failed workflow step should be retried"""
-        
-        # Get the latest execution for this agent type
-        latest_execution = db.query(AgentExecution).filter(
-            AgentExecution.task_id == self._current_task.id,
-            AgentExecution.agent_type == agent_type
-        ).order_by(AgentExecution.created_at.desc()).first()
-        
-        if not latest_execution or not latest_execution.can_retry:
-            return False
-        
-        # Define retry logic based on error type and agent type
+        # 简化：按错误类型和策略决定，不依赖 AgentExecution 表
         retry_conditions = {
             AgentType.IMAGE_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
             AgentType.VIDEO_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
             AgentType.VIDEO_COMPOSER: ["processing_error", "temporary_file_error"],
         }
-        
+
         error_type = type(error).__name__.lower()
-        
         if agent_type in retry_conditions:
             return any(condition in error_type for condition in retry_conditions[agent_type])
-        
-        # Default: retry on timeout and temporary errors
         return "timeout" in error_type or "temporary" in error_type
 
     def _is_image_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
@@ -763,47 +739,43 @@ class OrchestratorAgent(BaseAgent):
         return False
     
     async def _send_workflow_completion(self, task: Task, results: Dict[str, Any]):
-        """Send workflow completion notification via WebSocket"""
+        """Send workflow completion notification via event bus"""
         try:
-            message = {
-                "type": "workflow_completed",
-                "task_id": str(task.task_id),
-                "status": "completed",
-                "results": results,
-                "timestamp": int(asyncio.get_event_loop().time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
+            await publish_event(
+                kind=EventKind.STATE,
+                payload={
+                    "state": "workflow_completed",
+                    "results": results,
+                },
+                task_id=str(task.task_id),
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
             )
         except Exception as e:
-            self.logger.warning(f"Failed to send workflow completion notification: {e}")
+            self.logger.warning(f"Failed to publish workflow completion event: {e}")
     
     async def _send_workflow_failure(self, task: Task, error_message: str):
-        """Send workflow failure notification via WebSocket"""
+        """Send workflow failure notification via event bus"""
         try:
-            message = {
-                "type": "workflow_failed",
-                "task_id": str(task.task_id),
-                "status": "failed", 
-                "error": error_message,
-                "timestamp": int(asyncio.get_event_loop().time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
+            await publish_event(
+                kind=EventKind.STATE,
+                payload={
+                    "state": "workflow_failed",
+                    "error": error_message,
+                },
+                task_id=str(task.task_id),
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
             )
         except Exception as e:
-            self.logger.warning(f"Failed to send workflow failure notification: {e}")
+            self.logger.warning(f"Failed to publish workflow failure event: {e}")
     
     def get_workflow_status(self, task: Task, db: Session) -> Dict[str, Any]:
         """Get current workflow status and progress"""
-        
-        executions = db.query(AgentExecution).filter(
-            AgentExecution.task_id == task.id
-        ).order_by(AgentExecution.execution_order).all()
         
         workflow_status = {
             "task_id": str(task.task_id),
@@ -811,26 +783,22 @@ class OrchestratorAgent(BaseAgent):
             "overall_progress": task.progress_percentage,
             "current_step": task.current_step,
             "total_steps": len(self.workflow_order),
-            "completed_steps": len([e for e in executions if e.is_completed]),
-            "failed_steps": len([e for e in executions if e.is_failed]),
+            "completed_steps": 0,
+            "failed_steps": 0,
             "steps": []
         }
-        
+
+        # 仅返回粗粒度状态；详细执行信息改为事件/缓存，不依赖 AgentExecution 表
         for agent_type in self.workflow_order:
-            execution = next(
-                (e for e in executions if e.agent_type == agent_type), 
-                None
+            workflow_status["steps"].append(
+                {
+                    "agent_type": agent_type.value,
+                    "status": "unknown",
+                    "progress": None,
+                    "duration": None,
+                    "error": None,
+                }
             )
-            
-            step_info = {
-                "agent_type": agent_type.value,
-                "status": execution.status.value if execution else "pending",
-                "progress": execution.progress_percentage if execution else 0,
-                "duration": execution.duration if execution else None,
-                "error": execution.error_message if execution and execution.is_failed else None
-            }
-            
-            workflow_status["steps"].append(step_info)
         
         return workflow_status
     
@@ -859,7 +827,6 @@ class OrchestratorAgent(BaseAgent):
     
     def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
-            from .utils.memory_helpers import read_shared_fact
             voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}) or {}
             if not voice_plan or not voice_plan.get("enabled"):
                 return False

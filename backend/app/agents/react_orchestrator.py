@@ -13,7 +13,7 @@ from enum import Enum
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, TaskStatus, AgentType
+from ..models import Task, TaskStatus, AgentType
 
 
 class ReasoningStep(Enum):
@@ -87,7 +87,6 @@ class ReActOrchestratorAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Execute iterative workflow"""
@@ -115,7 +114,6 @@ class ReActOrchestratorAgent(BaseAgent):
                 
                 self.logger.info(f"🔄 开始迭代 {iteration}")
                 await self._update_progress(
-                    execution, 
                     min(90, iteration * 10), 
                     "processing",
                     db

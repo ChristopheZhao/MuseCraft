@@ -2,7 +2,7 @@
 Smoke test for AudioGeneratorAgent (ReAct) without external dependencies.
 
 What it does
-- Sets up a local SQLite DB and creates Task/AgentExecution tables
+- Sets up a local SQLite DB and creates Task-related tables (AgentExecution 已移除)
 - Creates a minimal WorkflowState with concept_plan and scenes
 - Monkeypatches ToolRegistry.get_tool to return dummy in-memory tools for:
   - suno_client.generate_background_music

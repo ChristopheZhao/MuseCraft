@@ -258,7 +258,6 @@ class MultiAgentSystemVerifier:
         model_files = {
             "base.py": "BaseModel",
             "task.py": "Task", 
-            "agent.py": "AgentExecution",
             "scene.py": "Scene",
             "resource.py": "Resource"
         }

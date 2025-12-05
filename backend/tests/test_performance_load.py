@@ -21,7 +21,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
-from app.models import Task, AgentExecution, Scene, Resource
+from app.models import Task, Scene, Resource
 
 
 @pytest.mark.performance

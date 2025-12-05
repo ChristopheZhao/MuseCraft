@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional, Callable, Set
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 from .utils.obs_builder import derive_action_facts
 # LLM 服务通过依赖注入提供（BaseAgent._llms）
 
@@ -40,11 +40,10 @@ class ReActAgent(BaseAgent, ABC):
         # Agent 内不保存跨回合状态
     
     async def _execute_impl(
-        self, 
+        self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
-        db: Session
+        db: Session = None,
     ) -> Dict[str, Any]:
         """
         ReAct循环的标准实现
@@ -64,7 +63,6 @@ class ReActAgent(BaseAgent, ABC):
         for iteration in range(self.max_iterations):
             iteration_start_progress = 10 + (iteration * 80 // self.max_iterations)
             await self._update_progress(
-                execution,
                 iteration_start_progress,
                 "processing",
                 db
@@ -90,13 +88,13 @@ class ReActAgent(BaseAgent, ABC):
                 # THINK & PLAN
                 self.logger.debug(f"🧠 THINK & PLAN: Developing action strategy...")
                 action_plan = await self._think_and_plan(
-                    current_iter_context, task, execution, iteration
+                    current_iter_context, task, iteration
                 )
                 
                 # ACT
                 self.logger.debug(f"⚡ ACT: Executing planned actions...")
                 action_result = await self._execute_action(
-                    action_plan, input_data, execution, db, iteration
+                    action_plan, input_data, db, iteration
                 )
                 action_facts = self._derive_action_facts_payload(action_plan, action_result)
                 try:
@@ -207,7 +205,7 @@ class ReActAgent(BaseAgent, ABC):
                         action_result, {"total_iterations": iteration + 1}
                     )
                     
-                    await self._update_progress(execution, 95, "completed", db)
+                    await self._update_progress(95, "completed", db)
                     return final_result
                     
             except Exception as e:
@@ -231,7 +229,7 @@ class ReActAgent(BaseAgent, ABC):
                 "total_iterations": iteration + 1,
             "last_action_result": last_action_result,
         }, task)
-        await self._update_progress(execution, 90, "processing", db)
+        await self._update_progress(90, "processing", db)
         
         return final_result
 
@@ -327,7 +325,6 @@ class ReActAgent(BaseAgent, ABC):
         self, 
         current_state: Dict[str, Any], 
         task: Task, 
-        execution: AgentExecution,
         iteration: int
     ) -> Dict[str, Any]:
         """
@@ -336,7 +333,6 @@ class ReActAgent(BaseAgent, ABC):
         Args:
             current_state: 当前观察到的状态
             task: 任务对象
-            execution: 执行记录
             iteration: 当前迭代次数
             
         Returns:
@@ -351,7 +347,6 @@ class ReActAgent(BaseAgent, ABC):
         self, 
         action_plan: Dict[str, Any], 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session,
         iteration: int
     ) -> Dict[str, Any]:
@@ -361,7 +356,6 @@ class ReActAgent(BaseAgent, ABC):
         Args:
             action_plan: 行动计划
             input_data: 原始输入数据
-            execution: 执行记录
             db: 数据库会话
             iteration: 当前迭代次数
             

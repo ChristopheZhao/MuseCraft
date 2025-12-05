@@ -9,7 +9,7 @@ from sqlalchemy import select, desc
 from pydantic import BaseModel, Field
 
 from ....core.database import get_db
-from ....models import Task, TaskStatus, TaskType, Scene, Resource, AgentExecution
+from ....models import Task, TaskStatus, TaskType, Scene, Resource
 from ....agents import OrchestratorAgent
 from ....services.task_queue import TaskQueueService
 from ....core.config import settings
@@ -69,7 +69,7 @@ class TaskDetailResponse(TaskResponse):
     output_metadata: dict
     scenes_count: int
     resources_count: int
-    agent_executions_count: int
+    agent_executions_count: int = 0
 
 
 class SceneResponse(BaseModel):
@@ -244,10 +244,6 @@ async def get_task(
         select(func.count(Resource.id)).where(Resource.task_id == task.id)
     ) or 0
     
-    agent_executions_count = await db.scalar(
-        select(func.count(AgentExecution.id)).where(AgentExecution.task_id == task.id)
-    ) or 0
-    
     return TaskDetailResponse(
         id=task.id,
         task_id=str(task.task_id),
@@ -264,7 +260,7 @@ async def get_task(
         output_metadata=task.output_metadata or {},
         scenes_count=scenes_count,
         resources_count=resources_count,
-        agent_executions_count=agent_executions_count
+        agent_executions_count=0
     )
 
 
@@ -358,13 +354,7 @@ async def get_task_status(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    # Get agent executions
-    executions_query = select(AgentExecution).where(
-        AgentExecution.task_id == task.id
-    ).order_by(AgentExecution.execution_order)
-    executions_result = await db.execute(executions_query)
-    executions = executions_result.scalars().all()
-    
+    # AgentExecution 已移除，直接返回任务状态
     # Get workflow status from orchestrator
     orchestrator = OrchestratorAgent()
     workflow_status = orchestrator.get_workflow_status(task, db)
@@ -376,16 +366,7 @@ async def get_task_status(
         "current_step": task.current_step,
         "error_message": task.error_message,
         "workflow_status": workflow_status,
-        "agent_executions": [
-            {
-                "agent_type": _val(exec.agent_type),
-                "status": _val(exec.status),
-                "progress": exec.progress_percentage,
-                "duration": exec.duration,
-                "error": exec.error_message
-            }
-            for exec in executions
-        ]
+        "agent_executions": []
     }
 
 

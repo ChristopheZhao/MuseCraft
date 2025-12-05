@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType, Scene, Resource, ResourceType
+from ..models import Task, AgentType, Scene, Resource, ResourceType
 from ..services.file_storage import FileStorageService
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
@@ -40,7 +40,6 @@ class VideoComposerAgent(BaseAgent):
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Compose final video from individual scene videos, or add background music if requested"""
@@ -59,7 +58,7 @@ class VideoComposerAgent(BaseAgent):
 
         # Unified ReAct planning: let the model decide VO/BGM composition steps
         # Build neutral observation (no tool names), include hints but do not hard-branch
-        await self._update_progress(execution, 10, "Gathering composition context", db)
+        await self._update_progress(10, "Gathering composition context", db)
         final_video_facts = wm.get("project.final_video", {}) if wm else {}
         video_path = input_data.get("final_video_path") or final_video_facts.get("path", '')
         bgm_facts = wm.get("project.background_music", {}) if wm else {}
@@ -161,8 +160,8 @@ class VideoComposerAgent(BaseAgent):
                 mixed_path = pick_artifact_path_from_results(executed_calls, kind="video", require_local=True)
 
             if mixed_path and os.path.exists(mixed_path):
-                await self._update_progress(execution, 90, "Finalizing composed video", db)
-                stored_path = self._store_final_video_output(mixed_path, execution, suffix="final_composed")
+                await self._update_progress(90, "Finalizing composed video", db)
+                stored_path = self._store_final_video_output(mixed_path, suffix="final_composed")
                 # 发布操作交由编排层（MAS）统一处理；此处仅生成本地可用产物并写回事实
                 final_url = self._resolve_local_public_url("", stored_path)
                 try:
@@ -177,7 +176,6 @@ class VideoComposerAgent(BaseAgent):
                         },
                     }
                     # 始终写入 final_video 事实：供持久化读取最终交付物
-                    from .utils.memory_helpers import write_shared_fact
                     write_shared_fact(str(workflow_state_id), "project.final_video", fv)
                     # 统一写回：记录本轮 Composer 产物（作为阶段性artifact）
                     self.write_shared_artifact(
@@ -241,7 +239,6 @@ class VideoComposerAgent(BaseAgent):
     def _store_final_video_output(
         self,
         source_path: str,
-        execution: AgentExecution,
         suffix: str = "final_video",
         move: bool = True
     ) -> str:
@@ -254,10 +251,11 @@ class VideoComposerAgent(BaseAgent):
         destination_dir = self.file_storage.get_final_output_dir("video")
         extension = source.suffix or ".mp4"
 
-        candidate = destination_dir / f"{suffix}_{execution.id}{extension}"
+        exec_id = self._current_execution_id or "run"
+        candidate = destination_dir / f"{suffix}_{exec_id}{extension}"
         counter = 1
         while candidate.exists():
-            candidate = destination_dir / f"{suffix}_{execution.id}_{counter}{extension}"
+            candidate = destination_dir / f"{suffix}_{exec_id}_{counter}{extension}"
             counter += 1
 
         # Move or copy depending on caller intent.
@@ -310,7 +308,6 @@ class VideoComposerAgent(BaseAgent):
     async def _publish_final_video(
         self,
         local_path: str,
-        execution: AgentExecution,
         workflow_state_id: str
     ) -> Dict[str, Any]:
         """Upload the final video to remote storage (OSS preferred)."""

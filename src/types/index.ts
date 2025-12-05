@@ -115,7 +115,23 @@ export type MessageType =
   | 'progress-update'
   | 'result-ready'
   | 'error'
-  | 'system-message';
+  | 'system-message'
+  // Backend Event Bus types
+  | 'event.state'
+  | 'event.progress'
+  // Legacy/Direct types (for backward compatibility)
+  | 'agent_progress'
+  | 'workflow_completed'
+  | 'workflow_failed'
+  | 'enhanced_workflow_completed'
+  | 'enhanced_workflow_failed'
+  | 'task_notification'
+  | 'system_notification'
+  | 'connection_established'
+  | 'subscription_confirmed'
+  | 'concept_plan_ready'
+  | 'image_assets_ready'
+  | 'video_assets_ready';
 
 // UI状态类型
 export interface UIState {

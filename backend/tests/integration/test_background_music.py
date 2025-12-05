@@ -67,7 +67,7 @@ async def test_audio_generator_agent():
     
     try:
         from app.agents.audio_generator import AudioGeneratorAgent
-        from app.models.agent import AgentExecution, AgentType
+        from app.models.agent import AgentType
         from app.models.task import Task
         from app.agents.memory.short_term import get_working_memory_service
         from app.agents.memory.short_term import SceneSnapshot
@@ -94,11 +94,6 @@ async def test_audio_generator_agent():
         # 创建 AudioGenerator
         audio_agent = AudioGeneratorAgent()
         print("✅ AudioGeneratorAgent 创建成功")
-        
-        # 创建模拟执行对象
-        execution = AgentExecution()
-        execution.agent_type = AgentType.AUDIO_GENERATOR
-        execution.task_id = 1
         
         # 创建模拟任务
         task = Task()

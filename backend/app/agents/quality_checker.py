@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
+from ..models import Task, AgentType, Resource, ResourceType
 from ..services.ai_client import AIClient
 from ..services.file_storage import FileStorageService
 
@@ -35,7 +35,6 @@ class QualityCheckerAgent(BaseAgent):
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Perform comprehensive quality check on the final video"""
@@ -66,7 +65,7 @@ class QualityCheckerAgent(BaseAgent):
             self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
         view = wm.get("scene_overview", {}) if wm else {"scenes": {}}
         
-        await self._update_progress(execution, 10, "Loading final video from workflow", db)
+        await self._update_progress(10, "Loading final video from workflow", db)
         
         # Get final video facts from MAS WM
         fv = wm.get("project.final_video", {}) if wm else {}
@@ -128,14 +127,14 @@ class QualityCheckerAgent(BaseAgent):
             else:
                 raise AgentError("No video content found in workflow state")
         
-        await self._update_progress(execution, 20, "Performing technical analysis", db)
+        await self._update_progress(20, "Performing technical analysis", db)
         
         # Perform technical quality checks
         technical_quality = await self._analyze_technical_quality(
             final_video_url, video_metadata
         )
         
-        await self._update_progress(execution, 40, "Analyzing content quality", db)
+        await self._update_progress(40, "Analyzing content quality", db)
         
         # Perform content quality analysis
         content_quality = await self._analyze_content_quality(
@@ -146,21 +145,21 @@ class QualityCheckerAgent(BaseAgent):
             video_metadata
         )
         
-        await self._update_progress(execution, 60, "Checking requirement compliance", db)
+        await self._update_progress(60, "Checking requirement compliance", db)
         
         # Check compliance with original requirements
         compliance_check = await self._check_requirement_compliance(
             task, concept_plan, composition_timeline, video_metadata
         )
         
-        await self._update_progress(execution, 80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report", db)
         
         # Generate overall quality score and recommendations
         quality_assessment = await self._generate_quality_assessment(
             technical_quality, content_quality, compliance_check, execution
         )
         
-        await self._update_progress(execution, 95, "Finalizing quality check", db)
+        await self._update_progress(95, "Finalizing quality check", db)
         
         # Update task with quality information
         task.quality_score = quality_assessment["overall_score"]
@@ -180,7 +179,7 @@ class QualityCheckerAgent(BaseAgent):
             "approval_status": quality_assessment["approval_status"]
         }
         
-        await self._update_progress(execution, 100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed", db)
         
         return output_data
     
@@ -188,12 +187,11 @@ class QualityCheckerAgent(BaseAgent):
         self, 
         scenes_data: List, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution, 
         db: Session
     ) -> Dict[str, Any]:
         """对图像进行质量检查（当没有视频时的降级方案）"""
         
-        await self._update_progress(execution, 30, "Analyzing image quality", db)
+        await self._update_progress(30, "Analyzing image quality", db)
         
         # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
         available_images = []
@@ -208,7 +206,7 @@ class QualityCheckerAgent(BaseAgent):
                     "description": getattr(scene, 'visual_description', '')
                 })
         
-        await self._update_progress(execution, 60, "Evaluating content appropriateness", db)
+        await self._update_progress(60, "Evaluating content appropriateness", db)
         
         # 简化的质量检查
         quality_score = 75  # 图像质量默认分数
@@ -226,7 +224,7 @@ class QualityCheckerAgent(BaseAgent):
             if any(word in description for word in ["violent", "inappropriate", "explicit"]):
                 content_issues.append(f"Scene {img['scene_number']} may contain inappropriate content")
         
-        await self._update_progress(execution, 80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report", db)
         
         # 生成建议
         suggestions = []
@@ -265,7 +263,7 @@ class QualityCheckerAgent(BaseAgent):
             "fallback_reason": "no_videos_available"
         }
         
-        await self._update_progress(execution, 100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed", db)
         
         return output_data
     
@@ -527,7 +525,6 @@ class QualityCheckerAgent(BaseAgent):
         technical_quality: Dict[str, Any], 
         content_quality: Dict[str, Any],
         compliance_check: Dict[str, Any],
-        execution: AgentExecution
     ) -> Dict[str, Any]:
         """Generate overall quality assessment and recommendations"""
         

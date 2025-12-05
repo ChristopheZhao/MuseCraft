@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.models import Task, AgentExecution, Scene, Resource, TaskStatus, AgentType
+from app.models import Task, Scene, Resource, TaskStatus, AgentType
 from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
 from app.services.websocket import websocket_manager
 
@@ -96,24 +96,6 @@ class TestEndToEndWorkflow:
                 input_data=task.input_parameters,
                 db=test_db_session
             )
-        
-        # Step 4: Verify agent executions were created
-        stmt = select(AgentExecution).where(AgentExecution.task_id == task.id)
-        executions_result = await test_db_session.execute(stmt)
-        executions = executions_result.scalars().all()
-        
-        # Should have executions for all required agents
-        agent_types = {exec.agent_type for exec in executions}
-        expected_agents = {
-            AgentType.CONCEPT_PLANNER,
-            AgentType.SCRIPT_WRITER,
-            AgentType.IMAGE_GENERATOR,
-            AgentType.VIDEO_GENERATOR,
-            AgentType.VIDEO_COMPOSER,
-            AgentType.QUALITY_CHECKER
-        }
-        
-        assert agent_types >= expected_agents
         
         # Step 5: Verify scenes were created
         stmt = select(Scene).where(Scene.task_id == task.id)

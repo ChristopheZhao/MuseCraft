@@ -19,7 +19,7 @@ import uuid
 from sqlalchemy.orm import Session
 from unittest.mock import AsyncMock, MagicMock
 
-from ..models import Task, AgentExecution, TaskStatus, TaskType, AgentType
+from ..models import Task, TaskStatus, TaskType, AgentType
 from ..agents.enhanced_orchestrator import EnhancedOrchestratorAgent
 from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
 from .workflow_optimizer import workflow_optimizer, ExecutionStrategy, OptimizationLevel

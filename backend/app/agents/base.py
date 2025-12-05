@@ -11,10 +11,12 @@ from typing import Dict, Any, Optional, List, Callable, Tuple
 import re
 from sqlalchemy.orm import Session
 
-from ..models import Task, AgentExecution, AgentType, AgentStatus
+from ..models import Task, AgentType, AgentStatus
 from ..core.config import settings
-from ..core.database import get_sync_db
-from ..services.websocket import WebSocketManager, websocket_manager
+from ..events import EventKind
+from ..events.publisher import publish_state_event
+from ..events.execution import ExecutionState, execution_context_var
+from ..events.utils.progress import send_progress_event, update_progress
 
 from .tools.tool_registry import get_tool_registry
 from .tools.manager import get_tool_manager
@@ -43,6 +45,8 @@ class AgentTimeoutError(AgentError):
     pass
 
 
+
+
 class BaseAgent(ABC):
     """Base class for all agents in the video generation workflow"""
 
@@ -62,8 +66,7 @@ class BaseAgent(ABC):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.logger = logging.getLogger(f"agent.{agent_name}")
-        # Use global singleton WebSocket manager so broadcasts reach connected clients
-        self.websocket_manager = websocket_manager
+        # 事件总线：Agent 只发布事件，监听器负责 WS/持久化/轨迹
         
         # Initialize tool registry/manager
         self.tool_registry = get_tool_registry()
@@ -74,7 +77,7 @@ class BaseAgent(ABC):
         self._wm_cache = None
         self.workflow_state_id: Optional[str] = None
         self.task_id: Optional[str] = None
-        self._current_iteration: int = 0
+        self._task_db_id: Optional[int] = None
         self._max_iterations_hint: int = int(getattr(self, "max_iterations", 0) or 0)
         # 不在 Agent 上保存跨回合状态；仅在同轮内以局部变量传递控制信息
         
@@ -324,11 +327,11 @@ class BaseAgent(ABC):
             return None
     
     async def execute(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
-        db: Session,
-        execution_order: int = 0
+        self,
+        task: Task,
+        input_data: Dict[str, Any],
+        db: Session = None,
+        execution_order: int = 0,
     ) -> Dict[str, Any]:
         """
         Execute the agent with the given task and input data
@@ -356,6 +359,10 @@ class BaseAgent(ABC):
             self.task_id = task_id_str
         else:
             self.task_id = None
+        try:
+            self._task_db_id = int(getattr(task, "id", None)) if getattr(task, "id", None) is not None else None
+        except Exception:
+            self._task_db_id = None
 
         # Reset FC执行轨迹（避免跨任务泄露）
         try:
@@ -363,7 +370,7 @@ class BaseAgent(ABC):
         except Exception:
             self._fc_exec_trace = []
 
-        # Create agent execution record
+        # Create execution state (local scope, transient)
         def _to_jsonable(obj):
             # Recursively convert objects to JSON-serializable structures
             from pydantic import BaseModel as _PydanticBaseModel  # type: ignore
@@ -388,90 +395,132 @@ class BaseAgent(ABC):
             return getattr(obj, "__dict__", str(obj))
 
         sanitized_input = _to_jsonable(input_data)
-        execution = AgentExecution(
-            task_id=task.id,
+        run_id = f"{self.agent_name}-{int(time.time()*1000)}"
+        
+        exec_state = ExecutionState(
+            id=run_id,
             agent_type=self.agent_type,
             agent_name=self.agent_name,
             execution_order=execution_order,
-            input_data=sanitized_input,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries
+            input_data=sanitized_input
         )
-        db.add(execution)
-        db.commit()
-        db.refresh(execution)
         
         # 将当前任务挂到实例上，便于进度上报和子类访问
         # 注意：同一实例串行执行多个任务时会被覆盖，这是预期行为
         self._current_task = task
-        # 暂存当前执行，便于工具参数策略注入
-        self._current_execution = execution
+        
+        # Set execution context
+        token = execution_context_var.set(exec_state)
 
         try:
-            # Start execution
-            execution.start_execution()
-            db.commit()
-            
-            # Send WebSocket update
-            await self._send_progress_update(task, execution, "started")
-            
+            # Start execution (in-memory)
+            exec_state.status = "running"
+            await publish_state_event(
+                status="running",
+                extra_payload={
+                    "input_data": sanitized_input,
+                    "timeout_seconds": self.timeout_seconds,
+                    "max_retries": self.max_retries,
+                },
+                task_id=self.task_id,
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
+                execution_order=exec_state.execution_order,
+                execution_id=exec_state.id,
+            )
+            await self._send_progress_update("started")
             self.logger.info(f"Starting {self.agent_name} for task {task.task_id}")
-            
+
             # Execute with timeout
             output_data = await asyncio.wait_for(
-                self._execute_impl(task, input_data, execution, db),
+                self._execute_impl(task, input_data, db),
                 timeout=self.timeout_seconds
             )
             sanitized_output = _to_jsonable(output_data)
-            
-            # Complete execution
-            execution.complete_execution(sanitized_output)
-            db.commit()
-            
-            # Send WebSocket update
-            await self._send_progress_update(task, execution, "completed")
-            
+
+            # Complete execution (in-memory)
+            exec_state.finish(status="completed")
+
+            await publish_state_event(
+                status="completed",
+                extra_payload={
+                    "output_data": sanitized_output, 
+                    "duration": exec_state.duration,
+                    "metrics": {
+                        "tokens_used": exec_state.tokens_used,
+                        "api_calls": exec_state.api_calls_made
+                    }
+                },
+                task_id=self.task_id,
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
+                execution_order=exec_state.execution_order,
+                execution_id=exec_state.id,
+            )
+            await self._send_progress_update("completed")
             self.logger.info(f"Completed {self.agent_name} for task {task.task_id}")
-            
             return output_data
-            
+
         except asyncio.TimeoutError:
             error_msg = f"Agent {self.agent_name} timed out after {self.timeout_seconds} seconds"
-            execution.fail_execution(error_msg, "timeout")
-            db.commit()
+            exec_state.finish(status="failed", error=error_msg)
             
-            await self._send_progress_update(task, execution, "failed")
-            
+            await publish_state_event(
+                status="failed",
+                error=error_msg,
+                task_id=self.task_id,
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
+                execution_order=exec_state.execution_order,
+                execution_id=exec_state.id,
+            )
+            await self._send_progress_update("failed")
             self.logger.error(error_msg)
             raise AgentTimeoutError(error_msg)
             
         except Exception as e:
             error_msg = f"Agent {self.agent_name} failed: {str(e)}"
-            execution.fail_execution(error_msg, type(e).__name__)
-            db.commit()
+            exec_state.finish(status="failed", error=error_msg)
             
-            await self._send_progress_update(task, execution, "failed")
-            
+            await publish_state_event(
+                status="failed",
+                error=error_msg,
+                task_id=self.task_id,
+                task_db_id=self._task_db_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
+                execution_order=exec_state.execution_order,
+                execution_id=exec_state.id,
+            )
+            await self._send_progress_update("failed")
             self.logger.error(error_msg, exc_info=True)
             raise AgentError(error_msg) from e
         finally:
+            # Reset execution context
+            execution_context_var.reset(token)
+            
             # 避免跨任务残留引用
             try:
                 del self._current_task
             except Exception:
                 pass
-            try:
-                del self._current_execution
-            except Exception:
-                pass
+            # ExecutionState is local, no need to explicit delete, but good for clarity
+            del exec_state
+
     
     @abstractmethod
     async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
-        execution: AgentExecution,
-        db: Session
+        self,
+        task: Task,
+        input_data: Dict[str, Any],
+        db: Session = None,
     ) -> Dict[str, Any]:
         """
         Internal implementation of agent execution
@@ -479,7 +528,6 @@ class BaseAgent(ABC):
         Args:
             task: The task to execute
             input_data: Input data for the agent
-            execution: Agent execution record
             db: Database session
             
         Returns:
@@ -488,50 +536,30 @@ class BaseAgent(ABC):
         pass
     
     async def _send_progress_update(
-        self, 
-        task: Task, 
-        execution: AgentExecution, 
-        status: str
+        self,
+        status: str,
     ):
-        """Send progress update via WebSocket"""
-        try:
-            message = {
-                "type": "agent_progress",
-                "task_id": str(task.task_id),
-                "agent_type": execution.agent_type.value,
-                "agent_name": execution.agent_name,
-                "status": status,
-                "progress": execution.progress_percentage,
-                "current_step": execution.current_substep,
-                "timestamp": int(time.time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id), 
-                message
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to send WebSocket update: {e}")
+        """发布进度事件（WS 推送等由监听器处理）"""
+        exec_state = execution_context_var.get()
+        if exec_state:
+            await send_progress_event(exec_state, self, status)
+        else:
+            self.logger.warning("Attempted to send progress update without execution context")
     
     async def _update_progress(
-        self, 
-        execution: AgentExecution, 
-        percentage: int, 
+        self,
+        percentage: int,
         substep: str = None,
-        db: Session = None
+        db: Session = None,
     ):
         """Update execution progress"""
-        execution.update_progress(percentage, substep)
-        if db:
-            db.commit()
-        
-        # Send WebSocket update
-        if hasattr(self, '_current_task'):
-            await self._send_progress_update(
-                self._current_task, 
-                execution, 
-                "progress"
-            )
+        exec_state = execution_context_var.get()
+        if exec_state:
+            await update_progress(exec_state, self, percentage, substep)
+        else:
+            self.logger.warning("Attempted to update progress without execution context")
+
+    # 事件发布通过 events.publisher，Base 不再内置审计逻辑
     
     def _validate_input(self, input_data: Dict[str, Any], required_keys: List[str]):
         """Validate that required input keys are present and non-empty"""
@@ -549,15 +577,20 @@ class BaseAgent(ABC):
         if empty_keys:
             raise AgentError(f"Required input fields cannot be empty: {empty_keys}. Cannot continue with empty prompt.")
     
-    def _get_model_parameters(self, execution: AgentExecution) -> Dict[str, Any]:
+    def _get_model_parameters(self) -> Dict[str, Any]:
         """Get model parameters for AI service calls"""
-        return execution.model_parameters or {}
+        exec_state = execution_context_var.get()
+        if exec_state:
+            return exec_state.model_parameters
+        return {}
     
-    def _update_token_usage(self, execution: AgentExecution, tokens_used: int):
-        """Update token usage for cost tracking"""
-        execution.tokens_used = (execution.tokens_used or 0) + tokens_used
-        execution.api_calls_made += 1
-        execution.estimate_cost()
+    def _update_token_usage(self, tokens_used: int):
+        """Update token usage for cost tracking (in-memory only)"""
+        exec_state = execution_context_var.get()
+        if exec_state:
+            exec_state.add_token_usage(tokens_used)
+        else:
+            self.logger.warning("Attempted to update token usage without execution context")
     
     # === Function Call支持 ===
     
@@ -976,9 +1009,9 @@ class BaseAgent(ABC):
                 pass
             # 执行ID来自当前执行上下文
             try:
-                exec_id = getattr(getattr(self, '_current_execution', None), 'id', None)
-                if exec_id:
-                    ctx['execution.id'] = exec_id
+                exec_state = execution_context_var.get()
+                if exec_state and exec_state.id:
+                    ctx['execution.id'] = exec_state.id
             except Exception:
                 pass
             return ctx
@@ -1364,33 +1397,13 @@ class BaseAgent(ABC):
         return self.prompt_manager.get_system_instruction(self.agent_name)
     
     async def _handle_retry(
-        self, 
-        task: Task, 
-        execution: AgentExecution, 
+        self,
+        task: Task,
         error: Exception,
-        db: Session
+        db: Session = None
     ) -> bool:
-        """
-        Handle retry logic for failed executions
-        
-        Returns:
-            True if retry should be attempted, False otherwise
-        """
-        if not execution.can_retry:
-            self.logger.error(
-                f"Max retries ({execution.max_retries}) exceeded for {self.agent_name}"
-            )
-            return False
-        
-        self.logger.warning(
-            f"Retrying {self.agent_name} (attempt {execution.retry_count + 1})"
-        )
-        
-        # Wait before retry with exponential backoff
-        wait_time = min(60, 2 ** execution.retry_count)
-        await asyncio.sleep(wait_time)
-        
-        return True
+        """Handle retry logic for failed executions (default: no retry)."""
+        return False
     
     def _initialize_agent(self):
         """Agent-specific initialization - override in subclasses"""

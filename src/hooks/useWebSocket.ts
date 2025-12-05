@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { WebSocketMessage, MessageType, Agent, GenerationResult } from '@/types';
+import { WebSocketMessage, MessageType, Agent, GenerationResult, AgentStatus } from '@/types';
 import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { generateId } from '@/lib/utils';
 
@@ -67,6 +67,37 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     setCurrentStep,
     currentRequest,
   } = useAppStore();
+
+  const eventStateToAgentStatus: Record<string, AgentStatus> = {
+    running: 'working',
+    started: 'working',
+    processing: 'working',
+    in_progress: 'working',
+    completed: 'completed',
+    success: 'completed',
+    failed: 'error',
+    error: 'error',
+    idle: 'idle',
+    waiting: 'waiting',
+    thinking: 'thinking',
+  };
+
+  const agentTypeMap: Record<string, string> = {
+    concept_planner: 'concept-generator',
+    script_writer: 'script-writer',
+    image_generator: 'image-generator',
+    video_generator: 'video-generator',
+    audio_generator: 'voice-synthesizer',
+    voice_synthesizer: 'voice-synthesizer',
+    video_composer: 'video-composer',
+    quality_checker: 'quality-controller',
+    orchestrator: 'orchestrator',
+  };
+
+  const getAgentId = (agentType: string) => {
+    const key = (agentType || '').toLowerCase();
+    return agentTypeMap[key] || agentType;
+  };
 
   const connect = useCallback(() => {
     try {
@@ -192,67 +223,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     return false;
   }, []);
 
-  const handleMessage = useCallback((message: WebSocketMessage) => {
-    console.log('Received WebSocket message:', message);
-
-    switch (message.type) {
-      case 'agent-status-update':
-        handleAgentStatusUpdate(message.data);
-        break;
-      
-      case 'progress-update':
-        handleProgressUpdate(message.data);
-        break;
-      
-      // Backend-native message types
-      case 'agent_progress':
-        handleBackendAgentProgress(message as any);
-        break;
-      case 'workflow_completed':
-        handleWorkflowCompleted(message as any);
-        break;
-      case 'workflow_failed':
-        handleWorkflowFailed(message as any);
-        break;
-      case 'task_notification':
-        handleSystemMessage({ message: message.message, level: message.level || 'info' });
-        break;
-      case 'system_notification':
-        handleSystemMessage({ message: message.message, level: message.level || 'info' });
-        break;
-      case 'connection_established':
-        handleConnectionEstablished(message as any);
-        break;
-      case 'subscription_confirmed':
-        handleSubscriptionConfirmed(message as any);
-        break;
-      case 'concept_plan_ready':
-        handleConceptPlanReady(message as any);
-        break;
-      case 'image_assets_ready':
-        handleImageAssetsReady(message as any);
-        break;
-      case 'video_assets_ready':
-        handleVideoAssetsReady(message as any);
-        break;
-      
-      case 'result-ready':
-        handleResultReady(message.data);
-        break;
-      
-      case 'error':
-        handleError(message.data);
-        break;
-      
-      case 'system-message':
-        handleSystemMessage(message.data);
-        break;
-      
-      default:
-        console.warn('Unknown message type:', message.type);
-    }
-  }, []);
-
   const handleAgentStatusUpdate = useCallback((data: any) => {
     const { agentId, status, currentTask, estimatedTime, progress } = data;
     
@@ -290,6 +260,23 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     });
   }, [updateAgent]);
 
+  // Map backend event.progress to frontend update
+  const handleEventProgress = useCallback((msg: any) => {
+    try {
+      const payload = msg.payload || {};
+      const agentType = String((msg as any).agent_type || '').toLowerCase();
+      const agentId = getAgentId(agentType) || (msg as any).agent_name || agentType || 'unknown-agent';
+      const progress = payload.progress ?? payload.percentage ?? 0;
+      const current_step = payload.current_step || payload.substep || '';
+      updateAgent(agentId, {
+        progress: progress || 0,
+        currentTask: current_step,
+      });
+    } catch (e) {
+      console.warn('Failed to handle event.progress:', e);
+    }
+  }, [updateAgent]);
+
   // Map backend agent_progress to frontend update
   const handleBackendAgentProgress = useCallback((msg: any) => {
     try {
@@ -306,11 +293,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       const agentId = typeToId[agentType] || (msg as any).agent_name || agentType || 'unknown-agent';
       const progress = (msg as any).progress ?? 0;
       const rawStatus = String((msg as any).status || '').toLowerCase();
-      const status = rawStatus === 'completed'
-        ? 'completed'
-        : rawStatus === 'failed'
-        ? 'error'
-        : 'working';
+      const status = eventStateToAgentStatus[rawStatus] || 'working';
       const current_step = (msg as any).current_step || '';
       updateAgent(agentId, {
         status,
@@ -356,11 +339,8 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     }
   }, []);
 
-  
-
   const handleWorkflowCompleted = useCallback((msg: any) => {
     try {
-      // Try to extract final video url/path from results payload
       const results = (msg && (msg.results || (msg.data && msg.data.results))) || {};
       const composer = results.video_composer || results['video-composer'] || {};
       const qc = results.quality_checker || results['quality-checker'] || {};
@@ -388,7 +368,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       message: '多智能体协作已完成，进入结果预览',
       autoClose: 5000,
     });
-    // Switch UI step to review
     setCurrentStep('review' as any);
   }, [addNotification, setCurrentStep]);
 
@@ -402,10 +381,48 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     setCurrentStep('input' as any);
   }, [addNotification, setCurrentStep]);
 
-  // Lightweight system messages
+  // Handle new event.state messages
+  const handleEventState = useCallback((msg: any) => {
+    try {
+      const payload = msg.payload || {};
+      const state = payload.state || payload.status;
+      const normalized = String(state || '').toLowerCase();
+
+      switch (normalized) {
+        case 'concept_plan_ready':
+          handleConceptPlanReady({ ...msg, ...payload });
+          break;
+        case 'image_assets_ready':
+          handleImageAssetsReady({ ...msg, ...payload });
+          break;
+        case 'video_assets_ready':
+          handleVideoAssetsReady({ ...msg, ...payload });
+          break;
+        case 'workflow_completed':
+        case 'enhanced_workflow_completed':
+          handleWorkflowCompleted({ ...msg, results: payload.results, ...payload });
+          break;
+        case 'workflow_failed':
+        case 'enhanced_workflow_failed':
+          handleWorkflowFailed({ ...msg, error: payload.error, ...payload });
+          break;
+        default:
+          if (msg.agent_name) {
+            const agentId = getAgentId(msg.agent_name);
+            const status = eventStateToAgentStatus[normalized];
+            if (status) {
+              updateAgent(agentId, { status });
+            }
+          }
+      }
+    } catch (e) {
+      console.warn('Failed to handle event.state:', e);
+    }
+  }, [handleConceptPlanReady, handleImageAssetsReady, handleVideoAssetsReady, handleWorkflowCompleted, handleWorkflowFailed, updateAgent]);
+
   const handleConnectionEstablished = useCallback((msg: any) => {
-    // no-op; optionally notify or debug log
-  }, []);
+    setWSConnected(true);
+  }, [setWSConnected]);
 
   const handleSubscriptionConfirmed = useCallback((msg: any) => {
     // no-op
@@ -465,6 +482,52 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       autoClose: level === 'error' ? 10000 : 5000,
     });
   }, [addNotification]);
+
+  const handleMessage = useCallback((message: WebSocketMessage) => {
+    console.log('Received WebSocket message:', message);
+
+    // 事件总线消息（统一走事件语义）
+    const eventBusHandlers: Record<string, (msg: any) => void> = {
+      'event.progress': handleEventProgress,
+      'event.state': handleEventState,
+    };
+
+    // 直传/遗留消息（保留少量仍在用的类型，其他状态类事件统一走 event.*）
+    const directHandlers: Record<string, (msg: any) => void> = {
+      task_notification: (msg) => handleSystemMessage({ message: msg.message, level: msg.level || 'info' }),
+      system_notification: (msg) => handleSystemMessage({ message: msg.message, level: msg.level || 'info' }),
+      'agent-status-update': (msg) => handleAgentStatusUpdate(msg.data),
+      'progress-update': (msg) => handleProgressUpdate(msg.data),
+      connection_established: handleConnectionEstablished,
+      subscription_confirmed: handleSubscriptionConfirmed,
+      'result-ready': (msg) => handleResultReady(msg.data),
+      error: (msg) => handleError(msg.data),
+      'system-message': (msg) => handleSystemMessage(msg.data),
+    };
+
+    const handler = eventBusHandlers[message.type] || directHandlers[message.type];
+    if (handler) {
+      handler(message);
+    } else {
+      console.warn('Unknown message type:', message.type);
+    }
+  }, [
+    handleAgentStatusUpdate,
+    handleProgressUpdate,
+    handleEventProgress,
+    handleEventState,
+    handleBackendAgentProgress,
+    handleWorkflowCompleted,
+    handleWorkflowFailed,
+    handleSystemMessage,
+    handleConnectionEstablished,
+    handleSubscriptionConfirmed,
+    handleConceptPlanReady,
+    handleImageAssetsReady,
+    handleVideoAssetsReady,
+    handleResultReady,
+    handleError,
+  ]);
 
   // Initialize connection only when a task exists, to avoid early connect/close noise
   useEffect(() => {

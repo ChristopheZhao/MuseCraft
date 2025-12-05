@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import redis.asyncio as redis
 
-from app.models import Task, AgentExecution, Scene, Resource, TaskStatus
+from app.models import Task, Scene, Resource, TaskStatus
 from app.core.database import get_db
 from app.services.websocket import websocket_manager
 from app.services.file_storage import FileStorageService
@@ -307,17 +307,6 @@ class TestSystemIntegration:
                 resources.append(resource)
                 test_db_session.add(resource)
             
-            # Create agent executions
-            agent_execution = AgentExecution(
-                task_id=task.id,
-                agent_type="concept_planner",
-                agent_name="test_agent",
-                status="completed",
-                input_data={"prompt": "test"},
-                output_data={"result": "success"},
-                execution_metadata={"duration": 5.0}
-            )
-            test_db_session.add(agent_execution)
         
         # Verify all objects were created
         await test_db_session.commit()
@@ -333,12 +322,6 @@ class TestSystemIntegration:
         result = await test_db_session.execute(stmt)
         created_resources = result.scalars().all()
         assert len(created_resources) == 3
-        
-        # Check agent executions
-        stmt = select(AgentExecution).where(AgentExecution.task_id == task.id)
-        result = await test_db_session.execute(stmt)
-        created_executions = result.scalars().all()
-        assert len(created_executions) == 1
     
     async def test_error_handling_across_components(
         self,
