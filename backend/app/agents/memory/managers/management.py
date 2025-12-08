@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..long_term.manager import MemoryManager
+from ..long_term.manager import LongTermMemoryManager
 from ..long_term.stores import BaseMemoryStore, DictMemoryStore, SQLiteMemoryStore
 from ..services.coordinator import MemoryCoordinator
 from ..storage.backend_factory import create_workflow_backend
@@ -20,7 +20,7 @@ class MemoryManagement:
     """Bundle of memory subsystem components ready for injection."""
 
     memory_coordinator: MemoryCoordinator
-    memory_manager: MemoryManager
+    long_term_manager: LongTermMemoryManager
 
 
 _DEFAULT_MANAGEMENT: Optional[MemoryManagement] = None
@@ -57,14 +57,14 @@ def build_memory_management(
                 )
             store_map["default"] = DictMemoryStore()
 
-    manager = MemoryManager(
+    manager = LongTermMemoryManager(
         stores=store_map,
         config=memory_config or {"enable_consolidation": False, "enable_cleanup": False},
     )
 
     return MemoryManagement(
         memory_coordinator=coordinator,
-        memory_manager=manager,
+        long_term_manager=manager,
     )
 
 

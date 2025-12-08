@@ -274,8 +274,8 @@ class SystemValidator:
             registry = get_tool_registry()
             
             # Test memory manager
-            from app.agents.memory.long_term.manager import MemoryManager
-            memory_manager = MemoryManager()
+            from app.agents.memory.long_term.manager import LongTermMemoryManager
+            memory_manager = LongTermMemoryManager()
             
             # Test template manager
             from app.agents.prompts.template_manager import get_template_manager
@@ -346,11 +346,11 @@ class SystemValidator:
         status = "PASS"
         
         try:
-            from app.agents.memory.long_term.manager import MemoryManager
+            from app.agents.memory.long_term.manager import LongTermMemoryManager
             from app.agents.memory.long_term.stores import MemoryItem, MemoryType, MemoryImportance
             
             # Test memory manager initialization
-            memory_manager = MemoryManager(config={
+            memory_manager = LongTermMemoryManager(config={
                 "enable_consolidation": False,  # Disable for testing
                 "enable_cleanup": False
             })

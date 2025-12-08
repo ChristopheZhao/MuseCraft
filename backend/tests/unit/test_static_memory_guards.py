@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-静态守护：禁止生产代码重新引入短期记忆单例或直接暴露 MemoryManager。
+静态守护：禁止生产代码重新引入短期记忆单例或直接暴露 LongTermMemoryManager。
 """
 
 from pathlib import Path
@@ -9,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]  # backend/
 APP_ROOT = REPO_ROOT / "app"
 
-# 允许出现 MemoryManager 的实现层路径前缀
+# 允许出现 LongTermMemoryManager 的实现层路径前缀
 ALLOWED_MM_PREFIXES = [
     APP_ROOT / "agents" / "memory" / "long_term",
     APP_ROOT / "agents" / "memory" / "managers",
@@ -52,6 +52,6 @@ def test_no_memory_manager_exposure_in_app_layer():
         if _is_allowed_mm_path(py_file):
             continue
         text = py_file.read_text(encoding="utf-8", errors="ignore")
-        if "MemoryManager" in text:
+        if "LongTermMemoryManager" in text:
             offenders.append(str(py_file))
-    assert not offenders, "MemoryManager should not appear outside implementation/allowed layers:\n" + "\n".join(offenders)
+    assert not offenders, "LongTermMemoryManager should not appear outside implementation/allowed layers:\n" + "\n".join(offenders)

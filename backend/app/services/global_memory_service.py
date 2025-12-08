@@ -28,14 +28,14 @@ class GlobalMemoryService:
         self.logger = logging.getLogger("global_memory_service")
         self._management = management
         # 底层 manager 仅供内部使用；对外只暴露受控 long_term 接口
-        self._memory_manager = management.memory_manager
-        self._long_term = long_term_service or SimpleLongTermMemoryService(self._memory_manager)
+        self._long_term_manager = management.long_term_manager
+        self._long_term = long_term_service or SimpleLongTermMemoryService(self._long_term_manager)
         self.workflow_stats: Dict[str, Any] = {}
         self.logger.info("🧠 Global Memory Service initialised with injected management bundle")
 
     @property
     def long_term(self) -> SimpleLongTermMemoryService:
-        """受控长记忆接口，屏蔽底层 MemoryManager。"""
+        """受控长记忆接口，屏蔽底层 LongTermMemoryManager。"""
         return self._long_term
 
     async def store_creative_guidance(

@@ -15,9 +15,9 @@ from ..stores import (
 )
 
 
-class MemoryManager:
+class LongTermMemoryManager:
     """
-    High-level memory management interface for agents
+    High-level memory management interface for long-term memories.
     
     Provides unified access to different memory stores and retrieval strategies
     """
@@ -36,7 +36,7 @@ class MemoryManager:
         self.default_retriever = default_retriever
         self.config = config or {}
         
-        self.logger = logging.getLogger("memory_manager")
+        self.logger = logging.getLogger("long_term_memory_manager")
         
         # Memory consolidation settings
         self.consolidation_interval = self.config.get("consolidation_interval", 3600)  # 1 hour
@@ -571,7 +571,7 @@ class MemoryManager:
                 )
         except RuntimeError:
             # 没有运行的事件循环，在同步环境中跳过后台任务
-            print("MemoryManager: No running event loop, skipping background tasks")
+            print("LongTermMemoryManager: No running event loop, skipping background tasks")
             self._consolidation_task = None
             self._cleanup_task = None
     

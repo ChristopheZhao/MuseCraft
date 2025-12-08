@@ -39,7 +39,7 @@ def build_memory_services(
     management = build_memory_management(
         storage_backend=settings.MEMORY_WORKFLOW_BACKEND,
     )
-    long_term = SimpleLongTermMemoryService(management.memory_manager)
+    long_term = SimpleLongTermMemoryService(management.long_term_manager)
     global_service = GlobalMemoryService(management, long_term_service=long_term)
 
     factory = short_term_store_factory or (lambda: create_short_term_store(kind="memory"))

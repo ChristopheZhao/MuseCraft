@@ -8,7 +8,7 @@ from ..long_term.stores import MemoryImportance, MemoryItem, MemoryType
 
 
 class SimpleLongTermMemoryService(LongTermMemoryService):
-    """Wrapper around MemoryManager providing uniform store/retrieve APIs."""
+    """Wrapper around LongTermMemoryManager providing uniform store/retrieve APIs."""
 
     def __init__(self, memory_manager) -> None:
         self._manager = memory_manager

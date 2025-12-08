@@ -47,15 +47,15 @@
   - BaseAgent/Orchestrator/Helpers/快照/工具 provider 全部改为注入路径，删除全局引用；`memory.short_term.registry` 生产导出已删除/禁用。
   - ContextAssembler 默认实例移除，必须显式构造传入 memory_services。
 - **Phase 2（P1，已完成：长记忆封装与调用迁移）**
-  - ✅ 定义/强化长记忆 Facade/Helper（服务层暴露抽象接口，隐藏 MemoryManager/Coordinator 细节）。
+  - ✅ 定义/强化长记忆 Facade/Helper（服务层暴露抽象接口，隐藏 LongTermMemoryManager/Coordinator 细节）。
   - ✅ 迁移调用方：MemoryTool、MemoryWriter、GlobalMemoryService、BaseAgent 内部 helper 改用 Facade；BaseAgent 兼容 property 已删除，后续仅暴露受控接口。
   - ✅ MemoryServices 仅暴露抽象接口（global/long_term/short_term）；management/coordinator 已从注入包移除，GlobalMemoryService 内部私有化 coordinator 且不暴露 Slot API。
 - **Phase 3（P1，已完成：Agent 视图与守护）**
   - ✅ agent_scope 迭代状态视图：已实现统计/观测快照并由 Orchestrator 注入；字段聚焦迭代计数、场景完成/失败/重试计数、错误/重试热点等汇总指标，明细仍在 agent-scope WM。
-  - ✅ 静态守护：已添加静态检查用例（禁用单例/MemoryManager 暴露）和纯注入冒烟用例，当前在本地执行。
+  - ✅ 静态守护：已添加静态检查用例（禁用单例/LongTermMemoryManager 暴露）和纯注入冒烟用例，当前在本地执行。
   - 工厂替换测试：短期/长期后端替换仍可运行核心工作流（待补）。
 - **Phase 4（P2，收尾与文档）**
-  - ✅ BaseAgent 兼容 property 删除；示例/样例已改用 Facade。应用层无 MemoryManager 直接引用，保留实现层导出供内部使用。
+  - ✅ BaseAgent 兼容 property 删除；示例/样例已改用 Facade。应用层无 LongTermMemoryManager 直接引用，保留实现层导出供内部使用。
   - ✅ 文档同步：标记单例移除、长记忆封装与视图补全的完成度，明确受控接口使用规范；Coordinator/slot 概念不对外暴露。
   - 如无引用，彻底删除 registry/默认导出；测试 stub 保留在 testutils，不进入生产包。
 

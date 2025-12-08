@@ -13,7 +13,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # 直接导入需要的组件，避免循环导入
-from app.agents.memory.long_term.manager import MemoryManager
+from app.agents.memory.long_term.manager import LongTermMemoryManager
 from app.agents.memory.long_term.stores import DictMemoryStore, MemoryItem, MemoryType, MemoryImportance
 
 async def test_memory_service_data_structures():
@@ -24,7 +24,7 @@ async def test_memory_service_data_structures():
     
     # 初始化记忆管理器
     default_store = DictMemoryStore()
-    memory_manager = MemoryManager(
+    memory_manager = LongTermMemoryManager(
         stores={"default": default_store},
         config={
             "enable_consolidation": False,
