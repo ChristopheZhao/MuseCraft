@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..memory.short_term.working_memory import WorkingMemory
 from ..memory.config.scene_output_schema import load_scene_output_schema
 from ..adapters.memory_views import load_scene_overview, extract_failed_scenes
 from .memory_helpers import get_mas_working_memory
+
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
 
 
 def extract_tool_payload(result: Any) -> Any:
@@ -159,17 +162,18 @@ def finalize_scene_outputs(
     workflow_id: Optional[str],
     agent_memory: Optional[WorkingMemory],
     shared_memory: Optional[WorkingMemory] = None,
+    service: Optional["WorkingMemoryService"] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Collect completion/failure payloads for a given scene output kind."""
     wf_id = str(workflow_id) if workflow_id else None
     shared = shared_memory
-    if shared is None and wf_id:
+    if shared is None and wf_id and service is not None:
         try:
-            shared = get_mas_working_memory(wf_id)
+            shared = get_mas_working_memory(wf_id, service=service)
         except Exception:
             shared = None
     completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)
-    overview = load_scene_overview(wf_id) if wf_id else None
+    overview = load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
     failed = extract_failed_scenes(overview)
     return completed, failed
 

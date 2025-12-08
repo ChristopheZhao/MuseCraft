@@ -2,15 +2,18 @@ from __future__ import annotations
 
 """Shared memory view helpers for orchestrator → agent context construction."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .video import VideoMemoryAdapter
 from ..utils.memory_helpers import get_mas_working_memory
 
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
 
-def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
+
+def load_scene_overview(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Return MAS working-memory projection for scenes/state."""
-    wm = get_mas_working_memory(str(workflow_id))
+    wm = get_mas_working_memory(str(workflow_id), service=service)
     if wm is None:
         return {}
     overview = wm.get("scene_overview", {})
@@ -24,10 +27,10 @@ def load_scene_overview(workflow_id: str) -> Dict[str, Any]:
         return {}
 
 
-def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
+def load_scene_scripts(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[int, Dict[str, Any]]:
     """Fetch per-scene script facts from the workflow fact store."""
     try:
-        wm = get_mas_working_memory(workflow_id)
+        wm = get_mas_working_memory(workflow_id, service=service)
         payload = wm.get("project.scene_scripts", {})
         if isinstance(payload, dict):
             return _normalize_scene_dict(payload)
@@ -36,9 +39,9 @@ def load_scene_scripts(workflow_id: str) -> Dict[int, Dict[str, Any]]:
     return {}
 
 
-def load_roles_context(workflow_id: str) -> Dict[str, Any]:
+def load_roles_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Return concept-level roles/settings context."""
-    concept_plan = load_concept_plan(workflow_id)
+    concept_plan = load_concept_plan(workflow_id, service=service)
     roles = concept_plan.get("roles")
     overview = {
         "concept_overview": concept_plan.get("overview") or concept_plan.get("story_overview") or "",
@@ -48,9 +51,9 @@ def load_roles_context(workflow_id: str) -> Dict[str, Any]:
     return overview
 
 
-def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
+def load_concept_plan(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     try:
-        wm = get_mas_working_memory(workflow_id)
+        wm = get_mas_working_memory(workflow_id, service=service)
         plan = wm.get("project.concept_plan", {}) or {}
         if isinstance(plan, dict):
             return plan
@@ -62,30 +65,31 @@ def load_concept_plan(workflow_id: str) -> Dict[str, Any]:
 def build_media_agent_context(
     workflow_id: str,
     *,
+    service: "WorkingMemoryService",
     include_scripts: bool = True,
     include_roles: bool = False,
 ) -> Dict[str, Any]:
     """Convenience helper for orchestrator when preparing agent inputs."""
     context: Dict[str, Any] = {}
-    overview = load_scene_overview(workflow_id)
+    overview = load_scene_overview(workflow_id, service=service)
     if overview:
         context["scene_overview"] = overview
     if include_scripts:
-        scripts = load_scene_scripts(workflow_id)
+        scripts = load_scene_scripts(workflow_id, service=service)
         if scripts:
             context["scene_scripts"] = scripts
     if include_roles:
-        roles_ctx = load_roles_context(workflow_id)
+        roles_ctx = load_roles_context(workflow_id, service=service)
         if roles_ctx:
             context["roles_context"] = roles_ctx
     return context
 
 
-def build_image_generation_context(workflow_id: str) -> Dict[str, Any]:
+def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for ImageGenerator."""
-    concept_plan = load_concept_plan(workflow_id)
-    overview = load_scene_overview(workflow_id)
-    scripts = load_scene_scripts(workflow_id)
+    concept_plan = load_concept_plan(workflow_id, service=service)
+    overview = load_scene_overview(workflow_id, service=service)
+    scripts = load_scene_scripts(workflow_id, service=service)
 
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
     target_map: Dict[int, str] = {}

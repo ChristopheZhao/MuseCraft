@@ -72,7 +72,7 @@ class ConceptPlannerAgent(BaseAgent):
 
         # 移除 WorkflowState 依赖：从 Shared WM facts 读取已有风格（如有）
         if not predefined_style_profile:
-            existing_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}) or {}
+            existing_plan = read_shared_fact(workflow_state_id, "project.concept_plan", {}, service=self.short_term_service) or {}
             if isinstance(existing_plan, dict):
                 predefined_style_profile = existing_plan.get("intelligent_style_design") or None
 
@@ -245,7 +245,7 @@ class ConceptPlannerAgent(BaseAgent):
             skeleton_payload,
         )
         try:
-            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan)
+            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan, service=self.short_term_service)
         except Exception:
             self.logger.warning("voice_plan 写回 MAS WM 失败，忽略")
 
@@ -300,11 +300,11 @@ class ConceptPlannerAgent(BaseAgent):
 
         # --- 写回 MAS WorkingMemory (facts + scenes) ---
         try:
-            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan)
+            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan, service=self.short_term_service)
         except Exception as _wm_err:
             self.logger.warning(f"WM write failed for concept_plan: {_wm_err}")
         try:
-            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan)
+            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan, service=self.short_term_service)
         except Exception:
             pass
 
@@ -337,7 +337,7 @@ class ConceptPlannerAgent(BaseAgent):
                     "completed_scene_numbers": [],
                     "failed_scene_numbers": [],
                 }
-                write_shared_fact(workflow_state_id, "scene_overview", overview)
+                write_shared_fact(workflow_state_id, "scene_overview", overview, service=self.short_term_service)
         except Exception as _wm_err:
             # Fail-fast 是核心流程，记忆写回为尽力而为
             self.logger.warning(f"scene_overview write failed (non-fatal): {_wm_err}")

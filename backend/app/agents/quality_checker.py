@@ -60,7 +60,7 @@ class QualityCheckerAgent(BaseAgent):
         from .utils.memory_helpers import get_mas_working_memory, read_shared_fact
         wm = None
         try:
-            wm = get_mas_working_memory(str(workflow_state_id))
+            wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
         except Exception as _wm_err:
             self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
         view = wm.get("scene_overview", {}) if wm else {"scenes": {}}

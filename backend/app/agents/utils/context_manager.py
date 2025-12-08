@@ -10,16 +10,20 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .memory_helpers import get_agent_working_memory
 from ..adapters.state.mas_state import build_mas_state_view
+
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
 
 
 def build_agent_context(
     workflow_id: str,
     agent_name: str,
     *,
+    service: "WorkingMemoryService",
     state_view: Optional[Dict[str, Any]] = None,
     max_turn: Optional[int] = None,
     max_token_budget: Optional[int] = None,  # 占位，暂未实现基于 token 的裁剪
@@ -31,7 +35,7 @@ def build_agent_context(
     ctx: Dict[str, Any] = {}
     if not workflow_id or not agent_name:
         return ctx
-    wm = get_agent_working_memory(str(workflow_id), agent_name)
+    wm = get_agent_working_memory(str(workflow_id), agent_name, service=service)
 
     # 基础 facts
     try:
@@ -69,7 +73,7 @@ def build_agent_context(
         ctx["state_view"] = state_view
     elif workflow_id:
         try:
-            ctx["state_view"] = build_mas_state_view(workflow_id)
+            ctx["state_view"] = build_mas_state_view(workflow_id, service=service)
         except Exception as e:
             raise f"构建 MAS 状态视图失败: {e}"
     return ctx

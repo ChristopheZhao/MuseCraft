@@ -1,27 +1,39 @@
 """ConsistencyTool - gather per-scene prompt assets and continuity hints."""
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, TYPE_CHECKING
 
 from .base_tool import BaseTool, ToolMetadata, ToolType, ToolInput
 from ..utils.memory_helpers import get_mas_working_memory
 from ..adapters.video.memory_adapter import VideoMemoryAdapter
 from ...core.scene_continuity_memory import get_scene_continuity_memory
 
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
+
 
 class _WMFactsProvider:
     """Default facts provider that reads from MAS WorkingMemory."""
 
+    def __init__(self, service: Optional["WorkingMemoryService"] = None):
+        self._service = service
+
     async def get_fact(self, workflow_state_id: str, key: str) -> Any:
-        wm = get_mas_working_memory(workflow_state_id)
+        if self._service is None:
+            return None
+        wm = get_mas_working_memory(workflow_state_id, service=self._service)
         return wm.get(key, None) if wm else None
 
     async def get_all_facts(self, workflow_state_id: str) -> Dict[str, Any]:
-        wm = get_mas_working_memory(workflow_state_id)
+        if self._service is None:
+            return {}
+        wm = get_mas_working_memory(workflow_state_id, service=self._service)
         return dict(getattr(wm, "facts", {}) or {}) if wm else {}
 
     async def get_scene(self, workflow_state_id: str, scene_number: int) -> Optional[Dict[str, Any]]:
-        wm = get_mas_working_memory(workflow_state_id)
+        if self._service is None:
+            return None
+        wm = get_mas_working_memory(workflow_state_id, service=self._service)
         if wm is None:
             return None
         # scene_overview 优先
@@ -43,7 +55,9 @@ class _WMFactsProvider:
             return None
 
     async def get_all_scenes(self, workflow_state_id: str) -> Dict[int, Any]:
-        wm = get_mas_working_memory(workflow_state_id)
+        if self._service is None:
+            return {}
+        wm = get_mas_working_memory(workflow_state_id, service=self._service)
         if wm is None:
             return {}
         overview = wm.get("scene_overview", {})
@@ -102,9 +116,11 @@ class ConsistencyTool(BaseTool):
         *,
         facts_provider: Optional[Any] = None,
         memory_provider: Optional[Any] = None,
+        short_term_service: Optional["WorkingMemoryService"] = None,
         **kwargs: Any,
     ):
-        self._facts_provider = facts_provider or _WMFactsProvider()
+        self._short_term_service = short_term_service
+        self._facts_provider = facts_provider or _WMFactsProvider(service=short_term_service)
         self._memory_provider = memory_provider or _WMMemoryProvider()
         self._asset_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
         super().__init__(

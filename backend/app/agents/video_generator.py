@@ -220,7 +220,7 @@ class VideoGeneratorAgent(ReActAgent):
                     "metadata": {},
                 })
             normalized_results = await self._ensure_video_persistence(normalized_results)
-            shared_wm = get_mas_working_memory(wf_id) if wf_id else None
+            shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
             normalized_results = await persist_scene_outputs(
                 artifacts=normalized_results,
                 kind="video",

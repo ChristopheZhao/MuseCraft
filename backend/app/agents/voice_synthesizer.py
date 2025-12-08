@@ -357,7 +357,7 @@ class VoiceSynthesizerAgent(ReActAgent):
     ) -> None:
         if not artifacts:
             return
-        shared_wm = get_mas_working_memory(str(workflow_state_id))
+        shared_wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
         try:
             assets = shared_wm.get("voice_assets", {}) or {}
         except Exception as exc:
@@ -486,7 +486,7 @@ class VoiceSynthesizerAgent(ReActAgent):
             kind="audio",
             include_prompt=False,
         )
-        shared_wm = get_mas_working_memory(wf_id) if wf_id else None
+        shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
         await persist_scene_outputs(
             artifacts=artifacts,
             kind="voice",

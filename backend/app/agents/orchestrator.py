@@ -13,7 +13,7 @@ from ..models import Task, TaskStatus, AgentType
 from .adapters.memory_views import build_media_agent_context, build_image_generation_context
 from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
-from .memory.short_term import get_working_memory_service
+# legacy WM singleton removed - use injected self._memory_services.short_term
 from .utils.memory_helpers import (
     agent_scope,
     mas_scope,
@@ -21,6 +21,7 @@ from .utils.memory_helpers import (
     write_shared_fact,
     read_shared_fact,
 )
+from .utils.iteration_view import build_agent_iteration_view
 
 from ..events.models import EventKind
 from ..events.publisher import publish_event
@@ -133,14 +134,14 @@ class OrchestratorAgent(BaseAgent):
 
     def _load_workflow_overview(self, workflow_id: str) -> Dict[str, Any]:
         try:
-            value = read_shared_fact(workflow_id, "workflow_overview", {})
+            value = read_shared_fact(workflow_id, "workflow_overview", {}, service=self.short_term_service)
         except Exception as exc:
             raise AgentError(f"Failed to read workflow_overview from MAS WM: {exc}") from exc
         return dict(value) if isinstance(value, dict) else {}
 
     def _store_workflow_overview(self, workflow_id: str, payload: Dict[str, Any]) -> None:
         try:
-            write_shared_fact(workflow_id, "workflow_overview", payload or {})
+            write_shared_fact(workflow_id, "workflow_overview", payload or {}, service=self.short_term_service)
         except Exception as exc:
             raise AgentError(f"Failed to write workflow_overview to MAS WM: {exc}") from exc
 
@@ -163,7 +164,7 @@ class OrchestratorAgent(BaseAgent):
         """Execute the complete video generation workflow using Shared Working Memory"""
         
         self._current_task = task
-        mem_service = get_working_memory_service()
+        mem_service = self._memory_services.short_term
         mem_service.create_or_get(str(task.task_id), mas_scope(str(task.task_id)))
         
         # 使用 Task.task_id 作为本次工作流的 Shared WM 标识
@@ -181,6 +182,7 @@ class OrchestratorAgent(BaseAgent):
                     "step_index": 0,
                     "total_steps": len(self.workflow_order),
                 },
+                service=self.short_term_service,
             )
         except Exception as wm_err:
             raise AgentError(f"Failed to initialize workflow_overview in shared memory: {wm_err}") from wm_err
@@ -201,7 +203,7 @@ class OrchestratorAgent(BaseAgent):
             for step_index, agent_type in enumerate(self.workflow_order):
                 agent = self.agents[agent_type]
                 try:
-                    shared_view = get_mas_working_memory(wf_id)
+                    shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
                     scope = agent_scope(wf_id, agent.agent_name)
                     mem_service.create_or_get(
                         wf_id,
@@ -279,7 +281,7 @@ class OrchestratorAgent(BaseAgent):
                         mixing_mode = 'composer'
                     if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
                         try:
-                            shared = get_mas_working_memory(str(wf_id))
+                            shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
                             voice_bucket = {}
                             try:
                                 voice_bucket = shared.get("scene_outputs.voice", {}) if shared is not None else {}
@@ -294,7 +296,7 @@ class OrchestratorAgent(BaseAgent):
                                     "add_voiceover": True
                                 }
                                 scope = agent_scope(wf_id, comp_agent.agent_name)
-                                shared_view = get_mas_working_memory(wf_id)
+                                shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
                                 mem_service.create_or_get(
                                     wf_id,
                                     scope,
@@ -320,7 +322,7 @@ class OrchestratorAgent(BaseAgent):
                                 "add_bgm": True
                             }
                             scope = agent_scope(wf_id, comp_agent.agent_name)
-                            shared_view = get_mas_working_memory(wf_id)
+                            shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
                             mem_service.create_or_get(
                                 wf_id,
                                 scope,
@@ -406,7 +408,7 @@ class OrchestratorAgent(BaseAgent):
                     elif agent_type == AgentType.AUDIO_GENERATOR:
                         tracked_kind = "audio"
                     if tracked_kind:
-                        shared = get_mas_working_memory(str(wf_id))
+                        shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
                         bucket = shared.get(f"scene_outputs.{tracked_kind}", {}) if shared is not None else {}
                         committed = len(bucket) if isinstance(bucket, dict) else 0
                         self.logger.info(
@@ -424,7 +426,7 @@ class OrchestratorAgent(BaseAgent):
                         # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
                         if "concept_plan" in agent_output:
                             try:
-                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"], service=self.short_term_service)
                             except Exception:
                                 pass
                     else:
@@ -436,9 +438,9 @@ class OrchestratorAgent(BaseAgent):
                     try:
                         from .adapters.state.memory_state import build_memory_state
                         from .adapters.state.mas_state import build_mas_state_view
-                        shared = get_mas_working_memory(str(wf_id))
+                        shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
                         wm_state = build_memory_state(shared)
-                        mas_state = build_mas_state_view(str(wf_id))
+                        mas_state = build_mas_state_view(str(wf_id), service=self.short_term_service)
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id, agent_output):
                             await publish_event(
                                 kind=EventKind.STATE,
@@ -488,7 +490,7 @@ class OrchestratorAgent(BaseAgent):
                         workflow_data.update(agent_output)
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
                             try:
-                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"])
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"], service=self.short_term_service)
                                 self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
                             except Exception:
                                 pass
@@ -717,7 +719,7 @@ class OrchestratorAgent(BaseAgent):
     def _is_image_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for image generation step completion."""
         try:
-            shared = get_mas_working_memory(str(workflow_id))
+            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
             outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
             if isinstance(outputs, dict) and outputs:
                 return True
@@ -729,7 +731,7 @@ class OrchestratorAgent(BaseAgent):
     def _is_video_step_completed(self, workflow_id: str, agent_output: Dict[str, Any]) -> bool:
         """Gate condition for video generation step completion."""
         try:
-            shared = get_mas_working_memory(str(workflow_id))
+            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
             outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
             if isinstance(outputs, dict) and outputs:
                 return True
@@ -827,7 +829,7 @@ class OrchestratorAgent(BaseAgent):
     
     def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
-            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}) or {}
+            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}, service=self.short_term_service) or {}
             if not voice_plan or not voice_plan.get("enabled"):
                 return False
             if str(voice_plan.get("mode", "none")).lower() == "none":
@@ -873,6 +875,7 @@ class OrchestratorAgent(BaseAgent):
             def _merge_media_context(include_roles: bool) -> None:
                 context_bundle = build_media_agent_context(
                     workflow_id,
+                    service=self.short_term_service,
                     include_scripts=True,
                     include_roles=include_roles,
                 )
@@ -885,7 +888,7 @@ class OrchestratorAgent(BaseAgent):
             elif agent_type == AgentType.AUDIO_GENERATOR:
                 _merge_media_context(include_roles=False)
             if agent_type == AgentType.IMAGE_GENERATOR:
-                image_ctx = build_image_generation_context(workflow_id)
+                image_ctx = build_image_generation_context(workflow_id, service=self.short_term_service)
                 if image_ctx:
                     agent_input["image_generation_context"] = image_ctx
 
@@ -899,6 +902,25 @@ class OrchestratorAgent(BaseAgent):
 
             elif agent_type == AgentType.VOICE_SYNTHESIZER:
                 _merge_media_context(include_roles=True)
+
+            # Agent 级迭代状态视图（统计汇总，正交于 agent WM 明细）
+            try:
+                agent_obj = self.agents.get(agent_type)
+                agent_name = getattr(agent_obj, "agent_name", agent_type.value) if agent_obj else agent_type.value
+                iter_view = build_agent_iteration_view(
+                    workflow_id,
+                    agent_name,
+                    service=self.short_term_service,
+                    create_if_absent=True,
+                )
+                if iter_view:
+                    agent_input["agent_iteration_view"] = iter_view
+            except Exception as e:
+                self.logger.debug(
+                    "Skip iteration view for %s: %s",
+                    agent_type.value,
+                    e,
+                )
 
             return agent_input
             

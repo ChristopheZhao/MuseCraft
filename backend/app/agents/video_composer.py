@@ -52,7 +52,7 @@ class VideoComposerAgent(BaseAgent):
         from .utils.memory_helpers import get_mas_working_memory
         wm = None
         try:
-            wm = get_mas_working_memory(str(workflow_state_id))
+            wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
         except Exception as _wm_err:
             self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
 
@@ -176,7 +176,7 @@ class VideoComposerAgent(BaseAgent):
                         },
                     }
                     # 始终写入 final_video 事实：供持久化读取最终交付物
-                    write_shared_fact(str(workflow_state_id), "project.final_video", fv)
+                    write_shared_fact(str(workflow_state_id), "project.final_video", fv, service=self.short_term_service)
                     # 统一写回：记录本轮 Composer 产物（作为阶段性artifact）
                     self.write_shared_artifact(
                         kind="video",

@@ -65,7 +65,7 @@ class ScriptWriterAgent(BaseAgent):
                 return {"success": False, "error": "workflow_state_id missing", "workflow_state_updated": False, "results": []}
 
             # 读取 MAS WM 作为上下文
-            overview = load_scene_overview(wf_id_str)
+            overview = load_scene_overview(wf_id_str, service=self.short_term_service)
             scenes_payload = overview.get("scenes") if isinstance(overview, dict) else []
             scenes: List[SceneSnapshot] = []
             for entry in scenes_payload or []:
@@ -88,11 +88,11 @@ class ScriptWriterAgent(BaseAgent):
 
             episode_context = input_data.get("episode_context")
             if episode_context is None:
-                episode_context = read_shared_fact(wf_id_str, "episode_context", None)
+                episode_context = read_shared_fact(wf_id_str, "episode_context", None, service=self.short_term_service)
 
             project_context = input_data.get("project_context")
             if project_context is None:
-                project_context = read_shared_fact(wf_id_str, "project_context", None)
+                project_context = read_shared_fact(wf_id_str, "project_context", None, service=self.short_term_service)
             approved_script_text = ""
             if episode_context:
                 approved_script_text = str(episode_context.get("approved_script", "") or "").strip()
@@ -109,7 +109,7 @@ class ScriptWriterAgent(BaseAgent):
                     if str(cid).strip()
                 ]
 
-            concept_plan = load_concept_plan(wf_id_str) or {}
+            concept_plan = load_concept_plan(wf_id_str, service=self.short_term_service) or {}
 
             if not scenes:
                 return {
@@ -166,8 +166,7 @@ class ScriptWriterAgent(BaseAgent):
 
         # 旁白规划从记忆槽读取
         try:
-            from .utils.memory_helpers import read_shared_fact
-            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}) or {}
+            voice_plan = read_shared_fact(workflow_state_id, "project.voice_plan", {}, service=self.short_term_service) or {}
         except Exception:
             voice_plan = {}
         voice_plan_enabled = True
@@ -255,7 +254,7 @@ class ScriptWriterAgent(BaseAgent):
                     if isinstance(concept_plan, dict):
                         concept_plan['intelligent_style_design'] = enriched_style
                         try:
-                            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan)
+                            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan, service=self.short_term_service)
                         except Exception as slot_err:
                             raise AgentError(
                                 f"Failed to persist enriched concept_plan: {slot_err}"
@@ -506,7 +505,7 @@ class ScriptWriterAgent(BaseAgent):
                         # 将脚本结果写入项目级脚本槽
                         entry = {}
                         try:
-                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
+                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
                             entry = dict(existing_scripts.get(str(scene.scene_number), {}))
                             entry.update({
                                 "script_text": scene_script_data.get("script_text", ""),
@@ -523,7 +522,7 @@ class ScriptWriterAgent(BaseAgent):
                             })
                             merged = dict(existing_scripts)
                             merged[str(scene.scene_number)] = entry
-                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
+                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
                         except Exception as err:
                             raise AgentError(
                                 f"Failed to persist scene_scripts for scene {scene.scene_number}: {err}"
@@ -568,7 +567,7 @@ class ScriptWriterAgent(BaseAgent):
             try:
                 decisions = (continuity_analysis or {}).get("continuity_decisions", {}) if isinstance(continuity_analysis, dict) else {}
                 if decisions:
-                    scene_view = load_scene_overview(str(workflow_state_id))
+                    scene_view = load_scene_overview(str(workflow_state_id), service=self.short_term_service)
                     scenes_payload = scene_view.get("scenes") if isinstance(scene_view, dict) else []
                     indexed: Dict[int, Dict[str, Any]] = {}
                     for entry in scenes_payload or []:
@@ -596,7 +595,7 @@ class ScriptWriterAgent(BaseAgent):
                         "completed_scene_numbers": scene_view.get("completed_scene_numbers", []) if isinstance(scene_view, dict) else [],
                         "failed_scene_numbers": scene_view.get("failed_scene_numbers", []) if isinstance(scene_view, dict) else [],
                     }
-                    write_shared_fact(workflow_state_id, "scene_overview", updated_view)
+                    write_shared_fact(workflow_state_id, "scene_overview", updated_view, service=self.short_term_service)
                     self.logger.info("✅ 连续性决策已写回 MAS WM 场景概览")
             except Exception as ce:
                 self.logger.warning(f"连续性结果写回失败：{ce}")
@@ -677,7 +676,7 @@ class ScriptWriterAgent(BaseAgent):
                             char_lib[n] = desc
 
                 # 基于脚本文本标注每个场景
-                scene_view = load_scene_overview(str(workflow_state_id))
+                scene_view = load_scene_overview(str(workflow_state_id), service=self.short_term_service)
                 for scene_entry in (scene_view.get("scenes") or []) if isinstance(scene_view, dict) else []:
                     text = (scene_entry.get('script_text', '') or '') + ' ' + (scene_entry.get('narrative_description', '') or '')
                     present = []
@@ -695,12 +694,12 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception as parse_err:
                             raise AgentError("Failed to parse scene_number during character consistency sync") from parse_err
                         if sn:
-                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
+                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
                             entry = dict(existing_scripts.get(str(sn), {}))
                             entry.update({"characters_present": present, "character_descriptions": descs})
                             merged = dict(existing_scripts)
                             merged[str(sn)] = entry
-                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
+                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
                 self.logger.info("✅ 角色一致性标注已写回 scene_scripts")
             except Exception as ce:
                 self.logger.error(f"角色一致性标注失败: {ce}")
@@ -817,12 +816,12 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception:
                             continue
                         # 将角色提示写到 facts.scene_scripts 下以场景为键
-                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
+                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
                         entry = dict(existing_scripts.get(str(sn), {}))
                         entry.update({"characters_present": present, "character_descriptions": descs})
                         merged = dict(existing_scripts)
                         merged[str(sn)] = entry
-                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
+                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
                 self.logger.info("✅ 角色记忆已写回（concept→WF.scene）")
             except Exception as ce:
                 self.logger.error(f"角色记忆写回失败: {ce}")
@@ -832,7 +831,7 @@ class ScriptWriterAgent(BaseAgent):
             try:
                 # 组装场景文本
                 scene_payload: List[Dict[str, Any]] = []
-                scene_view = load_scene_overview(str(workflow_state_id))
+                scene_view = load_scene_overview(str(workflow_state_id), service=self.short_term_service)
                 for scene_entry in (scene_view.get("scenes") or []) if isinstance(scene_view, dict) else []:
                     scene_payload.append({
                         "scene_number": scene_entry.get('scene_number'),
@@ -856,7 +855,7 @@ class ScriptWriterAgent(BaseAgent):
                             style_hint = sw.strip()
                     if not style_hint:
                         from .utils.memory_helpers import read_shared_fact
-                        sw = read_shared_fact(str(workflow_state_id), "project.style_preference", "")
+                        sw = read_shared_fact(str(workflow_state_id), "project.style_preference", "", service=self.short_term_service)
                         if isinstance(sw, str) and sw.strip():
                             style_hint = sw.strip()
                         elif isinstance(sw, dict):
@@ -965,23 +964,24 @@ class ScriptWriterAgent(BaseAgent):
                             if parts:
                                 descs.append("；".join(parts))
                     if names or descs:
-                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}) or {}
+                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
                         entry = dict(existing_scripts.get(str(sn), {}))
                         merged_names = list(set((entry.get('characters_present', []) or []) + names))
                         merged_descs = list(set((entry.get('character_descriptions', []) or []) + descs))
                         entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
                         merged = dict(existing_scripts)
                         merged[str(sn)] = entry
-                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged)
+                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
                 self.logger.info("✅ 角色分析结果已写回 scene_scripts slot")
 
                 # 将角色一致性快照作为 EPISODIC 记忆写入（无开关，作为系统保障；若记忆不可用则优雅降级）
                 try:
                     wf_id = str(workflow_state_id or "")
                     if wf_id:
-                        from ..services.memory_writer import memory_writer
+                        from ..services.memory_writer import MemoryWriter
                         from ..models.task import TaskType
-                        await memory_writer.write(
+                        writer = MemoryWriter(self._memory_services)
+                        await writer.write(
                             TaskType.SCRIPT_WRITING,
                             workflow_id=str(wf_id),
                             scene_number=None,
@@ -1138,7 +1138,7 @@ class ScriptWriterAgent(BaseAgent):
         try:
             workflow_state_id = input_data.get("workflow_state_id")
             if workflow_state_id:
-                overview = load_scene_overview(str(workflow_state_id))
+                overview = load_scene_overview(str(workflow_state_id), service=self.short_term_service)
                 scenes = overview.get("scenes") if isinstance(overview, dict) else []
                 if scenes:
                     return len(scenes)

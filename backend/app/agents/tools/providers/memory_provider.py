@@ -98,7 +98,7 @@ class MemoryProvider(Protocol):
         ...
 
 
-from ....services.memory_provider import get_memory_services, MemoryServices
+from ....services.memory_provider import MemoryServices
 
 
 class DefaultMemoryProvider:
@@ -108,11 +108,12 @@ class DefaultMemoryProvider:
     异常不在此处捕获，上抛给工具层处理。
     """
 
-    def __init__(self, memory_services: Optional[MemoryServices] = None):
+    def __init__(self, memory_services: MemoryServices):
         from ....core.scene_continuity_memory import get_scene_continuity_memory
 
-        services = memory_services or get_memory_services()
-        self._global_memory = services.global_service
+        if memory_services is None:
+            raise ValueError("memory_services is required for DefaultMemoryProvider")
+        self._global_memory = memory_services.global_service
         self._continuity_memory = get_scene_continuity_memory()
 
     async def retrieve_scene_references(

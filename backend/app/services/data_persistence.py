@@ -17,7 +17,7 @@ from ..core.workflow_state import WorkflowState, SceneData, WorkflowStatus
 from ..models import Task, Scene, Resource, AgentType, ResourceType, SceneType, TaskType, TaskStatus
 from ..core.config import settings
 from ..agents.memory.long_term.snapshots import export_shared_wm_snapshot
-from ..services.memory_provider import get_memory_services, MemoryServices
+from ..services.memory_provider import MemoryServices
 
 
 class DataValidationError(Exception):
@@ -34,9 +34,11 @@ class DataPersistenceService:
     2. MAS兼容性：支持Agent间状态共享和通信
     """
     
-    def __init__(self, memory_services: Optional[MemoryServices] = None):
+    def __init__(self, memory_services: MemoryServices):
         self.logger = self._get_logger()
-        self._memory_services = memory_services or get_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for DataPersistenceService")
+        self._memory_services = memory_services
 
     def _get_logger(self):
         import logging
@@ -119,7 +121,11 @@ class DataPersistenceService:
         """Persist results by reading snapshot from MAS WorkingMemory (facts/scene_outputs)."""
         self.logger.info(f"🗄️ 开始基于 MAS WM 持久化任务 {task_id} 的数据")
         try:
-            snapshot = export_shared_wm_snapshot(task_id, memory_services=self._memory_services)
+            snapshot = export_shared_wm_snapshot(
+                task_id,
+                memory_services=self._memory_services,
+                short_term_service=getattr(self._memory_services, "short_term", None),
+            )
             task = await self._persist_task_from_snapshot(snapshot, db)
             scene_results = await self._persist_scenes_from_snapshot(task, snapshot, db)
             resource_results = await self._persist_resources_from_snapshot(task, snapshot, db)
@@ -781,8 +787,8 @@ class DataPersistenceService:
         pass
 
 
-# 全局服务实例
-data_persistence_service = DataPersistenceService()
+# 全局服务实例（需通过 configure_data_persistence 显式设置）
+data_persistence_service: Optional[DataPersistenceService] = None
 
 
 def configure_data_persistence(memory_services: MemoryServices) -> None:

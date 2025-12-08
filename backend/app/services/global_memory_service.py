@@ -13,19 +13,31 @@ from ..agents.memory.managers import (
     build_memory_management,
     get_default_memory_management,
 )
+from ..agents.memory.services.long_term import SimpleLongTermMemoryService
 
 
 class GlobalMemoryService:
     """System-level facade that coordinates shared slots and long-term stores."""
 
-    def __init__(self, management: MemoryManagement) -> None:
+    def __init__(
+        self,
+        management: MemoryManagement,
+        *,
+        long_term_service: Optional[SimpleLongTermMemoryService] = None,
+    ) -> None:
         self.logger = logging.getLogger("global_memory_service")
         self._management = management
-        self.memory_coordinator = management.memory_coordinator
-        self.memory_manager = management.memory_manager
+        # 底层 manager 仅供内部使用；对外只暴露受控 long_term 接口
+        self._memory_manager = management.memory_manager
+        self._long_term = long_term_service or SimpleLongTermMemoryService(self._memory_manager)
         self.workflow_stats: Dict[str, Any] = {}
         self.logger.info("🧠 Global Memory Service initialised with injected management bundle")
-    
+
+    @property
+    def long_term(self) -> SimpleLongTermMemoryService:
+        """受控长记忆接口，屏蔽底层 MemoryManager。"""
+        return self._long_term
+
     async def store_creative_guidance(
         self,
         workflow_id: str,
@@ -58,7 +70,7 @@ class GlobalMemoryService:
                 "timestamp": datetime.now().isoformat()
             }
             
-            overall_memory_id = await self.memory_manager.store_memory(
+            overall_memory_id = await self._long_term.store_memory(
                 content=overall_guidance,
                 memory_type=MemoryType.CONCEPTUAL,
                 importance=MemoryImportance.HIGH,
@@ -100,7 +112,7 @@ class GlobalMemoryService:
                     "timestamp": datetime.now().isoformat()
                 }
                 
-                scene_memory_id = await self.memory_manager.store_memory(
+                scene_memory_id = await self._long_term.store_memory(
                     content=scene_guidance,
                     memory_type=MemoryType.EPISODIC,
                     importance=MemoryImportance.MEDIUM,
@@ -156,7 +168,7 @@ class GlobalMemoryService:
             }
             
             # 检索整体创意指导
-            overall_memories = await self.memory_manager.retrieve_memories(
+            overall_memories = await self._long_term.retrieve_memories(
                 tags=["creative_direction", "visual_guidance"],
                 memory_type=MemoryType.CONCEPTUAL,
                 task_id=workflow_id,
@@ -170,7 +182,7 @@ class GlobalMemoryService:
             
             # 检索特定场景指导（如果指定了场景编号）
             if scene_number is not None:
-                scene_memories = await self.memory_manager.retrieve_memories(
+                scene_memories = await self._long_term.retrieve_memories(
                     tags=["scene_design", f"scene_{scene_number}"],
                     memory_type=MemoryType.EPISODIC,
                     task_id=workflow_id,
@@ -223,7 +235,7 @@ class GlobalMemoryService:
                 "timestamp": datetime.now().isoformat()
             }
             
-            memory_id = await self.memory_manager.store_memory(
+            memory_id = await self._long_term.store_memory(
                 content=scene_ref_data,
                 memory_type=MemoryType.EPISODIC,
                 importance=MemoryImportance.HIGH,
@@ -263,7 +275,7 @@ class GlobalMemoryService:
             场景参考数据
         """
         try:
-            scene_ref_memories = await self.memory_manager.retrieve_memories(
+            scene_ref_memories = await self._long_term.retrieve_memories(
                 tags=["scene_references", f"scene_{scene_number}"],
                 memory_type=MemoryType.EPISODIC,
                 task_id=workflow_id,
@@ -330,7 +342,7 @@ class GlobalMemoryService:
         """获取工作流记忆统计信息"""
         try:
             # 从memory manager获取统计
-            memory_stats = await self.memory_manager.get_memory_stats()
+            memory_stats = await self._long_term.get_memory_stats()
             
             # 组合工作流特定统计
             workflow_specific = self.workflow_stats.get(workflow_id, {})

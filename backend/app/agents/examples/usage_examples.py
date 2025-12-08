@@ -7,7 +7,8 @@ import json
 from typing import Dict, Any
 
 from ..tools.tool_registry import get_tool_registry
-from ..memory.long_term.manager import MemoryManager
+from ..memory.services.long_term import SimpleLongTermMemoryService
+from ..services.memory_provider import build_memory_services
 from ..prompts.template_manager import get_template_manager
 from .enhanced_concept_planner import EnhancedConceptPlannerAgent
 
@@ -55,21 +56,19 @@ async def demonstrate_memory_usage():
     """Demonstrate memory management"""
     print("\n=== Memory Usage Example ===")
     
-    # Create memory manager
-    memory_manager = MemoryManager(config={
-        "short_term_ttl": 3600,
-        "enable_consolidation": False  # Disable for demo
-    })
+    # Create long-term memory facade via injected services (no global singletons)
+    services = build_memory_services()
+    memory_service = services.long_term
     
     # Store some memories
-    memory_id1 = await memory_manager.store_memory(
+    memory_id1 = await memory_service.store_memory(
         content="This is a test memory about video generation",
         tags=["test", "video", "generation"],
         agent_id="demo_agent"
     )
     print(f"Stored memory 1: {memory_id1}")
     
-    memory_id2 = await memory_manager.store_memory(
+    memory_id2 = await memory_service.store_memory(
         content="Another memory about creative concepts",
         tags=["test", "creative", "concepts"],
         agent_id="demo_agent",
@@ -78,7 +77,7 @@ async def demonstrate_memory_usage():
     print(f"Stored memory 2: {memory_id2}")
     
     # Search memories
-    memories = await memory_manager.search_memories(
+    memories = await memory_service.search_memories(
         query="video creative",
         agent_id="demo_agent",
         limit=5
@@ -88,7 +87,7 @@ async def demonstrate_memory_usage():
         print(f"  - {memory.content[:50]}... (tags: {memory.tags})")
     
     # Get statistics
-    stats = await memory_manager.get_memory_stats()
+    stats = await memory_service.get_memory_stats()
     print(f"Memory stats: {stats}")
 
 

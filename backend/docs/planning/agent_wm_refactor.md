@@ -6,22 +6,23 @@
 - 虽已引入存储抽象（ShortTermMemoryStore）与领域适配器（VideoMemoryAdapter），但访问路径仍绑定单例，抽象层与应用层间缺少注入封装。
 
 ## 当前状态校准
-- ✅ MemoryServices dataclass 已存在，但缺少短期服务字段。
-- ✅ WorkingMemoryService 已支持 store_factory，ShortTermMemoryStore 抽象已落地。
+- ✅ MemoryServices dataclass 已补充 short_term 字段，短期记忆仅支持注入（无全局回退）。
+- ✅ WorkingMemoryService 支持 store_factory，ShortTermMemoryStore 抽象已落地；单例 registry 已移除/禁用。
 - ✅ Orchestrator 在构造各 Agent 时注入同一份 memory_services。
-- ❌ BaseAgent 的短期记忆访问仍走全局单例（base.py:166/189）。
-- ❌ memory_helpers、快照导出等辅助模块仍通过全局单例获取 WM。
-- ❌ 尚未提供注入式短期服务字段，导致注入路径与全局路径并存。
+- ✅ BaseAgent 的短期记忆访问已走注入路径；全局单例引用已清理。
+- ✅ MemoryServices 不再暴露 management/coordinator；GlobalMemoryService 不再持有/暴露 coordinator，抽象层仅提供受控 Facade（long_term/业务方法）。
+- ✅ Agent 迭代状态视图已实现并注入；静态守护/冒烟用例已添加并本地通过。
 
 ## 目标
-- 短期记忆通过注入的 WorkingMemoryService/MemoryServices 管理，移除硬编码单例依赖，保持 MAS/Agent 单一通道（scope 区分）。
-- 记忆模型与应用层解耦：Agent 通过受保护接口/Helper 访问，不直接暴露底层服务句柄；scope 继续用 `mas:{wf_id}` / `agent:{wf_id}:{agent}`。
+- 短期记忆仅通过注入的 WorkingMemoryService/MemoryServices 管理，无单例回退，保持 MAS/Agent 单一通道（scope 区分）。
+- 记忆模型与应用层解耦：Agent 通过受控接口/Helper 访问，不直接暴露底层服务句柄；scope 继续用 `mas:{wf_id}` / `agent:{wf_id}:{agent}`。
 - 支持可替换存储后端：ShortTermMemoryStore 抽象 + store_factory 注入，默认内存后端，可按需替换。
+- 长期记忆同样通过受控 Facade/Helper 暴露，隐藏 MemoryManager/Coordinator 等实现细节，便于替换与治理。
 
 ## 分层与角色
-- **基础实现层**：短期存储后端（ShortTermMemoryStore 及实现，如 in_memory；slot 等可选后端需适配后启用）。
-- **抽象层**：WorkingMemory 模型 + 领域适配器（VideoMemoryAdapter 等）；MemoryServices 持有短期/长期服务实例。
-- **应用层**：Agent/工具/编排，通过注入的服务/Helper 访问 WM，不触碰存储实现；MAS/Agent 作用域由 scope 管理。
+- **基础实现层**：纯存储实现（ShortTermMemoryStore 等），只负责数据持久/缓存，不承载记忆策略或领域逻辑。
+- **抽象/服务层**：记忆服务接口与 Facade（WorkingMemoryService、长记忆服务接口、领域适配器等），负责策略/校验/接口统一，屏蔽存储细节；MemoryServices 聚合短期/长期服务。
+- **应用层**：Agent/工具/编排，仅通过注入的抽象接口/Facade/Helper 访问记忆，不直接依赖底层存储或管理器；作用域仍用 `mas:{wf_id}` / `agent:{wf_id}:{agent}`。
 
 ## 重构方案（WM 相关）
 1) **短期记忆注入化（无过渡、移除全局路径）**
@@ -41,22 +42,22 @@
 - Orchestrator 注入已完成，保持现有构造逻辑，但不再同步/写入全局。
 
 ## 行动清单（分阶段/模块/优先级）
-- **Phase 1（P0，短期服务注入）**
-  - backend/app/services/memory_provider.py：MemoryServices dataclass 新增 short_term 字段；`build_memory_services` 构造 short_term，移除 `set_working_memory_service` 调用。
-  - backend/app/agents/base.py：`wm`/`memory_write` 改用注入的 short_term_service，清理全局单例引用。
-  - backend/app/agents/orchestrator.py：初始化 MAS/Agent WM 时改用注入的 short_term_service，不再调用全局单例。
-  - 覆盖基础单测：BaseAgent 在无全局单例时可正常读取/写入 WM；自定义 store_factory 能被注入。
-- **Phase 2（P1，辅助模块去全局）**
-  - backend/app/agents/utils/memory_helpers.py：改为接受 MemoryServices/WorkingMemoryService（参数或构造注入，必填），删除全局单例使用；更新调用方。
-  - backend/app/agents/memory/long_term/snapshots.py 及工具 provider：同上，改为注入获取 WM。
-  - 运行/补充集成测试，验证无全局 WM 依赖下的快照导出与工具使用。
-- **Phase 3（P1，守护与验证）**
-  - 静态检查：全局搜索生产路径不再出现 `get_working_memory_service` 引用；删除 `memory.short_term.registry` 的生产导出（保留时直接抛异常，防止误用）。
-  - 清理 `memory/short_term/__init__.py` 等 re-export 入口，避免新代码误用单例。
-  - 覆盖工厂替换测试：短期存储切换（内存 → 自定义后端）不影响 Agent/辅助模块。
-  - CI 增加无全局单例模式下的冒烟用例（可通过禁用 registry 默认实例来验证）。
-- **Phase 4（P2，可选收敛）**
-  - 收敛 BaseAgent 公开的长记忆句柄（memory_manager 等）：改为受控 helper/接口，只保留 MemoryServices 作为注入入口，避免子类直接操作底层管理器。
+- **Phase 1（P0，已完成：短期注入化 + 移除单例回退）**
+  - MemoryServices 补充 short_term，`build_memory_services` 构造短期服务，不再设置全局单例。
+  - BaseAgent/Orchestrator/Helpers/快照/工具 provider 全部改为注入路径，删除全局引用；`memory.short_term.registry` 生产导出已删除/禁用。
+  - ContextAssembler 默认实例移除，必须显式构造传入 memory_services。
+- **Phase 2（P1，已完成：长记忆封装与调用迁移）**
+  - ✅ 定义/强化长记忆 Facade/Helper（服务层暴露抽象接口，隐藏 MemoryManager/Coordinator 细节）。
+  - ✅ 迁移调用方：MemoryTool、MemoryWriter、GlobalMemoryService、BaseAgent 内部 helper 改用 Facade；BaseAgent 兼容 property 已删除，后续仅暴露受控接口。
+  - ✅ MemoryServices 仅暴露抽象接口（global/long_term/short_term）；management/coordinator 已从注入包移除，GlobalMemoryService 内部私有化 coordinator 且不暴露 Slot API。
+- **Phase 3（P1，已完成：Agent 视图与守护）**
+  - ✅ agent_scope 迭代状态视图：已实现统计/观测快照并由 Orchestrator 注入；字段聚焦迭代计数、场景完成/失败/重试计数、错误/重试热点等汇总指标，明细仍在 agent-scope WM。
+  - ✅ 静态守护：已添加静态检查用例（禁用单例/MemoryManager 暴露）和纯注入冒烟用例，当前在本地执行。
+  - 工厂替换测试：短期/长期后端替换仍可运行核心工作流（待补）。
+- **Phase 4（P2，收尾与文档）**
+  - ✅ BaseAgent 兼容 property 删除；示例/样例已改用 Facade。应用层无 MemoryManager 直接引用，保留实现层导出供内部使用。
+  - ✅ 文档同步：标记单例移除、长记忆封装与视图补全的完成度，明确受控接口使用规范；Coordinator/slot 概念不对外暴露。
+  - 如无引用，彻底删除 registry/默认导出；测试 stub 保留在 testutils，不进入生产包。
 
 ## 风险与注意事项
 - 确保 MAS/Agent scope 唯一性不变（mas:{wf} / agent:{wf}:{agent}），仅替换服务来源。

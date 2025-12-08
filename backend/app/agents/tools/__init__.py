@@ -82,7 +82,7 @@ def register_default_tools():
     tool_registry.register_tool(ConsistencyTool)
     tool_registry.register_tool(VideoPromptBuilderTool)
     # Register shared memory capability
-    tool_registry.register_tool(MemoryTool)
+    tool_registry.register_tool(MemoryTool, auto_load=False)
     # Register orchestrator control
     tool_registry.register_tool(OrchestratorControlTool)
 

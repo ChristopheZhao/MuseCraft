@@ -1,9 +1,7 @@
-"""Memory service implementations."""
+"""Memory service implementations (facades)."""
 
-from .coordinator import MemoryCoordinator
 from .long_term import SimpleLongTermMemoryService
 
 __all__ = [
-    "MemoryCoordinator",
     "SimpleLongTermMemoryService",
 ]

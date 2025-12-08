@@ -25,11 +25,10 @@ from .prompts.template_manager import get_template_manager
 from .utils.tool_contracts import extract_contract_slot_writes
 from .utils.obs_builder import derive_action_facts
 from .utils.memref import walk_memref
-from ..services.memory_provider import get_memory_services, MemoryServices
+from ..services.memory_provider import MemoryServices
 from .memory.short_term import (
-    get_working_memory_service,
-    invalidate_working_memory as _working_memory_invalidate,
     MemoryNotInitializedError,
+    WorkingMemoryService,
 )
 from .utils.memory_helpers import agent_scope
 
@@ -103,12 +102,11 @@ class BaseAgent(ABC):
         
         # 记忆管理器 - 🧠 MAS 共享记忆
         if memory_services is None:
-            memory_services = get_memory_services()
+            raise AgentError("MemoryServices is required (no global fallback).")
         self._memory_services: MemoryServices = memory_services
-        self.memory_manager = memory_services.global_service.memory_manager
-        self.memory_service = memory_services.global_service
-        self.memory_coordinator = memory_services.coordinator
-        self.long_term_memory = memory_services.long_term
+        # 长记忆/全局记忆接口（抽象层）
+        self._global_memory = memory_services.global_service
+        self._long_term_service = memory_services.long_term
         
         # 统一提示词管理器 - 支持YAML配置和模板渲染
         from ..core.prompt_manager import get_prompt_manager
@@ -148,6 +146,17 @@ class BaseAgent(ABC):
     # --- Iteration control state helpers: removed. Agent保持无状态；仅由 WM 承载事实 ---
 
     # --- Working Memory helpers（短期记忆服务） ----------------------------
+
+    @property
+    def short_term_service(self) -> WorkingMemoryService:
+        """Return the injected WorkingMemoryService (fail-fast if not injected)."""
+        if not hasattr(self._memory_services, 'short_term') or self._memory_services.short_term is None:
+            raise AgentError(
+                f"WorkingMemoryService not injected for agent {self.agent_name}. "
+                "Ensure MemoryServices includes short_term field."
+            )
+        return self._memory_services.short_term
+
     def _cache_iteration_memory(self, wm: Any, workflow_state_id: Optional[str] = None):
         """Cache WorkingMemory handle for quick access (no state beyond reference)."""
         self._wm_cache = wm
@@ -166,7 +175,7 @@ class BaseAgent(ABC):
                 f"WorkingMemory requested for agent {self.agent_name}, but workflow_state_id is not set."
             )
         scope = agent_scope(wf_id, self.agent_name)
-        service = get_working_memory_service()
+        service = self.short_term_service
         try:
             wm = service.get(str(wf_id), scope)
         except MemoryNotInitializedError as exc:
@@ -189,7 +198,7 @@ class BaseAgent(ABC):
         wf_id = self.workflow_state_id
         if not wf_id:
             raise AgentError("Cannot write WorkingMemory without workflow_state_id")
-        service = get_working_memory_service()
+        service = self.short_term_service
         service.memory_write(
             workflow_state_id=str(wf_id),
             scope=agent_scope(str(wf_id), self.agent_name),
@@ -207,7 +216,8 @@ class BaseAgent(ABC):
         wf_id = self.workflow_state_id
         self._wm_cache = None
         if invalidate and wf_id:
-            _working_memory_invalidate(agent_scope(wf_id, self.agent_name), wf_id)
+            scope = agent_scope(wf_id, self.agent_name)
+            self.short_term_service.reset(scope, wf_id)
 
     # === 预执行适配层（MemRef 解引用） ===
     def _pre_execute_enrich_args(self, function_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -313,9 +323,9 @@ class BaseAgent(ABC):
                 "tool": tool or "",
                 "metadata": meta,
             }
-            from .utils.memory_helpers import get_mas_working_memory
+            from .utils.memory_helpers import mas_scope
 
-            wm = get_mas_working_memory(str(wf_id))
+            wm = self.short_term_service.get(str(wf_id), mas_scope(str(wf_id)))
             bucket = wm.get("artifacts", [])
             if not isinstance(bucket, list):
                 bucket = []
@@ -1602,10 +1612,10 @@ class BaseAgent(ABC):
             "critical": MemoryImportance.CRITICAL
         }
         
-        if self.memory_manager is None:
+        if self._long_term_service is None:
             return "memory_disabled"
         
-        memory_id = await self.memory_manager.store_memory(
+        memory_id = await self._long_term_service.store_memory(
             content=content,
             memory_type=MemoryType.SHORT_TERM,
             importance=importance_map.get(importance, MemoryImportance.MEDIUM),
@@ -1623,14 +1633,15 @@ class BaseAgent(ABC):
         limit: int = 10
     ) -> List[Any]:
         """Retrieve relevant memories"""
-        if self.memory_manager is None:
+        if self._long_term_service is None:
             return []
         
-        memories = await self.memory_manager.search_memories(
+        memories = await self._long_term_service.search_memories(
             query=query,
             tags=tags,
             agent_id=self.agent_name,
-            limit=limit
+            limit=limit,
+            task_id=self.workflow_state_id,
         )
         
         return [memory.content for memory in memories]
@@ -1653,10 +1664,10 @@ class BaseAgent(ABC):
     
     async def get_memory_stats(self) -> Dict[str, Any]:
         """Get memory usage statistics"""
-        if self.memory_manager is None:
+        if self._long_term_service is None:
             return {"status": "disabled"}
         
-        return await self.memory_manager.get_memory_stats()
+        return await self._long_term_service.get_memory_stats()
     
     # 🚀 MAS记忆共享机制 - Phase 1.2新增
     async def store_creative_guidance(
@@ -1665,7 +1676,7 @@ class BaseAgent(ABC):
         concept_plan: Dict[str, Any]
     ) -> bool:
         """存储创意指导供其他Agent使用"""
-        return await self.memory_service.store_creative_guidance(
+        return await self._global_memory.store_creative_guidance(
             workflow_id, concept_plan, self.agent_name
         )
     
@@ -1675,7 +1686,7 @@ class BaseAgent(ABC):
         scene_number: Optional[int] = None
     ) -> Dict[str, Any]:
         """检索创意指导信息"""
-        return await self.memory_service.retrieve_creative_guidance(
+        return await self._global_memory.retrieve_creative_guidance(
             workflow_id, scene_number, self.agent_name
         )
     
@@ -1686,7 +1697,7 @@ class BaseAgent(ABC):
         scene_references: Dict[str, Any]
     ) -> bool:
         """存储场景参考数据供其他Agent使用"""
-        return await self.memory_service.store_scene_references(
+        return await self._global_memory.store_scene_references(
             workflow_id, scene_number, scene_references, self.agent_name
         )
     
@@ -1696,17 +1707,13 @@ class BaseAgent(ABC):
         scene_number: int
     ) -> Dict[str, Any]:
         """检索场景参考数据"""
-        return await self.memory_service.retrieve_scene_references(
+        return await self._global_memory.retrieve_scene_references(
             workflow_id, scene_number, self.agent_name
         )
     
     async def _cleanup_resources(self):
         """Cleanup agent resources"""
         try:
-            # Close memory manager
-            if self.memory_manager is not None and hasattr(self.memory_manager, 'close'):
-                await self.memory_manager.close()
-            
             # Cleanup tools
             for tool in self._available_tools.values():
                 if hasattr(tool, 'cleanup'):

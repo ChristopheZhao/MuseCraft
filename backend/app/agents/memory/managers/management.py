@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from ..long_term.manager import MemoryManager
 from ..long_term.stores import BaseMemoryStore, DictMemoryStore, SQLiteMemoryStore
-from ..services import MemoryCoordinator
+from ..services.coordinator import MemoryCoordinator
 from ..storage.backend_factory import create_workflow_backend
 
 _LOGGER = logging.getLogger("memory.management")

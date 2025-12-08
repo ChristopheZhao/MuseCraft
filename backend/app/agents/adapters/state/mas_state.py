@@ -9,14 +9,17 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from ...utils.memory_helpers import get_mas_working_memory
 
+if TYPE_CHECKING:
+    from ...memory.short_term.service import WorkingMemoryService
 
-def build_mas_state_view(workflow_id: str) -> Dict[str, Any]:
+
+def build_mas_state_view(workflow_id: str, *, service: WorkingMemoryService) -> Dict[str, Any]:
     """Return a lightweight MAS workflow state view derived from WM facts."""
-    wm = get_mas_working_memory(str(workflow_id))
+    wm = get_mas_working_memory(str(workflow_id), service=service)
     overview = wm.get("scene_overview", {}) if wm else {}
     outputs = wm.get("scene_outputs", {}) if wm else {}
     wf_meta = wm.get("workflow_overview", {}) if wm else {}

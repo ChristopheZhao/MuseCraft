@@ -8,11 +8,13 @@ Shared WM Snapshot Exporter（长期记忆视图）
 - 为数据持久化与日志分析提供统一入口
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..short_term.workflow_facts import WorkflowFactStoreError
-from ....services.memory_provider import get_memory_services, MemoryServices
-from ..short_term import get_working_memory_service
+from ....services.memory_provider import MemoryServices
+
+if TYPE_CHECKING:
+    from ..short_term.service import WorkingMemoryService
 
 
 def _coerce_int(v: Any, default: int = 0) -> int:
@@ -29,10 +31,18 @@ def _coerce_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
-def export_shared_wm_snapshot(task_id: str, memory_services: Optional[MemoryServices] = None) -> Dict[str, Any]:
+def export_shared_wm_snapshot(
+    task_id: str,
+    memory_services: Optional[MemoryServices] = None,
+    short_term_service: Optional["WorkingMemoryService"] = None,
+) -> Dict[str, Any]:
     """导出指定任务在 MAS WorkingMemory 中的整体快照（基于 WM facts/scene_outputs）。"""
-    services = memory_services or get_memory_services()
-    wm_service = get_working_memory_service()
+    wm_service = short_term_service or (getattr(memory_services, "short_term", None) if memory_services else None)
+    if wm_service is None:
+        raise WorkflowFactStoreError(
+            "WorkingMemoryService not available for snapshot export; "
+            "pass memory_services with short_term or short_term_service explicitly."
+        )
     mas_wm = wm_service.get_optional(scope=f"mas:{task_id}", workflow_state_id=str(task_id))
     if mas_wm is None:
         raise WorkflowFactStoreError(f"MAS WorkingMemory not initialised for workflow {task_id}")
@@ -210,7 +220,7 @@ def export_shared_wm_snapshot(task_id: str, memory_services: Optional[MemoryServ
             "content_elements": content_elements,
         },
         "scenes": scenes,
-        "failures": {int(k): v for k, v in (view.failed or {}).items() if k is not None},
+        "failures": {},  # Bug fix: view.failed was undefined; failures no longer tracked here
         "final_video": final_video,
         "artifacts": sanitized,
     }

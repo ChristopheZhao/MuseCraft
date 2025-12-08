@@ -146,7 +146,7 @@ class AudioGeneratorAgent(ReActAgent):
         total_duration = 0.0
         try:
             from .utils.memory_helpers import get_mas_working_memory
-            overview = get_mas_working_memory(wf_id).get("scene_overview", {}) or {}
+            overview = get_mas_working_memory(wf_id, service=self.short_term_service).get("scene_overview", {}) or {}
             tl = []
             cursor = 0.0
             for scene in overview.get("scenes", []) or []:
@@ -166,7 +166,7 @@ class AudioGeneratorAgent(ReActAgent):
         style_name = ""
         try:
             from .utils.memory_helpers import read_shared_fact
-            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {}) or {}
+            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {}, service=self.short_term_service) or {}
             if isinstance(concept_plan, dict):
                 sg = concept_plan.get("intelligent_style_design") or {}
                 style_name = (sg or {}).get("style_name", "")
@@ -199,7 +199,7 @@ class AudioGeneratorAgent(ReActAgent):
             pass
         stored_results: List[Dict[str, Any]] = []
         if ok:
-            shared_wm = get_mas_working_memory(wf_id) if wf_id else None
+            shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
             stored_results = await persist_scene_outputs(
                 artifacts=[
                     {

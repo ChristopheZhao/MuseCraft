@@ -178,7 +178,7 @@ class ImageGeneratorAgent(ReActAgent):
 
     async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         wf_id = str(self.workflow_state_id or "")
-        shared_wm = get_mas_working_memory(wf_id) if wf_id else None
+        shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
         return await persist_scene_outputs(
             executed_calls=executed_calls,
             kind="image",
