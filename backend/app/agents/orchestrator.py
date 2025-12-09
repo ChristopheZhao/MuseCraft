@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from .base import BaseAgent, AgentError
 from ..models import Task, TaskStatus, AgentType
 from .adapters.memory_views import build_media_agent_context, build_image_generation_context
-from ..services.data_persistence import data_persistence_service, configure_data_persistence
 from ..services.memory_provider import build_memory_services, MemoryServices
 # legacy WM singleton removed - use injected self._memory_services.short_term
 from .utils.memory_helpers import (
@@ -51,7 +50,6 @@ class OrchestratorAgent(BaseAgent):
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         self._llm_policy = LLMPolicyManager(policy_file)
         self._memory_services = memory_services or build_memory_services()
-        configure_data_persistence(self._memory_services)
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="orchestrator",
@@ -501,60 +499,74 @@ class OrchestratorAgent(BaseAgent):
                     raise AgentError(error_msg) from e
             
             # Workflow completed successfully
-            await self._update_progress(90, "Workflow completed, persisting data", db)
+            await self._update_progress(90, "Workflow completed, dispatching completion event", db)
             try:
                 self._update_workflow_overview(
                     wf_id,
                     {
-                        "status": "PERSISTING",
+                        "status": "PERSISTING",  # 保持概要一致，后续事件化由监听器处理
                         "progress": 90,
-                        "current_step": "Persisting data to database",
+                        "current_step": "Dispatching completion event",
                     },
                     raise_error=True,
                 )
             except AgentError as wm_err:
                 raise AgentError(f"Failed to mark workflow_overview as PERSISTING: {wm_err}") from wm_err
             
-            # 使用DataPersistenceService统一持久化数据
-            self.logger.info("💾 开始持久化工作流数据到数据库...")
-            persistence_result = await data_persistence_service.persist_from_mas_wm(wf_id, db)
+            # 发布完成事件（监听器异步落库），不再同步持久化
+            final_url = workflow_results.get("video_composer", {}).get("final_video_url")
             
-            if persistence_result["status"] == "success":
-                # Update task status
-                task.status = TaskStatus.COMPLETED
-                task.update_progress("Completed", 100)
-                try:
-                    ov = self._load_workflow_overview(wf_id)
-                    final_url = workflow_results.get("video_composer", {}).get("final_video_url")
-                    ov.update(
-                        {
-                            "status": "COMPLETED",
-                            "progress": 100,
-                            "current_step": "Workflow completed",
-                            "outputs": {
-                                "final_video_url": final_url
-                            },
-                        }
-                    )
-                    self._store_workflow_overview(wf_id, ov)
-                except AgentError as wm_err:
-                    raise AgentError(f"Failed to update workflow_overview on completion: {wm_err}") from wm_err
+            # 提取最小持久化 Payload（场景/资源索引），保证 DB 闭环
+            persistence_data = self._build_persistence_payload(workflow_results)
+            
+            try:
+                from .adapters.state.mas_state import build_mas_state_view
+                mas_state = build_mas_state_view(str(wf_id), service=self.short_term_service)
+            except Exception:
+                mas_state = {}
+
+            task.status = TaskStatus.COMPLETED
+            task.update_progress("Completed", 100)
+            try:
+                ov = self._load_workflow_overview(wf_id)
+                ov.update(
+                    {
+                        "status": "COMPLETED",
+                        "progress": 100,
+                        "current_step": "Workflow completed",
+                        "outputs": {"final_video_url": final_url},
+                    }
+                )
+                self._store_workflow_overview(wf_id, ov)
+            except AgentError as wm_err:
+                raise AgentError(f"Failed to update workflow_overview on completion: {wm_err}") from wm_err
+
+            try:
+                # 合并 persistence_data 到事件 payload
+                event_payload = {
+                    "state": "workflow_completed",
+                    "status": "COMPLETED",
+                    "final_video_url": final_url,
+                    "mas_state": mas_state,
+                }
+                event_payload.update(
+                    {
+                        "scenes": persistence_data.get("scenes") or [],
+                        "resources": persistence_data.get("resources") or [],
+                    }
+                )
                 
-                self.logger.info(f"✅ 工作流和数据持久化完成: {persistence_result}")
-            else:
-                # 持久化失败，但工作流本身成功了
-                task.status = TaskStatus.COMPLETED  # 仍然标记为完成
-                task.add_error(f"数据持久化部分失败: {persistence_result.get('error', '')}")
-                try:
-                    ov = self._load_workflow_overview(wf_id)
-                    warn = list(ov.get("warnings") or [])
-                    warn.append("数据持久化部分失败，但工作流成功完成")
-                    ov["warnings"] = warn[-5:]
-                    self._store_workflow_overview(wf_id, ov)
-                except AgentError as wm_err:
-                    raise AgentError(f"Failed to record persistence warning in shared memory: {wm_err}") from wm_err
-                
-                self.logger.warning(f"⚠️ 工作流成功但持久化失败: {persistence_result}")
+                await publish_event(
+                    kind=EventKind.STATE,
+                    payload=event_payload,
+                    task_id=str(task.task_id),
+                    task_db_id=self._task_db_id,
+                    workflow_state_id=wf_id,
+                    agent_type=self.agent_type.value,
+                    agent_name=self.agent_name,
+                )
+            except Exception as evt_err:
+                self.logger.warning("Failed to publish workflow_completed event: %s", evt_err)
             
             # Send final WebSocket notification
             await self._send_workflow_completion(task, workflow_results)
@@ -569,7 +581,7 @@ class OrchestratorAgent(BaseAgent):
                 "results": workflow_results,
                 "final_video_url": final_url,
                 "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
-                "persistence_status": persistence_result["status"],
+                "persistence_status": "deferred",
                 "workflow_state_id": wf_id
             }
             
@@ -586,12 +598,22 @@ class OrchestratorAgent(BaseAgent):
             except AgentError as wm_err:
                 raise AgentError(f"Failed to record workflow failure in shared memory: {wm_err}") from wm_err
             
-            # 尝试持久化失败状态（尽力而为）
             try:
-                await data_persistence_service.persist_from_mas_wm(wf_id, db)
-                self.logger.info("❌ 工作流失败状态已持久化")
-            except Exception as persist_error:
-                self.logger.error(f"❌❌ 连持久化失败状态都失败了: {str(persist_error)}")
+                await publish_event(
+                    kind=EventKind.STATE,
+                    payload={
+                        "state": "workflow_failed",
+                        "status": "FAILED",
+                        "error": error_msg,
+                    },
+                    task_id=str(task.task_id),
+                    task_db_id=self._task_db_id,
+                    workflow_state_id=wf_id,
+                    agent_type=self.agent_type.value,
+                    agent_name=self.agent_name,
+                )
+            except Exception as evt_err:
+                self.logger.warning("Failed to publish workflow_failed event: %s", evt_err)
             await self._send_workflow_failure(task, error_msg)
             
             raise AgentError(error_msg) from e
@@ -604,6 +626,96 @@ class OrchestratorAgent(BaseAgent):
                     wf_id,
                     cleanup_err,
                 )
+
+    def _build_persistence_payload(self, workflow_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract minimal scenes/resources from workflow_results for persistence (lightweight only)."""
+        scenes = []
+        resources = []
+
+        # Scenes (light fields) from concept planner
+        cp = workflow_results.get("concept_planner", {}).get("concept_plan")
+        raw_scenes = cp.get("scenes") if isinstance(cp, dict) else []
+        if isinstance(raw_scenes, list):
+            for s in raw_scenes:
+                if not isinstance(s, dict):
+                    continue
+                scenes.append(
+                    {
+                        "scene_number": s.get("scene_number"),
+                        "title": s.get("title"),
+                        "description": s.get("description"),
+                        "duration": s.get("duration"),
+                    }
+                )
+
+        # Video resources
+        vid_res = workflow_results.get("video_generator", {})
+        gen_results = vid_res.get("generation_results") or []
+        for gr in gen_results:
+            if isinstance(gr, dict) and (gr.get("video_url") or gr.get("video_path")):
+                resources.append(
+                    {
+                        "scene_number": gr.get("scene_number"),
+                        "type": "video",
+                        "resource_type": "video",
+                        "url": gr.get("video_url"),
+                        "path": gr.get("video_path"),
+                        "filename": f"scene_{gr.get('scene_number')}_video.mp4",
+                    }
+                )
+
+        # Image resources
+        img_res = workflow_results.get("image_generator", {})
+        img_gen_results = img_res.get("generation_results") or []
+        for gr in img_gen_results:
+            if isinstance(gr, dict) and (gr.get("image_url") or gr.get("image_path")):
+                resources.append(
+                    {
+                        "scene_number": gr.get("scene_number"),
+                        "type": "image",
+                        "resource_type": "image",
+                        "url": gr.get("image_url"),
+                        "path": gr.get("image_path"),
+                        "filename": f"scene_{gr.get('scene_number')}_image.jpg",
+                    }
+                )
+
+        # Audio/Voice resources (if available)
+        voice_res = workflow_results.get("voice_synthesizer", {})
+        voice_results = voice_res.get("generation_results") or []
+        for gr in voice_results:
+            if isinstance(gr, dict) and (gr.get("audio_url") or gr.get("audio_path")):
+                resources.append(
+                    {
+                        "scene_number": gr.get("scene_number"),
+                        "type": "audio",
+                        "resource_type": "audio",
+                        "url": gr.get("audio_url"),
+                        "path": gr.get("audio_path"),
+                        "filename": f"scene_{gr.get('scene_number')}_audio.mp3",
+                    }
+                )
+
+        # Final video
+        vc_res = workflow_results.get("video_composer", {})
+        final_url = vc_res.get("final_video_url")
+        final_path = vc_res.get("final_video_path")
+        if final_url or final_path:
+            resources.append(
+                {
+                    "scope": "task",
+                    "kind": "final_video",
+                    "resource_type": "video",
+                    "url": final_url,
+                    "path": final_path,
+                    "filename": "final_video.mp4",
+                }
+            )
+
+        return {
+            "scenes": scenes,
+            "resources": resources,
+        }
 
     async def _decide_next_step_llm(self, current_agent: AgentType, agent_output: Dict[str, Any], workflow_id: str) -> str:
         """Use a lightweight LLM + orchestrator_control tool to decide next step.

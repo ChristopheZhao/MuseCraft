@@ -5,9 +5,10 @@ import os
 from .models import Event
 
 
-class FileEpisodicSink:
+class FileTraceSink:
     """
-    简单的轨迹落盘：将事件写为 JSONL，便于后续分析。非阻塞，失败时记录 warning。
+    简单的事件轨迹落盘：将事件写为 JSONL，便于后续分析/回放。
+    仅用于调试/诊断，不属于记忆或审计主链路；默认可关闭。
     """
 
     def __init__(self, path: str):
@@ -19,5 +20,5 @@ class FileEpisodicSink:
         try:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event.as_dict(), ensure_ascii=False) + "\n")
-        except Exception as exc:
-            self.logger.warning("Failed to write episodic event: %s", exc)
+        except Exception as exc:  # pragma: no cover - best effort
+            self.logger.warning("Failed to write trace event: %s", exc)

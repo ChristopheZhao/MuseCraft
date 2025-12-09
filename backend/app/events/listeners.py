@@ -3,7 +3,7 @@ import logging
 from typing import Awaitable, Callable, Optional, Sequence
 
 from .models import Event, EventKind
-from .sinks import FileEpisodicSink
+from .sinks import FileTraceSink
 
 try:
     from ..services.websocket import WebSocketManager
@@ -105,15 +105,17 @@ class PersistenceListener(EventListener):
             await result
 
 
-def build_file_episodic_listener(log_path: str) -> EventListener:
-    sink = FileEpisodicSink(log_path)
-    return EpisodicListener(sink)
+def build_file_trace_listener(log_path: str) -> EventListener:
+    """调试用：将事件流写入本地 JSONL 文件，不参与记忆/审计主链路。"""
+    sink = FileTraceSink(log_path)
+    return TraceLogListener(sink)
 
 
-class EpisodicListener(EventListener):
+class TraceLogListener(EventListener):
     """
-    轨迹监听器：将事件写入长期轨迹存储（日志/对象存储等）。
-    writer 可是同步或异步函数；未配置时降级为 debug。
+    调试轨迹监听器：将事件写入文件/自定义 writer。
+    不属于记忆或审计链路，默认关闭，按需调试使用。
+    writer 可同步或异步；未配置时降级为 debug。
     """
 
     def __init__(self, writer: Optional[Callable[[Event], Optional[Awaitable[None]]]] = None):
