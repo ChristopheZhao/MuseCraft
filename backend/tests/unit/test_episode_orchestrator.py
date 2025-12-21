@@ -1,5 +1,11 @@
+import logging
+import types
+
+import pytest
+
 from app.agents.episode_orchestrator import EpisodeOrchestratorAgent
 from app.core.story_plan import (
+    CharacterProfile,
     EpisodePlan,
     StoryPlan,
     ProjectState,
@@ -76,3 +82,99 @@ def test_build_episode_payload_uses_episode_context(monkeypatch):
     assert ctx.get("character_ids") == ["zhao_zilong"]
 
     project_state_repository.remove("pid")
+
+
+@pytest.mark.asyncio
+async def test_project_character_reference_images_generated_and_idempotent():
+    agent = object.__new__(EpisodeOrchestratorAgent)
+    agent.logger = logging.getLogger("test.episode_orchestrator")
+
+    calls = {"image": 0, "upload": 0}
+
+    class _StubTool:
+        def __init__(self, kind: str):
+            self._kind = kind
+
+        async def execute(self, tool_input):
+            action = tool_input.get("action")
+            params = tool_input.get("parameters") or {}
+            if self._kind == "image":
+                calls["image"] += 1
+                scene_number = str(params.get("scene_number") or "")
+                ref_kind = scene_number.split(":")[-1] if ":" in scene_number else "unknown"
+                return types.SimpleNamespace(
+                    success=True,
+                    result={
+                        "image_url": f"https://example.com/{ref_kind}.png",
+                        "generated_prompt": params.get("prompt") or "",
+                    },
+                    error=None,
+                )
+            if self._kind == "upload":
+                calls["upload"] += 1
+                destination_key = params.get("destination_key") or ""
+                return types.SimpleNamespace(
+                    success=True,
+                    result={
+                        "url": f"file:///{destination_key}",
+                        "file_key": destination_key,
+                        "local_path": f"/tmp/{destination_key}",
+                        "storage_type": "local",
+                    },
+                    error=None,
+                )
+            return types.SimpleNamespace(success=False, result=None, error=f"unexpected {action}")
+
+    class _StubRegistry:
+        def get_tool(self, name: str):
+            if name == "image_generation":
+                return _StubTool("image")
+            if name == "file_storage_tool":
+                return _StubTool("upload")
+            raise KeyError(name)
+
+    agent.tool_registry = _StubRegistry()
+
+    story_plan = StoryPlan(
+        project_id="pid-charref",
+        user_prompt="Project",
+        target_duration_seconds=120,
+        aspect_ratio="16:9",
+    )
+    profile = CharacterProfile(
+        canonical_id="little_bunny",
+        display_name="小兔子",
+        description="一只活泼可爱的小兔子",
+        personality_traits=["好奇", "热情"],
+        visual_traits={"identity_tags": ["白色绒毛", "粉色耳朵"], "signature_props": ["红色小领结", "生日帽"]},
+        reference_assets={"items": []},
+    )
+    project_state = ProjectState(
+        project_id="pid-charref",
+        mode="project",
+        story_plan=story_plan,
+        style_profile={"style_name": "森林童话幻想风"},
+        character_bible={"little_bunny": profile},
+    )
+    project_state_repository.save(project_state)
+
+    await EpisodeOrchestratorAgent._ensure_project_character_reference_images(
+        agent,
+        project_state,
+        {"runtime_overrides": {"project_character_reference_images_enabled": True}},
+    )
+
+    assets = project_state.character_bible["little_bunny"].reference_assets
+    assert assets["avatar"]["url"].endswith("/avatar.png")
+    assert assets["full_body"]["url"].endswith("/full_body.png")
+    assert project_state.story_plan.character_bible is project_state.character_bible
+
+    call_count = dict(calls)
+    await EpisodeOrchestratorAgent._ensure_project_character_reference_images(
+        agent,
+        project_state,
+        {"project_character_reference_images_enabled": True},
+    )
+    assert calls == call_count
+
+    project_state_repository.remove("pid-charref")

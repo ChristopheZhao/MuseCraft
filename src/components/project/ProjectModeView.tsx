@@ -27,6 +27,27 @@ const defaultFormState: ProjectFormState = {
   aspectRatio: '16:9',
 };
 
+type PlanningStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | string;
+
+interface CharacterAssetRef {
+  url?: string;
+  kind?: string;
+  size?: string;
+}
+
+interface CharacterProfileView {
+  canonical_id?: string;
+  display_name?: string;
+  narrative_role?: string;
+  description?: string;
+  reference_assets?: {
+    avatar?: CharacterAssetRef | string;
+    full_body?: CharacterAssetRef | string;
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
 const ProjectModeView: React.FC = () => {
   const { addNotification, setMode } = useAppStore();
   const {
@@ -58,7 +79,11 @@ const ProjectModeView: React.FC = () => {
       .filter((ep) => project.episodes_runtime?.[ep.episode_id]?.status === 'generating')
       .map((ep) => ep.episode_id);
 
-    if (generatingEpisodeIds.length > 0 && pollingProjectId !== project.project_id) {
+    const planningStatus = project.global_settings?.planning_status as PlanningStatus | undefined;
+    const refsStatus = project.global_settings?.character_references_status as string | undefined;
+    const planningInProgress = planningStatus === 'queued' || planningStatus === 'in_progress' || refsStatus === 'in_progress';
+
+    if ((planningInProgress || generatingEpisodeIds.length > 0) && pollingProjectId !== project.project_id) {
       startPollingProject(project.project_id, generatingEpisodeIds);
     }
   }, [project, pollingProjectId, startPollingProject]);
@@ -120,6 +145,7 @@ const ProjectModeView: React.FC = () => {
 
     try {
       const created = await createProject(payload);
+      startPollingProject(created.project_id);
       addNotification({
         type: 'success',
         title: '项目已创建',
@@ -134,6 +160,156 @@ const ProjectModeView: React.FC = () => {
         autoClose: 6000,
       });
     }
+  };
+
+  const renderPlanningStatus = (current: ProjectStateResponse) => {
+    const planningStatus = (current.global_settings?.planning_status as PlanningStatus | undefined) || 'unknown';
+    const refsStatus = (current.global_settings?.character_references_status as string | undefined) || 'unknown';
+    const planningError = current.global_settings?.planning_error as string | undefined;
+    const refsError = current.global_settings?.character_reference_error as string | undefined;
+
+    const badge = (label: string, value: string, tone: 'gray' | 'blue' | 'green' | 'red' = 'gray') => {
+      const toneClass =
+        tone === 'green'
+          ? 'bg-green-100 text-green-700'
+          : tone === 'blue'
+          ? 'bg-blue-100 text-blue-700'
+          : tone === 'red'
+          ? 'bg-red-100 text-red-700'
+          : 'bg-gray-100 text-gray-700';
+      return (
+        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${toneClass}`}>
+          {label}：{value}
+        </span>
+      );
+    };
+
+    const planningTone: 'gray' | 'blue' | 'green' | 'red' =
+      planningStatus === 'completed' ? 'green' : planningStatus === 'failed' ? 'red' : planningStatus === 'in_progress' || planningStatus === 'queued' ? 'blue' : 'gray';
+    const refsTone: 'gray' | 'blue' | 'green' | 'red' =
+      refsStatus === 'completed' ? 'green' : refsStatus === 'in_progress' ? 'blue' : refsStatus === 'failed' ? 'red' : 'gray';
+
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">规划进度</h3>
+            <p className="text-sm text-gray-600 mt-1">项目规划与角色库会异步生成，完成后即可截图展示。</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {(planningStatus === 'queued' || planningStatus === 'in_progress' || refsStatus === 'in_progress') && (
+              <span className="inline-flex items-center gap-2 text-sm text-primary-600">
+                <Loader2 className="w-4 h-4 animate-spin" /> 进行中
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {badge('planning_status', String(planningStatus), planningTone)}
+          {badge('character_refs', String(refsStatus), refsTone)}
+        </div>
+
+        {(planningError || refsError) && (
+          <div className="mt-4 space-y-2">
+            {planningError && (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                规划失败：{planningError}
+              </div>
+            )}
+            {refsError && (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                角色库生成失败：{refsError}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderCharacterLibrary = (current: ProjectStateResponse) => {
+    const rawBible = (current.character_bible || current.story_plan.character_bible || {}) as Record<string, CharacterProfileView>;
+    const characters = Object.entries(rawBible)
+      .map(([key, value]) => ({ key, profile: value }))
+      .filter((item) => item.profile && typeof item.profile === 'object');
+
+    const getAssetUrl = (asset: CharacterAssetRef | string | undefined): string => {
+      if (!asset) return '';
+      if (typeof asset === 'string') return asset;
+      return String(asset.url || '');
+    };
+
+    const cards = characters.map(({ key, profile }) => {
+      const name = String(profile.display_name || profile.canonical_id || key || '未命名角色');
+      const role = String(profile.narrative_role || '').trim();
+      const avatarUrl = getAssetUrl(profile.reference_assets?.avatar as any);
+      const fullBodyUrl = getAssetUrl(profile.reference_assets?.full_body as any);
+
+      return (
+        <div key={key} className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm">
+          <div className="p-4 border-b border-gray-100">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-gray-900 truncate">{name}</div>
+                {role && <div className="text-xs text-gray-500 mt-1 truncate">角色定位：{role}</div>}
+              </div>
+              <div className="text-xs text-gray-400">#{key}</div>
+            </div>
+          </div>
+
+          <div className="p-4 grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-gray-600">头像</div>
+              <div className="relative w-full aspect-square rounded-lg border border-gray-200 bg-gray-50 overflow-hidden">
+                {avatarUrl ? (
+                  <img src={avatarUrl} alt={`${name} 头像`} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500">
+                    生成中…
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-gray-600">全身</div>
+              <div className="relative w-full aspect-[3/4] rounded-lg border border-gray-200 bg-gray-50 overflow-hidden">
+                {fullBodyUrl ? (
+                  <img src={fullBodyUrl} alt={`${name} 全身`} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500">
+                    生成中…
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    });
+
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">角色库</h3>
+            <p className="text-sm text-gray-600 mt-1">头像与全身参考图将用于跨分集一致性，并可直接截图展示。</p>
+          </div>
+          <div className="text-sm text-gray-600">共 {characters.length} 个</div>
+        </div>
+
+        {characters.length === 0 ? (
+          <div className="mt-4 text-sm text-gray-500 border border-dashed border-gray-300 rounded-xl p-6 text-center">
+            暂无角色信息（规划生成中或未识别到角色）
+          </div>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {cards}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const handleSaveScript = async (episodeId: string, approve = false) => {
@@ -473,6 +649,11 @@ const ProjectModeView: React.FC = () => {
             重置项目
           </button>
         </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {renderPlanningStatus(current)}
+        {renderCharacterLibrary(current)}
       </div>
 
       <div className="flex-1">

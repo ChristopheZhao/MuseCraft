@@ -244,13 +244,112 @@ class BaseAgent(ABC):
         payload: Dict[str, Any],
         scene_number: Optional[int],
     ) -> None:
-        """Write tool outputs to working memory based on tool-declared contracts."""
+        """Write tool outputs to agent-scoped WorkingMemory via tool-declared contracts.
+
+        设计约束：
+        - Contract 由工具声明，Agent 侧只做通用适配；不在此处按工具名 if/else 分支。
+        - 只写入 Agent-scope WorkingMemory（不写入 MAS/shared 产物槽位）。
+        - 写入内容必须可序列化（dict/list/str/number/bool）。
+
+        支持两类 contract：
+        1) 推荐：`memory_slots` / `slots`（配合 `extract_contract_slot_writes`）
+        2) 兼容：旧的 `writes`（历史遗留，后续可移除）
+        """
         if not isinstance(payload, dict):
             return
         if tool_obj is None or not hasattr(tool_obj, "get_output_contract"):
             return
-        # legacy contract → slot 写回已弃用；保持空实现以兼容旧工具
-        return
+
+        try:
+            contract = tool_obj.get_output_contract(action_name)  # type: ignore[attr-defined]
+        except Exception:
+            return
+        if not isinstance(contract, dict) or not contract:
+            return
+
+        # 优先：memory_slots/slots → SlotWrite（统一 contract 入口）
+        try:
+            slot_writes = extract_contract_slot_writes(payload, contract, default_scene=scene_number)
+        except Exception:
+            slot_writes = []
+        if slot_writes:
+            wm = self.wm
+            for w in slot_writes:
+                if not w.slot or not isinstance(w.slot, str):
+                    continue
+                if w.scene_number is None:
+                    continue
+                # slot 作为 WM 顶层键保存（避免把中间准备数据混入 facts）
+                try:
+                    bucket = wm.get(w.slot, {}) or {}
+                    if not isinstance(bucket, dict):
+                        bucket = {}
+                    bucket[str(int(w.scene_number))] = w.value
+                    wm.put(w.slot, bucket)
+                except Exception:
+                    continue
+            return
+
+        # 兼容：旧的 writes 形态
+        writes = contract.get("writes")
+        if not isinstance(writes, list) or not writes:
+            return
+
+        def _get_from_path(obj: Dict[str, Any], path: str) -> Any:
+            cur: Any = obj
+            for part in (path or "").split("."):
+                if not part:
+                    continue
+                if not isinstance(cur, dict):
+                    return None
+                cur = cur.get(part)
+            return cur
+
+        for w in writes:
+            if not isinstance(w, dict):
+                continue
+            if w.get("scope") != "agent_facts":
+                continue
+            key = w.get("key")
+            mode = w.get("mode")
+            from_path = w.get("from")
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if not isinstance(from_path, str) or not from_path.strip():
+                continue
+
+            value = _get_from_path(payload, from_path)
+            if value is None:
+                continue
+
+            if mode == "by_scene":
+                if scene_number is None:
+                    continue
+                try:
+                    wm = self.wm
+                    facts = wm.get("facts", {}) or {}
+                    if not isinstance(facts, dict):
+                        facts = {}
+                    bucket = facts.get(key, {}) or {}
+                    if not isinstance(bucket, dict):
+                        bucket = {}
+                    bucket[str(int(scene_number))] = value
+                    facts[key] = bucket
+                    wm.put("facts", facts)
+                except Exception:
+                    continue
+            elif mode == "replace":
+                try:
+                    wm = self.wm
+                    facts = wm.get("facts", {}) or {}
+                    if not isinstance(facts, dict):
+                        facts = {}
+                    facts[key] = value
+                    wm.put("facts", facts)
+                except Exception:
+                    continue
+            else:
+                continue
 
     # --- Unified SharedWM artifact writer ---------------------------------
     def write_shared_artifact(
@@ -593,6 +692,13 @@ class BaseAgent(ABC):
         if exec_state:
             return exec_state.model_parameters
         return {}
+
+    def _get_execution_id(self) -> Optional[str]:
+        """Return current execution id if available."""
+        exec_state = execution_context_var.get()
+        if exec_state and getattr(exec_state, "id", None):
+            return str(exec_state.id)
+        return None
     
     def _update_token_usage(self, tokens_used: int):
         """Update token usage for cost tracking (in-memory only)"""
@@ -645,6 +751,19 @@ class BaseAgent(ABC):
             
             # 构建完整消息列表（零侵入：完全透传调用方 messages）
             complete_messages = list(messages or [])
+
+            # 协议约束：当 tools 非空时，不应使用 response_format 强制 JSON。
+            # 在部分供应商/模式下，这会抑制 tool_calls 产出，导致 ReAct 空转。
+            #
+            # 这里不做静默兜底：显式告警并移除 response_format，保证工具规划可用。
+            if tools_schema and kwargs.get("response_format") is not None:
+                try:
+                    self.logger.warning(
+                        "llm_function_call: dropping response_format because tools are present (to avoid suppressing tool_calls)"
+                    )
+                except Exception:
+                    pass
+                kwargs.pop("response_format", None)
             
             # 注入思维链与token档位（仅在未显式传入时），依据Agent默认策略
             thinking_cfg = kwargs.get("thinking")
@@ -731,7 +850,8 @@ class BaseAgent(ABC):
             # 单轮一次 FC：不做长度放大重试
             
             # 处理Function Call响应（仅返回计划，不执行）
-            if llm_response.get("has_function_call") and llm_response.get("tool_calls"):
+            # 兼容：部分供应商可能返回 tool_calls 但未显式标记 has_function_call
+            if llm_response.get("tool_calls"):
                 # 调试：打印本轮计划的工具调用名称与参数预览（不执行）
                 try:
                     call_summaries = []

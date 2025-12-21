@@ -216,29 +216,6 @@ def extract_contract_slot_writes(
 __all__ = ["ContractSlotWrite", "extract_contract_slot_writes"]
 
 
-def parse_plan_contract(plan_obj: Any) -> Dict[str, Any]:
-    """Parse minimal contract from PLAN output.
-
-    Supports passing fc_plan (with llm_response) or llm_response directly.
-    Only extracts {task_complete, completed_reason}. Fenced ```json tolerated.
-    """
-    try:
-        lr = None
-        if isinstance(plan_obj, dict):
-            if "llm_response" in plan_obj and isinstance(plan_obj.get("llm_response"), dict):
-                lr = plan_obj.get("llm_response")
-            elif "content" in plan_obj:
-                lr = plan_obj
-        content = (lr or {}).get("content") if isinstance(lr, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            return {}
-        from .json_utils import safe_json_loads  # type: ignore
-        data = safe_json_loads(content, logger=None, context="plan_contract", allow_fallback=False)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def overlay_contract_on_reflection(reflection: Dict[str, Any], contract: Dict[str, Any], ignore_complete: bool = False) -> Dict[str, Any]:
     """Overlay minimal contract fields into reflection result.
 

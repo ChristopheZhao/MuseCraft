@@ -43,8 +43,7 @@ class ScriptWriterAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: Any,
-        db: Session = None
+        db: Session = None,
     ) -> Dict[str, Any]:
         """批量脚本生成 - 实现在 _execute_impl，使用 BaseAgent.execute 统一包装"""
         try:
@@ -62,7 +61,7 @@ class ScriptWriterAgent(BaseAgent):
             workflow_state_id = input_data.get("workflow_state_id")
             wf_id_str = str(workflow_state_id) if workflow_state_id else ""
             if not wf_id_str:
-                return {"success": False, "error": "workflow_state_id missing", "workflow_state_updated": False, "results": []}
+                raise AgentError("workflow_state_id missing")
 
             # 读取 MAS WM 作为上下文
             overview = load_scene_overview(wf_id_str, service=self.short_term_service)
@@ -112,12 +111,7 @@ class ScriptWriterAgent(BaseAgent):
             concept_plan = load_concept_plan(wf_id_str, service=self.short_term_service) or {}
 
             if not scenes:
-                return {
-                    "success": False,
-                    "error": "No scenes available for script generation",
-                    "workflow_state_updated": False,
-                    "results": []
-                }
+                raise AgentError("No scenes available for script generation")
 
             # 批量生成脚本
             return await self._batch_generate_scripts(
@@ -130,15 +124,11 @@ class ScriptWriterAgent(BaseAgent):
                 approved_script_text=approved_script_text,
             )
 
+        except AgentError:
+            raise
         except Exception as e:
-            self.logger.error(f"ScriptWriter execution failed: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "workflow_state_updated": False,
-                "fallback_applied": True,
-                "results": []
-            }
+            self.logger.error("ScriptWriter execution failed: %s", e, exc_info=True)
+            raise AgentError(f"ScriptWriter execution failed: {e}") from e
 
     async def _batch_generate_scripts(
         self,
@@ -811,8 +801,9 @@ class ScriptWriterAgent(BaseAgent):
                                 continue
                             brief = char_desc_map.get(nm_str) or ''
                             descs.append(f"{nm_str}：{brief}" if brief else nm_str)
+                        # sn 已在上方解析得到，避免引用未定义变量
                         try:
-                            sn = int(sn_key)
+                            sn = int(sn)
                         except Exception:
                             continue
                         # 将角色提示写到 facts.scene_scripts 下以场景为键
@@ -854,7 +845,6 @@ class ScriptWriterAgent(BaseAgent):
                         if isinstance(sw, str) and sw.strip():
                             style_hint = sw.strip()
                     if not style_hint:
-                        from .utils.memory_helpers import read_shared_fact
                         sw = read_shared_fact(str(workflow_state_id), "project.style_preference", "", service=self.short_term_service)
                         if isinstance(sw, str) and sw.strip():
                             style_hint = sw.strip()
@@ -927,12 +917,21 @@ class ScriptWriterAgent(BaseAgent):
                 else:
                     per_scene = payload.get('per_scene_roles') or {}
                     global_roles = payload.get('roles') or []
-                # 合并写回各场景（不覆盖已有，做集合并集）
-                for sn_key, sc in (view.scenes or {}).items():
+                # 合并写回各场景（不覆盖已有字段，仅对角色字段做并集）
+                existing_scripts = read_shared_fact(
+                    workflow_state_id,
+                    "project.scene_scripts",
+                    {},
+                    service=self.short_term_service,
+                ) or {}
+                merged_scripts = dict(existing_scripts) if isinstance(existing_scripts, dict) else {}
+                for sc in (scene_payload or []):
+                    if not isinstance(sc, dict):
+                        continue
                     try:
-                        sn = int(getattr(sc, 'scene_number', 0))
+                        sn = int(sc.get("scene_number") or 0)
                     except Exception:
-                        sn = None
+                        sn = 0
                     if not sn:
                         continue
                     key = str(sn)
@@ -941,7 +940,8 @@ class ScriptWriterAgent(BaseAgent):
                     descs: List[str] = []
                     for item in scene_roles:
                         if isinstance(item, str):
-                            names.append(item)
+                            if item.strip():
+                                names.append(item.strip())
                         elif isinstance(item, dict):
                             nm = item.get('display_name') or item.get('name')
                             if isinstance(nm, str) and nm.strip():
@@ -963,15 +963,20 @@ class ScriptWriterAgent(BaseAgent):
                                 parts.append("/".join([str(x) for x in traits[:3]]))
                             if parts:
                                 descs.append("；".join(parts))
-                    if names or descs:
-                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
-                        entry = dict(existing_scripts.get(str(sn), {}))
-                        merged_names = list(set((entry.get('characters_present', []) or []) + names))
-                        merged_descs = list(set((entry.get('character_descriptions', []) or []) + descs))
-                        entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
-                        merged = dict(existing_scripts)
-                        merged[str(sn)] = entry
-                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
+                    if not (names or descs):
+                        continue
+                    entry = dict(merged_scripts.get(key, {})) if isinstance(merged_scripts.get(key), dict) else {}
+                    merged_names = list(set((entry.get('characters_present', []) or []) + names))
+                    merged_descs = list(set((entry.get('character_descriptions', []) or []) + descs))
+                    entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
+                    merged_scripts[key] = entry
+                if merged_scripts != existing_scripts:
+                    write_shared_fact(
+                        workflow_state_id,
+                        "project.scene_scripts",
+                        merged_scripts,
+                        service=self.short_term_service,
+                    )
                 self.logger.info("✅ 角色分析结果已写回 scene_scripts slot")
 
                 # 将角色一致性快照作为 EPISODIC 记忆写入（无开关，作为系统保障；若记忆不可用则优雅降级）
@@ -994,7 +999,8 @@ class ScriptWriterAgent(BaseAgent):
                 except Exception as _mw:
                     self.logger.warning(f"角色一致性快照写入记忆失败（跳过）：{_mw}")
             except Exception as re:
-                self.logger.error(f"角色分析执行/写回失败：{re}")
+                # 仅在错误路径输出 traceback，便于定位根因（例如 NameError: view 未定义）
+                self.logger.exception("角色分析执行/写回失败")
                 raise AgentError("Role analysis failed to execute or persist results") from re
 
             overall_success = len(hard_failed_voice_scenes) == 0
@@ -1022,14 +1028,12 @@ class ScriptWriterAgent(BaseAgent):
                 "voice_over_warnings": warning_voice_scenes,
             }
             
+        except AgentError:
+            # Fail-fast：交由 BaseAgent.execute 统一上抛，保证 orchestrator 可感知失败并停止工作流
+            raise
         except Exception as e:
             self.logger.error(f"批量脚本生成失败: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "scenes_generated": 0,
-                "workflow_state_updated": False
-            }
+            raise AgentError(f"批量脚本生成失败: {e}") from e
 
     def _sanitize_motion_beats(self, beats: Any, scene_duration: float) -> List[Dict[str, Any]]:
         if not isinstance(beats, list):

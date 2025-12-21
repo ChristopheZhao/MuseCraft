@@ -55,6 +55,8 @@ export interface ProjectStateResponse {
   total_cost: number;
   total_tokens: number;
   completed_episodes: number;
+  style_profile?: Record<string, any>;
+  character_bible?: Record<string, any>;
 }
 
 export interface CreateProjectRequest {
@@ -71,6 +73,8 @@ export interface CreateProjectRequest {
   visual_style?: Record<string, any>;
   tone_and_mood?: string | null;
   additional_notes?: Record<string, any>;
+  auto_generate_scripts?: boolean;
+  generate_character_references?: boolean;
 }
 
 export interface UpdateEpisodeScriptRequest {

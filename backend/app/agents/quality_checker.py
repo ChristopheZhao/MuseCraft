@@ -63,7 +63,7 @@ class QualityCheckerAgent(BaseAgent):
             wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
         except Exception as _wm_err:
             self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
-        view = wm.get("scene_overview", {}) if wm else {"scenes": {}}
+        view = wm.get("scene_overview", {}) if wm else {"scenes": []}
         
         await self._update_progress(10, "Loading final video from workflow", db)
         
@@ -109,23 +109,20 @@ class QualityCheckerAgent(BaseAgent):
                 video_metadata = {}
         
         if not final_video_url:
-            # If no final video, try to get from scene_overview (fallback)
-            scenes_data = view.get("scenes") if isinstance(view, dict) else []
-            if scenes_data and len(scenes_data) > 0:
-                first_scene = scenes_data[0] if isinstance(scenes_data[0], dict) else {}
-                if first_scene.get("video_url"):
-                    final_video_url = first_scene.get("video_url")
-                    self.logger.warning("Using first scene video for quality check - no final composed video available")
-                else:
-                    # 检查是否有图像可用（降级场景）
-                    has_image = any(isinstance(s, dict) and (s.get("image_path") or s.get("image_url")) for s in scenes_data)
-                    if has_image:
-                        self.logger.warning("No videos available, performing image-based quality check")
-                        return await self._perform_image_based_quality_check(scenes_data, input_data, execution, db)
-                    else:
-                        raise AgentError("No video content available for quality check")
-            else:
-                raise AgentError("No video content found in workflow state")
+            # 质量检查强依赖“成片”：缺失应直接报错并给出诊断信息，避免掩盖上游 composer 问题。
+            try:
+                outputs = wm.get("scene_outputs.video", {}) if wm else {}
+                outputs_cnt = len(outputs) if isinstance(outputs, dict) else 0
+            except Exception:
+                outputs_cnt = 0
+            try:
+                scenes_cnt = len(view.get("scenes") or []) if isinstance(view, dict) else 0
+            except Exception:
+                scenes_cnt = 0
+            raise AgentError(
+                f"No final video content available for quality check "
+                f"(project.final_video missing; scene_outputs.video={outputs_cnt}; scenes={scenes_cnt})"
+            )
         
         await self._update_progress(20, "Performing technical analysis", db)
         
@@ -156,7 +153,7 @@ class QualityCheckerAgent(BaseAgent):
         
         # Generate overall quality score and recommendations
         quality_assessment = await self._generate_quality_assessment(
-            technical_quality, content_quality, compliance_check, execution
+            technical_quality, content_quality, compliance_check
         )
         
         await self._update_progress(95, "Finalizing quality check", db)
@@ -196,15 +193,25 @@ class QualityCheckerAgent(BaseAgent):
         # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
         available_images = []
         for scene in scenes_data:
-            url = getattr(scene, 'image_url', '')
-            path = getattr(scene, 'image_path', '') if hasattr(scene, 'image_path') else ''
+            if isinstance(scene, dict):
+                url = scene.get("image_url", "") or ""
+                path = scene.get("image_path", "") or ""
+                desc = scene.get("visual_description", "") or ""
+                sn = scene.get("scene_number")
+            else:
+                url = getattr(scene, "image_url", "") or ""
+                path = getattr(scene, "image_path", "") if hasattr(scene, "image_path") else ""
+                desc = getattr(scene, "visual_description", "") or ""
+                sn = getattr(scene, "scene_number", None)
             if path or url:
-                available_images.append({
-                    "scene_number": getattr(scene, 'scene_number', None),
-                    "image_path": path,
-                    "image_url": url,
-                    "description": getattr(scene, 'visual_description', '')
-                })
+                available_images.append(
+                    {
+                        "scene_number": sn,
+                        "image_path": path,
+                        "image_url": url,
+                        "description": desc,
+                    }
+                )
         
         await self._update_progress(60, "Evaluating content appropriateness", db)
         

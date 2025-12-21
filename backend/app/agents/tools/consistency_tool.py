@@ -149,6 +149,82 @@ class ConsistencyTool(BaseTool):
     def get_available_actions(self) -> List[str]:
         return ["get_prompt_assets", "register_reference"]
 
+    def get_output_contract(self, action: str) -> Dict[str, Any]:
+        if action == "get_prompt_assets":
+            # Contract-first: declare how to write tool outputs into agent-scoped WM slots.
+            # NOTE: This is *not* a final artifact/output; it is a prepared/cached input for planning.
+            return {
+                "scene_path": "scene_number",
+                "memory_slots": {
+                    "prepared_assets": {
+                        "enabled": True,
+                        "path": "assets",
+                        "value_spec": {
+                            "fields": {
+                                "style": {
+                                    "fields": {
+                                        "color_palette": {"max_items": 8},
+                                        "mood": {"max_text": 120},
+                                        "intelligent_style_design": {
+                                            "fields": {
+                                                "style_name": {"max_text": 120},
+                                                "style_description": {"max_text": 240},
+                                                "style_tags": {"max_items": 8},
+                                                "color_palette": {"max_items": 8},
+                                            },
+                                        },
+                                    },
+                                },
+                                "characters": {
+                                    "fields": {
+                                        "characters": {
+                                            "max_items": 8,
+                                            "items": {
+                                                "fields": {
+                                                    "prompt_snippet": {"max_text": 240},
+                                                    "description": {"max_text": 240},
+                                                    "abstract_traits": {"max_items": 12},
+                                                    "key_traits": {"max_items": 12},
+                                                    "traits": {"max_items": 12},
+                                                    "aliases": {"max_items": 8},
+                                                },
+                                            },
+                                        }
+                                    },
+                                },
+                                "environment": {
+                                    "fields": {
+                                        "visual_description": {"max_text": 400},
+                                        "narrative_description": {"max_text": 240},
+                                    },
+                                },
+                                "continuity": {
+                                    "fields": {
+                                        "motion_guidance": {
+                                            "max_text": 400,
+                                            "fields": {
+                                                "has_guidance": {},
+                                                "guidance": {"max_text": 400},
+                                                "text": {"max_text": 400},
+                                                "motion_guidance": {"max_text": 400},
+                                            },
+                                            "default_field_spec": {"max_text": 400},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "prepared_assets_diagnostics": {
+                        "enabled": True,
+                        "path": "diagnostics",
+                        "allow_null_scene": True,
+                        "value_spec": {"max_dict_items": 20, "default_field_spec": {"max_text": 200}},
+                    },
+                },
+            }
+        return {}
+
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         if action == "get_prompt_assets":
             return {"type": "object", "properties": {"scene_number": {"type": "integer"}}}
@@ -175,7 +251,8 @@ class ConsistencyTool(BaseTool):
 
         if action == "get_prompt_assets":
             scene_number = int(params.get("scene_number") or 0)
-            use_cache = bool(params.get("use_cache"))
+            # Default to cache-on for idempotent prompt-asset collection
+            use_cache = True if "use_cache" not in params else bool(params.get("use_cache"))
             payload, diagnostics = await self._collect_assets(wf_id, scene_number, use_cache=use_cache)
             return {
                 "workflow_state_id": wf_id,
@@ -275,4 +352,3 @@ class ConsistencyTool(BaseTool):
 
         self._asset_cache[cache_key] = assets
         return assets, diagnostics
-

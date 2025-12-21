@@ -101,6 +101,14 @@ class ImageGenerationTool(AsyncTool):
                 "size": {
                     "type": "string",
                     "description": "图像尺寸（任意字符串，例如 1024x1024、2K、1K）"
+                },
+                "persist": {
+                    "type": "boolean",
+                    "description": "可选：将生成结果持久化到文件存储/OSS（若可用）并返回可访问 URL"
+                },
+                "destination_key": {
+                    "type": "string",
+                    "description": "可选：持久化时使用的目标路径/键名（例如 projects/<id>/characters/<cid>/avatar.jpg）"
                 }
             }
             base_schema["required"] = ["prompt"]
@@ -188,6 +196,66 @@ class ImageGenerationTool(AsyncTool):
         # 风格改为“按需透传”：无则不默认，避免硬编码偏置
         style = (params.get("style") or "").strip()
         size = params.get("size", "1024x1024")
+        persist = bool(params.get("persist", False))
+        destination_key = (params.get("destination_key") or "").strip()
+        scene_number = params.get("scene_number")
+
+        async def _maybe_persist(image_url: str) -> str:
+            if not persist:
+                return image_url
+            if not image_url:
+                return image_url
+
+            dest_key = destination_key
+            if not dest_key:
+                safe_scene = str(scene_number) if scene_number is not None else "image"
+                safe_scene = safe_scene.replace("/", "_").replace("\\", "_").replace(" ", "_")
+                dest_key = f"images/scene_{safe_scene}_image.jpg"
+
+            hosted_url = ""
+            try:
+                from ..tool_registry import get_tool_registry
+                from ..base_tool import ToolInput as TI
+
+                storage = get_tool_registry().get_tool("file_storage_tool")
+                res = await storage.execute(
+                    TI(
+                        action="upload_from_url",
+                        parameters={
+                            "url": image_url,
+                            "destination_key": dest_key,
+                            "metadata": {"scene_number": scene_number, "source": "generate_image"},
+                            "public": True,
+                        },
+                    )
+                )
+                payload = getattr(res, "result", res)
+                if isinstance(payload, dict):
+                    candidate = payload.get("url")
+                    if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                        hosted_url = candidate
+            except Exception:
+                hosted_url = ""
+
+            if not hosted_url:
+                try:
+                    oss_url = await self._mirror_image_url_to_oss(
+                        image_url,
+                        dest_key,
+                        metadata={"scene_number": scene_number, "source": "generate_image", "original_url": image_url},
+                    )
+                    if isinstance(oss_url, str) and oss_url.startswith(("http://", "https://")):
+                        hosted_url = oss_url
+                except Exception:
+                    hosted_url = ""
+
+            if hosted_url:
+                try:
+                    self.logger.info("IMAGE_REHOST_RESULT(scene=%s) url=%s", scene_number, hosted_url)
+                except Exception:
+                    pass
+                return hosted_url
+            return image_url
 
         # 轻量提示词质量校验
         if self._is_prompt_weak(prompt):
@@ -266,6 +334,7 @@ class ImageGenerationTool(AsyncTool):
                 if not image_url:
                     # 统一抛错，让下方敏感处理或上层 ReAct 接手
                     raise ToolError("image_generation returned no image_url", self.metadata.name)
+                image_url = await _maybe_persist(image_url)
                 return {
                     "image_url": image_url,
                     "generated_prompt": prompt,
@@ -332,6 +401,7 @@ class ImageGenerationTool(AsyncTool):
                         if not image_url2:
                             # 二次仍失败，走原有失败路径
                             raise terr
+                        image_url2 = await _maybe_persist(image_url2)
                         return {
                             "image_url": image_url2,
                             "generated_prompt": prompt,
@@ -539,11 +609,9 @@ class ImageGenerationTool(AsyncTool):
             "scene_number": scene_number
         })
 
-        if not gen.get("success"):
-            # 再次保障：若下游未抛异常但返回success=False，也将其视为工具失败
-            raise ToolError(gen.get("error") or "image_generation failed", self.metadata.name)
-
         image_url = gen.get("image_url")
+        if not image_url:
+            raise ToolError(gen.get("error") or "image_generation returned no image_url", self.metadata.name)
         prompt_text = gen.get("generated_prompt", prompt_text)
         file_path = ""
         hosted_url = ""

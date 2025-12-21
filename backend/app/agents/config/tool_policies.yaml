@@ -55,3 +55,15 @@ agents:
       expose: true
       allowed_actions:
         - analyze_roles_and_scenes
+
+  audio_generator:
+    file_storage_tool:
+      expose: true
+      allowed_actions:
+        - download_from_url
+
+  video_composer:
+    file_storage_tool:
+      expose: true
+      allowed_actions:
+        - download_from_url

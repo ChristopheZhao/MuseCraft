@@ -29,6 +29,10 @@ def build_memory_state(
     pending = max(total - len(completed) - len(failed), 0) if total else 0
 
     outputs_by_kind = _collect_outputs(wm)
+    # 若 overview 未提供 completed_scene_numbers，则用 outputs 推导“已完成”（跨 kind 的并集）
+    if not completed and outputs_by_kind:
+        completed = _derive_completed_from_outputs(wm)
+        pending = max(total - len(completed) - len(failed), 0) if total else 0
 
     state["total_scenes"] = total
     state["completed_scenes"] = len(completed)
@@ -63,21 +67,47 @@ def _extract_scene_sets(
 
 
 def _collect_outputs(wm: Optional[WorkingMemory]) -> Dict[str, int]:
-    if wm is None or not hasattr(wm, "facts"):
+    if wm is None:
         return {}
     outputs: Dict[str, int] = {}
     try:
-        for key, value in (wm.facts or {}).items():
+        keys = wm.list_keys() if hasattr(wm, "list_keys") else []
+        for key in keys or []:
             if not isinstance(key, str) or not key.startswith("scene_outputs."):
                 continue
             kind = key.split(".", 1)[1] if "." in key else ""
             if not kind:
                 continue
-            bucket = value if isinstance(value, dict) else {}
-            outputs[kind] = len(bucket)
+            value = wm.get(key, {})
+            outputs[kind] = len(value) if isinstance(value, dict) else 0
     except Exception:
         return outputs
     return outputs
+
+
+def _derive_completed_from_outputs(wm: Optional[WorkingMemory]) -> set:
+    if wm is None:
+        return set()
+    completed: set = set()
+    try:
+        keys = wm.list_keys() if hasattr(wm, "list_keys") else []
+    except Exception:
+        keys = []
+    for key in keys or []:
+        if not isinstance(key, str) or not key.startswith("scene_outputs."):
+            continue
+        try:
+            bucket = wm.get(key, {})
+        except Exception:
+            bucket = {}
+        if not isinstance(bucket, dict):
+            continue
+        for sn in bucket.keys():
+            try:
+                completed.add(int(sn))
+            except Exception:
+                continue
+    return completed
 
 
 def _failed_details(scenes: Any, limit: int = 5) -> list:

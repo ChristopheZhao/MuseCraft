@@ -37,6 +37,7 @@ class VoiceSynthesisTool(AsyncTool):
             return {
                 "type": "object",
                 "properties": {
+                    "scene_number": {"type": "integer", "description": "场景编号（用于归档/去重）"},
                     "text": {"type": "string", "description": "待合成的配音文本"},
                     "voice_id": {
                         "type": "string",
@@ -70,7 +71,7 @@ class VoiceSynthesisTool(AsyncTool):
                         "description": "附加元数据，将透传到结果中",
                     },
                 },
-                "required": ["text", "voice_id"],
+                "required": ["scene_number", "text", "voice_id"],
             }
         if action == "list_voices":
             return {
@@ -118,6 +119,7 @@ class VoiceSynthesisTool(AsyncTool):
         if not self._is_voice_allowed(voice_id):
             raise ToolError(f"voice_id {voice_id} is not allowed", self.metadata.name)
 
+        scene_number = params.get("scene_number")
         language = str(params.get("language") or "zh-CN")
         speed = float(params.get("speed", 1.0))
         pitch = float(params.get("pitch", 1.0))
@@ -126,6 +128,12 @@ class VoiceSynthesisTool(AsyncTool):
         audio_format = str(params.get("audio_format", settings.VOICE_DEFAULT_FORMAT))
         reference_id = params.get("reference_id")
         metadata = params.get("metadata") or {}
+        if scene_number is not None and isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.setdefault("scene_number", scene_number)
+        if reference_id and isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.setdefault("reference_id", reference_id)
 
         return VoiceSynthesisRequest(
             text=text,

@@ -365,6 +365,9 @@ class Settings(BaseSettings):
     LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)
     LLM_FALLBACK_TIMEOUT_MAX: int = config("LLM_FALLBACK_TIMEOUT_MAX", default=90, cast=int)
     LLM_REQUEST_SAFETY_MARGIN: int = config("LLM_REQUEST_SAFETY_MARGIN", default=5, cast=int)
+    # 结构化输出温度（response_format=json_object 等）：优先稳定性，避免格式漂移
+    LLM_JSON_TEMPERATURE: float = config("LLM_JSON_TEMPERATURE", default=0.2, cast=float)
+    LLM_JSON_TEMPERATURE_FALLBACK: float = config("LLM_JSON_TEMPERATURE_FALLBACK", default=0.2, cast=float)
 
     # Audio mixing strategy
     AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # composer | agent
@@ -410,7 +413,7 @@ class Settings(BaseSettings):
     # Agent ReAct Configuration - ReAct循环最大迭代次数配置（业务逻辑配置，不放在.env）
     VIDEO_GENERATOR_MAX_ITERATIONS: int = 14   # 视频生成Agent最大迭代次数
     CONCEPT_PLANNER_MAX_ITERATIONS: int = 4  # 概念规划Agent最大迭代次数
-    IMAGE_GENERATOR_MAX_ITERATIONS: int = 10   # 图像生成Agent最大迭代次数
+    IMAGE_GENERATOR_MAX_ITERATIONS: int = 14   # 图像生成Agent最大迭代次数
     ORCHESTRATOR_MAX_ITERATIONS: int = 10     # 编排Agent最大迭代次数
     ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
     # Concept Planner agent-level timeout（配置化，避免代码常量）
@@ -473,6 +476,16 @@ class Settings(BaseSettings):
     DEFAULT_TOOL_TIMEOUT: int = config("DEFAULT_TOOL_TIMEOUT", default=120, cast=int)  # 默认工具超时
     VIDEO_GENERATION_TOOL_TIMEOUT: int = config("VIDEO_GENERATION_TOOL_TIMEOUT", default=300, cast=int)
     IMAGE_GENERATION_TOOL_TIMEOUT: int = config("IMAGE_GENERATION_TOOL_TIMEOUT", default=180, cast=int)
+    # Project character reference images (avatar/full-body) for cross-episode reuse
+    PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED: bool = config(
+        "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", default=False, cast=bool
+    )
+    PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE: str = config(
+        "PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE", default="1024x1024"
+    )
+    PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE: str = config(
+        "PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE", default="1024x1792"
+    )
     IMAGE_TOOL_PROMPT_RULES: Dict[str, Any] = config(
         "IMAGE_TOOL_PROMPT_RULES",
         default='{"min_length": 30, "allow_weak_prompt": false, "weak_marker_length_threshold": 50, "weak_marker_threshold": 2, "weak_markers": ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]}'

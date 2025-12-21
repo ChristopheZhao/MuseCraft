@@ -1,5 +1,5 @@
 """
-ReAct Agent - 提供规划-行动-观察循环能力的基类
+ReAct Agent - 提供“基于记忆的迭代规划”能力的基类
 """
 import asyncio
 import json
@@ -18,7 +18,12 @@ from .utils.obs_builder import derive_action_facts
 class ReActAgent(BaseAgent, ABC):
     """
     ReAct模式Agent基类
-    提供 OBSERVE → THINK → PLAN → ACT → REFLECT 循环能力
+
+    说明（避免术语误解）：
+    - 本实现的每一轮迭代在进入 PLAN 之前，会先从 WorkingMemory 读取上一轮写入的观察记录与产物索引，
+      组装为 iteration_context（等价于“观察输入”）。
+    - 因此单轮时序可理解为：PLAN → ACT → OBSERVE（写回WM）→（可选）REFLECT；
+      下一轮再基于 WM 推导出的 iteration_context 继续规划。
     
     适用于需要动态调整策略、处理复杂依赖关系的Agent
     """
@@ -46,9 +51,14 @@ class ReActAgent(BaseAgent, ABC):
         db: Session = None,
     ) -> Dict[str, Any]:
         """
-        ReAct循环的标准实现
+        ReAct循环的标准实现（基于 WM 的迭代闭环）
         
-        OBSERVE → THINK → PLAN → ACT → REFLECT → (循环)
+        单轮时序：
+        1) 从 WM 构建 iteration_context（承载上一轮 OBSERVE 的结果）
+        2) THINK/PLAN（一次 FC 产出 tool_calls 或输出合同 JSON）
+        3) ACT（仅执行 tool_calls）
+        4) OBSERVE（将本轮结果写入 WM）
+        5) REFLECT（可选领域反思 + 合同融合，决定是否退出）
         """
 
         # 初始化：清理工作记忆引用缓存（WorkingMemory 由 Orchestrator 统一创建）。
@@ -59,7 +69,7 @@ class ReActAgent(BaseAgent, ABC):
         
         # 不跨轮保存状态；每轮上下文显式从 WM / 状态视图读取
         pending_action_facts: Optional[Dict[str, Any]] = None
-        last_action_result: Optional[Dict[str, Any]] = None
+        no_tool_calls_streak = 0
         for iteration in range(self.max_iterations):
             iteration_start_progress = 10 + (iteration * 80 // self.max_iterations)
             await self._update_progress(
@@ -77,19 +87,264 @@ class ReActAgent(BaseAgent, ABC):
                     current_iter_context = build_agent_context(
                         workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
                         agent_name=self.agent_name,
+                        service=self.short_term_service,
                         state_view=None,
                         max_turn=None,
                         max_token_budget=None,
                     )
-                except Exception:
+                except Exception as ctx_err:
+                    try:
+                        self.logger.warning(
+                            "build_agent_context failed for agent=%s err=%s",
+                            self.agent_name,
+                            ctx_err,
+                            exc_info=True,
+                        )
+                    except Exception:
+                        pass
                     current_iter_context = {}
                 pending_action_facts = None
 
                 # THINK & PLAN
                 self.logger.debug(f"🧠 THINK & PLAN: Developing action strategy...")
-                action_plan = await self._think_and_plan(
-                    current_iter_context, task, iteration
+                # 合并任务指令 + 静态上下文（由 orchestrator 注入）与迭代上下文，作为本轮 PLAN 输入
+                plan_context: Dict[str, Any] = self._build_plan_context(
+                    input_data=input_data,
+                    iteration_context=current_iter_context,
                 )
+                # NOTE: 临时调试“PLAN_CONTEXT 落盘到 /tmp”已移除（避免隐性 I/O 与数据泄露风险）。
+
+                action_plan = await self._think_and_plan(plan_context, task, iteration)
+
+                # 空转保护（单一职责）：
+                # - 本轮无 tool_calls 时，对 PLAN 文本做一次“退出合同规整”（response_format=json_object，且不携带 tools），
+                #   以获得可解析的 task_complete / completed_reason / plan_summary，避免仅凭自然语言 content 猜测。
+                # - 连续多轮无 tool_calls 且合同仍判定未完成：以 blocked 早停并告警，避免浪费预算空转到 max_iterations。
+                def _planned_calls(plan: Any) -> List[Any]:
+                    if isinstance(plan, dict):
+                        calls = plan.get("tool_calls") or []
+                        return list(calls) if isinstance(calls, list) else []
+                    return []
+
+                planned_calls = _planned_calls(action_plan)
+                if planned_calls:
+                    no_tool_calls_streak = 0
+                else:
+                    # 无 tool_calls：将 PLAN 的自然语言回执规整为最小退出合同（不做二次规划决策）。
+                    plan_contract: Dict[str, Any] = {}
+
+                    if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
+                        plan_contract = dict(action_plan.get("plan_contract") or {})
+
+                    if not plan_contract:
+                        raw_text = ""
+                        if isinstance(action_plan, dict):
+                            plan_llm = action_plan.get("plan_llm")
+                            if isinstance(plan_llm, dict):
+                                raw_text = str(plan_llm.get("content") or "")
+                            elif isinstance(action_plan.get("content"), str):
+                                raw_text = action_plan.get("content") or ""
+                        if not raw_text.strip():
+                            # 风险1修复（轻量）：PLAN 空输出属于模型/供应商异常，不应误判为业务 blocked；
+                            # 且需要落一条终止事实到 Agent WM 便于审计。
+                            self.logger.warning(
+                                "PLAN_EMPTY_OUTPUT agent=%s iter=%d; ending loop early",
+                                self.agent_name,
+                                iteration + 1,
+                            )
+                            terminal_result = {
+                                "success": False,
+                                "subtask_state": "error",
+                                "loop_end_reason": "plan_output_empty",
+                                "completed_reason": "plan_output_empty",
+                                "plan_summary": "PLAN 输出为空，无法规整退出合同",
+                            }
+                            try:
+                                from .utils.wm_obs import append_obs_to_wm
+
+                                wf_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+                                append_obs_to_wm(
+                                    workflow_id=wf_id,
+                                    agent_name=self.agent_name,
+                                    obs_record={
+                                        "iteration": iteration,
+                                        "event": {
+                                            "type": "loop_end",
+                                            "reason": "plan_output_empty",
+                                            "subtask_state": "error",
+                                            "completed_reason": terminal_result.get("completed_reason"),
+                                            "plan_summary": terminal_result.get("plan_summary"),
+                                        },
+                                    },
+                                    service=self.short_term_service,
+                                )
+                            except Exception as obs_err:
+                                self.logger.warning(
+                                    "EARLY_STOP_OBS_WRITE_FAILED agent=%s iter=%d err=%s",
+                                    self.agent_name,
+                                    iteration + 1,
+                                    obs_err,
+                                    exc_info=True,
+                                )
+                            # fail-fast：以明确错误结果结束本次执行（不进入 ACT/REFLECT）
+                            final_result = await self._finalize_incomplete_results(
+                                {
+                                    "total_iterations": iteration + 1,
+                                    "workflow_state_id": input_data.get("workflow_state_id") or self.workflow_state_id,
+                                    "subtask_state": "error",
+                                    "loop_end_reason": "plan_output_empty",
+                                    "completed_reason": terminal_result.get("completed_reason"),
+                                    "plan_summary": terminal_result.get("plan_summary"),
+                                },
+                                task,
+                            )
+                            await self._update_progress(90, "processing", db)
+                            return final_result
+
+                        self.logger.info(
+                            "PLAN_CONTRACT_NORMALIZE agent=%s iter=%d (no tool_calls, no inline contract)",
+                            self.agent_name,
+                            iteration + 1,
+                        )
+                        plan_contract = await self._normalize_plan_contract_from_text(raw_text)
+
+                    if isinstance(action_plan, dict) and plan_contract:
+                        action_plan["plan_contract"] = plan_contract
+
+                    task_complete = bool(plan_contract.get("task_complete") is True)
+                    # 关键可观测性：记录规整后的合同关键信息，便于定位“为何无 tool_calls / 为何未退出”
+                    plan_summary = plan_contract.get("plan_summary")
+                    plan_summary_str = plan_summary.strip() if isinstance(plan_summary, str) else ""
+                    plan_summary_preview = (
+                        (plan_summary_str[:240] + "...(truncated)")
+                        if len(plan_summary_str) > 240
+                        else plan_summary_str
+                    )
+                    completed_reason = plan_contract.get("completed_reason")
+                    completed_reason_str = completed_reason.strip() if isinstance(completed_reason, str) else ""
+                    self.logger.info(
+                        "PLAN_CONTRACT agent=%s iter=%d planned_calls=%d task_complete=%s completed_reason=%s plan_summary_preview=%s",
+                        self.agent_name,
+                        iteration + 1,
+                        len(planned_calls),
+                        task_complete,
+                        completed_reason_str or None,
+                        plan_summary_preview or None,
+                    )
+                    if task_complete:
+                        # 关键语义：当 PLAN 判定“无需再行动且任务完成”时，本轮不应进入 ACT（否则会产生 noop 结果覆盖上一轮产物）。
+                        no_tool_calls_streak = 0
+                        # 写入一次终止事实到 Agent WM（便于审计/追溯），但不写入 PLAN 原文回执
+                        try:
+                            from .utils.wm_obs import append_obs_to_wm
+
+                            wf_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+                            append_obs_to_wm(
+                                workflow_id=wf_id,
+                                agent_name=self.agent_name,
+                                obs_record={
+                                    "iteration": iteration,
+                                    "event": {
+                                        "type": "loop_end",
+                                        "reason": "plan_contract_task_complete",
+                                        "subtask_state": "complete",
+                                        "completed_reason": completed_reason_str or None,
+                                        "plan_summary": plan_summary_str or None,
+                                    },
+                                },
+                                service=self.short_term_service,
+                            )
+                        except Exception:
+                            pass
+
+                        # 重要：本分支是“计划回合（无工具调用）”；交付物应由 MAS SoT 承担，
+                        # 不应在基类内依赖“上一轮 action_result”做隐式拼接。
+                        final_action_result: Dict[str, Any] = {
+                            "success": True,
+                            "subtask_state": "complete",
+                            "loop_end_reason": "plan_contract_task_complete",
+                        }
+                        if completed_reason_str:
+                            final_action_result["completed_reason"] = completed_reason_str
+                        if plan_summary_str:
+                            final_action_result["plan_summary"] = plan_summary_str
+
+                        self.logger.info(
+                            "✅ Iterative loop completed successfully after %d iterations (plan_contract)",
+                            iteration + 1,
+                        )
+                        final_result = await self._finalize_success_results(
+                            final_action_result,
+                            {
+                                "total_iterations": iteration + 1,
+                                "workflow_state_id": input_data.get("workflow_state_id") or self.workflow_state_id,
+                            },
+                        )
+                        await self._update_progress(95, "completed", db)
+                        return final_result
+                    else:
+                        no_tool_calls_streak += 1
+                        if no_tool_calls_streak >= 2:
+                            try:
+                                self.logger.warning(
+                                    "PLAN_NO_TOOL_CALLS_STREAK agent=%s iter=%d streak=%d; ending loop early to avoid empty-loop",
+                                    self.agent_name,
+                                    iteration + 1,
+                                    no_tool_calls_streak,
+                                )
+                            except Exception:
+                                pass
+                            # 以“阻塞/未完成但无法推进”收尾（不抛错，避免误把“计划回合”当异常）
+                            terminal_result = {
+                                "success": False,
+                                "subtask_state": "blocked",
+                                "loop_end_reason": "no_tool_calls_streak",
+                                "completed_reason": plan_contract.get("completed_reason") if isinstance(plan_contract, dict) else None,
+                                "plan_summary": plan_contract.get("plan_summary") if isinstance(plan_contract, dict) else None,
+                            }
+                            # 风险1补齐：早停前写入一次终止事实到 Agent WM（避免审计缺口）
+                            try:
+                                from .utils.wm_obs import append_obs_to_wm
+
+                                wf_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+                                append_obs_to_wm(
+                                    workflow_id=wf_id,
+                                    agent_name=self.agent_name,
+                                    obs_record={
+                                        "iteration": iteration,
+                                        "event": {
+                                            "type": "loop_end",
+                                            "reason": "no_tool_calls_streak",
+                                            "subtask_state": "blocked",
+                                            "completed_reason": terminal_result.get("completed_reason"),
+                                            "plan_summary": terminal_result.get("plan_summary"),
+                                        },
+                                    },
+                                    service=self.short_term_service,
+                                )
+                            except Exception as obs_err:
+                                self.logger.warning(
+                                    "EARLY_STOP_OBS_WRITE_FAILED agent=%s iter=%d err=%s",
+                                    self.agent_name,
+                                    iteration + 1,
+                                    obs_err,
+                                    exc_info=True,
+                                )
+                            final_result = await self._finalize_incomplete_results(
+                                {
+                                    "total_iterations": iteration + 1,
+                                    "workflow_state_id": input_data.get("workflow_state_id") or self.workflow_state_id,
+                                    "subtask_state": "blocked",
+                                    "loop_end_reason": "no_tool_calls_streak",
+                                    "completed_reason": terminal_result.get("completed_reason"),
+                                    "plan_summary": terminal_result.get("plan_summary"),
+                                },
+                                task,
+                            )
+                            await self._update_progress(90, "processing", db)
+                            return final_result
+                        # 本轮无可执行动作且未完成：直接进入下一轮重新规划
+                        continue
                 
                 # ACT
                 self.logger.debug(f"⚡ ACT: Executing planned actions...")
@@ -109,12 +364,11 @@ class ReActAgent(BaseAgent, ABC):
                         workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
                         agent_name=self.agent_name,
                         obs_record=obs_record,
+                        service=self.short_term_service,
                     )
                 except Exception:
                     pass
                 pending_action_facts = action_facts
-                if isinstance(action_result, dict):
-                    last_action_result = action_result
                 await self._log_react_iteration_event(
                     iteration=iteration,
                     observation=current_iter_context,
@@ -130,20 +384,12 @@ class ReActAgent(BaseAgent, ABC):
                     action_result, current_iter_context, task, iteration
                 )
                 # 与 PLAN 响应的合同回执融合：
-                # 1) 优先使用 action_result['contract']（若存在并符合键约束）
-                # 2) 否则尝试从 action_result['fc_plan'] 或 action_result['plan_llm'] 中解析 content JSON
+                # - 不将 PLAN 回执写入 WM；仅在本轮内从 action_plan['plan_llm'] 解析并融合到 reflection，用于退出判断。
                 try:
-                    from .utils.tool_contracts import parse_plan_contract, overlay_contract_on_reflection
+                    from .utils.tool_contracts import overlay_contract_on_reflection
                     contract = None
-                    if isinstance(action_result, dict):
-                        cand = action_result.get('contract')
-                        if isinstance(cand, dict):
-                            contract = cand
-                        if contract is None:
-                            plan_obj = action_result.get('fc_plan') or action_result.get('plan_llm')
-                            parsed = parse_plan_contract(plan_obj)
-                            if isinstance(parsed, dict) and parsed:
-                                contract = parsed
+                    if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
+                        contract = action_plan.get("plan_contract")
                     if isinstance(contract, dict) and contract:
                         has_actions = False
                         try:
@@ -227,7 +473,9 @@ class ReActAgent(BaseAgent, ABC):
         
         final_result = await self._finalize_incomplete_results({
                 "total_iterations": iteration + 1,
-            "last_action_result": last_action_result,
+                "workflow_state_id": input_data.get("workflow_state_id") or self.workflow_state_id,
+                "subtask_state": "max_iter_reached",
+                "loop_end_reason": "max_iterations",
         }, task)
         await self._update_progress(90, "processing", db)
         
@@ -303,20 +551,56 @@ class ReActAgent(BaseAgent, ABC):
         return
 
     def _truncate_action_result(self, action_result: Dict[str, Any], max_token_budget: int = 3000) -> Any:
-        """对 action_result 做简单预算限制，超限时返回占位摘要。"""
+        """对 action_result 做简单预算限制，超限时做通用截断（不丢整条结果）。"""
+        # 设计约束：OBS/WM 仅记录可复现的“执行事实”，不写入 PLAN 文本回执，避免上下文污染与双轨不一致。
         try:
-            import json as _json
-            text = _json.dumps(action_result, ensure_ascii=False)
-            approx_tokens = len(text) // 4
-            if max_token_budget and approx_tokens > max_token_budget:
-                return {
-                    "truncated": True,
-                    "reason": "over_token_budget",
-                    "approx_tokens": approx_tokens,
-                }
+            if isinstance(action_result, dict):
+                action_result = dict(action_result)
+                for k in ("plan_llm", "fc_plan", "contract"):
+                    action_result.pop(k, None)
         except Exception:
             pass
-        return action_result
+        try:
+            from .utils.json_utils import estimate_tokens, shrink_jsonable, to_jsonable
+        except Exception:
+            return action_result
+        try:
+            jsonable = to_jsonable(action_result)
+            approx_tokens = estimate_tokens(jsonable)
+            if max_token_budget and approx_tokens > max_token_budget:
+                truncated = shrink_jsonable(
+                    jsonable,
+                    max_string_chars=600,
+                    max_list_items=60,
+                    max_dict_items=80,
+                    max_depth=7,
+                )
+                approx_tokens2 = estimate_tokens(truncated)
+                if approx_tokens2 > max_token_budget:
+                    truncated = shrink_jsonable(
+                        truncated,
+                        max_string_chars=220,
+                        max_list_items=20,
+                        max_dict_items=40,
+                        max_depth=5,
+                    )
+                    approx_tokens2 = estimate_tokens(truncated)
+                if isinstance(truncated, dict):
+                    meta = dict(truncated.get("action_result_meta") or {})
+                    meta.update(
+                        {
+                            "truncated": True,
+                            "reason": "over_token_budget",
+                            "original_tokens": int(approx_tokens),
+                            "budget": int(max_token_budget),
+                            "tokens_after": int(approx_tokens2),
+                        }
+                    )
+                    truncated["action_result_meta"] = meta
+                return truncated
+            return jsonable
+        except Exception:
+            return action_result
 
     # === THINK / PLAN PHASE ==============================================
     
@@ -366,7 +650,6 @@ class ReActAgent(BaseAgent, ABC):
     
     # === REFLECT PHASE ====================================================
 
-    @abstractmethod
     async def _reflect_on_results(
         self, 
         action_result: Dict[str, Any], 
@@ -374,22 +657,23 @@ class ReActAgent(BaseAgent, ABC):
         task: Task,
         iteration: int
     ) -> Dict[str, Any]:
+        """Optional REFLECT hook.
+
+        Notes:
+        - This framework's completion decision is primarily driven by PLAN contracts.
+          REFLECT is kept as an optional hook for lightweight per-iteration receipts
+          (e.g. a short summary or progress snapshot emission).
+        - Return value must be a dict; `overlay_contract_on_reflection(...)` may inject
+          `task_complete` / `completed_reason` into this dict.
         """
-        反思行动结果（领域规约，不做进度统计与合同裁决）
-        
-        Args:
-            action_result: 行动执行结果
-            current_state: 当前状态
-            task: 任务对象
-            iteration: 当前迭代次数
-            
-        Returns:
-            反思结果（仅规约）：
-            - task_complete: bool（可选，若领域已判定完成）
-            - completed_reason: str（可选，诊断用途）
-            - 其它领域需要的非状态信息
-        """
-        pass
+        summary = ""
+        try:
+            action_performed = action_result.get("action_performed") if isinstance(action_result, dict) else None
+            if isinstance(action_performed, str) and action_performed:
+                summary = action_performed
+        except Exception:
+            summary = ""
+        return {"success": True, "reflection_summary": summary}
     
     # === FINALIZATION / ERROR HANDLING ===================================
 
@@ -415,13 +699,27 @@ class ReActAgent(BaseAgent, ABC):
         
         可以被子类重写以提供fallback逻辑
         """
-        # 优先返回最后一次行动的结果（若存在）
-        last_action_result = context.get("last_action_result")
-        if isinstance(last_action_result, dict):
-            return dict(last_action_result)
-        # 无部分结果可返回，抛出明确错误
+        # 注意：MAS 架构下的交付 SoT 在 Shared/MAS WM；ReAct 基类不再通过“上一轮 action_result 缓存”兜底交付。
+        # 这里仅返回明确的未完成回执，供 orchestrator 做门控/重试决策；子类可覆写并从 MAS 聚合部分产物。
         total_iters = int(context.get("total_iterations") or 0)
-        raise AgentError(f"Iterative loop ended without results after {total_iters} iterations")
+        subtask_state = context.get("subtask_state") or "max_iter_reached"
+        loop_end_reason = context.get("loop_end_reason") or "max_iterations"
+        completed_reason = context.get("completed_reason")
+        plan_summary = context.get("plan_summary")
+        result: Dict[str, Any] = {
+            "success": False,
+            "subtask_state": str(subtask_state),
+            "loop_end_reason": str(loop_end_reason),
+            "total_iterations": total_iters,
+        }
+        if completed_reason:
+            result["completed_reason"] = completed_reason
+        if plan_summary:
+            result["plan_summary"] = plan_summary
+        wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        if wf_id:
+            result["workflow_state_id"] = wf_id
+        return result
     
     async def _handle_iteration_error(
         self, 
@@ -442,11 +740,22 @@ class ReActAgent(BaseAgent, ABC):
             self.logger.info(f"🔄 Error in iteration {iteration + 1}, will retry in next iteration")
         else:
             self.logger.error(f"❌ Error in final iteration {iteration + 1}, stopping iterative loop")
-        
+
         return should_continue
+
+    # === PLAN 上下文构造（分区：task/static/iteration） ===
+    def _build_plan_context(
+        self,
+        input_data: Dict[str, Any],
+        iteration_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """构造 PLAN 输入上下文，分区而非平铺。"""
+        from .utils.plan_context import build_plan_context
+
+        return build_plan_context(input_data=input_data, iteration_context=iteration_context)
     
     # === PLAN 消息构造（通用）：系统模板 + 观察 JSON ===
-    def build_plan_messages(self, observation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def build_plan_messages(self, plan_context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """构造 THINK/PLAN 阶段消息。
 
         要求：
@@ -455,6 +764,27 @@ class ReActAgent(BaseAgent, ABC):
         - user 消息为事实 JSON（不包含工具名/参数名）。
         """
         import json as _json
+        # PLAN 输入事实 JSON：同时作为 user content 与 plan 模板变量（facts_json）
+        try:
+            from .utils.json_utils import to_jsonable
+
+            facts_payload = to_jsonable(plan_context or {})
+            facts_json = _json.dumps(facts_payload, ensure_ascii=False)
+        except Exception as exc:
+            try:
+                self.logger.warning(
+                    "PLAN_CONTEXT_SERIALIZE_FAILED agent=%s err=%s",
+                    self.agent_name,
+                    exc,
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+            try:
+                facts_json = str(plan_context or {})
+            except Exception:
+                facts_json = "{}"
+        template_vars = {"facts_json": facts_json, "plan_context_json": facts_json}
         # 渲染系统模板
         sys_text: str = ""
         cfg_name = str(self.agent_name)
@@ -479,7 +809,7 @@ class ReActAgent(BaseAgent, ABC):
                 plan_rendered = self.prompt_manager.render_template(
                     cfg_name,
                     "plan",
-                    variables={},
+                    variables=template_vars,
                     use_cache=True,
                     auto_reload=False,
                 )
@@ -501,19 +831,82 @@ class ReActAgent(BaseAgent, ABC):
                 self.logger.info(f"PLAN_SYS_TEMPLATE agent={self.agent_name} cfg={cfg_name} len={len(sys_text)} src={src}")
             except Exception:
                 pass
-        # 观察 JSON
-        try:
-            # 过滤可能的衍生键，保持 PLAN 仅基于“事实”输入
-            obs_for_plan = {}
-            if isinstance(observation, dict):
-                obs_for_plan = {k: v for k, v in observation.items() if k not in ("aug", "aug_meta")}
-            obs_json = _json.dumps(obs_for_plan or {}, ensure_ascii=False)
-        except Exception:
-            obs_json = str(observation or {})
+        # 上下文 JSON（不做过滤/改造）
         return [
             {"role": "system", "content": sys_text},
-            {"role": "user", "content": obs_json},
+            {"role": "user", "content": facts_json},
         ]
+
+    async def _normalize_plan_contract_from_text(self, raw_plan_text: str) -> Dict[str, Any]:
+        """将 PLAN 的自然语言输出规整为最小退出合同 JSON。
+
+        重要约束：
+        - 仅做“抽取/规整”，不做二次规划与决策；
+        - 输入仅为 raw_plan_text（不再注入 plan_context），避免二次推理偏移。
+        """
+        raw = (raw_plan_text or "").strip()
+        if not raw:
+            return {}
+
+        try:
+            sys_text = self.prompt_manager.render_template(
+                "react_plan_contract",
+                "system",
+                variables={},
+                use_cache=True,
+                auto_reload=False,
+            ).strip()
+            user_text = self.prompt_manager.render_template(
+                "react_plan_contract",
+                "user",
+                variables={"raw_plan_text": raw},
+                use_cache=True,
+                auto_reload=False,
+            ).strip()
+        except Exception as e:
+            raise AgentError(f"react_plan_contract prompt render failed: {e}") from e
+
+        llm = self.get_llm("plan")
+        try:
+            resp = await llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": sys_text},
+                    {"role": "user", "content": user_text},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=512,
+                thinking={"type": "disabled"},
+            )
+        except Exception as e:
+            raise AgentError(f"react_plan_contract LLM call failed: {e}") from e
+
+        content = resp.get("content") if isinstance(resp, dict) else None
+        if not isinstance(content, str) or not content.strip():
+            raise AgentError("react_plan_contract returned empty content")
+
+        from .utils.json_utils import safe_json_loads  # type: ignore
+
+        try:
+            data = safe_json_loads(
+                content,
+                logger=self.logger,
+                context="react_plan_contract",
+                allow_fallback=False,
+                allow_syntax_repair=True,
+            )
+        except Exception as e:
+            raise AgentError(f"react_plan_contract JSON parse failed: {e}") from e
+
+        if not isinstance(data, dict):
+            raise AgentError("react_plan_contract output is not a JSON object")
+        if "task_complete" not in data or not isinstance(data.get("task_complete"), bool):
+            raise AgentError("react_plan_contract missing task_complete:boolean")
+        if "completed_reason" in data and data.get("completed_reason") is not None and not isinstance(data.get("completed_reason"), str):
+            raise AgentError("react_plan_contract completed_reason must be string|null")
+        if "plan_summary" not in data or not isinstance(data.get("plan_summary"), str):
+            raise AgentError("react_plan_contract missing plan_summary:string")
+        return data
 
 
     async def llm_structured_observation(self, messages: List[Dict[str, Any]], schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:

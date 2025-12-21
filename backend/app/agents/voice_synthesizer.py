@@ -133,220 +133,6 @@ class VoiceSynthesizerAgent(ReActAgent):
             return items or None
         return None
 
-    def _resolve_voice_plan(
-        self,
-        workflow_state_id: str,
-        *,
-        incoming: Optional[Dict[str, Any]],
-        store: Optional[Any],
-    ) -> Dict[str, Any]:
-        if isinstance(incoming, dict) and incoming:
-            if store is not None:
-                try:
-                    store.put("voice_plan", incoming)
-                except Exception as exc:
-                    self.logger.error("Shared memory write voice_plan failed: %s", exc, exc_info=True)
-                    raise AgentError("Shared memory write failed (voice_plan)") from exc
-            return incoming
-        if store is None:
-            return {}
-        try:
-            return store.get("voice_plan", {}) or {}
-        except Exception as exc:
-            self.logger.error("Shared memory read voice_plan failed: %s", exc, exc_info=True)
-            raise AgentError("Shared memory read failed (voice_plan)") from exc
-
-    def _resolve_concept_plan(
-        self,
-        workflow_state_id: str,
-        *,
-        store: Optional[Any],
-    ) -> Dict[str, Any]:
-        if store is None:
-            return {}
-        try:
-            return store.get("concept_plan", {}) or {}
-        except Exception as exc:
-            self.logger.error("Shared memory read concept_plan failed: %s", exc, exc_info=True)
-            raise AgentError("Shared memory read failed (concept_plan)") from exc
-
-    def _load_voice_assets(self, workflow_state_id: str, store: Optional[Any]) -> Dict[int, Dict[str, Any]]:
-        if store is None:
-            return {}
-        try:
-            assets = store.get("voice_assets", {}) or {}
-        except Exception as exc:
-            self.logger.error("Shared memory read voice_assets failed: %s", exc, exc_info=True)
-            raise AgentError("Shared memory read failed (voice_assets)") from exc
-        normalized: Dict[int, Dict[str, Any]] = {}
-        if isinstance(assets, dict):
-            for key, value in assets.items():
-                try:
-                    scene_number = int(key)
-                except Exception:
-                    continue
-                if isinstance(value, dict):
-                    normalized[scene_number] = value
-        return normalized
-
-    def _build_voice_scene_facts(
-        self,
-        *,
-        wm: Any,
-        scenes_payload: Optional[List[Dict[str, Any]]],
-        voice_plan: Dict[str, Any],
-        concept_plan: Dict[str, Any],
-        voice_assets: Dict[int, Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        scenes = self._materialize_scene_payloads(wm, scenes_payload)
-        guidance_map = self._build_guidance_map(voice_plan)
-        default_enabled = bool(voice_plan.get("enabled")) and str(voice_plan.get("mode", "none")).lower() not in {"none", "off"}
-        facts: List[Dict[str, Any]] = []
-        concept_overview = concept_plan.get("overview") if isinstance(concept_plan, dict) else ""
-
-        for scene in scenes:
-            if not isinstance(scene, dict):
-                continue
-            scene_number = scene.get("scene_number")
-            if scene_number is None:
-                continue
-            try:
-                scene_number = int(scene_number)
-            except Exception:
-                continue
-            guidance = dict(guidance_map.get(scene_number, {}) or {})
-            pacing = scene.get("pacing_and_timing") or {}
-            if isinstance(pacing, dict):
-                if pacing.get("should_narrate") is not None:
-                    guidance["should_narrate"] = bool(pacing.get("should_narrate"))
-                if pacing.get("pace_tag"):
-                    guidance["pace_tag"] = str(pacing.get("pace_tag")).strip().lower()
-                if pacing.get("target_char_count") is not None:
-                    try:
-                        guidance["target_char_count"] = int(pacing.get("target_char_count"))
-                    except (TypeError, ValueError):
-                        guidance["target_char_count"] = pacing.get("target_char_count")
-            scene_guidance = scene.get("voice_guidance")
-            if isinstance(scene_guidance, dict):
-                for key, value in scene_guidance.items():
-                    if value is not None:
-                        guidance[key] = value
-
-            should_narrate = guidance.get("should_narrate")
-            if should_narrate is None:
-                should_narrate = default_enabled
-            target_duration = float(scene.get("duration") or scene.get("target_duration") or 0.0)
-            raw_text = (
-                scene.get("voice_over_text")
-                or scene.get("existing_text")
-                or scene.get("script_text")
-                or ""
-            )
-            char_limit = self._estimate_char_limit(target_duration)
-            sanitized_text = self._sanitize_narration_text(raw_text, char_limit)
-            asset_info = voice_assets.get(scene_number)
-            has_asset = bool(
-                asset_info
-                and (asset_info.get("audio_path") or asset_info.get("audio_url"))
-            )
-
-            fact_status = "skipped"
-            if should_narrate:
-                fact_status = "ready" if has_asset else "pending"
-
-            fact = {
-                "scene_number": scene_number,
-                "should_narrate": bool(should_narrate),
-                "fact_status": fact_status,
-                "target_duration": target_duration,
-                "existing_text": sanitized_text,
-                "original_char_count": len(raw_text or ""),
-                "voice_guidance": guidance,
-                "has_voice_asset": has_asset,
-                "existing_asset": asset_info if has_asset else {},
-                "video_url": scene.get("video_url") or "",
-                "script_excerpt": self._clean_text_fragment(scene.get("script_text") or "", 200),
-                "narrative_description": self._clean_text_fragment(scene.get("narrative_description") or "", 200),
-                "visual_description": self._clean_text_fragment(scene.get("visual_description") or "", 200),
-                "concept_overview": concept_overview,
-            }
-            facts.append(fact)
-        return facts
-
-    def _materialize_scene_payloads(
-        self,
-        wm: Any,
-        scenes_payload: Optional[List[Dict[str, Any]]],
-    ) -> List[Dict[str, Any]]:
-        if isinstance(scenes_payload, list) and scenes_payload:
-            prepared: List[Dict[str, Any]] = []
-            for item in scenes_payload:
-                if isinstance(item, dict) and item.get("scene_number") is not None:
-                    prepared.append(dict(item))
-            if prepared:
-                return prepared
-
-        prepared = []
-        if wm is None:
-            return prepared
-        try:
-            scene_numbers = list(getattr(wm, "scene_numbers", []))
-        except Exception:
-            scene_numbers = []
-        for sn in scene_numbers:
-            snapshot = getattr(wm, "scenes", {}).get(sn)
-            prepared.append(
-                {
-                    "scene_number": sn,
-                    "duration": float(getattr(snapshot, "duration", 0.0) or 0.0) if snapshot else 0.0,
-                    "narrative_description": getattr(snapshot, "narrative_description", "") if snapshot else "",
-                    "visual_description": getattr(snapshot, "visual_description", "") if snapshot else "",
-                    "script_text": "",
-                    "video_url": "",
-                }
-            )
-        return prepared
-
-    @staticmethod
-    def _build_guidance_map(voice_plan: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
-        mapping: Dict[int, Dict[str, Any]] = {}
-        entries = voice_plan.get("scene_guidance") if isinstance(voice_plan, dict) else None
-        if not isinstance(entries, list):
-            return mapping
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            scene_key = entry.get("scene_number") or entry.get("sceneIndex")
-            try:
-                scene_number = int(scene_key)
-            except (TypeError, ValueError):
-                continue
-            should_raw = entry.get("should_narrate")
-            if isinstance(should_raw, str):
-                should_val = should_raw.strip().lower() not in {"false", "0", "no", "off"}
-            else:
-                should_val = should_raw
-            raw_points = entry.get("key_points") or entry.get("topics") or entry.get("highlights") or []
-            if isinstance(raw_points, str):
-                key_points = [
-                    seg.strip()
-                    for seg in raw_points.replace("、", ",").split(",")
-                    if seg.strip()
-                ]
-            elif isinstance(raw_points, list):
-                key_points = [str(seg).strip() for seg in raw_points if str(seg).strip()]
-            else:
-                key_points = []
-            mapping[scene_number] = {
-                "scene_number": scene_number,
-                "should_narrate": should_val,
-                "objective": entry.get("objective") or entry.get("purpose") or "",
-                "emotion": entry.get("emotion") or entry.get("tone") or "",
-                "key_points": key_points,
-                "pace_tag": str(entry.get("pace_tag", "")).strip().lower(),
-                "target_char_count": entry.get("target_char_count"),
-            }
-        return mapping
 
     def _persist_voice_artifacts(
         self,
@@ -375,7 +161,7 @@ class VoiceSynthesizerAgent(ReActAgent):
                 continue
             record = {
                 "audio_url": art.get("audio_url", ""),
-                "audio_path": art.get("file_path", ""),
+                "audio_path": art.get("audio_path") or art.get("file_path", ""),
                 "duration": float(art.get("duration_sec") or 0.0),
                 "provider": art.get("provider", ""),
                 "voice_id": art.get("voice_id") or voice_settings.get("voice_id", ""),
@@ -417,21 +203,9 @@ class VoiceSynthesizerAgent(ReActAgent):
         task: Task,
         iteration: int,
     ) -> Dict[str, Any]:
-        current_state = current_state or {}
-        scene_facts = current_state.get("voice_scene_facts") or []
-        actionable = [
-            fact
-            for fact in scene_facts
-            if fact.get("should_narrate", True) and not fact.get("has_voice_asset")
-        ]
-        if not actionable:
-            return {
-                "action": "noop",
-                "reason": "no_actionable_scene",
-                "plan_llm": None,
-            }
+        plan_ctx = current_state or {}
 
-        messages = build_neutral_act_messages(self.agent_name, current_state)
+        messages = self.build_plan_messages(plan_ctx)
         fc_plan = await self.llm_function_call(
             messages=messages,
             context_description="voice_synthesis_plan_fc",
@@ -452,6 +226,38 @@ class VoiceSynthesizerAgent(ReActAgent):
             "tool_calls": planned_calls,
             "plan_llm": plan_llm,
         }
+
+    @staticmethod
+    def _try_fill_scene_number_for_voice_call(args: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize tool-call args for voice synthesis: ensure `scene_number` is present when derivable."""
+        if not isinstance(args, dict):
+            return args
+        scene_number = args.get("scene_number")
+        if scene_number is not None:
+            # Ensure reference_id exists for audit/dedup when possible.
+            if not args.get("reference_id"):
+                try:
+                    sn = int(scene_number)
+                    return {**args, "reference_id": f"scene_{sn}_narration"}
+                except Exception:
+                    return args
+            return args
+        reference_id = args.get("reference_id")
+        if not isinstance(reference_id, str) or not reference_id:
+            md = args.get("metadata")
+            if isinstance(md, dict) and md.get("scene_number") is not None:
+                return {**args, "scene_number": md.get("scene_number")}
+            return args
+        import re as _re
+
+        m = _re.search(r"(?:^|[^0-9])scene[_-]?(?P<num>[0-9]{1,4})(?:[^0-9]|$)", reference_id.lower())
+        if not m:
+            return args
+        try:
+            sn = int(m.group("num"))
+        except Exception:
+            return args
+        return {**args, "scene_number": sn}
 
     async def _execute_action(
         self,
@@ -476,6 +282,32 @@ class VoiceSynthesizerAgent(ReActAgent):
             }
 
         tool_calls = list(action_plan.get("tool_calls") or [])
+        # Contract-first normalization: fill missing scene_number from reference_id for legacy plans.
+        normalized_calls: List[Dict[str, Any]] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                normalized_calls.append(call)
+                continue
+            fn = (call.get("function") or {}).get("name")
+            if not isinstance(fn, str) or not fn.startswith("voice_synth_tool."):
+                normalized_calls.append(call)
+                continue
+            func = dict(call.get("function") or {})
+            raw_args = func.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    import json as _json
+
+                    raw_args = _json.loads(raw_args)
+                except Exception:
+                    normalized_calls.append(call)
+                    continue
+            if not isinstance(raw_args, dict):
+                normalized_calls.append(call)
+                continue
+            func["arguments"] = self._try_fill_scene_number_for_voice_call(raw_args)
+            normalized_calls.append({**call, "function": func})
+        tool_calls = normalized_calls
         exec_out = await self.execute_tool_calls(tool_calls, collect_facts=True)
         executed_calls = exec_out.get("executed_calls") or []
         act_log = exec_out.get("act_log") or []
@@ -546,36 +378,10 @@ class VoiceSynthesizerAgent(ReActAgent):
         task: Task,
         iteration: int,
     ) -> Dict[str, Any]:
-        current_state = current_state or {}
-        scene_facts = current_state.get("voice_scene_facts") or []
-        actionable = [
-            fact for fact in scene_facts if fact.get("should_narrate", True)
-        ]
-        newly_completed = {
-            int(art.get("scene_number"))
-            for art in (action_result.get("voice_artifacts") or [])
-            if art.get("scene_number") is not None
-        }
-        remaining = [
-            fact
-            for fact in actionable
-            if not fact.get("has_voice_asset") and fact.get("scene_number") not in newly_completed
-        ]
-        completed_count = len(newly_completed)
-        summary_bits: List[str] = []
-        if completed_count:
-            summary_bits.append(f"生成 {completed_count} 条旁白")
-        if remaining:
-            summary_bits.append(f"剩余 {len(remaining)} 条待生成")
-        if not summary_bits:
-            summary_bits.append("本轮无新增旁白")
-        summary = "；".join(summary_bits)
-
-        return {
-            "task_complete": len(remaining) == 0,
-            "completed_reason": summary if len(remaining) == 0 else None,
-            "reflection_summary": summary,
-        }
+        artifacts = action_result.get("voice_artifacts") or []
+        completed_count = len(artifacts) if isinstance(artifacts, list) else 0
+        summary = f"生成 {completed_count} 条旁白" if completed_count else "本轮无新增旁白"
+        return {"success": True, "reflection_summary": summary}
 
     async def _finalize_success_results(
         self,

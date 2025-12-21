@@ -66,6 +66,67 @@ class VideoComposerAgent(BaseAgent):
         voice_assets_facts = wm.get("project.voice_assets", {}) if wm else {}
         vm_state = wm.get("project.voice_mixing_state", {}) if wm else {}
 
+        # 从 Shared WM 收集“可合成的场景视频片段/旁白音轨”事实，用于让规划阶段具备可执行输入。
+        scene_videos: List[Dict[str, Any]] = []
+        scene_voiceovers: List[Dict[str, Any]] = []
+        try:
+            overview = wm.get("scene_overview", {}) if wm else {}
+            duration_by_scene: Dict[int, float] = {}
+            for s in (overview.get("scenes") if isinstance(overview, dict) else []) or []:
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    sn = int(s.get("scene_number"))
+                except Exception:
+                    continue
+                try:
+                    duration_by_scene[sn] = float(s.get("duration") or 0.0)
+                except Exception:
+                    duration_by_scene[sn] = 0.0
+
+            video_bucket = wm.get("scene_outputs.video", {}) if wm else {}
+            if isinstance(video_bucket, dict) and video_bucket:
+                for k, rec in video_bucket.items():
+                    if not isinstance(rec, dict):
+                        continue
+                    try:
+                        sn = int(rec.get("scene_number") or k)
+                    except Exception:
+                        continue
+                    scene_videos.append(
+                        {
+                            "scene_number": sn,
+                            "local_path": rec.get("video_path") or "",
+                            "video_url": rec.get("video_url") or "",
+                            "duration": float(rec.get("duration_sec") or duration_by_scene.get(sn) or 0.0),
+                        }
+                    )
+            scene_videos.sort(key=lambda x: int(x.get("scene_number") or 0))
+
+            voice_bucket = wm.get("scene_outputs.voice", {}) if wm else {}
+            if isinstance(voice_bucket, dict) and voice_bucket:
+                for k, rec in voice_bucket.items():
+                    if not isinstance(rec, dict):
+                        continue
+                    try:
+                        sn = int(rec.get("scene_number") or k)
+                    except Exception:
+                        continue
+                    scene_voiceovers.append(
+                        {
+                            "scene_number": sn,
+                            "local_path": rec.get("audio_path") or "",
+                            "audio_url": rec.get("audio_url") or "",
+                            "duration": float(rec.get("duration_sec") or 0.0),
+                        }
+                    )
+            scene_voiceovers.sort(key=lambda x: int(x.get("scene_number") or 0))
+        except Exception:
+            scene_videos = []
+            scene_voiceovers = []
+
+        compose_needed = bool((not str(video_path or "").strip()) and len(scene_videos) > 0)
+
         # 单写模式：从 artifacts 收集可用资产（compose/bgm/voiceover/video_only）
         try:
             from ..core.config import settings as _cfg
@@ -107,6 +168,8 @@ class VideoComposerAgent(BaseAgent):
 
         obs_unified = {
             "final_video": {"path": video_path, "url": final_video_facts.get("url", "")},
+            "scene_videos": scene_videos,
+            "scene_voiceovers": scene_voiceovers,
             "background_music": {
                 "path": bgm_facts.get("audio_path", ""),
                 "url": bgm_facts.get("audio_url", ""),
@@ -125,6 +188,7 @@ class VideoComposerAgent(BaseAgent):
             "voice_settings": voice_settings,
             "ducking_config": vm_state.get("ducking_config", {}),
             "requests": {
+                "compose_requested": compose_needed,
                 "voiceover_requested": bool(input_data.get("add_voiceover")),
                 "bgm_requested": bool(input_data.get("add_bgm")),
             },
@@ -133,9 +197,13 @@ class VideoComposerAgent(BaseAgent):
             {
                 "role": "system",
                 "content": (
-                    "你是视频合成代理。根据观察到的事实，自主判断是否需要为现有成片添加配音或背景音乐，"
-                    "或跳过处理。若需要：1) 产出本地可用的 mp4 成片路径；2) 遵循 ducking_config 等约束；"
-                    "3) 如资源仅有 URL，应先按策略落盘后再混流；4) 仅进行函数调用，不要输出解释文本。"
+                    "你是视频合成代理。你必须遵循观察到的事实中的 requests 字段来完成工作："
+                    "requests.compose_requested / requests.voiceover_requested / requests.bgm_requested 是上游明确下发的需求。"
+                    "当某个 request 为 true 且输入资源足以执行时，你应调用函数完成对应动作；"
+                    "当 request 为 false 时，不要为该项执行任何函数调用。"
+                    "你需要根据事实自主选择调用哪些函数（若无需处理则不调用）。"
+                    "要求：a) 产出本地可用的 mp4 成片路径；b) 遵循 ducking_config 等约束；"
+                    "c) 如资源仅有 URL，应先按策略落盘后再混流；d) 仅进行函数调用，不要输出解释文本。"
                     f"观察：{json.dumps(obs_unified, ensure_ascii=False)}"
                 ),
             },
@@ -251,7 +319,7 @@ class VideoComposerAgent(BaseAgent):
         destination_dir = self.file_storage.get_final_output_dir("video")
         extension = source.suffix or ".mp4"
 
-        exec_id = self._current_execution_id or "run"
+        exec_id = self._get_execution_id() or "run"
         candidate = destination_dir / f"{suffix}_{exec_id}{extension}"
         counter = 1
         while candidate.exists():
@@ -318,6 +386,7 @@ class VideoComposerAgent(BaseAgent):
             "provider": "",
             "skipped": False,
         }
+        exec_id = self._get_execution_id() or "run"
 
         if "oss_storage" in self._available_tools:
             try:
@@ -333,7 +402,7 @@ class VideoComposerAgent(BaseAgent):
                             "metadata": {
                                 "workflow_state_id": workflow_state_id,
                                 "agent": self.agent_name,
-                                "execution_id": execution.id,
+                                "execution_id": exec_id,
                             },
                         }
                     }

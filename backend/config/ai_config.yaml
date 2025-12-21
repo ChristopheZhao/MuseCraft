@@ -76,7 +76,7 @@ models:
     temperature: 0.7
     max_tokens: 12000              # Air版本轻量化
     enabled: true
-    timeout: 90                   # 备用模型更快/更短超时，兜底更及时
+    timeout: 120                  # 与主模型对齐，避免过早超时导致JSON不稳定
   
   # GLM-4 系列模型 (保留兼容性)
   glm-4:

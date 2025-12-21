@@ -3,7 +3,6 @@ Audio Generator Agent - Generates background music and audio for videos
 ReAct 版：先规划，再调用工具，失败可重试。
 """
 import asyncio
-import os
 from typing import Dict, Any, List
 import json
 from sqlalchemy.orm import Session
@@ -12,12 +11,8 @@ from .react_agent import ReActAgent, AgentError
 from ..models import Task, AgentType, Resource, ResourceType
  
 from ..core.config import settings
-from .utils.artifacts import (
-    pick_artifact_path_from_results,
-    persist_scene_outputs,
-    finalize_scene_outputs,
-)
-from .utils.memory_helpers import get_mas_working_memory
+from .utils.artifacts import extract_tool_payload
+from .utils.memory_helpers import write_shared_fact
 
 
 class AudioGeneratorAgent(ReActAgent):
@@ -51,28 +46,10 @@ class AudioGeneratorAgent(ReActAgent):
 
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
-        """PLAN：仅产生 call_tools（不执行），ACT 统一执行 BaseAgent.execute_tool_calls。"""
-        # 中立观察快照，避免在提示中泄漏工具名/参数名
-        style_guidance = {}
-        try:
-            cp = current_state.get("concept_plan", {})
-            if isinstance(cp, dict):
-                style_guidance = cp.get("intelligent_style_design") or {}
-        except Exception:
-            style_guidance = {}
-        observation_json = json.dumps({
-            "timeline": current_state.get("timeline", []),
-            "duration": current_state.get("summary", {}).get("duration", 0.0),
-            "style_guidance": style_guidance,
-        }, ensure_ascii=False)
-        messages = [
-            {"role": "system", "content": (
-                "你是配乐设计与执行代理。目标：生成与视频总时长一致、风格与情绪一致的背景音乐。"
-                "如需执行，请直接使用函数调用；若仅规划，可简要说明。"
-                f"观察：{observation_json}"
-            )},
-            {"role": "user", "content": "准备好就进行函数调用，不要输出解释性文本。"},
-        ]
+        """PLAN：使用模板和分区化上下文生成 FC 规划。"""
+        # current_state 已包含 orchestrator 组装的上下文（task/static/iteration 分区）；
+        # Agent 内不再二次拼装/覆盖，避免双轨事实源。
+        messages = self.build_plan_messages(current_state or {})
         # 仅规划：调用 llm_function_call 获取 tool_calls，不执行
         fc_plan = await self.llm_function_call(
             messages=messages,
@@ -106,157 +83,112 @@ class AudioGeneratorAgent(ReActAgent):
                 "success": True,
                 "generation_results": [],
                 "executed_calls": [],
-                "subtask_state": "complete",
-                "loop_end_reason": "noop",
                 "plan_llm": plan_llm,
             }
-        # 提前解析 workflow_state_id，供后续 Shared WM 使用
-        wf_id = str(input_data.get("workflow_state_id") or "")
-        if not wf_id:
-            raise AgentError("Shared WM write failed (background_music): missing workflow_state_id")
         # 统一执行工具调用
         executed_calls = await self.execute_tool_calls(call_tools)
-        # 优先从 WorkingMemory 的最近产物索引读取（kind=audio），再回退到 last_round_results / executed_calls
         audio_url: str = ""
-        music_path: str = ""
-        wm = self.wm
-        if wm is not None:
-            try:
-                latest = wm.latest_iteration_artifacts(kind="audio", limit=1)
-                if latest:
-                    rec = latest[0]
-                    music_path = rec.get("file_path") or ""
-                    audio_url = rec.get("url") or ""
-            except Exception:
-                pass
-        if not (music_path or audio_url):
-            music_path = pick_artifact_path_from_results(executed_calls, kind="audio", require_local=True) or ""
+        audio_path: str = ""
+        title: str = ""
+        duration: float = 0.0
+        style: str = ""
+        mood: str = ""
+        for call in (executed_calls or []):
+            if not isinstance(call, dict):
+                continue
+            payload = extract_tool_payload(call.get("result"))
+            if not isinstance(payload, dict):
+                continue
             if not audio_url:
-                for rec in (executed_calls or []):
-                    if not isinstance(rec, dict):
-                        continue
-                    payload = rec.get("result")
-                    if hasattr(payload, "result"):
-                        payload = getattr(payload, "result")
-                    if isinstance(payload, dict) and isinstance(payload.get("audio_url"), str) and payload.get("audio_url"):
-                        audio_url = payload.get("audio_url")
-                        break
-        # 推断时长与风格信息
-        # 计算总时长：优先从 Shared WM 时间线推导
-        total_duration = 0.0
-        try:
-            from .utils.memory_helpers import get_mas_working_memory
-            overview = get_mas_working_memory(wf_id, service=self.short_term_service).get("scene_overview", {}) or {}
-            tl = []
-            cursor = 0.0
-            for scene in overview.get("scenes", []) or []:
-                if not isinstance(scene, dict):
-                    continue
+                candidate = payload.get("audio_url") or payload.get("url") or ""
+                if isinstance(candidate, str) and candidate.strip():
+                    audio_url = candidate.strip()
+            if not audio_path:
+                candidate = payload.get("audio_path") or payload.get("file_path") or payload.get("local_path") or ""
+                if isinstance(candidate, str) and candidate.strip():
+                    audio_path = candidate.strip()
+            if not title and isinstance(payload.get("title"), str):
+                title = payload.get("title") or ""
+            if not style and isinstance(payload.get("style"), str):
+                style = payload.get("style") or ""
+            if not mood and isinstance(payload.get("mood"), str):
+                mood = payload.get("mood") or ""
+            if not duration:
                 try:
-                    sn = int(scene.get("scene_number"))
+                    duration = float(payload.get("duration") or payload.get("duration_sec") or 0.0)
                 except Exception:
-                    continue
-                dur = float(scene.get("duration") or 0.0)
-                tl.append({"scene_number": sn, "start": cursor, "end": cursor + dur, "duration": dur})
-                cursor += dur
-            total_duration = cursor
-        except Exception:
-            total_duration = 0.0
-        # 写回 WM（失败抛错）
-        style_name = ""
-        try:
-            from .utils.memory_helpers import read_shared_fact
-            concept_plan = read_shared_fact(wf_id, "project.concept_plan", {}, service=self.short_term_service) or {}
-            if isinstance(concept_plan, dict):
-                sg = concept_plan.get("intelligent_style_design") or {}
-                style_name = (sg or {}).get("style_name", "")
-        except Exception:
-            style_name = ""
-        bgm_facts = {
-            "audio_url": audio_url or "",
-            "audio_path": music_path or "",
-            "title": "Background Music",
-            "duration": float(total_duration or 0),
-            "style": style_name,
-            "available": bool(audio_url or music_path),
-        }
-        # 统一写回：artifacts 时间线记录 BGM 阶段产物
-        try:
-            self.write_shared_artifact(
-                kind="audio",
-                stage="bgm",
-                payload={
-                    "file_path": music_path or "",
-                    "url": audio_url or "",
-                    "duration_sec": float(total_duration or 0),
-                    "metadata": {"source": "audio_generator"},
-                },
-                scene_number=None,
-                tool="suno_client",
-                workflow_state_id=wf_id,
-            )
-        except Exception:
-            pass
-        stored_results: List[Dict[str, Any]] = []
-        if ok:
-            shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
-            stored_results = await persist_scene_outputs(
-                artifacts=[
-                    {
-                        "scene_number": 0,
-                        "audio_url": audio_url or "",
-                        "audio_path": music_path or "",
-                        "duration_sec": float(total_duration or 0),
-                        "metadata": {"source": "audio_generator"},
-                    }
-                ],
-                kind="audio",
-                agent_memory=None,
-                shared_memory=shared_wm,
-                include_prompt=False,
-            )
+                    duration = duration or 0.0
 
-        ok = bool(audio_url or music_path)
+        ok = bool(audio_url or audio_path)
+        background_music = {
+            "audio_url": audio_url or "",
+            "audio_path": audio_path or "",
+            "title": title or "",
+            "duration": float(duration or 0.0),
+            "style": style or "",
+            "mood": mood or "",
+            "available": bool(audio_url or audio_path),
+        }
+        if ok:
+            workflow_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+            if workflow_id:
+                # MAS SoT: cross-agent deliverable
+                try:
+                    write_shared_fact(
+                        workflow_id,
+                        "project.background_music",
+                        dict(background_music),
+                        service=self.short_term_service,
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "MAS write failed: project.background_music agent=%s wf_id=%s err=%s",
+                        self.agent_name,
+                        workflow_id,
+                        exc,
+                        exc_info=True,
+                    )
+                # Optional: normalized artifact receipt (for audit/debug)
+                try:
+                    tool_name = ""
+                    for call in reversed(executed_calls or []):
+                        if isinstance(call, dict) and isinstance(call.get("tool"), str) and call.get("tool"):
+                            tool_name = call.get("tool") or ""
+                            break
+                    self.write_shared_artifact(
+                        kind="audio",
+                        stage="bgm",
+                        payload={
+                            "file_path": audio_path,
+                            "url": audio_url,
+                            "duration_sec": float(duration or 0.0),
+                            "metadata": {
+                                "title": title or "",
+                                "style": style or "",
+                                "mood": mood or "",
+                            },
+                        },
+                        scene_number=None,
+                        tool=tool_name or "audio_generator",
+                        workflow_state_id=workflow_id,
+                    )
+                except Exception:
+                    pass
+        # 注意：此处不做“任务是否完成”的硬编码裁决（task_complete 由 PLAN 合同 + 事实上下文决定）。
+        # action_result 仅回报“本轮执行结果”与“产物索引”（用于写入 OBS→WM→下一轮上下文）。
         return {
             "success": ok,
-            "generation_results": stored_results
-            if stored_results
-            else [{"success": ok, "audio_url": audio_url, "file_path": music_path}],
+            "action_performed": "bgm_generation",
+            "background_music": background_music,
+            "generation_results": [{"success": ok, **background_music}],
             "executed_calls": executed_calls,
-            "subtask_state": "complete" if ok else "partial",
-            "loop_end_reason": "natural_complete" if ok else "incomplete",
             "plan_llm": plan_llm,
         }
 
-    async def _finalize_success_results(
-        self,
-        final_action_result: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        base = await super()._finalize_success_results(final_action_result, context)
-        wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        finals, failed = finalize_scene_outputs(
-            kind="audio",
-            workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
-        )
-        result = dict(base or {})
-        result["final_completed_scenes"] = finals
-        result["final_failed_scenes"] = failed
-        return result
-
     async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
         ok = bool(action_result.get("success"))
-        if (not ok) and iteration == 0:
-            return {
-                "task_complete": False,
-                "reflection_summary": "Retry with stronger energy and negative tags",
-            }
-        return {
-            "task_complete": True,
-            "reflection_summary": "Audio generation completed" if ok else "Audio generation incomplete",
-            "completed_reason": "Audio generation completed" if ok else None,
-        }
+        summary = "音频生成成功" if ok else "音频生成未成功"
+        return {"success": ok, "reflection_summary": summary}
     
     async def _generate_background_music_from_concept(
         self, 

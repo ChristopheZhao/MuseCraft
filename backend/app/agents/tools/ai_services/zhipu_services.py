@@ -235,13 +235,27 @@ class ZhipuLLMService(LLMServiceInterface):
         if "thinking" in kwargs and kwargs["thinking"] is not None:
             payload["thinking"] = kwargs["thinking"]
 
-        # 透传 response_format（若供应商支持则生效）
-        # 说明：即便在 FC 模式下，部分场景（如 tools 为空或直接文本响应）依然需要结构化输出约束
-        # 因此这里与 chat_completion 保持一致支持 response_format 透传
-        if "response_format" in kwargs and kwargs["response_format"]:
+        # response_format 透传（若供应商支持则生效）。
+        # 是否允许在 tools 非空时使用 response_format 由协议层（调用方）约束；本层不做“静默忽略”。
+        rf = kwargs.get("response_format")
+        # 协议约束：tools 非空时不要携带 response_format（在部分供应商/模式下会抑制 tool_calls）。
+        if rf and tools:
             try:
-                payload["response_format"] = kwargs["response_format"]
-                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')}")
+                self.logger.warning(
+                    "Zhipu.function_call: dropping response_format because tools are present (to avoid suppressing tool_calls): %s",
+                    rf,
+                )
+            except Exception:
+                pass
+            rf = None
+        if rf:
+            try:
+                payload["response_format"] = rf
+                self.logger.info(
+                    "Zhipu.function_call using response_format=%s max_tokens=%s",
+                    payload.get("response_format"),
+                    payload.get("max_tokens"),
+                )
             except Exception:
                 pass
         # 诊断：打印工具schema数量与前几个函数名
@@ -354,9 +368,19 @@ class ZhipuLLMService(LLMServiceInterface):
                 "has_function_call": False,
             }
 
-            if choice.get("finish_reason") == "tool_calls" and msg.get("tool_calls"):
-                response_data["tool_calls"] = msg.get("tool_calls")
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                # 兼容：部分供应商在 response_format/特定模式下可能仍返回 tool_calls 但 finish_reason=stop
+                response_data["tool_calls"] = tool_calls
                 response_data["has_function_call"] = True
+                try:
+                    if choice.get("finish_reason") != "tool_calls":
+                        self.logger.info(
+                            "Zhipu.function_call: tool_calls present but finish_reason=%s",
+                            choice.get("finish_reason"),
+                        )
+                except Exception:
+                    pass
 
             try:
                 clen = len(content or "") if isinstance(content, str) else 0

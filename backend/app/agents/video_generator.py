@@ -74,9 +74,8 @@ class VideoGeneratorAgent(ReActAgent):
         if runtime is None:
             raise AgentError("运行时尚未初始化")
 
-        # 使用完整 OBS 事实进行规划（去除 ready 对子集干预）
-        from .utils.fc_messages import build_neutral_act_messages
-        messages = build_neutral_act_messages(self.agent_name, current_state)
+        # 通过统一模板构造 PLAN 消息（分区上下文）
+        messages = self.build_plan_messages(current_state or {})
 
         # 仅规划：调用 FC 获取 tool_calls，不执行
         fc = await self.llm_function_call(
@@ -117,17 +116,55 @@ class VideoGeneratorAgent(ReActAgent):
         except Exception:
             pass
 
+        # 关键可观测性：当 tool_calls=0 时，打印本轮 PLAN 文本预览，便于定位“为何未触发工具调用”
+        if not planned_calls:
+            content = None
+            finish_reason = None
+            model = None
+            provider = None
+            if isinstance(plan_llm, dict):
+                content = plan_llm.get("content")
+                finish_reason = plan_llm.get("finish_reason")
+                model = plan_llm.get("model")
+                provider = plan_llm.get("provider")
+            content_str = (content or "").strip() if isinstance(content, str) else ""
+            if content_str:
+                preview = content_str
+                if len(preview) > 800:
+                    preview = preview[:800] + "...(truncated)"
+                self.logger.warning(
+                    "PLAN_NO_TOOL_CALLS agent=%s iter=%d finish_reason=%s model=%s provider=%s content_preview=%s",
+                    self.agent_name,
+                    iteration + 1,
+                    finish_reason,
+                    model,
+                    provider,
+                    preview,
+                )
+            else:
+                self.logger.warning(
+                    "PLAN_NO_TOOL_CALLS agent=%s iter=%d finish_reason=%s model=%s provider=%s (empty content)",
+                    self.agent_name,
+                    iteration + 1,
+                    finish_reason,
+                    model,
+                    provider,
+                )
+
         # 若未产出任何调用，尝试解析合同 JSON 作为回退；否则进入执行阶段
         if not planned_calls:
             # 无调用：回到观察，让下一轮根据 WM 事实自纠
-            return {"action": "observe", "parameters": {"reason": "no_calls_planned"}}
+            return {
+                "action": "observe",
+                "parameters": {"reason": "no_calls_planned"},
+                "plan_llm": plan_llm,
+                "reason": "no_calls_planned",
+            }
 
         return {
             "action": "execute_planned_calls",
-            "parameters": {
-                "call_tools": planned_calls,
-                "plan_llm": plan_llm,
-            },
+            "tool_calls": planned_calls,
+            "plan_llm": plan_llm,
         }
 
     # 旧版规划消息/决策路径已移除：改为单次 FC 直接产出 tool_calls
@@ -193,10 +230,16 @@ class VideoGeneratorAgent(ReActAgent):
 
         if action == "execute_planned_calls":
             params = action_plan.get("parameters", {}) or {}
-            planned_calls: List[Dict[str, Any]] = params.get("call_tools") or []
+            planned_calls: List[Dict[str, Any]] = list(
+                action_plan.get("tool_calls")
+                or action_plan.get("call_tools")
+                or params.get("tool_calls")
+                or params.get("call_tools")
+                or []
+            )
             if not planned_calls:
                 return {"action_performed": "observe", "generation_results": [], "executed_calls": []}
-            plan_llm = params.get("plan_llm")
+            plan_llm = action_plan.get("plan_llm") or params.get("plan_llm")
             wf_id = (
                 runtime.workflow_state_id
                 or input_data.get("workflow_state_id")
@@ -290,21 +333,10 @@ class VideoGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         performed = action_result.get("action_performed")
         if performed in {"observe"}:
-            return {
-                "success": True,
-                "task_complete": False,
-                "reflection_summary": "本轮仅观察，未执行工具。",
-            }
-        if performed == "task_completed":
-            return {
-                "success": True,
-                "task_complete": True,
-                "completed_reason": "任务已完成。",
-                "reflection_summary": "任务已完成。",
-            }
+            return {"success": True, "reflection_summary": "本轮仅观察，未执行工具。"}
 
-        completed_now = [r for r in action_result.get("generation_results", []) if r.get("success")]
-        failed_now = [r for r in action_result.get("generation_results", []) if not r.get("success")]
+        completed_now = [r for r in (action_result.get("generation_results") or []) if isinstance(r, dict) and r.get("success")]
+        failed_now = [r for r in (action_result.get("generation_results") or []) if isinstance(r, dict) and not r.get("success")]
 
         summary_bits: List[str] = []
         if completed_now:
@@ -312,22 +344,7 @@ class VideoGeneratorAgent(ReActAgent):
         if failed_now:
             summary_bits.append(f"{len(failed_now)} 个场景失败")
         summary_text = "；".join(summary_bits) if summary_bits else "本轮无新增产物"
-
-        try:
-            total = len(current_state.get("scenes") or [])
-        except Exception:
-            total = 0
-        outputs = self.wm.get("scene_outputs.video", {}) if self.wm is not None else {}
-        completed = len(outputs) if isinstance(outputs, dict) else 0
-        task_complete = total > 0 and completed >= total
-        result = {
-            "success": True,
-            "task_complete": task_complete,
-            "reflection_summary": summary_text,
-        }
-        if task_complete:
-            result["completed_reason"] = summary_text
-        return result
+        return {"success": True, "reflection_summary": summary_text}
 
     # === FINALIZE =========================================================
     async def _finalize_success_results(

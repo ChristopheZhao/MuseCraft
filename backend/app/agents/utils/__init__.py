@@ -11,6 +11,7 @@ from .artifacts import (
     make_storage_uploader,
 )
 from .tool_contracts import ContractSlotWrite, extract_contract_slot_writes
+from .plan_context import build_plan_context
 
 __all__ = [
     "SceneDurationCalculator",
@@ -23,4 +24,5 @@ __all__ = [
     "make_storage_uploader",
     "ContractSlotWrite",
     "extract_contract_slot_writes",
+    "build_plan_context",
 ]

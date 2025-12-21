@@ -139,13 +139,13 @@ class SceneContinuityPreparationTool(AsyncTool):
                     video_url=url_in,
                     memory_scene_number=None
                 )
-                if not final_frame_result.get("success"):
+                frame_data = final_frame_result.get("frame_data") if isinstance(final_frame_result, dict) else None
+                if not frame_data:
                     # 覆盖URL失败：不再依赖 shared_wm，直接回退
                     raise ToolError(
-                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
+                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error') if isinstance(final_frame_result, dict) else 'Unknown error'}",
                         self.metadata.name
                     )
-                frame_data = final_frame_result["frame_data"]
                 upload_result = await self._upload_frame_to_oss(frame_data, scene_number)
                 if not upload_result.get("success"):
                     raise ToolError(
@@ -213,21 +213,21 @@ class SceneContinuityPreparationTool(AsyncTool):
                 memory_scene_number=prev_scene_no
             )
             frame_data: Optional[str] = None
-            if final_frame_result.get("success"):
+            if isinstance(final_frame_result, dict):
                 frame_data = final_frame_result.get("frame_data")
-                # 若返回的是直链URL（非data_url），可直接复用，无需再次上传
-                if isinstance(frame_data, str) and frame_data.startswith("http"):
-                    self.logger.info("♻️  复用已存在的连续性帧URL（跳过上传）")
-                    return {
-                        "success": True,
-                        "scene_number": scene_number,
-                        "image_url": frame_data,
-                        "continuity_used": True,
-                        "processing_type": "continuity_frame_reuse",
-                        "previous_scene": prev_scene_no,
-                        "frame_extraction_info": final_frame_result.get("extraction_info", {}),
-                        "message": f"场景 {scene_number} 复用上游已存连续性帧"
-                    }
+            # 若返回的是直链URL（非data_url），可直接复用，无需再次上传
+            if isinstance(frame_data, str) and frame_data.startswith("http"):
+                self.logger.info("♻️  复用已存在的连续性帧URL（跳过上传）")
+                return {
+                    "success": True,
+                    "scene_number": scene_number,
+                    "image_url": frame_data,
+                    "continuity_used": True,
+                    "processing_type": "continuity_frame_reuse",
+                    "previous_scene": prev_scene_no,
+                    "frame_extraction_info": final_frame_result.get("extraction_info", {}) if isinstance(final_frame_result, dict) else {},
+                    "message": f"场景 {scene_number} 复用上游已存连续性帧"
+                }
             # 2) 若内存无可用帧，则尝试从上游视频提帧
             if not frame_data:
                 prev_video_url = None
@@ -256,9 +256,9 @@ class SceneContinuityPreparationTool(AsyncTool):
                     video_url=source,
                     memory_scene_number=prev_scene_no
                 )
-                if not final_frame_result.get("success"):
+                if not isinstance(final_frame_result, dict) or not final_frame_result.get("frame_data"):
                     raise ToolError(
-                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
+                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error') if isinstance(final_frame_result, dict) else 'Unknown error'}",
                         self.metadata.name
                     )
                 frame_data = final_frame_result["frame_data"]

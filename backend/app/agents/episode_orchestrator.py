@@ -17,11 +17,13 @@ from ..core.workflow_state import workflow_manager
 from ..core.story_plan import (
     EpisodePlan,
     EpisodeStatus,
+    CharacterProfile,
     ProjectState,
     merge_character_bibles,
     normalize_character_elements,
     project_state_repository,
 )
+from ..services.memory_provider import MemoryServices, build_memory_services
 from ..services.style_taxonomy import summarize_style_taxonomy
 
 
@@ -30,10 +32,12 @@ class EpisodeOrchestratorAgent(BaseAgent):
 
     def __init__(
         self,
+        memory_services: Optional[MemoryServices] = None,
         llms=None,
         orchestrator: Optional[OrchestratorAgent] = None,
         concept_planner: Optional[ConceptPlannerAgent] = None,
     ) -> None:
+        self._memory_services = memory_services or build_memory_services()
         super().__init__(
             agent_type=AgentType.EPISODE_ORCHESTRATOR,
             agent_name="episode_orchestrator",
@@ -41,8 +45,9 @@ class EpisodeOrchestratorAgent(BaseAgent):
             max_retries=1,
             tools=[],
             llms=llms,
+            memory_services=self._memory_services,
         )
-        self._base_orchestrator = orchestrator or OrchestratorAgent()
+        self._base_orchestrator = orchestrator or OrchestratorAgent(memory_services=self._memory_services)
         base_policy = getattr(self._base_orchestrator, "_llm_policy", None)
         if base_policy is None:
             policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
@@ -57,7 +62,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 llms = self._llm_policy.build_llms_for_agent("concept_planner")
             except Exception:
                 llms = None
-            self._concept_agent = ConceptPlannerAgent(llms=llms)
+            self._concept_agent = ConceptPlannerAgent(llms=llms, memory_services=self._memory_services)
 
         try:
             concept_llms = self._llm_policy.build_llms_for_agent("concept_planner")
@@ -81,7 +86,13 @@ class EpisodeOrchestratorAgent(BaseAgent):
         if not project_state:
             raise AgentError(f"Project state not found: {project_id}")
 
+        task.error_message = None
+        task.status = TaskStatus.IN_PROGRESS.value
+        task.update_progress("Episode orchestration started", 0)
+        db.commit()
+
         await self._ensure_project_foundation(task, project_state, db)
+        await self._ensure_project_character_reference_images(project_state, input_data)
 
         episodes_to_run = self._resolve_episode_selection(project_state, input_data)
         if not episodes_to_run:
@@ -92,12 +103,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
 
         results: List[Dict[str, Any]] = []
         total = len(episodes_to_run)
-
-        task.error_message = None
-        
-        task.status = TaskStatus.IN_PROGRESS.value
-        task.update_progress("Episode orchestration started", 0)
-        db.commit()
 
         for idx, episode in enumerate(episodes_to_run, start=1):
             runtime = project_state.ensure_runtime_state(episode.episode_id)
@@ -127,12 +132,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 )
                 continue
 
-            await self._update_progress(
-                execution,
-                int((idx - 1) / total * 90),
-                f"Generating episode {idx}/{total}",
-                db,
-            )
+            await self._update_progress(int((idx - 1) / total * 90), f"Generating episode {idx}/{total}", db)
             task.update_progress(f"Generating episode {idx}/{total}", int((idx - 1) / total * 90))
             db.commit()
 
@@ -145,17 +145,11 @@ class EpisodeOrchestratorAgent(BaseAgent):
             )
             results.append(episode_result)
 
-            await self._update_progress(
-                execution,
-                int(idx / total * 90),
-                f"Episode {idx}/{total} completed",
-                db,
-            )
+            await self._update_progress(int(idx / total * 90), f"Episode {idx}/{total} completed", db)
             task.update_progress(f"Episode {idx}/{total} completed", int(idx / total * 90))
             db.commit()
 
         project_state_repository.save(project_state)
-        execution.output_data = {"episodes": results}
         db.commit()
 
         await self._update_progress(100, "Episode orchestration finished", db)
@@ -286,6 +280,199 @@ class EpisodeOrchestratorAgent(BaseAgent):
             )
             project_state.story_plan.merge_character_profiles(normalized_characters)
 
+        project_state_repository.save(project_state)
+
+
+    async def _ensure_project_character_reference_images(
+        self,
+        project_state: ProjectState,
+        input_data: Dict[str, Any],
+    ) -> None:
+        """Generate avatar/full-body reference images for project characters (optional)."""
+
+        requested = input_data.get("project_character_reference_images_enabled")
+        if requested is None:
+            runtime_overrides = input_data.get("runtime_overrides") or {}
+            if isinstance(runtime_overrides, dict):
+                requested = runtime_overrides.get("project_character_reference_images_enabled")
+        enabled = (
+            bool(requested)
+            if requested is not None
+            else bool(getattr(settings, "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", False))
+        )
+        if not enabled:
+            return
+
+        if not project_state.character_bible:
+            return
+
+        avatar_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE", "1024x1024")
+        full_body_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE", "1024x1792")
+        style_profile = project_state.style_profile or {}
+        style_name = str(style_profile.get("style_name") or style_profile.get("style") or "").strip()
+        style_description = str(style_profile.get("style_description") or "").strip()
+        visual_approach = str(style_profile.get("visual_approach") or "").strip()
+
+        def _ensure_assets_container(profile_obj: Any) -> Dict[str, Any]:
+            if isinstance(profile_obj, CharacterProfile):
+                if profile_obj.reference_assets is None:
+                    profile_obj.reference_assets = {}
+                return profile_obj.reference_assets
+            if isinstance(profile_obj, dict):
+                assets = profile_obj.get("reference_assets")
+                if not isinstance(assets, dict):
+                    assets = {}
+                    profile_obj["reference_assets"] = assets
+                return assets
+            return {}
+
+        def _has_kind(assets: Dict[str, Any], kind: str) -> bool:
+            direct = assets.get(kind)
+            if isinstance(direct, dict) and str(direct.get("url") or "").strip():
+                return True
+            if isinstance(direct, str) and direct.strip():
+                return True
+            return False
+
+        def _upsert_kind(assets: Dict[str, Any], kind: str, payload: Dict[str, Any]) -> None:
+            assets[kind] = payload
+
+        def _flatten_keywords(value: Any) -> List[str]:
+            if not value:
+                return []
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if str(v).strip()]
+            if isinstance(value, dict):
+                keywords = value.get("keywords")
+                if isinstance(keywords, list):
+                    return [str(v).strip() for v in keywords if str(v).strip()]
+                if isinstance(keywords, dict):
+                    return [str(k).strip() for k, v in keywords.items() if v]
+            if isinstance(value, str):
+                return [value.strip()] if value.strip() else []
+            return [str(value).strip()]
+
+        def _build_prompt(profile_obj: Any, kind: str) -> str:
+            if isinstance(profile_obj, CharacterProfile):
+                display_name = profile_obj.display_name
+                description = profile_obj.description
+                narrative_role = profile_obj.narrative_role
+                personality = list(profile_obj.personality_traits or [])
+                visual_traits = profile_obj.visual_traits or {}
+                style_prefs = profile_obj.style_preferences or {}
+            elif isinstance(profile_obj, dict):
+                display_name = str(profile_obj.get("display_name") or profile_obj.get("name") or "").strip()
+                description = str(profile_obj.get("description") or "").strip()
+                narrative_role = str(profile_obj.get("narrative_role") or profile_obj.get("role") or "").strip()
+                personality = profile_obj.get("personality_traits") or []
+                if not isinstance(personality, list):
+                    personality = [str(personality)]
+                visual_traits = profile_obj.get("visual_traits") or {}
+                style_prefs = profile_obj.get("style_preferences") or {}
+            else:
+                display_name = ""
+                description = ""
+                narrative_role = ""
+                personality = []
+                visual_traits = {}
+                style_prefs = {}
+
+            identity_tags = _flatten_keywords(visual_traits.get("identity_tags") if isinstance(visual_traits, dict) else None)
+            signature_props = _flatten_keywords(visual_traits.get("signature_props") if isinstance(visual_traits, dict) else None)
+            style_keywords = _flatten_keywords(style_prefs)
+
+            parts: List[str] = []
+            if style_name:
+                parts.append(f"风格：{style_name}")
+            if style_description:
+                parts.append(f"风格描述：{style_description}")
+            if visual_approach:
+                parts.append(f"表现形式：{visual_approach}")
+            if display_name:
+                parts.append(f"角色：{display_name}")
+            if narrative_role:
+                parts.append(f"角色定位：{narrative_role}")
+            if description:
+                parts.append(f"角色描述：{description}")
+            if identity_tags:
+                parts.append("外观特征：" + "、".join(identity_tags[:8]))
+            if signature_props:
+                parts.append("标志性道具/服饰：" + "、".join(signature_props[:8]))
+            if personality:
+                parts.append("性格关键词：" + "、".join([str(x).strip() for x in personality[:8] if str(x).strip()]))
+            if style_keywords:
+                parts.append("风格偏好：" + "、".join(style_keywords[:10]))
+
+            if kind == "avatar":
+                parts.append("画面要求：角色头像参考图，正面，居中构图，背景干净，风格统一，无文字无水印。")
+            else:
+                parts.append("画面要求：角色全身立绘参考图，正面站立，包含标志性服饰与道具，背景干净，风格统一，无文字无水印。")
+
+            return "\n".join([p for p in parts if p])
+
+        for canonical_id, profile in (project_state.character_bible or {}).items():
+            assets = _ensure_assets_container(profile)
+            for kind, size in (("avatar", avatar_size), ("full_body", full_body_size)):
+                if _has_kind(assets, kind):
+                    continue
+
+                prompt = _build_prompt(profile, kind)
+                scene_number = f"character:{canonical_id}:{kind}"
+                dest_key = f"projects/{project_state.project_id}/character_refs/{canonical_id}/{kind}.png"
+                agent_timeout = int(getattr(self, "timeout_seconds", 3600) or 3600)
+
+                try:
+                    image_tool = self.tool_registry.get_tool("image_generation")
+                except Exception as exc:
+                    raise AgentError(f"image_generation tool not available: {exc}") from exc
+
+                gen_out = await image_tool.execute(
+                    {
+                        "action": "generate_image",
+                        "parameters": {
+                            "scene_number": scene_number,
+                            "prompt": prompt,
+                            "size": size,
+                        },
+                        "context": {"agent_timeout_seconds": agent_timeout},
+                    }
+                )
+                if not getattr(gen_out, "success", False):
+                    self.logger.warning(
+                        "Character reference generation failed: cid=%s kind=%s err=%s",
+                        canonical_id,
+                        kind,
+                        getattr(gen_out, "error", None),
+                    )
+                    continue
+
+                gen_payload = getattr(gen_out, "result", None)
+                if not isinstance(gen_payload, dict):
+                    self.logger.warning(
+                        "Character reference generation returned non-dict: cid=%s kind=%s",
+                        canonical_id,
+                        kind,
+                    )
+                    continue
+
+                image_url = str(gen_payload.get("image_url") or "").strip()
+                if not image_url:
+                    self.logger.warning("Character reference generation missing image_url: cid=%s kind=%s", canonical_id, kind)
+                    continue
+
+                asset_payload = {
+                    "kind": kind,
+                    "url": image_url,
+                    "size": size,
+                    "generated_prompt": gen_payload.get("generated_prompt") or prompt,
+                }
+                _upsert_kind(assets, kind, asset_payload)
+
+        # Keep StoryPlan view in sync with the project-level canonical bible
+        try:
+            project_state.story_plan.character_bible = project_state.character_bible
+        except Exception:
+            pass
         project_state_repository.save(project_state)
 
 

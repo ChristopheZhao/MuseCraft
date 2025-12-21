@@ -4,6 +4,7 @@ Concept Planner Agent - multi-stage concept planning with structured sub tasks.
 
 import json
 import asyncio
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -116,23 +117,42 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception:
             total_timeout = 180
 
-        stage_timeouts, stage_token_limits = self._compute_stage_budgets(
-            total_timeout, model_config
-        )
-        skeleton_timeout = stage_timeouts["skeleton"]
-        style_timeout = stage_timeouts["style"]
-        voice_timeout = stage_timeouts["voice"]
-        scene_timeout = stage_timeouts["scene"]
-
         try:
             fallback_request_timeout = int(getattr(settings, "LLM_FALLBACK_TIMEOUT_MAX", 60))
         except Exception:
             fallback_request_timeout = 60
 
-        skeleton_max_tokens = stage_token_limits["skeleton"]
-        style_max_tokens = stage_token_limits["style"]
-        voice_max_tokens = stage_token_limits["voice"]
-        scene_max_tokens = stage_token_limits["scene"]
+        deadline_ts = time.monotonic() + total_timeout
+
+        try:
+            standard_limit = int(getattr(settings, "LLM_MAX_TOKENS_STANDARD", 12800) or 12800)
+        except Exception:
+            standard_limit = 12800
+
+        model_token_limit: Optional[int] = None
+        if model_config is not None:
+            candidate = getattr(model_config, "max_tokens", None)
+            try:
+                if candidate:
+                    model_token_limit = int(candidate)
+            except Exception:
+                model_token_limit = None
+
+        max_token_cap = standard_limit
+        if model_token_limit and model_token_limit > 0:
+            max_token_cap = min(max_token_cap, model_token_limit)
+
+        skeleton_max_tokens = max_token_cap
+        style_max_tokens = max_token_cap
+        voice_max_tokens = max_token_cap
+        scene_max_tokens = max_token_cap
+
+        global_scene_max = getattr(settings, "LLM_MAX_TOKENS_SCENE_DETAIL", None)
+        if global_scene_max:
+            try:
+                scene_max_tokens = min(scene_max_tokens, int(global_scene_max))
+            except Exception:
+                pass
 
         base_temperature = getattr(model_config, "temperature", 0.7) if model_config else 0.7
         skeleton_temperature = min(0.65, base_temperature)
@@ -141,6 +161,12 @@ class ConceptPlannerAgent(BaseAgent):
         scene_temperature = base_temperature
 
         await self._update_progress(20, "Drafting concept skeleton", db)
+
+        expected_calls = 1 + 2
+        if concept_mode != "project":
+            expected_calls += 1
+        skeleton_timeout = self._budgeted_timeout(deadline_ts, expected_calls)
+        skeleton_fallback_timeout = min(fallback_request_timeout, skeleton_timeout)
 
         skeleton_payload, skeleton_usage = await self._generate_skeleton(
             system_prompt=system_prompt,
@@ -156,7 +182,7 @@ class ConceptPlannerAgent(BaseAgent):
             fallback_model=fallback_model,
             fallback_model_config=fallback_model_config,
             request_timeout=skeleton_timeout,
-            fallback_request_timeout=fallback_request_timeout,
+            fallback_request_timeout=skeleton_fallback_timeout,
             max_tokens=skeleton_max_tokens,
             temperature=skeleton_temperature,
         )
@@ -166,6 +192,12 @@ class ConceptPlannerAgent(BaseAgent):
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
 
         await self._update_progress(40, "Designing style and voice plan", db)
+
+        pending_calls = 2 + (0 if concept_mode == "project" else 1)
+        style_timeout = self._budgeted_timeout(deadline_ts, pending_calls)
+        style_fallback_timeout = min(fallback_request_timeout, style_timeout)
+        voice_timeout = self._budgeted_timeout(deadline_ts, pending_calls)
+        voice_fallback_timeout = min(fallback_request_timeout, voice_timeout)
 
         style_task = asyncio.create_task(
             self._generate_style_bundle(
@@ -178,7 +210,7 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=style_timeout,
-                fallback_request_timeout=fallback_request_timeout,
+                fallback_request_timeout=style_fallback_timeout,
                 max_tokens=style_max_tokens,
                 temperature=style_temperature,
                 concept_mode=concept_mode,
@@ -197,7 +229,7 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=voice_timeout,
-                fallback_request_timeout=fallback_request_timeout,
+                fallback_request_timeout=voice_fallback_timeout,
                 max_tokens=voice_max_tokens,
                 temperature=voice_temperature,
             )
@@ -269,7 +301,7 @@ class ConceptPlannerAgent(BaseAgent):
                 model_config=model_config,
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
-                request_timeout=scene_timeout,
+                deadline_ts=deadline_ts,
                 fallback_request_timeout=fallback_request_timeout,
                 max_tokens=scene_max_tokens,
                 temperature=scene_temperature,
@@ -545,38 +577,28 @@ class ConceptPlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
             context_description="style_elements_generation",
         )
+        raw_content = response.get("content", "")
         try:
             payload = safe_json_loads(
-                response.get("content", ""),
+                raw_content,
                 logger=self.logger,
                 context="style_elements_generation",
                 allow_fallback=False,
             )
         except Exception as _pe:
-            # 打印原始返回内容的更完整快照，便于定位非JSON根因
-            try:
-                raw = response.get("content", "")
-                clen = len(raw or "")
-                try:
-                    max_len = int(getattr(settings, 'CONTENT_PREVIEW_CHARS', 1000))
-                except Exception:
-                    max_len = 1000
-                preview = (raw or "")[:max_len].replace("\n", " ")
-                meta = {
-                    "finish_reason": response.get("finish_reason"),
-                    "model": response.get("model"),
-                    "provider": response.get("provider"),
-                    "usage": response.get("usage"),
-                    "len": clen,
-                }
-                self.logger.warning(
-                    "Style elements raw response snapshot: meta=%s preview=%r",
-                    meta,
-                    preview,
-                )
-            except Exception:
-                pass
-            raise
+            # 解析失败：打印 meta + 原始全文，便于比对
+            meta = {
+                "finish_reason": response.get("finish_reason"),
+                "model": response.get("model"),
+                "provider": response.get("provider"),
+                "usage": response.get("usage"),
+                "len": len(raw_content or ""),
+            }
+            self.logger.warning("Style elements raw response meta=%s", meta)
+            self.logger.error("Style elements JSON parse failed: %s", _pe)
+            self.logger.error("Style elements raw content (full): %s", raw_content)
+            raise _pe
+        
         if not isinstance(payload, dict) or "intelligent_style_design" not in payload:
             # 定位是什么问题
             if not isinstance(payload, dict):
@@ -657,7 +679,7 @@ class ConceptPlannerAgent(BaseAgent):
         model_config: Any,
         fallback_model: Optional[str],
         fallback_model_config: Any,
-        request_timeout: int,
+        deadline_ts: float,
         fallback_request_timeout: int,
         max_tokens: int,
         temperature: float,
@@ -678,6 +700,9 @@ class ConceptPlannerAgent(BaseAgent):
         total_usage = 0
 
         for batch_index, batch in enumerate(batches):
+            remaining_batches = len(batches) - batch_index
+            request_timeout = self._budgeted_timeout(deadline_ts, remaining_batches)
+            batch_fallback_timeout = min(fallback_request_timeout, request_timeout)
             scene_batch_json = self._compact_json(batch)
             prompt = self.render_prompt(
                 "scene_detail_batch_generation",
@@ -697,7 +722,7 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=request_timeout,
-                fallback_request_timeout=fallback_request_timeout,
+                fallback_request_timeout=batch_fallback_timeout,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 response_format={"type": "json_object"},
@@ -742,60 +767,15 @@ class ConceptPlannerAgent(BaseAgent):
             "total_duration": total_duration,
         }
 
-    def _compute_stage_budgets(self, total_timeout: int, model_config: Any) -> Tuple[Dict[str, int], Dict[str, int]]:
-        """Compute per-stage timeout and token budgets, mirroring diagnostic flow."""
-
-        try:
-            timeout_ratio = float(getattr(settings, "LLM_PRIMARY_TIMEOUT_RATIO", 0.5))
-        except Exception:
-            timeout_ratio = 0.5
-        if timeout_ratio <= 0:
-            timeout_ratio = 0.5
-
-        base_timeout = max(5, int(total_timeout * timeout_ratio))
-        stage_timeouts = {
-            "skeleton": max(40, int(base_timeout * 0.5)),
-            "style": max(20, int(base_timeout * 0.3)),
-            "voice": max(15, int(base_timeout * 0.25)),
-            "scene": max(30, int(base_timeout * 0.35)),
-        }
-
-        try:
-            standard_limit = int(getattr(settings, "LLM_MAX_TOKENS_STANDARD", 12800) or 12800)
-        except Exception:
-            standard_limit = 12800
-
-        stage_tokens = {
-            "skeleton": standard_limit,
-            "style": standard_limit,
-            "voice": standard_limit,
-            "scene": standard_limit,
-        }
-
-        # 除非显式配置，否则把场景阶段再限制到全局场景上限
-        from ..core.config import settings as _settings
-        global_scene_max = getattr(_settings, "LLM_MAX_TOKENS_SCENE_DETAIL", None)
-        if global_scene_max:
-            try:
-                scene_cap = int(global_scene_max)
-                stage_tokens["scene"] = min(stage_tokens["scene"], scene_cap)
-            except Exception:
-                pass
-
-        model_token_limit: Optional[int] = None
-        if model_config is not None:
-            candidate = getattr(model_config, "max_tokens", None)
-            try:
-                if candidate:
-                    model_token_limit = int(candidate)
-            except Exception:
-                model_token_limit = None
-
-        if model_token_limit and model_token_limit > 0:
-            for key, value in stage_tokens.items():
-                stage_tokens[key] = min(value, model_token_limit)
-
-        return stage_timeouts, stage_tokens
+    def _budgeted_timeout(
+        self,
+        deadline_ts: float,
+        pending_calls: int,
+        min_timeout: int = 5,
+    ) -> int:
+        remaining = max(1.0, deadline_ts - time.monotonic())
+        per_call = remaining / max(1, pending_calls)
+        return max(min_timeout, int(per_call))
 
     def _make_scene_batches(self, scene_slots: List[Dict[str, Any]], batch_size: int) -> List[List[Dict[str, Any]]]:
         batches: List[List[Dict[str, Any]]] = []
@@ -1060,10 +1040,11 @@ class ConceptPlannerAgent(BaseAgent):
         response: Optional[Dict[str, Any]] = None
 
         try:
-            response = await self.llm_function_call(
+            # JSON-only planning step: use chat_completion directly to avoid FC proxy overhead.
+            llm = self.get_llm("plan")
+            response = await llm.chat_completion(
                 messages=messages,
                 model=model_name,
-                context_description=context_description,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 request_timeout=request_timeout,
@@ -1100,9 +1081,12 @@ class ConceptPlannerAgent(BaseAgent):
                 getattr(settings, "LLM_MAX_TOKENS_STANDARD", 8000),
                 getattr(fallback_model_config, "max_tokens", max_tokens) if fallback_model_config else max_tokens,
             )
-            fallback_temperature = (
-                getattr(fallback_model_config, "temperature", 0.5) if fallback_model_config else 0.5
-            )
+            fallback_temperature = getattr(fallback_model_config, "temperature", 0.5) if fallback_model_config else 0.5
+            if isinstance(response_format, dict) and response_format.get("type") == "json_object":
+                try:
+                    fallback_temperature = min(float(fallback_temperature), float(settings.LLM_JSON_TEMPERATURE_FALLBACK))
+                except Exception:
+                    fallback_temperature = float(settings.LLM_JSON_TEMPERATURE_FALLBACK)
             response = await llm.chat_completion(
                 messages=messages,
                 model=fallback_model,

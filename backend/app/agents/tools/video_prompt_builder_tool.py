@@ -1,6 +1,6 @@
 """
 Video Prompt Builder Tool
-负责将场景事实、一致性资产、连续性信息和创意意图组合为统一的视频生成提示词。
+根据场景信息引用与场景编号，组合提示词要素生成视频提示词。
 
 该工具保持供应商无关，返回标准字段：
 - prompt_text
@@ -10,6 +10,8 @@ Video Prompt Builder Tool
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any, Dict, List, Optional
 
 from .base_tool import (
@@ -21,7 +23,7 @@ from .base_tool import (
 
 
 class VideoPromptBuilderTool(AsyncTool):
-    """根据输入的场景事实与一致性资料生成视频提示词。"""
+    """根据场景信息引用与场景编号生成视频提示词。"""
 
     @classmethod
     def get_metadata(cls) -> ToolMetadata:
@@ -62,41 +64,25 @@ class VideoPromptBuilderTool(AsyncTool):
                     "type": ["integer", "string"],
                     "description": "目标场景编号（便于日志追踪）",
                 },
-                "scene_facts": {
-                    "type": "object",
-                    "description": "场景事实（visual_description、narrative_description、motion_beats 等）",
-                },
-                "style_assets": {
-                    "type": ["object", "null"],
-                    "description": "全局或场景级风格约束",
-                },
-                "character_assets": {
-                    "type": ["object", "null"],
-                    "description": "角色形象与特征约束",
-                },
-                "continuity_assets": {
-                    "type": ["object", "null"],
-                    "description": "连续性参考（上一场景尾帧、衔接说明等）",
-                },
-                "creative_intent": {
-                    "type": ["string", "null"],
-                    "description": "本场景的核心创意目标",
-                },
-                "negative_guidance": {
-                    "type": ["array", "null"],
-                    "items": {"type": "string"},
-                    "description": "需要排除的画面或风格要素",
+                "scene_info_ref": {
+                    "type": "string",
+                    "description": "场景信息引用（本地 JSON 路径或可访问的引用）",
                 },
             },
-            "required": ["scene_facts"],
+            "required": ["scene_number", "scene_info_ref"],
         }
 
     def _validate_action_parameters(self, action: str, parameters: Dict[str, Any]):
         if action != "build_prompt":
             return
-        if not isinstance(parameters.get("scene_facts"), dict):
+        if parameters.get("scene_number") is None:
             raise ToolValidationError(
-                "scene_facts 必须为对象，包含视觉与叙事描述",
+                "scene_number 不能为空",
+                tool_name=self.metadata.name,
+            )
+        if not isinstance(parameters.get("scene_info_ref"), str) or not parameters.get("scene_info_ref"):
+            raise ToolValidationError(
+                "scene_info_ref 必须为非空字符串",
                 tool_name=self.metadata.name,
             )
 
@@ -110,12 +96,14 @@ class VideoPromptBuilderTool(AsyncTool):
 
     def _build_prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
         scene_number = params.get("scene_number")
-        scene_facts = params.get("scene_facts") or {}
-        style_assets = params.get("style_assets") or {}
-        character_assets = params.get("character_assets") or {}
-        continuity_assets = params.get("continuity_assets") or {}
-        creative_intent = params.get("creative_intent") or ""
-        negative_guidance = params.get("negative_guidance") or []
+        scene_info_ref = params.get("scene_info_ref") or ""
+        scene_info = self._load_scene_info(scene_info_ref)
+        scene_facts = self._extract_scene_facts(scene_info, scene_number)
+        style_assets = self._extract_style_assets(scene_info)
+        character_assets = self._extract_character_assets(scene_info)
+        continuity_assets = self._extract_continuity_assets(scene_info, scene_number)
+        creative_intent = ""
+        negative_guidance: List[str] = []
 
         lines: List[str] = []
 
@@ -186,6 +174,96 @@ class VideoPromptBuilderTool(AsyncTool):
             "metadata": metadata,
         }
 
+    def _load_scene_info(self, ref: str) -> Dict[str, Any]:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ToolValidationError(
+                "scene_info_ref 为空或无效",
+                tool_name=self.metadata.name,
+            )
+        path = ref.strip()
+        if path.startswith("file://"):
+            path = path[len("file://"):]
+        if not os.path.exists(path):
+            raise ToolValidationError(
+                f"scene_info_ref 不存在: {path}",
+                tool_name=self.metadata.name,
+            )
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:
+            raise ToolValidationError(
+                f"scene_info_ref 解析失败: {exc}",
+                tool_name=self.metadata.name,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ToolValidationError(
+                "scene_info_ref 必须指向 JSON 对象",
+                tool_name=self.metadata.name,
+            )
+        return payload
+
+    def _extract_scene_facts(self, static_context: Dict[str, Any], scene_number: Any) -> Dict[str, Any]:
+        sn = self._coerce_int(scene_number)
+        if sn is None:
+            return {}
+        scenes = static_context.get("scenes_to_generate") or []
+        if isinstance(scenes, list):
+            for scene in scenes:
+                if not isinstance(scene, dict):
+                    continue
+                if self._coerce_int(scene.get("scene_number")) == sn:
+                    return scene
+        overview = static_context.get("scene_overview") or {}
+        if isinstance(overview, dict):
+            for scene in overview.get("scenes") or []:
+                if not isinstance(scene, dict):
+                    continue
+                if self._coerce_int(scene.get("scene_number")) == sn:
+                    return scene
+        return {}
+
+    def _extract_style_assets(self, static_context: Dict[str, Any]) -> Dict[str, Any]:
+        style_assets: Dict[str, Any] = {}
+        intelligent_style = static_context.get("intelligent_style") or {}
+        if intelligent_style:
+            style_assets["intelligent_style_design"] = intelligent_style
+        concept_plan = static_context.get("concept_plan") or {}
+        if isinstance(concept_plan, dict):
+            consistency_hints = concept_plan.get("consistency_hints")
+            if isinstance(consistency_hints, dict):
+                style_assets["consistency_hints"] = consistency_hints
+        return style_assets
+
+    def _extract_character_assets(self, static_context: Dict[str, Any]) -> Dict[str, Any]:
+        roles_ctx = static_context.get("roles_context") or {}
+        if isinstance(roles_ctx, dict) and roles_ctx.get("roles"):
+            return {"characters": roles_ctx.get("roles")}
+        concept_plan = static_context.get("concept_plan") or {}
+        if isinstance(concept_plan, dict) and concept_plan.get("roles"):
+            return {"characters": concept_plan.get("roles")}
+        return {}
+
+    def _extract_continuity_assets(self, static_context: Dict[str, Any], scene_number: Any) -> Dict[str, Any]:
+        sn = self._coerce_int(scene_number)
+        if sn is None:
+            return {}
+        continuity_sources = static_context.get("continuity_sources") or {}
+        if isinstance(continuity_sources, dict):
+            candidate = continuity_sources.get(sn) or continuity_sources.get(str(sn)) or {}
+            if isinstance(candidate, dict):
+                return candidate
+        return {}
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
     def _format_continuity(self, continuity_assets: Dict[str, Any]) -> List[str]:
         lines: List[str] = []
         if not isinstance(continuity_assets, dict):
@@ -193,6 +271,9 @@ class VideoPromptBuilderTool(AsyncTool):
         previous_frame = continuity_assets.get("previous_frame_url") or continuity_assets.get("continuity_frame_url")
         if previous_frame:
             lines.append(f"- Use previous frame {previous_frame} as continuity reference")
+        previous_video = continuity_assets.get("previous_scene_video_url") or continuity_assets.get("previous_video_url")
+        if previous_video:
+            lines.append(f"- Previous scene video: {previous_video}")
         notes = continuity_assets.get("transition_notes")
         if isinstance(notes, str) and notes.strip():
             lines.append(f"- Transition notes: {notes.strip()}")

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import uuid
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import asyncio
+import threading
 
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -15,7 +18,13 @@ from ....agents.base import AgentError
 from ....core.database import SessionLocal
 from ....core.constants import GenerationMode
 from ....core.mode_router import resolve_generation_mode, dispatch_generation
-from ....core.story_plan import ProjectState, project_state_repository, EpisodeStatus
+from ....core.story_plan import (
+    EpisodePlan,
+    EpisodeStatus,
+    ProjectState,
+    StoryPlan,
+    project_state_repository,
+)
 from ....models import Task, TaskStatus, TaskType
 from ....services.project_service import update_episode_script
 
@@ -94,10 +103,14 @@ class ProjectCreateRequest(BaseModel):
     tone_and_mood: Optional[str] = None
     additional_notes: Dict[str, Any] = Field(default_factory=dict)
     project_id: Optional[str] = None
+    auto_generate_scripts: bool = True
+    generate_character_references: bool = True
 
 
 class ProjectCreateResponse(BaseModel):
     project: ProjectStateResponse
+    task_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 class EpisodeScriptRequest(BaseModel):
@@ -112,6 +125,107 @@ class EpisodeGenerationRequest(BaseModel):
     auto_approve: bool = False
     force_rerun: bool = False
     runtime_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _schedule_project_plan(task_db_id: Optional[int], payload: Dict[str, Any]) -> None:
+    if task_db_id is None:
+        return
+
+    def runner() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run_project_plan(task_db_id, payload))
+        finally:
+            loop.close()
+
+    threading.Thread(target=runner, name=f"project-plan-{task_db_id}", daemon=True).start()
+
+
+async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
+    session = SessionLocal()
+    task: Optional[Task] = None
+    try:
+        task = session.get(Task, task_db_id)
+        if not task:
+            return
+
+        task.status = TaskStatus.IN_PROGRESS.value
+        task.update_progress("Project planning started", 1)
+        session.commit()
+
+        project_id = payload.get("project_id")
+        if project_id:
+            project_state = project_state_repository.get(project_id)
+            if project_state:
+                project_state.global_settings["planning_status"] = "in_progress"
+                project_state.global_settings["planning_task_id"] = task.task_id
+                project_state_repository.save(project_state)
+
+        from ....agents.utils.llm_policy import LLMPolicyManager
+
+        policy_path = Path(__file__).resolve().parents[3].joinpath('config', 'llm_policies.yaml')
+        policy_manager = LLMPolicyManager(str(policy_path))
+        planner_llms = policy_manager.build_llms_for_agent('series_planner')
+
+        planner = SeriesPlannerAgent(llms=planner_llms)
+        await planner.execute(
+            task=task,
+            input_data=payload,
+            db=session,
+            execution_order=1,
+        )
+
+        # Optional: generate project character reference images (avatar/full_body)
+        try:
+            from ....services.character_reference_images import ensure_project_character_reference_images
+
+            if project_id:
+                task.update_progress("Generating character references", 90)
+                session.commit()
+                await ensure_project_character_reference_images(
+                    str(project_id),
+                    enabled=bool(payload.get("generate_character_references", True)),
+                    logger=getattr(planner, "logger", None),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Keep planning successful even if refs fail; surface diagnostics in project_state.
+            if project_id:
+                project_state = project_state_repository.get(project_id)
+                if project_state:
+                    project_state.global_settings["character_reference_error"] = str(exc)
+                    project_state_repository.save(project_state)
+
+        task.status = TaskStatus.COMPLETED.value
+        task.error_message = None
+        task.output_metadata = {"project_id": payload.get("project_id")}
+        task.update_progress("Project planning completed", 100)
+        session.commit()
+
+        if project_id:
+            project_state = project_state_repository.get(project_id)
+            if project_state:
+                project_state.global_settings["planning_status"] = "completed"
+                project_state.global_settings["planning_task_id"] = task.task_id
+                project_state_repository.save(project_state)
+
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        if task:
+            task.status = TaskStatus.FAILED.value
+            task.error_message = str(exc)
+            task.update_progress("Project planning failed", task.progress_percentage or 1)
+            session.commit()
+
+        project_id = payload.get("project_id")
+        if project_id:
+            project_state = project_state_repository.get(project_id)
+            if project_state:
+                project_state.global_settings["planning_status"] = "failed"
+                project_state.global_settings["planning_error"] = str(exc)
+                project_state_repository.save(project_state)
+    finally:
+        session.close()
 
 
 class EpisodeGenerationResponse(BaseModel):
@@ -204,6 +318,8 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             "visual_style": request.visual_style,
             "tone_and_mood": request.tone_and_mood,
             "additional_notes": request.additional_notes,
+            "auto_generate_scripts": bool(request.auto_generate_scripts),
+            "generate_character_references": bool(request.generate_character_references),
         }
 
         task = _create_task(
@@ -213,28 +329,46 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             task_type=TaskType.SCRIPT_WRITING,
             input_params=payload,
         )
-
-        from ....agents.utils.llm_policy import LLMPolicyManager
-
-        policy_path = (
-            Path(__file__).resolve()
-            .parents[3]
-            .joinpath('config', 'llm_policies.yaml')
-        )
-        policy_manager = LLMPolicyManager(str(policy_path))
-        planner_llms = policy_manager.build_llms_for_agent('series_planner')
-
-        planner = SeriesPlannerAgent(llms=planner_llms)
-        await planner.execute(
-            task=task,
-            input_data=payload,
-            db=session,
-            execution_order=1,
-        )
-
-        task.status = TaskStatus.COMPLETED.value
-        task.update_progress("Series plan completed", 100)
+        task.status = TaskStatus.QUEUED.value
+        task.update_progress("Project planning queued", 0)
         session.commit()
+
+        # Bootstrap a placeholder project state immediately so the frontend can navigate
+        # without waiting for LLM planning to finish.
+        per_episode_cap = int(request.episode_cap_seconds or 60) or 60
+        min_episode_duration = int(request.episode_min_seconds or 45) or 45
+        target_duration = max(60, int(request.target_duration_seconds))
+        episodes_count = max(1, math.ceil(target_duration / per_episode_cap))
+        planned_episode_duration = max(min_episode_duration, min(per_episode_cap, target_duration // episodes_count))
+
+        story_plan = StoryPlan(
+            project_id=project_id,
+            user_prompt=request.user_prompt,
+            target_duration_seconds=target_duration,
+            aspect_ratio=request.aspect_ratio,
+        )
+        remainder = target_duration
+        for index in range(episodes_count):
+            target_for_episode = planned_episode_duration
+            if index == episodes_count - 1:
+                target_for_episode = remainder
+            remainder = max(0, remainder - target_for_episode)
+            story_plan.add_episode(EpisodePlan.create(index, f"Episode {index + 1}", target_for_episode, summary=""))
+
+        project_state = ProjectState(
+            project_id=project_id,
+            mode=request.mode,
+            story_plan=story_plan,
+            global_settings={
+                "resolution": request.resolution,
+                "style_preference": request.style_preference,
+                "planning_status": "queued",
+                "planning_task_id": task.task_id,
+            },
+        )
+        project_state_repository.save(project_state)
+
+        _schedule_project_plan(task.id, payload)
 
     except Exception as exc:  # noqa: BLE001
         session.rollback()
@@ -249,9 +383,13 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
 
     project_state = project_state_repository.get(project_id)
     if not project_state:
-        raise HTTPException(status_code=500, detail="Project plan not found after generation")
+        raise HTTPException(status_code=500, detail="Project plan not found after queuing")
 
-    return ProjectCreateResponse(project=_serialize_project_state(project_state))
+    return ProjectCreateResponse(
+        project=_serialize_project_state(project_state),
+        task_id=str(task.task_id) if task else None,
+        status=str(task.status) if task else None,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectStateResponse)
@@ -286,6 +424,12 @@ async def orchestrate_project(
     project_state = project_state_repository.get(project_id)
     if not project_state:
         raise HTTPException(status_code=404, detail="Project not found")
+    planning_status = (project_state.global_settings or {}).get("planning_status")
+    if planning_status in {"queued", "in_progress"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project planning in progress; please retry after it completes.",
+        )
 
     session = SessionLocal()
     task: Optional[Task] = None

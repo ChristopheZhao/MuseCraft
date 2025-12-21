@@ -131,6 +131,7 @@ class ReActOrchestratorAgent(BaseAgent):
                     plan_context = build_agent_context(
                         workflow_id=wf_id,
                         agent_name=self.agent_name,
+                        service=self.short_term_service,
                         state_view=None,
                         max_turn=None,
                         max_token_budget=None,

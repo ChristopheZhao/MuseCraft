@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.artifacts import (
-    normalize_executed_calls_to_artifacts,
     persist_scene_outputs,
     finalize_scene_outputs,
 )
@@ -44,7 +43,6 @@ class ImageGeneratorAgent(ReActAgent):
     def build_react_context_messages(self) -> List[Dict[str, Any]]:
         return []
 
-
     async def maybe_augment_observation(self, observation: Dict[str, Any]) -> Dict[str, Any]:
         """ImageAgent 使用最小观察视图，不做额外压缩或总结。"""
         if isinstance(observation, dict):
@@ -78,9 +76,8 @@ class ImageGeneratorAgent(ReActAgent):
                 "act_log": [],
                 "react_metrics": {},
                 "plan_llm": plan_llm,
-                "success": True,
-                "subtask_state": "complete",
                 "processed": 0,
+                "reason": summary.get("reason"),
             }
 
         self.logger.info("🚀 ACT: execute %d planned calls", len(tool_calls))
@@ -192,17 +189,27 @@ class ImageGeneratorAgent(ReActAgent):
         返回字段：final_completed_scenes / final_failed_scenes
         """
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        shared = None
+        try:
+            if wf_id:
+                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
+        except Exception:
+            shared = None
         finals, finals_failed = finalize_scene_outputs(
             kind="image",
             workflow_id=str(wf_id) if wf_id else None,
             agent_memory=self.wm,
+            shared_memory=shared,
+            service=self.short_term_service,
         )
 
-        return {
-            **(final_action_result or {}),
-            "final_completed_scenes": finals,
-            "final_failed_scenes": finals_failed,
-        }
+        result = dict(final_action_result or {})
+        result["final_completed_scenes"] = finals
+        result["final_failed_scenes"] = finals_failed
+        # Orchestrator 的策略优先读取 subtask_state；成功收尾时显式标记
+        result.setdefault("subtask_state", "complete")
+        result.setdefault("loop_end_reason", "task_complete")
+        return result
     
     @emit_progress_snapshot
     async def _reflect_on_results(
@@ -212,29 +219,21 @@ class ImageGeneratorAgent(ReActAgent):
         task: Task,
         iteration: int
     ) -> Dict[str, Any]:
-        """REFLECT：领域规约（覆盖式写回），不判断增量/进度。
+        """REFLECT：领域规约与轻量摘要（不做完成判定）。
 
         - 直接将本轮结果中的 prepared_prompts 写入 Shared WM 对应槽（覆盖式）。
-        - 返回轻量摘要，不计算“新增/剩余”。
+        - 返回轻量摘要；任务是否完成由 PLAN 合同（LLM 决策）给出。
         """
         action_performed = action_result.get("action_performed", "")
         if action_performed == "task_completed":
             return {
                 "success": True,
-                "task_complete": True,
-                "completed_reason": "所有图像生成任务已完成",
+                "reflection_summary": "任务已完成。",
             }
 
-        # 规约：从 executed_calls 规范化提取带 prompt_text 的结果
-        executed_calls = action_result.get("executed_calls") or []
-        generation_results = normalize_executed_calls_to_artifacts(
-            executed_calls, kind="image", include_prompt=True
-        )
-
-        summary = f"处理 {len(generation_results or [])} 个场景"
+        summary = "本轮已执行"
         return {
             "success": True,
-            "task_complete": False,
             "reflection_summary": summary,
         }
 
@@ -246,8 +245,7 @@ class ImageGeneratorAgent(ReActAgent):
         iteration: int
     ) -> Dict[str, Any]:
         """PLAN：直接通过 FC 产出 tool_calls，ACT 仅执行。"""
-        observation = current_state or {}
-        messages = self.build_plan_messages(observation)
+        messages = self.build_plan_messages(current_state or {})
         fc_plan = await self.llm_function_call(
             messages=messages,
             context_description="image_generation_plan_fc",

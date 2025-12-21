@@ -319,6 +319,29 @@ def normalize_executed_calls_to_artifacts(
     - kind: 限定 'image' | 'video' | 'audio'；为 None 时不过滤。
     - scene_number 来自 args.scene_number（优先）。
     """
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _parse_scene_number_from_reference_id(reference_id: Any) -> Optional[int]:
+        if not isinstance(reference_id, str) or not reference_id:
+            return None
+        # Contract-boundary normalization: accept common legacy reference_id patterns like:
+        # - scene_1_voice_over / scene_1_narration / scene_1
+        # - scene-1-xxx / scene1_xxx
+        import re as _re
+
+        m = _re.search(r"(?:^|[^0-9])scene[_-]?(?P<num>[0-9]{1,4})(?:[^0-9]|$)", reference_id.lower())
+        if not m:
+            return None
+        return _coerce_int(m.group("num"))
+
     out: List[Dict[str, Any]] = []
     for call in executed_calls or []:
         if not isinstance(call, dict) or not call.get("success"):
@@ -328,16 +351,27 @@ def normalize_executed_calls_to_artifacts(
         if not isinstance(payload, dict):
             continue
         # 选择路径与URL
-        file_path = payload.get("file_path") or payload.get("output_path") or payload.get("local_path")
+        file_path = (
+            payload.get("file_path")
+            or payload.get("output_path")
+            or payload.get("local_path")
+            # common cross-tool aliases
+            or payload.get("audio_path")
+            or payload.get("video_path")
+            or payload.get("image_path")
+        )
         image_url = payload.get("image_url")
         video_url = payload.get("video_url")
         audio_url = payload.get("audio_url")
+        audio_path = payload.get("audio_path")
+        video_path = payload.get("video_path")
+        image_path = payload.get("image_path")
         # kind 过滤
         if kind == "image" and not (image_url or file_path):
             continue
         if kind == "video" and not (video_url or file_path):
             continue
-        if kind == "audio" and not (audio_url or file_path):
+        if kind == "audio" and not (audio_url or audio_path or file_path):
             continue
         # 通用时长
         duration = (
@@ -353,12 +387,13 @@ def normalize_executed_calls_to_artifacts(
         except Exception:
             duration = None
         # 场景号
-        sn = args.get("scene_number")
-        try:
-            if sn is not None:
-                sn = int(sn)
-        except Exception:
-            pass
+        sn = _coerce_int(args.get("scene_number") if isinstance(args, dict) else None)
+        if sn is None and isinstance(args, dict):
+            md = args.get("metadata")
+            if isinstance(md, dict):
+                sn = _coerce_int(md.get("scene_number"))
+        if sn is None and isinstance(args, dict):
+            sn = _parse_scene_number_from_reference_id(args.get("reference_id"))
         # 构造结果
         item: Dict[str, Any] = {
             "success": True,
@@ -368,6 +403,17 @@ def normalize_executed_calls_to_artifacts(
             "video_url": video_url or "",
             "audio_url": audio_url or "",
         }
+        if isinstance(audio_path, str) and audio_path:
+            item["audio_path"] = audio_path
+        if isinstance(video_path, str) and video_path:
+            item["video_path"] = video_path
+        if isinstance(image_path, str) and image_path:
+            item["image_path"] = image_path
+        if isinstance(payload.get("metadata"), dict) and payload.get("metadata"):
+            item["metadata"] = dict(payload.get("metadata") or {})
+        for extra_key in ("provider", "voice_id", "sample_rate", "audio_format", "reference_id"):
+            if extra_key in payload and payload.get(extra_key) not in (None, ""):
+                item[extra_key] = payload.get(extra_key)
         if duration is not None:
             item["duration_sec"] = duration
         if include_prompt:

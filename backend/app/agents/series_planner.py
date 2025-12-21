@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -19,12 +19,13 @@ from ..core.story_plan import (
     normalize_character_bible,
     project_state_repository,
 )
+from ..services.memory_provider import MemoryServices, build_memory_services
 
 
 class SeriesPlannerAgent(BaseAgent):
     """Generate an episode-level plan while keeping MAS internals untouched."""
 
-    def __init__(self, llms=None) -> None:
+    def __init__(self, llms=None, memory_services: Optional[MemoryServices] = None) -> None:
         super().__init__(
             agent_type=AgentType.SERIES_PLANNER,
             agent_name="series_planner",
@@ -32,6 +33,7 @@ class SeriesPlannerAgent(BaseAgent):
             max_retries=1,
             tools=[],
             llms=llms,
+            memory_services=memory_services or build_memory_services(),
         )
 
     async def _execute_impl(
@@ -112,16 +114,27 @@ class SeriesPlannerAgent(BaseAgent):
             merged_style.update(story_plan.visual_style or {})
             story_plan.visual_style = merged_style
 
+        existing_state = project_state_repository.get(project_id)
+        existing_settings = {}
+        if existing_state and isinstance(getattr(existing_state, "global_settings", None), dict):
+            existing_settings = dict(existing_state.global_settings)
+
         project_state = ProjectState(
             project_id=project_id,
             mode=mode,
             story_plan=story_plan,
+            style_profile=dict(story_plan.visual_style or {}),
+            character_bible=dict(story_plan.character_bible or {}),
             global_settings={
                 "resolution": input_data.get("resolution"),
                 "style_preference": input_data.get("style_preference"),
             },
             cost_budget=input_data.get("cost_budget"),
         )
+        if existing_settings:
+            merged_settings = dict(existing_settings)
+            merged_settings.update(project_state.global_settings or {})
+            project_state.global_settings = merged_settings
 
         for episode in story_plan.episodes:
             runtime = project_state.ensure_runtime_state(episode.episode_id)
@@ -136,9 +149,6 @@ class SeriesPlannerAgent(BaseAgent):
             )
 
         project_state_repository.save(project_state)
-
-        execution.output_data = story_plan.to_dict()
-        db.commit()
 
         return {
             "project_id": project_id,
