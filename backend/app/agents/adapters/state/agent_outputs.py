@@ -84,6 +84,134 @@ def has_background_music(value: Any) -> bool:
     return bool(str(value.get("audio_path") or "").strip() or str(value.get("audio_url") or "").strip())
 
 
+def _has_video_artifact(value: Any) -> bool:
+    return has_project_artifact(value, url_key="url", path_key="path")
+
+
+def _has_mix_output(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return bool(str(value.get("output_path") or "").strip() or str(value.get("output_url") or "").strip())
+
+
+def _match_bgm_source(bgm: Dict[str, Any], mix_inputs: Dict[str, Any]) -> bool:
+    if not isinstance(bgm, dict) or not isinstance(mix_inputs, dict):
+        return False
+    src = mix_inputs.get("background_music") if isinstance(mix_inputs.get("background_music"), dict) else {}
+    if not isinstance(src, dict):
+        src = {}
+    bgm_path = str(bgm.get("audio_path") or "").strip()
+    bgm_url = str(bgm.get("audio_url") or "").strip()
+    src_path = str(src.get("path") or "").strip()
+    src_url = str(src.get("url") or "").strip()
+    if bgm_path and src_path and bgm_path == src_path:
+        return True
+    if bgm_url and src_url and bgm_url == src_url:
+        return True
+    return False
+
+
+def _has_voice_assets(wm: "WorkingMemory") -> bool:
+    try:
+        voice_bucket = wm.get("scene_outputs.voice", {}) if wm is not None else {}
+    except Exception:
+        voice_bucket = {}
+    if isinstance(voice_bucket, dict) and voice_bucket:
+        return True
+    try:
+        voice_assets = wm.get("project.voice_assets", {}) if wm is not None else {}
+    except Exception:
+        voice_assets = {}
+    if isinstance(voice_assets, dict) and voice_assets:
+        return True
+    try:
+        voice_assets = wm.get("voice_assets", {}) if wm is not None else {}
+    except Exception:
+        voice_assets = {}
+    return bool(isinstance(voice_assets, dict) and voice_assets)
+
+
+def assess_final_video_ready(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    """Assess whether final video exists in MAS WM."""
+    wf_id = str(workflow_id or "")
+    if not wf_id:
+        return {"ready": False, "reason": "workflow_id_missing"}
+    wm = get_mas_working_memory(wf_id, service=service)
+    fv = wm.get("project.final_video", {}) if wm is not None else {}
+    return {"ready": _has_video_artifact(fv), "reason": None if _has_video_artifact(fv) else "final_video_missing"}
+
+
+def assess_composer_bgm_prereq(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    """Assess whether composer has enough inputs to apply BGM."""
+    fv = assess_final_video_ready(workflow_id, service=service)
+    if not fv.get("ready"):
+        return {"eligible": False, "reason": fv.get("reason") or "final_video_missing"}
+    wm = get_mas_working_memory(str(workflow_id), service=service)
+    bgm = wm.get("project.background_music", {}) if wm is not None else {}
+    if not has_background_music(bgm):
+        return {"eligible": False, "reason": "bgm_missing"}
+    return {"eligible": True, "reason": None}
+
+
+def assess_composer_voiceover_prereq(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    """Assess whether composer has enough inputs to apply voiceover tracks."""
+    fv = assess_final_video_ready(workflow_id, service=service)
+    if not fv.get("ready"):
+        return {"eligible": False, "reason": fv.get("reason") or "final_video_missing"}
+    wm = get_mas_working_memory(str(workflow_id), service=service)
+    if not _has_voice_assets(wm):
+        return {"eligible": False, "reason": "voice_assets_missing"}
+    return {"eligible": True, "reason": None}
+
+
+def assess_composer_mix_delivery(
+    workflow_id: str,
+    *,
+    mix_type: str,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    """Assess whether composer has delivered a mix result in MAS WM (facts-only)."""
+    wf_id = str(workflow_id or "")
+    if not wf_id:
+        return {"subtask_state": "error", "pending": 0, "completed": 0, "total": 0}
+
+    wm = get_mas_working_memory(wf_id, service=service)
+    fv = wm.get("project.final_video", {}) if wm is not None else {}
+    if not _has_video_artifact(fv):
+        return {"subtask_state": "partial", "pending": 1, "completed": 0, "total": 1, "reason": "final_video_missing"}
+
+    mix_receipt = wm.get("project.final_video_mix", {}) if wm is not None else {}
+    if not isinstance(mix_receipt, dict) or not mix_receipt:
+        return {"subtask_state": "partial", "pending": 1, "completed": 0, "total": 1, "reason": "mix_receipt_missing"}
+
+    actual_type = str(mix_receipt.get("mix_type") or "").strip()
+    if actual_type != str(mix_type or "").strip():
+        return {"subtask_state": "partial", "pending": 1, "completed": 0, "total": 1, "reason": "mix_type_mismatch"}
+
+    if not _has_mix_output(mix_receipt):
+        return {"subtask_state": "partial", "pending": 1, "completed": 0, "total": 1, "reason": "mix_output_missing"}
+
+    if actual_type == "bgm":
+        bgm = wm.get("project.background_music", {}) if wm is not None else {}
+        inputs = mix_receipt.get("inputs") if isinstance(mix_receipt.get("inputs"), dict) else {}
+        if not _match_bgm_source(bgm, inputs):
+            return {"subtask_state": "partial", "pending": 1, "completed": 0, "total": 1, "reason": "mix_source_mismatch"}
+
+    return {"subtask_state": "complete", "pending": 0, "completed": 1, "total": 1}
+
+
 def _coerce_int(value: Any) -> Optional[int]:
     try:
         if value is None:
@@ -225,6 +353,10 @@ __all__ = [
     "get_agent_output_key",
     "get_agent_outputs_from_mas",
     "assess_agent_delivery",
+    "assess_composer_mix_delivery",
+    "assess_composer_bgm_prereq",
+    "assess_composer_voiceover_prereq",
+    "assess_final_video_ready",
     "has_project_artifact",
     "has_background_music",
 ]

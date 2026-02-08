@@ -2,9 +2,12 @@ from __future__ import annotations
 
 """Shared memory view helpers for orchestrator → agent context construction."""
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .video import VideoMemoryAdapter
+from ...core.config import settings
 from ..utils.memory_helpers import get_mas_working_memory
 
 if TYPE_CHECKING:
@@ -85,12 +88,27 @@ def load_concept_plan(workflow_id: str, *, service: "WorkingMemoryService") -> D
     return {}
 
 
+def load_audio_requirements(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
+    """Return audio requirement facts, if available."""
+    try:
+        wm = get_mas_working_memory(workflow_id, service=service)
+        payload = wm.get("project.audio_requirements", {}) if wm is not None else {}
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return {}
+    return {}
+
+
 def build_media_agent_context(
     workflow_id: str,
     *,
     service: "WorkingMemoryService",
     include_scripts: bool = True,
     include_roles: bool = False,
+    include_audio_requirements: bool = False,
+    sfx_required_default: Optional[bool] = None,
+    sfx_required_override: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Convenience helper for orchestrator when preparing agent inputs."""
     context: Dict[str, Any] = {}
@@ -105,7 +123,243 @@ def build_media_agent_context(
         roles_ctx = load_roles_context(workflow_id, service=service)
         if roles_ctx:
             context["roles_context"] = roles_ctx
+    if include_audio_requirements:
+        audio_requirements = load_audio_requirements(workflow_id, service=service)
+        if not isinstance(audio_requirements, dict):
+            audio_requirements = {}
+        if sfx_required_override is not None:
+            audio_requirements = dict(audio_requirements)
+            audio_requirements["sfx_required"] = bool(sfx_required_override)
+        elif "sfx_required" not in audio_requirements and sfx_required_default is not None:
+            audio_requirements = dict(audio_requirements)
+            audio_requirements["sfx_required"] = bool(sfx_required_default)
+        if audio_requirements:
+            context["audio_requirements"] = audio_requirements
     return context
+
+
+def build_video_composer_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+    requests: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Aggregate composer facts for ReAct planning."""
+    ctx: Dict[str, Any] = {}
+    wm = None
+    try:
+        wm = get_mas_working_memory(str(workflow_id), service=service)
+    except Exception:
+        wm = None
+
+    final_video = wm.get("project.final_video", {}) if wm else {}
+    bgm = wm.get("project.background_music", {}) if wm else {}
+    voice_settings = wm.get("project.voice_settings", {}) if wm else {}
+    if not voice_settings:
+        voice_settings = wm.get("voice_settings", {}) if wm else {}
+    voice_assets = wm.get("project.voice_assets", {}) if wm else {}
+    if not voice_assets:
+        voice_assets = wm.get("voice_assets", {}) if wm else {}
+    vm_state = wm.get("project.voice_mixing_state", {}) if wm else {}
+
+    # Compatibility: fallback to scene_outputs bundle when project-level facts are absent.
+    try:
+        scene_outputs = wm.get("scene_outputs", {}) if wm else {}
+    except Exception:
+        scene_outputs = {}
+    if isinstance(scene_outputs, dict) and scene_outputs:
+        if not (isinstance(final_video, dict) and (final_video.get("path") or final_video.get("url"))):
+            try:
+                video_bucket = scene_outputs.get("scene_outputs.video") or scene_outputs.get("video") or {}
+                latest_video = max(video_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(video_bucket, dict) else {}
+                if isinstance(latest_video, dict):
+                    final_video = {
+                        "path": latest_video.get("file_path") or latest_video.get("path") or "",
+                        "url": latest_video.get("url") or "",
+                    }
+            except Exception:
+                pass
+        if not (isinstance(bgm, dict) and (bgm.get("audio_path") or bgm.get("audio_url"))):
+            try:
+                audio_bucket = scene_outputs.get("scene_outputs.audio") or scene_outputs.get("audio") or {}
+                latest_audio = max(audio_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(audio_bucket, dict) else {}
+                if isinstance(latest_audio, dict):
+                    bgm = {
+                        "audio_path": latest_audio.get("file_path") or "",
+                        "audio_url": latest_audio.get("url") or "",
+                        "duration": latest_audio.get("duration_sec") or 0.0,
+                        "style": voice_settings.get("style_name") if isinstance(voice_settings, dict) else "",
+                    }
+            except Exception:
+                pass
+
+    scene_videos: List[Dict[str, Any]] = []
+    scene_voiceovers: List[Dict[str, Any]] = []
+    try:
+        overview = wm.get("scene_overview", {}) if wm else {}
+        duration_by_scene: Dict[int, float] = {}
+        for s in (overview.get("scenes") if isinstance(overview, dict) else []) or []:
+            if not isinstance(s, dict):
+                continue
+            try:
+                sn = int(s.get("scene_number"))
+            except Exception:
+                continue
+            try:
+                duration_by_scene[sn] = float(s.get("duration") or 0.0)
+            except Exception:
+                duration_by_scene[sn] = 0.0
+
+        video_bucket = wm.get("scene_outputs.video", {}) if wm else {}
+        if isinstance(video_bucket, dict) and video_bucket:
+            for k, rec in video_bucket.items():
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    sn = int(rec.get("scene_number") or k)
+                except Exception:
+                    continue
+                local_path = rec.get("video_path") or rec.get("path") or rec.get("file_path") or ""
+                video_url = rec.get("video_url") or rec.get("url") or ""
+                if local_path:
+                    # Prefer local artifacts when available to avoid redundant downloads.
+                    video_url = ""
+                scene_videos.append(
+                    {
+                        "scene_number": sn,
+                        "local_path": local_path,
+                        "video_url": video_url,
+                        "duration": float(rec.get("duration_sec") or duration_by_scene.get(sn) or 0.0),
+                    }
+                )
+        scene_videos.sort(key=lambda x: int(x.get("scene_number") or 0))
+
+        voice_bucket = wm.get("scene_outputs.voice", {}) if wm else {}
+        if isinstance(voice_bucket, dict) and voice_bucket:
+            for k, rec in voice_bucket.items():
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    sn = int(rec.get("scene_number") or k)
+                except Exception:
+                    continue
+                scene_voiceovers.append(
+                    {
+                        "scene_number": sn,
+                        "local_path": rec.get("audio_path") or "",
+                        "audio_url": rec.get("audio_url") or "",
+                        "duration": float(rec.get("duration_sec") or 0.0),
+                    }
+                )
+        scene_voiceovers.sort(key=lambda x: int(x.get("scene_number") or 0))
+    except Exception:
+        scene_videos = []
+        scene_voiceovers = []
+
+    scene_media_ref: Optional[str] = None
+    scene_media_has_voice = False
+    if scene_videos:
+        scene_numbers = [int(item.get("scene_number") or 0) for item in scene_videos]
+        voice_map = {
+            int(item.get("scene_number") or 0): item
+            for item in scene_voiceovers
+            if isinstance(item, dict) and item.get("local_path")
+        }
+        all_voice_ready = bool(scene_numbers) and all(sn in voice_map for sn in scene_numbers)
+        scene_media_has_voice = all_voice_ready
+        scene_media: List[Dict[str, Any]] = []
+        for item in scene_videos:
+            if not isinstance(item, dict):
+                continue
+            try:
+                sn = int(item.get("scene_number") or 0)
+            except Exception:
+                continue
+            video_path = (item.get("local_path") or "").strip()
+            if not video_path:
+                continue
+            entry: Dict[str, Any] = {
+                "scene_number": sn,
+                "video_file": video_path,
+                "duration": float(item.get("duration") or 0.0),
+            }
+            if all_voice_ready:
+                entry["audio_file"] = voice_map[sn].get("local_path") or ""
+            scene_media.append(entry)
+        if scene_media:
+            try:
+                base_dir = Path(settings.TEMP_PATH) / "context"
+                base_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"video_composer_scene_media_{workflow_id}.json"
+                ref_path = (base_dir / filename).resolve()
+                with open(ref_path, "w", encoding="utf-8") as fh:
+                    json.dump({"scenes": scene_media}, fh, ensure_ascii=False)
+                try:
+                    backend_root = Path(__file__).resolve().parents[3]
+                    scene_media_ref = str(ref_path.relative_to(backend_root))
+                except Exception:
+                    scene_media_ref = str(ref_path)
+            except Exception:
+                scene_media_ref = None
+
+    has_final = bool(
+        isinstance(final_video, dict)
+        and (str(final_video.get("path") or "").strip() or str(final_video.get("url") or "").strip())
+    )
+    requested = requests or {}
+    compose_requested = bool(requested.get("compose_requested", (not has_final) and len(scene_videos) > 0))
+
+    ctx["final_video"] = {
+        "path": final_video.get("path", "") if isinstance(final_video, dict) else "",
+        "url": final_video.get("url", "") if isinstance(final_video, dict) else "",
+    }
+    if compose_requested:
+        ctx["scene_videos"] = scene_videos
+    else:
+        ctx["scene_videos"] = []
+    ctx["scene_voiceovers"] = scene_voiceovers
+    ctx["scene_media_has_voice"] = scene_media_has_voice
+    if compose_requested and scene_media_ref:
+        ctx["scene_media_ref"] = scene_media_ref
+        key_illustration = dict(ctx.get("key_illustration") or {})
+        key_illustration.setdefault(
+            "scene_media_ref",
+            "场景合成清单的引用地址（包含场景视频路径/时长，可能包含配音路径）",
+        )
+        ctx["key_illustration"] = key_illustration
+    ctx["background_music"] = {
+        "path": bgm.get("audio_path", "") if isinstance(bgm, dict) else "",
+        "url": bgm.get("audio_url", "") if isinstance(bgm, dict) else "",
+        "duration": (bgm.get("duration") or 0.0) if isinstance(bgm, dict) else 0.0,
+        "style": bgm.get("style", "") if isinstance(bgm, dict) else "",
+    }
+    voice_assets_ctx = [
+        {
+            "scene_number": int(k) if str(k).isdigit() else k,
+            "local_path": (v or {}).get("local_path") or (v or {}).get("audio_path") or "",
+            "audio_url": (v or {}).get("audio_url", ""),
+            "duration": (v or {}).get("duration", 0.0),
+        }
+        for k, v in (voice_assets.items() if isinstance(voice_assets, dict) else [])
+    ]
+    ctx["voice_assets"] = voice_assets_ctx
+    # 当使用包含配音的合成清单时，隐藏逐场景音频路径，避免误导模型逐场景混音。
+    if (
+        scene_media_ref
+        and scene_media_has_voice
+        and bool(getattr(settings, "COMPOSER_HIDE_SCENE_AUDIO_ON_REF", False))
+    ):
+        ctx["scene_voiceovers"] = []
+        ctx["voice_assets"] = []
+    ctx["voice_settings"] = voice_settings if isinstance(voice_settings, dict) else {}
+    ctx["ducking_config"] = vm_state.get("ducking_config", {}) if isinstance(vm_state, dict) else {}
+    voiceover_requested = bool(requested.get("voiceover_requested", False))
+    ctx["requests"] = {
+        "compose_requested": compose_requested,
+        "voiceover_requested": voiceover_requested,
+        "bgm_requested": bool(requested.get("bgm_requested", False)),
+    }
+    return ctx
 
 
 def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
@@ -162,16 +416,30 @@ def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryS
         else:
             scenes_to_generate.append(payload)
 
+    context = {
+        "task_type": "batch_image_generation",
+        "workflow_state_id": workflow_id,
+        "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
+        "scenes_to_generate": scenes_to_generate,
+        "scenes_to_skip": scenes_to_skip,
+        "concept_plan": concept_plan,
+        "intelligent_style": concept_plan.get("intelligent_style_design") or {},
+    }
+
+    scene_info_payload = {
+        "task_type": "batch_image_generation",
+        "workflow_state_id": workflow_id,
+        "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
+        "scenes_to_generate": scenes_to_generate,
+        "scenes_to_skip": scenes_to_skip,
+        "concept_plan": concept_plan,
+        "intelligent_style": concept_plan.get("intelligent_style_design") or {},
+        "scene_overview": overview,
+    }
+
     return {
-        "context": {
-            "task_type": "batch_image_generation",
-            "workflow_state_id": workflow_id,
-            "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
-            "scenes_to_generate": scenes_to_generate,
-            "scenes_to_skip": scenes_to_skip,
-            "concept_plan": concept_plan,
-            "intelligent_style": concept_plan.get("intelligent_style_design") or {},
-        }
+        "context": context,
+        "scene_info_payload": scene_info_payload,
     }
 
 
@@ -283,6 +551,19 @@ def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryS
         if sn is not None:
             scene_numbers.append(sn)
 
+    scene_image_refs: List[Dict[str, Any]] = []
+    for scene in scenes_source or []:
+        if not isinstance(scene, dict):
+            continue
+        sn = _coerce_int(scene.get("scene_number"))
+        if sn is None:
+            continue
+        concept_entry = concept_scene_index.get(sn, {})
+        image_url = scene.get("image_url") or concept_entry.get("image_url") or ""
+        if isinstance(image_url, str) and image_url:
+            scene_image_refs.append({"scene_number": sn, "image_url": image_url})
+    scene_image_refs.sort(key=lambda item: item.get("scene_number") or 0)
+
     scene_dependency_graph: List[Dict[str, Any]] = []
     for scene in scenes_source or []:
         if not isinstance(scene, dict):
@@ -309,6 +590,7 @@ def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryS
         "roles": concept_plan.get("roles") or [],
         "total_scenes": len((overview.get("scenes") or []) if isinstance(overview, dict) else scenes_source or []),
         "scene_numbers": scene_numbers,
+        "scene_image_refs": scene_image_refs,
     }
 
     scene_info_payload = {
@@ -327,6 +609,7 @@ def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryS
         "key_illustration": {
             "task_overview": "全局故事与风格/角色概览，仅用于规划",
             "scene_dependency_graph": "场景依赖关系，表示生成顺序",
+            "scene_image_refs": "场景起始视觉参考索引（含 image_url）",
         },
     }
 
@@ -345,6 +628,7 @@ def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemorySe
 
     wm = get_mas_working_memory(workflow_id, service=service)
     voice_bucket = wm.get("scene_outputs.voice", {}) if wm is not None else {}
+    video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
     voice_plan = wm.get("project.voice_plan", {}) if wm is not None else {}
 
     def build_guidance_map(plan: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -406,6 +690,22 @@ def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemorySe
     if not scenes_source:
         scenes_source = concept_plan.get("scenes") or []
 
+    video_duration_map: Dict[int, float] = {}
+    if isinstance(video_bucket, dict):
+        for key, rec in video_bucket.items():
+            if not isinstance(rec, dict):
+                continue
+            try:
+                sn = int(rec.get("scene_number") or key)
+            except Exception:
+                continue
+            try:
+                duration_val = float(rec.get("duration_sec") or rec.get("duration") or 0.0)
+            except Exception:
+                duration_val = 0.0
+            if duration_val > 0:
+                video_duration_map[sn] = duration_val
+
     scenes_to_synthesize: List[Dict[str, Any]] = []
     scenes_completed: List[Dict[str, Any]] = []
     scenes_blocked: List[Dict[str, Any]] = []
@@ -459,12 +759,13 @@ def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemorySe
             and (voice_rec.get("audio_path") or voice_rec.get("audio_url") or voice_rec.get("url"))
         )
 
+        scene_duration = video_duration_map.get(sn) or scene.get("duration", 0.0)
         payload = {
             "scene_number": sn,
             "title": concept_entry.get("title", ""),
             "visual_description": scene.get("visual_description", ""),
             "narrative_description": scene.get("narrative_description", ""),
-            "duration": scene.get("duration", 0.0),
+            "duration": scene_duration,
             "voice_over_text": voice_text,
             "script_text": (script_entry or {}).get("script_text", "") or scene.get("script_text", ""),
             "voice_guidance": guidance,
@@ -472,6 +773,8 @@ def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemorySe
             "has_voice_asset": has_asset,
             "existing_asset": voice_rec if has_asset else {},
         }
+        if sn in video_duration_map:
+            payload["video_duration_sec"] = video_duration_map.get(sn)
 
         if not should_narrate:
             scenes_skipped.append({"scene_number": sn, "reason": "should_not_narrate"})

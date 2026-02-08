@@ -8,7 +8,7 @@ import logging
 import json
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
@@ -146,11 +146,15 @@ class OrchestratorAgent(BaseAgent):
         try:
             base_dir = Path(settings.TEMP_PATH) / "context"
             base_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"{agent_type.value}_{workflow_id}_{uuid.uuid4().hex}.json"
+            filename = f"{agent_type.value}_{workflow_id}.json"
             ref_path = (base_dir / filename).resolve()
             with open(ref_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False)
-            return str(ref_path)
+            try:
+                backend_root = Path(__file__).resolve().parents[2]
+                return str(ref_path.relative_to(backend_root))
+            except Exception:
+                return str(ref_path)
         except Exception as exc:
             try:
                 self.logger.warning("scene_info_ref persist failed: %s", exc)
@@ -227,7 +231,11 @@ class OrchestratorAgent(BaseAgent):
 
         workflow_results = {}
         # 任务分解（LLM → per-agent 指令），失败则回退
-        task_specs = await self._llm_decompose_tasks(workflow_data, wf_id)
+        task_specs, conditional_task_specs = await self._llm_decompose_tasks(workflow_data, wf_id)
+        if not isinstance(conditional_task_specs, dict) or not conditional_task_specs:
+            raise AgentError("LLM task decomposition missing conditional_tasks (required)")
+        if "video_composer_bgm_mix" not in conditional_task_specs:
+            raise AgentError("LLM task decomposition missing conditional task: video_composer_bgm_mix")
 
         total_steps = len(self.workflow_order)
         
@@ -237,6 +245,10 @@ class OrchestratorAgent(BaseAgent):
                 try:
                     shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
                     scope = agent_scope(wf_id, agent.agent_name)
+                    try:
+                        mem_service.reset(scope, wf_id)
+                    except Exception:
+                        pass
                     mem_service.create_or_get(
                         wf_id,
                         scope,
@@ -321,21 +333,16 @@ class OrchestratorAgent(BaseAgent):
 
                     # Hard gate: quality_checker requires a final video deliverable in MAS SoT.
                     if agent_type == AgentType.QUALITY_CHECKER:
-                        shared_qc = None
                         try:
-                            shared_qc = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                        except Exception:
-                            shared_qc = None
-                        fv = shared_qc.get("project.final_video", {}) if shared_qc is not None else {}
-                        has_final = bool(
-                            isinstance(fv, dict)
-                            and (
-                                str(fv.get("path") or "").strip()
-                                or str(fv.get("url") or "").strip()
-                            )
-                        )
-                        if not has_final:
-                            raise AgentError("Cannot run quality_checker: project.final_video missing in MAS WM")
+                            from .adapters.state.agent_outputs import assess_final_video_ready
+
+                            delivery = assess_final_video_ready(str(wf_id), service=self.short_term_service)
+                            if not delivery.get("ready"):
+                                raise AgentError("Cannot run quality_checker: project.final_video missing in MAS WM")
+                        except AgentError:
+                            raise
+                        except Exception as err:
+                            raise AgentError(f"Cannot run quality_checker: final_video check failed: {err}") from err
                     
                     # Execute the agent (now purely stateless)
                     agent_output = await agent.execute(
@@ -349,92 +356,35 @@ class OrchestratorAgent(BaseAgent):
                     workflow_results[agent_type.value] = agent_output
                     workflow_data.update(agent_output)
 
+                    if agent_type == AgentType.VIDEO_COMPOSER:
+                        self._store_composer_outputs(str(wf_id), agent_output)
+
                     # Composer re-entry: after composer/audion-agent, optionally add VO/BGM in composer mode
                     try:
                         mixing_mode = getattr(settings, 'AUDIO_MIXING_MODE', 'composer')
                     except Exception:
                         mixing_mode = 'composer'
-                    if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
-                        try:
-                            shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                            # 没有成片时，不应触发“二次混流”（会把问题掩盖成 add_voiceover 失败）。
-                            fv = shared.get("project.final_video", {}) if shared is not None else {}
-                            has_final = bool(
-                                isinstance(fv, dict)
-                                and (str(fv.get("path") or "").strip() or str(fv.get("url") or "").strip())
-                            )
-                            if not has_final:
-                                self.logger.warning(
-                                    "Skip composer add_voiceover: project.final_video missing (will rely on composer retry/gating)"
-                                )
-                            voice_bucket = {}
-                            try:
-                                voice_bucket = shared.get("scene_outputs.voice", {}) if shared is not None else {}
-                            except Exception:
-                                voice_bucket = {}
-                            has_voice_assets = bool(voice_bucket) if isinstance(voice_bucket, dict) else False
-                            if not has_final:
-                                has_voice_assets = False
-                            elif AgentType.VIDEO_COMPOSER.value + "_add_voiceover" in workflow_results:
-                                # Avoid repeating the same post-step composition within one workflow run.
-                                has_voice_assets = False
-                            if has_voice_assets:
-                                self.logger.info("🎤 Scheduling composer to add voice-over tracks")
-                                comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
-                                comp_input = {
-                                    "workflow_state_id": wf_id,
-                                    "add_voiceover": True
-                                }
-                                scope = agent_scope(wf_id, comp_agent.agent_name)
-                                shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
-                                mem_service.create_or_get(
-                                    wf_id,
-                                    scope,
-                                    owner_agent=comp_agent.agent_name,
-                                    shared_view=shared_view,
-                                )
-                                comp_out = await comp_agent.execute(
-                                    task=task,
-                                    input_data=comp_input,
-                                    db=db,
-                                    execution_order=step_index + 1
-                                )
-                                # Ensure final video is still available after post-processing.
-                                try:
-                                    shared2 = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                                    fv2 = shared2.get("project.final_video", {}) if shared2 is not None else {}
-                                    has_final2 = bool(
-                                        isinstance(fv2, dict)
-                                        and (str(fv2.get("path") or "").strip() or str(fv2.get("url") or "").strip())
-                                    )
-                                    if not has_final2:
-                                        raise AgentError("Composer add_voiceover did not produce/retain project.final_video")
-                                except AgentError:
-                                    raise
-                                except Exception as vf_err:
-                                    raise AgentError(f"Composer add_voiceover final_video verification failed: {vf_err}") from vf_err
-                                workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_voiceover"] = comp_out
-                                workflow_data.update(comp_out)
-                        except Exception as e:
-                            raise AgentError(f"Composer add_voiceover failed: {e}") from e
                     if agent_type == AgentType.AUDIO_GENERATOR and mixing_mode == 'composer':
                         try:
-                            shared0 = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                            fv0 = shared0.get("project.final_video", {}) if shared0 is not None else {}
-                            has_final0 = bool(
-                                isinstance(fv0, dict)
-                                and (str(fv0.get("path") or "").strip() or str(fv0.get("url") or "").strip())
-                            )
-                            bgm0 = shared0.get("project.background_music", {}) if shared0 is not None else {}
-                            has_bgm0 = bool(
-                                isinstance(bgm0, dict)
-                                and (str(bgm0.get("audio_path") or "").strip() or str(bgm0.get("audio_url") or "").strip())
-                            )
-                            if not has_final0:
-                                self.logger.warning("Skip composer add_bgm: project.final_video missing")
-                                raise RuntimeError("skip_add_bgm_missing_final_video")
-                            if not has_bgm0:
-                                self.logger.warning("Skip composer add_bgm: project.background_music missing")
+                            prereq = None
+                            try:
+                                from .adapters.state.agent_outputs import assess_composer_bgm_prereq
+
+                                prereq = assess_composer_bgm_prereq(
+                                    str(wf_id),
+                                    service=self.short_term_service,
+                                )
+                            except Exception:
+                                prereq = None
+                            eligible = bool(prereq.get("eligible")) if isinstance(prereq, dict) else False
+                            if not eligible:
+                                reason = (prereq or {}).get("reason") if isinstance(prereq, dict) else None
+                                if reason == "final_video_missing":
+                                    self.logger.warning("Skip composer add_bgm: project.final_video missing")
+                                    raise RuntimeError("skip_add_bgm_missing_final_video")
+                                if reason == "bgm_missing":
+                                    self.logger.warning("Skip composer add_bgm: project.background_music missing")
+                                    raise RuntimeError("skip_add_bgm_missing_bgm")
                                 raise RuntimeError("skip_add_bgm_missing_bgm")
 
                             self.logger.info("🎼 Scheduling composer to add background music")
@@ -446,8 +396,50 @@ class OrchestratorAgent(BaseAgent):
                                 "workflow_state_id": wf_id,
                                 "add_bgm": True
                             }
+                            comp_task = conditional_task_specs.get("video_composer_bgm_mix")
+                            if not isinstance(comp_task, dict) or not comp_task:
+                                raise AgentError("add_bgm missing preplanned task spec: video_composer_bgm_mix")
+                            comp_input["task"] = comp_task
+                            try:
+                                from .adapters.memory_views import build_video_composer_context
+
+                                comp_input["static_context"] = build_video_composer_context(
+                                    wf_id,
+                                    service=self.short_term_service,
+                                    requests={
+                                        "compose_requested": False,
+                                        "voiceover_requested": False,
+                                        "bgm_requested": True,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            static_ctx = comp_input.get("static_context") if isinstance(comp_input, dict) else None
+                            if isinstance(static_ctx, dict):
+                                requests_ctx = static_ctx.get("requests") or {}
+                                bgm_ctx = static_ctx.get("background_music") or {}
+                                bgm_path = (
+                                    bgm_ctx.get("audio_path")
+                                    or bgm_ctx.get("path")
+                                    or bgm_ctx.get("file_path")
+                                    or ""
+                                )
+                                bgm_url = bgm_ctx.get("audio_url") or bgm_ctx.get("url") or ""
+                                self.logger.info(
+                                    "🧠 add_bgm static_context requests=%s bgm_path=%s bgm_url=%s bgm_requested=%s",
+                                    requests_ctx,
+                                    bgm_path or None,
+                                    bgm_url or None,
+                                    bool(requests_ctx.get("bgm_requested")),
+                                )
+                            else:
+                                self.logger.warning("add_bgm static_context missing or invalid")
                             scope = agent_scope(wf_id, comp_agent.agent_name)
                             shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
+                            try:
+                                mem_service.reset(scope, wf_id)
+                            except Exception:
+                                pass
                             mem_service.create_or_get(
                                 wf_id,
                                 scope,
@@ -460,16 +452,20 @@ class OrchestratorAgent(BaseAgent):
                                 db=db,
                                 execution_order=step_index + 1
                             )
-                            # Ensure final video is available after BGM mixing.
+                            self._store_composer_outputs(str(wf_id), comp_out or {})
+                            # Ensure final video and mix receipt are available after BGM mixing.
                             try:
-                                shared2 = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                                fv2 = shared2.get("project.final_video", {}) if shared2 is not None else {}
-                                has_final2 = bool(
-                                    isinstance(fv2, dict)
-                                    and (str(fv2.get("path") or "").strip() or str(fv2.get("url") or "").strip())
+                                from .adapters.state.agent_outputs import assess_composer_mix_delivery
+
+                                delivery = assess_composer_mix_delivery(
+                                    str(wf_id),
+                                    mix_type="bgm",
+                                    service=self.short_term_service,
                                 )
-                                if not has_final2:
-                                    raise AgentError("Composer add_bgm did not produce/retain project.final_video")
+                                st = str(delivery.get("subtask_state") or "").strip().lower()
+                                if st != "complete":
+                                    reason = delivery.get("reason") or "mix_incomplete"
+                                    raise AgentError(f"Composer add_bgm verification failed: {reason}")
                             except AgentError:
                                 raise
                             except Exception as vf_err:
@@ -526,6 +522,21 @@ class OrchestratorAgent(BaseAgent):
                             self.logger.info(f"🔁 Orchestrator decided to repeat {agent.agent_name}")
                             if cnt < max_repeat:
                                 self._step_repeat_counts[agent_type] = cnt + 1
+                                try:
+                                    scope = agent_scope(wf_id, agent.agent_name)
+                                    shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
+                                    try:
+                                        mem_service.reset(scope, wf_id)
+                                    except Exception:
+                                        pass
+                                    mem_service.create_or_get(
+                                        wf_id,
+                                        scope,
+                                        owner_agent=agent.agent_name,
+                                        shared_view=shared_view,
+                                    )
+                                except Exception:
+                                    pass
                                 agent_output = await agent.execute(
                                     task=task,
                                     input_data=agent_input,
@@ -1179,6 +1190,38 @@ class OrchestratorAgent(BaseAgent):
                 
         except Exception as e:
             self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
+
+    def _store_composer_outputs(self, workflow_id: str, agent_output: Dict[str, Any]) -> None:
+        wf_id = str(workflow_id or "")
+        if not wf_id or not isinstance(agent_output, dict):
+            return
+        final_path = str(agent_output.get("final_video_path") or "").strip()
+        final_url = str(agent_output.get("final_video_url") or "").strip()
+        mix_receipt = agent_output.get("mix_receipt")
+        if not (final_path or final_url or isinstance(mix_receipt, dict)):
+            return
+        try:
+            if final_path or final_url:
+                payload = {
+                    "path": final_path,
+                    "url": final_url,
+                    "storage": {
+                        "provider": "local",
+                        "url": final_url,
+                        "skipped": True,
+                    },
+                }
+                write_shared_fact(wf_id, "project.final_video", payload, service=self.short_term_service)
+            if isinstance(mix_receipt, dict) and mix_receipt:
+                write_shared_fact(
+                    wf_id,
+                    "project.final_video_mix",
+                    dict(mix_receipt),
+                    service=self.short_term_service,
+                )
+        except Exception as exc:
+            self.logger.error("❌ Failed to store composer outputs: %s", exc, exc_info=True)
+            raise AgentError("Shared WM write failed (final_video)") from exc
     
     def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
@@ -1225,12 +1268,21 @@ class OrchestratorAgent(BaseAgent):
                     except Exception:
                         pass
 
-            def _merge_media_context(include_roles: bool) -> Dict[str, Any]:
+            def _merge_media_context(
+                include_roles: bool,
+                *,
+                include_audio_requirements: bool = False,
+                sfx_required_default: Optional[bool] = None,
+                sfx_required_override: Optional[bool] = None,
+            ) -> Dict[str, Any]:
                 context_bundle = build_media_agent_context(
                     workflow_id,
                     service=self.short_term_service,
                     include_scripts=True,
                     include_roles=include_roles,
+                    include_audio_requirements=include_audio_requirements,
+                    sfx_required_default=sfx_required_default,
+                    sfx_required_override=sfx_required_override,
                 )
                 for key, value in context_bundle.items():
                     if value:
@@ -1242,12 +1294,100 @@ class OrchestratorAgent(BaseAgent):
             if agent_type == AgentType.IMAGE_GENERATOR:
                 static_context.update(_merge_media_context(include_roles=True) or {})
             elif agent_type == AgentType.AUDIO_GENERATOR:
-                static_context.update(_merge_media_context(include_roles=False) or {})
+                audio_req = workflow_data.get("audio_requirements") if isinstance(workflow_data, dict) else None
+                sfx_override = None
+                if isinstance(audio_req, dict) and audio_req.get("sfx_required") is not None:
+                    sfx_override = bool(audio_req.get("sfx_required"))
+                elif isinstance(workflow_data, dict) and workflow_data.get("sfx_required") is not None:
+                    sfx_override = bool(workflow_data.get("sfx_required"))
+                static_context.update(
+                    _merge_media_context(
+                        include_roles=False,
+                        include_audio_requirements=True,
+                        sfx_required_default=getattr(settings, "AUDIO_SFX_REQUIRED_DEFAULT", False),
+                        sfx_required_override=sfx_override,
+                    )
+                    or {}
+                )
+                if isinstance(audio_req, dict) and audio_req:
+                    merged_req = dict(static_context.get("audio_requirements") or {})
+                    merged_req.update(audio_req)
+                    static_context["audio_requirements"] = merged_req
+            elif agent_type == AgentType.VIDEO_COMPOSER:
+                from .adapters.memory_views import build_video_composer_context
+
+                composer_requests = {}
+                if agent_input.get("compose_requested") is not None:
+                    composer_requests["compose_requested"] = bool(agent_input.get("compose_requested"))
+                composer_requests["voiceover_requested"] = bool(agent_input.get("add_voiceover"))
+                composer_requests["bgm_requested"] = bool(agent_input.get("add_bgm"))
+                composer_ctx = build_video_composer_context(
+                    workflow_id,
+                    service=self.short_term_service,
+                    requests=composer_requests,
+                )
+                if composer_ctx:
+                    static_context.update(composer_ctx)
+                try:
+                    scene_videos = composer_ctx.get("scene_videos") if isinstance(composer_ctx, dict) else []
+                    total = len(scene_videos) if isinstance(scene_videos, list) else 0
+                    local_count = 0
+                    url_only = 0
+                    if isinstance(scene_videos, list):
+                        for item in scene_videos:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("local_path"):
+                                local_count += 1
+                            elif item.get("video_url"):
+                                url_only += 1
+                    final_video = composer_ctx.get("final_video") if isinstance(composer_ctx, dict) else {}
+                    final_path = final_video.get("path") if isinstance(final_video, dict) else ""
+                    self.logger.info(
+                        "🧠 video_composer static_context scene_videos=%s local_paths=%s url_only=%s final_video_path=%s",
+                        total,
+                        local_count,
+                        url_only,
+                        final_path or None,
+                    )
+                except Exception:
+                    pass
 
             if agent_type == AgentType.IMAGE_GENERATOR:
                 image_ctx = build_image_generation_context(workflow_id, service=self.short_term_service)
                 if isinstance(image_ctx, dict) and image_ctx.get("context"):
-                    static_context.update(image_ctx.get("context") or {})
+                    ctx_payload = image_ctx.get("context") or {}
+                    scene_info_payload = image_ctx.get("scene_info_payload") or {}
+                    payload_for_ref = scene_info_payload or ctx_payload
+                    ref_path = self._persist_scene_info_ref(
+                        workflow_id=str(workflow_id),
+                        agent_type=agent_type,
+                        payload=payload_for_ref,
+                    )
+                    if ref_path:
+                        ctx_payload = dict(ctx_payload)
+                        ctx_payload["scene_info_ref"] = ref_path
+                        static_context.update(ctx_payload)
+                        try:
+                            self.logger.info(
+                                "🧠 image_generator scene_info_ref_ready=True ref_file=%s static_keys=%s",
+                                Path(ref_path).name,
+                                list(ctx_payload.keys()),
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        fallback_ctx = dict(ctx_payload)
+                        if scene_info_payload:
+                            fallback_ctx["scene_info_payload"] = scene_info_payload
+                        static_context.update(fallback_ctx)
+                        try:
+                            self.logger.info(
+                                "🧠 image_generator scene_info_ref_ready=False static_keys=%s",
+                                list(fallback_ctx.keys()),
+                            )
+                        except Exception:
+                            pass
             elif agent_type == AgentType.VIDEO_GENERATOR:
                 video_ctx = build_video_generation_context(workflow_id, service=self.short_term_service)
                 if isinstance(video_ctx, dict) and video_ctx.get("context"):
@@ -1382,8 +1522,29 @@ class OrchestratorAgent(BaseAgent):
             "fallback_used": True,
         }
 
-    async def _llm_decompose_tasks(self, workflow_data: Dict[str, Any], workflow_id: str) -> Dict[AgentType, Dict[str, Any]]:
-        """LLM 生成 per-Agent 指令/参与决策，失败时返回空映射，由回退处理。"""
+    def _build_bgm_mix_task_spec(self, workflow_id: str, *, fallback_used: bool) -> Dict[str, Any]:
+        """为背景音乐混流构造明确的任务说明（预分配或兜底使用）。"""
+        spec = self._build_fallback_task(AgentType.VIDEO_COMPOSER)
+        spec["instruction"] = "将已生成的背景音乐混入现有成片，输出可播放的最终成片"
+        spec["goal"] = "bgm_mix"
+        spec["expected_output"] = "带背景音乐的成片文件路径或可访问URL"
+        spec["boundaries"] = [
+            "仅在已有成片上进行混音，不重新生成场景视频",
+            "若背景音乐不可用，明确阻塞原因并停止无效操作",
+        ]
+        scope = spec.get("scope") or {}
+        if isinstance(scope, dict):
+            scope["workflow_id"] = workflow_id
+            spec["scope"] = scope
+        spec["fallback_used"] = bool(fallback_used)
+        return spec
+
+    async def _llm_decompose_tasks(
+        self,
+        workflow_data: Dict[str, Any],
+        workflow_id: str,
+    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """LLM 生成 per-Agent 指令与条件任务说明，失败时返回空映射，由回退处理。"""
         try:
             user_prompt = workflow_data.get("user_prompt") or workflow_data.get("prompt") or ""
             page_params = {
@@ -1394,8 +1555,12 @@ class OrchestratorAgent(BaseAgent):
             available_agents = [atype.value for atype in self.workflow_order]
             system_text = (
                 "你是多智能体编排器，需输出每个子Agent的执行指令。"
-                "返回JSON，包含 agents 列表，元素含：agent（枚举），run（bool），"
+                "返回JSON，必须包含 agents 列表，元素含：agent（枚举），run（bool），"
                 "instruction，goal，expected_output，boundaries（数组，可空），scope（对象，可空），order（数字，可选）。"
+                "必须提供 conditional_tasks 列表，用于描述条件触发的额外任务，元素含："
+                "task_id（字符串），agent（枚举），instruction，goal，expected_output，boundaries（数组，可空），"
+                "scope（对象，可空），trigger（字符串，可选）。"
+                "conditional_tasks 中必须包含用于背景音乐混流的任务，task_id 固定为 video_composer_bgm_mix。"
                 "不要编造场景内容，指示子Agent使用当前 MAS 记忆中的事实。"
             )
             user_content = {
@@ -1420,6 +1585,7 @@ class OrchestratorAgent(BaseAgent):
             data = json.loads(content)
             agents = data.get("agents") if isinstance(data, dict) else None
             task_map: Dict[AgentType, Dict[str, Any]] = {}
+            conditional_task_specs: Dict[str, Dict[str, Any]] = {}
             if isinstance(agents, list):
                 for item in agents:
                     if not isinstance(item, dict):
@@ -1441,10 +1607,37 @@ class OrchestratorAgent(BaseAgent):
                         "fallback_used": False,
                     }
                     task_map[atype] = spec
-            return task_map
+            conditional_tasks = data.get("conditional_tasks") if isinstance(data, dict) else None
+            if not isinstance(conditional_tasks, list):
+                raise ValueError("LLM task decomposition missing conditional_tasks list")
+            for item in conditional_tasks:
+                if not isinstance(item, dict):
+                    continue
+                task_id = str(item.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                name = (item.get("agent") or "").upper()
+                try:
+                    atype = AgentType[name]
+                except Exception:
+                    continue
+                spec = {
+                    "agent": atype.value,
+                    "instruction": item.get("instruction"),
+                    "goal": item.get("goal"),
+                    "expected_output": item.get("expected_output"),
+                    "boundaries": item.get("boundaries") or [],
+                    "scope": item.get("scope") or {"workflow_id": workflow_id},
+                    "trigger": item.get("trigger"),
+                    "fallback_used": False,
+                }
+                conditional_task_specs[task_id] = spec
+            if "video_composer_bgm_mix" not in conditional_task_specs:
+                raise ValueError("LLM task decomposition missing video_composer_bgm_mix task")
+            return task_map, conditional_task_specs
         except Exception as e:
             try:
-                self.logger.warning("LLM task decomposition failed: %s (fallback will be used)", e)
+                self.logger.error("LLM task decomposition failed: %s (required)", e)
             except Exception:
                 pass
-            return {}
+            raise AgentError("LLM task decomposition is required but failed") from e
