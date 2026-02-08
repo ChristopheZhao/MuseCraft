@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ....core.database import get_db
 from ....models import Task, TaskStatus, TaskType, Scene, Resource
 from ....agents import OrchestratorAgent
+from ....services.memory_provider import build_memory_services
 from ....services.task_queue import TaskQueueService
 from ....core.config import settings
 
@@ -356,7 +357,8 @@ async def get_task_status(
     
     # AgentExecution 已移除，直接返回任务状态
     # Get workflow status from orchestrator
-    orchestrator = OrchestratorAgent()
+    memory_services = build_memory_services()
+    orchestrator = OrchestratorAgent(memory_services=memory_services)
     workflow_status = orchestrator.get_workflow_status(task, db)
     
     return {

@@ -390,6 +390,7 @@ class BaseAgent(ABC):
             fp = (
                 (payload.get("file_path") if isinstance(payload, dict) else None)
                 or (payload.get("output_path") if isinstance(payload, dict) else None)
+                or (payload.get("output_file") if isinstance(payload, dict) else None)
                 or (payload.get("local_path") if isinstance(payload, dict) else None)
                 or ""
             )
@@ -455,7 +456,7 @@ class BaseAgent(ABC):
             Dict containing the agent's output data
         """
         # 每次执行重置 WM 引用缓存，避免跨任务状态污染
-        self.reset_iteration_memory_cache(invalidate=True)
+        self.reset_iteration_memory_cache()
         workflow_state_id = input_data.get("workflow_state_id")
         if workflow_state_id:
             wf_id_str = str(workflow_state_id)

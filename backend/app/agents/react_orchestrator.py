@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, TaskStatus, AgentType
+from ..services.memory_provider import build_memory_services, MemoryServices
 
 
 class ReasoningStep(Enum):
@@ -51,12 +52,15 @@ class ReActOrchestratorAgent(BaseAgent):
     5. Reflect - Evaluate results and decide next iteration
     """
     
-    def __init__(self):
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
+        if memory_services is None:
+            memory_services = build_memory_services()
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="react_orchestrator",
             timeout_seconds=3600,  # 1 hour for iterative process
-            max_retries=1
+            max_retries=1,
+            memory_services=memory_services,
         )
         
         self.reasoning_history: List[Dict[str, Any]] = []
@@ -354,7 +358,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('concept_planner')
-        agent = ConceptPlannerAgent(llms=llms)
+        agent = ConceptPlannerAgent(llms=llms, memory_services=self._memory_services)
         input_data = {**workflow_state.get('user_requirements', {}), **parameters}
         return await agent.execute(self._current_task, input_data, db)
     
@@ -365,7 +369,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('script_writer')
-        agent = ScriptWriterAgent(llms=llms)
+        agent = ScriptWriterAgent(llms=llms, memory_services=self._memory_services)
         input_data = {**workflow_state.get('current_results', {}), **parameters}
         return await agent.execute(self._current_task, input_data, db)
     
@@ -376,7 +380,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('image_generator')
-        agent = ImageGeneratorAgent(llms=llms)
+        agent = ImageGeneratorAgent(llms=llms, memory_services=self._memory_services)
         input_data = {**workflow_state.get('current_results', {}), **parameters}
         return await agent.execute(self._current_task, input_data, db)
     
@@ -387,7 +391,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('video_generator')
-        agent = VideoGeneratorAgent(llms=llms)
+        agent = VideoGeneratorAgent(llms=llms, memory_services=self._memory_services)
         input_data = {**workflow_state.get('current_results', {}), **parameters}
         return await agent.execute(self._current_task, input_data, db)
     
@@ -398,7 +402,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('video_composer')
-        agent = VideoComposerAgent(llms=llms)
+        agent = VideoComposerAgent(llms=llms, memory_services=self._memory_services)
         input_data = {**workflow_state.get('current_results', {}), **parameters}
         return await agent.execute(self._current_task, input_data, db)
     
@@ -409,7 +413,7 @@ class ReActOrchestratorAgent(BaseAgent):
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         llms = LLMPolicyManager(policy_file).build_llms_for_agent('quality_checker')
-        agent = QualityCheckerAgent(llms=llms)
+        agent = QualityCheckerAgent(llms=llms, memory_services=self._memory_services)
         input_data = workflow_state['current_results'].copy()
         input_data.update(parameters)
         

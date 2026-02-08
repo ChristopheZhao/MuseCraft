@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..models import Task
 from ..agents.orchestrator import OrchestratorAgent
 from ..agents.episode_orchestrator import EpisodeOrchestratorAgent
+from ..services.memory_provider import build_memory_services
 from .constants import GenerationMode
 from .config import settings
 
@@ -49,7 +50,8 @@ async def dispatch_generation(
     """Execute orchestration for the given mode."""
 
     if mode == GenerationMode.PROJECT:
-        coordinator = EpisodeOrchestratorAgent()
+        memory_services = build_memory_services()
+        coordinator = EpisodeOrchestratorAgent(memory_services=memory_services)
         return await coordinator.execute(
             task=task,
             input_data=input_data,
@@ -57,7 +59,8 @@ async def dispatch_generation(
             execution_order=execution_order,
         )
 
-    orchestrator = OrchestratorAgent()
+    memory_services = build_memory_services()
+    orchestrator = OrchestratorAgent(memory_services=memory_services)
     return await orchestrator.execute(
         task=task,
         input_data=input_data,

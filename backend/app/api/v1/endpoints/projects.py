@@ -27,6 +27,7 @@ from ....core.story_plan import (
 )
 from ....models import Task, TaskStatus, TaskType
 from ....services.project_service import update_episode_script
+from ....services.memory_provider import build_memory_services
 
 
 router = APIRouter()
@@ -168,7 +169,8 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
         policy_manager = LLMPolicyManager(str(policy_path))
         planner_llms = policy_manager.build_llms_for_agent('series_planner')
 
-        planner = SeriesPlannerAgent(llms=planner_llms)
+        memory_services = build_memory_services()
+        planner = SeriesPlannerAgent(llms=planner_llms, memory_services=memory_services)
         await planner.execute(
             task=task,
             input_data=payload,

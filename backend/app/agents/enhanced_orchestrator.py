@@ -27,6 +27,7 @@ from ..services.workflow_optimizer import workflow_optimizer, ExecutionStrategy,
 from ..services.monitoring_service import monitoring_service
 from ..services.quality_control import quality_control_service, ContentType
 from ..services.enhanced_ai_client import enhanced_ai_client
+from ..services.memory_provider import build_memory_services, MemoryServices
 
 
 class EnhancedOrchestratorAgent(BaseAgent):
@@ -35,22 +36,25 @@ class EnhancedOrchestratorAgent(BaseAgent):
     advanced error handling, and comprehensive monitoring
     """
     
-    def __init__(self):
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
+        if memory_services is None:
+            memory_services = build_memory_services()
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="enhanced_orchestrator",
             timeout_seconds=3600,  # 1 hour for complex workflows
-            max_retries=2
+            max_retries=2,
+            memory_services=memory_services,
         )
         
         # Initialize specialized agents
         self.agents = {
-            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(),
-            AgentType.SCRIPT_WRITER: ScriptWriterAgent(),
-            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(),
-            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(),
-            AgentType.VIDEO_COMPOSER: VideoComposerAgent(),
-            AgentType.QUALITY_CHECKER: QualityCheckerAgent()
+            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(memory_services=memory_services),
+            AgentType.SCRIPT_WRITER: ScriptWriterAgent(memory_services=memory_services),
+            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(memory_services=memory_services),
+            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(memory_services=memory_services),
+            AgentType.VIDEO_COMPOSER: VideoComposerAgent(memory_services=memory_services),
+            AgentType.QUALITY_CHECKER: QualityCheckerAgent(memory_services=memory_services),
         }
         
         # Configuration

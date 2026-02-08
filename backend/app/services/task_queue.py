@@ -12,6 +12,7 @@ from ..core.config import settings
 from ..core.database import get_sync_db
 from ..models import Task, TaskStatus
 from ..agents import OrchestratorAgent
+from ..services.memory_provider import build_memory_services
 from ..core.logging_utils import configure_mas_logging
 
 configure_mas_logging()
@@ -122,7 +123,8 @@ def sync_process_video_task(task_id: int):
         
         logger.info("Creating OrchestratorAgent...")
         # Create orchestrator and run workflow
-        orchestrator = OrchestratorAgent()
+        memory_services = build_memory_services()
+        orchestrator = OrchestratorAgent(memory_services=memory_services)
         logger.info(f"OrchestratorAgent created: {orchestrator}")
         
         try:
