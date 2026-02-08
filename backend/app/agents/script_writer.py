@@ -230,10 +230,28 @@ class ScriptWriterAgent(BaseAgent):
                         }
                     )
             
-            # 逐场景生成脚本（使用 script_generation 工具的 generate_scene_script 动作）
+            # 批量生成脚本（使用 script_generation 工具的 generate_scene_scripts_batch 动作）
             scripts_map: Dict[str, Any] = {}
             hard_failed_voice_scenes: List[Dict[str, Any]] = []
             warning_voice_scenes: List[Dict[str, Any]] = []
+            voice_guidance_by_scene: Dict[str, Dict[str, Any]] = {}
+            batch_inputs: List[Dict[str, Any]] = []
+            failed_scene_numbers: set[str] = set()
+
+            def _scene_key(value: Any) -> str:
+                return str(value) if value is not None else "unknown"
+
+            def _record_failure(scene_number: Any, reason: str) -> None:
+                key = _scene_key(scene_number)
+                if key in failed_scene_numbers:
+                    return
+                failed_scene_numbers.add(key)
+                hard_failed_voice_scenes.append(
+                    {
+                        "scene_number": scene_number,
+                        "reason": reason,
+                    }
+                )
             intelligent_style = concept_plan.get('intelligent_style_design', {}) if isinstance(concept_plan, dict) else {}
             if isinstance(intelligent_style, dict) and intelligent_style:
                 taxonomy_match = match_style_taxonomy(intelligent_style)
@@ -260,6 +278,11 @@ class ScriptWriterAgent(BaseAgent):
             except Exception:
                 script_model = None
                 max_tokens_budget = 1500
+            try:
+                from ..core.config import settings as _settings
+                max_concurrency = int(getattr(_settings, "SCRIPT_GENERATION_MAX_CONCURRENCY", 3))
+            except Exception:
+                max_concurrency = 3
             for scene in scenes_needing_scripts:
                 try:
                     guidance = voice_guidance_map.get(scene.scene_number)
@@ -314,6 +337,7 @@ class ScriptWriterAgent(BaseAgent):
                         context_payload["approved_script"] = approved_script_text
 
                     tool_params = {
+                        "scene_number": scene.scene_number,
                         "scene_data": {
                             "scene_number": scene.scene_number,
                             "visual_description": scene.visual_description,
@@ -341,101 +365,99 @@ class ScriptWriterAgent(BaseAgent):
                         "emotion": gd.get("emotion", ""),
                         "objective": gd.get("objective", ""),
                     }
-                    # 改为通过 FC 执行：构造 function_call 并统一走 BaseAgent.execute_tool_calls
-                    # 优先使用兼容名 "script_generation.generate_scene_script"；若工具暴露的是
-                    # scene_script_generation_tool.generate_scene_script，Base 的前置校验会提示。
-                    call = {
-                        "function": {
-                            "name": "script_generation.generate_scene_script",
-                            "arguments": tool_params,
-                        }
-                    }
-                    executed = await self.execute_tool_calls([call])
-                    if not executed:
-                        raise AgentError(f"场景 {scene.scene_number} 脚本生成失败：无执行结果")
-                    rec = executed[0]
-                    payload = extract_tool_payload(rec.get('result')) if isinstance(rec, dict) else None
-                    if isinstance(payload, dict) and (rec.get('success', True)):
-                        script_section = payload.get("script") if isinstance(payload.get("script"), dict) else {}
-                        voice_line = (
-                            payload.get("voice_over_text")
-                            or payload.get("voice_over")
-                            or script_section.get("voice_over")
-                            or script_section.get("voiceover")
-                        )
-                        if isinstance(voice_line, list):
-                            voice_line = " ".join(str(v).strip() for v in voice_line if str(v).strip())
-                        elif voice_line is not None:
-                            voice_line = str(voice_line).strip()
-
-                        motion_beats = self._sanitize_motion_beats(
-                            payload.get("motion_beats"),
-                            scene.duration,
-                        )
-
-                        is_valid_voice, warning_msg = self._validate_voice_line(
-                            scene.scene_number, voice_line, tool_params["voice_guidance"]
-                        )
-                        if not is_valid_voice and warning_msg:
-                            warning_voice_scenes.append({
-                                "scene_number": scene.scene_number,
-                                "warning": warning_msg,
-                            })
-                            self.logger.warning(
-                                "场景 %s 旁白字数与规划存在偏差：%s",
-                                scene.scene_number,
-                                warning_msg,
-                            )
-                        scripts_map[str(scene.scene_number)] = {
-                            "script_text": payload.get("script_text", payload.get("content", "") or script_section.get("script_text", "")),
-                            "narrative_description": payload.get("narrative_description", scene.narrative_description),
-                            "background_music_style": payload.get("background_music_style", ""),
-                            "sound_effects": payload.get("sound_effects", []),
-                            "voice_over_text": voice_line or "",
-                            "voice_guidance": tool_params["voice_guidance"],
-                            "motion_beats": motion_beats,
-                        }
-                    else:
-                        # 定位返回结构异常：在抛错前输出结构诊断
-                        try:
-                            payload_type = type(payload).__name__
-                            rec_success = rec.get('success', None) if isinstance(rec, dict) else None
-                            inner_type = None
-                            try:
-                                raw = rec.get('result') if isinstance(rec, dict) else None
-                                if hasattr(raw, 'result'):
-                                    inner_type = type(getattr(raw, 'result')).__name__
-                            except Exception:
-                                inner_type = None
-                            preview = None
-                            if not isinstance(payload, dict):
-                                try:
-                                    preview = str(payload)
-                                    if isinstance(preview, str) and len(preview) > 200:
-                                        preview = preview[:200]
-                                except Exception:
-                                    preview = None
-                            self.logger.error(
-                                "脚本生成返回结构异常 scene=%s payload_type=%s rec_success=%s inner_result_type=%s preview=%s",
-                                scene.scene_number, payload_type, rec_success, inner_type, preview,
-                            )
-                        except Exception:
-                            pass
-                        err = None
-                        if isinstance(rec, dict):
-                            err = rec.get('error')
-                        raise AgentError(f"场景 {scene.scene_number} 脚本生成失败: {err or 'payload_not_dict'}")
+                    batch_inputs.append(tool_params)
+                    voice_guidance_by_scene[_scene_key(scene.scene_number)] = tool_params["voice_guidance"]
                 except AgentError as ae:
-                    hard_failed_voice_scenes.append({
-                        "scene_number": scene.scene_number,
-                        "reason": str(ae),
-                    })
+                    _record_failure(scene.scene_number, str(ae))
                     self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {ae}")
                 except Exception as se:
-                    hard_failed_voice_scenes.append({
-                        "scene_number": scene.scene_number,
-                        "reason": str(se),
-                    })
+                    _record_failure(scene.scene_number, str(se))
+                    self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {se}")
+
+            batch_payload: Dict[str, Any] = {"scripts": {}, "failures": []}
+            if batch_inputs:
+                call = {
+                    "function": {
+                        "name": "script_generation.generate_scene_scripts_batch",
+                        "arguments": {
+                            "scenes": batch_inputs,
+                            "max_concurrency": max_concurrency,
+                        },
+                    }
+                }
+                executed = await self.execute_tool_calls([call])
+                if not executed:
+                    raise AgentError("批量脚本生成失败：无执行结果")
+                rec = executed[0]
+                payload = extract_tool_payload(rec.get('result')) if isinstance(rec, dict) else None
+                if not isinstance(payload, dict):
+                    raise AgentError("批量脚本生成失败: payload_not_dict")
+                batch_payload = payload
+
+            failures = batch_payload.get("failures", []) if isinstance(batch_payload, dict) else []
+            if isinstance(failures, list):
+                for failure in failures:
+                    if not isinstance(failure, dict):
+                        continue
+                    _record_failure(failure.get("scene_number"), failure.get("error", "script_generation_failed"))
+
+            batch_scripts = batch_payload.get("scripts", {}) if isinstance(batch_payload, dict) else {}
+            for scene in scenes_needing_scripts:
+                if _scene_key(scene.scene_number) in failed_scene_numbers:
+                    continue
+                script_payload = None
+                if isinstance(batch_scripts, dict):
+                    script_payload = batch_scripts.get(str(scene.scene_number))
+                    if script_payload is None:
+                        script_payload = batch_scripts.get(scene.scene_number)
+                if not isinstance(script_payload, dict):
+                    _record_failure(scene.scene_number, "script_generation_failed_or_empty")
+                    continue
+                try:
+                    script_section = script_payload.get("script") if isinstance(script_payload.get("script"), dict) else {}
+                    voice_line = (
+                        script_payload.get("voice_over_text")
+                        or script_payload.get("voice_over")
+                        or script_section.get("voice_over")
+                        or script_section.get("voiceover")
+                    )
+                    if isinstance(voice_line, list):
+                        voice_line = " ".join(str(v).strip() for v in voice_line if str(v).strip())
+                    elif voice_line is not None:
+                        voice_line = str(voice_line).strip()
+
+                    motion_beats = self._sanitize_motion_beats(
+                        script_payload.get("motion_beats"),
+                        scene.duration,
+                    )
+                    guidance_payload = voice_guidance_by_scene.get(_scene_key(scene.scene_number), {})
+                    is_valid_voice, warning_msg = self._validate_voice_line(
+                        scene.scene_number, voice_line, guidance_payload
+                    )
+                    if not is_valid_voice and warning_msg:
+                        warning_voice_scenes.append({
+                            "scene_number": scene.scene_number,
+                            "warning": warning_msg,
+                        })
+                        self.logger.warning(
+                            "场景 %s 旁白字数与规划存在偏差：%s",
+                            scene.scene_number,
+                            warning_msg,
+                        )
+                    scripts_map[str(scene.scene_number)] = {
+                        "script_text": script_payload.get("script_text", script_payload.get("content", "") or script_section.get("script_text", "")),
+                        "narrative_description": script_payload.get("narrative_description", scene.narrative_description),
+                        "background_music_style": script_payload.get("background_music_style", ""),
+                        "sound_effects": script_payload.get("sound_effects", []),
+                        "voice_over_text": voice_line or "",
+                        "voice_guidance": guidance_payload,
+                        "motion_beats": motion_beats,
+                    }
+                except AgentError as ae:
+                    _record_failure(scene.scene_number, str(ae))
+                    self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {ae}")
+                except Exception as se:
+                    _record_failure(scene.scene_number, str(se))
                     self.logger.warning(f"场景 {scene.scene_number} 脚本生成失败: {se}")
             script_results = {
                 "success": True,

@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Dict, Any, List, Optional
 
-from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
+from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError, ToolValidationError
 
 
 class ScriptGenerationTool(AsyncTool):
@@ -39,6 +39,7 @@ class ScriptGenerationTool(AsyncTool):
     def get_available_actions(self) -> List[str]:
         return [
             "generate_scene_script",
+            "generate_scene_scripts_batch",
             "generate_narrative_structure", 
             "optimize_dialogue",
             "analyze_script_continuity"
@@ -86,6 +87,41 @@ class ScriptGenerationTool(AsyncTool):
                 }
             }
             base_schema["required"] = ["scene_data"]
+
+        elif action == "generate_scene_scripts_batch":
+            base_schema["properties"] = {
+                "scenes": {
+                    "type": "array",
+                    "description": "批量场景参数列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_number": {"type": "integer"},
+                            "scene_data": {
+                                "type": "object",
+                                "description": "场景数据，包含视觉描述、内容重点等",
+                                "properties": {
+                                    "script_text": {"type": "string"},
+                                    "visual_description": {"type": "string"},
+                                    "narrative_description": {"type": "string"},
+                                    "duration": {"type": "number"}
+                                }
+                            },
+                            "video_style": {"type": "string"},
+                            "context": {"type": "object"},
+                            "voice_guidance": {"type": "object"},
+                            "intelligent_style_design": {"type": "object"},
+                            "model": {"type": "string"},
+                            "max_tokens": {"type": "integer"},
+                        }
+                    },
+                },
+                "max_concurrency": {
+                    "type": "integer",
+                    "description": "批量并发上限（来自配置，必要时可覆盖）",
+                },
+            }
+            base_schema["required"] = ["scenes"]
             
         elif action == "generate_narrative_structure":
             base_schema["properties"] = {
@@ -132,6 +168,8 @@ class ScriptGenerationTool(AsyncTool):
         
         if action == "generate_scene_script":
             return await self._generate_scene_script(parameters)
+        elif action == "generate_scene_scripts_batch":
+            return await self._generate_scene_scripts_batch(parameters)
         elif action == "generate_narrative_structure":
             return await self._generate_narrative_structure(parameters)
         elif action == "optimize_dialogue":
@@ -280,6 +318,60 @@ class ScriptGenerationTool(AsyncTool):
                     "duration_reasoning": "发生错误，使用默认时长",
                 },
             )
+
+    async def _generate_scene_scripts_batch(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """批量生成场景脚本"""
+
+        scenes = params.get("scenes", [])
+        if not isinstance(scenes, list) or not scenes:
+            raise ToolValidationError("scenes must be a non-empty list", self.metadata.name)
+
+        max_concurrency = params.get("max_concurrency")
+        if not (isinstance(max_concurrency, int) and max_concurrency > 0):
+            try:
+                from ....core.config import settings as _settings
+                max_concurrency = int(getattr(_settings, "SCRIPT_GENERATION_MAX_CONCURRENCY", 3))
+            except Exception:
+                max_concurrency = 3
+        if max_concurrency < 1:
+            max_concurrency = 1
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+        scripts: Dict[str, Any] = {}
+        failures: List[Dict[str, Any]] = []
+
+        async def _run_scene(scene_params: Dict[str, Any], scene_index: int) -> None:
+            async with semaphore:
+                scene_number = scene_params.get("scene_number")
+                scene_data = scene_params.get("scene_data") if isinstance(scene_params, dict) else {}
+                if scene_number is None and isinstance(scene_data, dict):
+                    scene_number = scene_data.get("scene_number")
+                try:
+                    result = await self._generate_scene_script(scene_params)
+                    key = str(scene_number) if scene_number is not None else str(scene_index + 1)
+                    scripts[key] = result
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "scene_number": scene_number,
+                            "error": str(exc),
+                        }
+                    )
+
+        tasks = [
+            asyncio.create_task(_run_scene(scene, idx))
+            for idx, scene in enumerate(scenes)
+        ]
+        await asyncio.gather(*tasks)
+
+        return {
+            "batch_success": len(failures) == 0,
+            "scripts": scripts,
+            "failures": failures,
+            "total": len(scenes),
+            "success_count": len(scripts),
+            "failure_count": len(failures),
+        }
     
     async def _generate_narrative_structure(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成叙事结构"""
