@@ -76,6 +76,7 @@ class ZhipuClientTool(AsyncTool):
         
         # 支持的模型列表
         self.text_models = [
+            "glm-4.7",           # GLM-4.7 最新一代
             "glm-4.5",           # GLM-4.5 最新一代
             "glm-4.5-air",       # GLM-4.5 Air 轻量版本
             "glm-4-plus",        # GLM-4 Plus

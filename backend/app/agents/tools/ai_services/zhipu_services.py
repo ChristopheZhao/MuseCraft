@@ -40,7 +40,7 @@ class ZhipuLLMService(LLMServiceInterface):
         
         # 支持的模型
         self.supported_models = [
-            "glm-4.5", "glm-4.5-air", "glm-4-plus", 
+            "glm-4.7", "glm-4.5", "glm-4.5-air", "glm-4-plus",
             "glm-4-0520", "glm-4-air", "glm-4-flash"
         ]
         self.default_model = self.config.get("default_model", "glm-4.5")

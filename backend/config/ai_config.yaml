@@ -3,29 +3,29 @@
 
 # Agent模型映射 - 指定每个Agent使用哪个模型
 agent_model_mapping:
-  concept_planner: "glm-4.5"        # 概念规划 - 使用最新GLM-4.5
-  script_writer: "glm-4.5"          # 脚本写作 - 使用GLM-4.5
-  quality_checker: "glm-4.5-air"    # 质量检查 - 使用轻量版本即可
-  audio_generator: "glm-4.5"        # 音频生成 - 需要理解内容，使用GLM-4.5
+  concept_planner: "glm-default"    # 概念规划 - 使用默认主模型
+  script_writer: "glm-default"      # 脚本写作 - 使用默认主模型
+  quality_checker: "glm-light"      # 质量检查 - 使用轻量版本即可
+  audio_generator: "glm-default"    # 音频生成 - 需要理解内容，使用默认主模型
   image_generator: "cogview-4"       # 图像生成 - 使用最新CogView-4
-  default: "glm-4.5"                # 默认模型
+  default: "glm-default"            # 默认模型
 
 # Agent备用模型映射（兜底模型，不是常规分支）
 agent_fallback_model_mapping:
-  concept_planner: "glm-4.5-air"
+  concept_planner: "glm-light"
 
 # Tool模型映射 - 指定特定工具使用哪个模型（可选）
 tool_model_mapping:
-  role_analysis_tool: "glm-4.5-air"   # 角色分析工具默认使用轻量高性价比模型
-  concept_generation_tool: "glm-4.5"  # 概念生成工具偏向更强模型
-  scene_continuity_analysis_tool: "glm-4.5-air"  # 连续性分析工具轻量即可
-  intelligent_scene_planning: "glm-4.5-air"      # 智能场景规划更偏速度
-  narrative_structure_generation_tool: "glm-4.5-air"  # 叙事结构生成轻量即可
-  parameter_optimization: "glm-4.5-air"          # 参数优化工具（时长推荐等）
-  image_generation: "glm-4.5-air"                # 图像工具中的提示词生成等文本能力
-  quality_analysis_tool: "glm-4.5-air"           # 质量分析
-  scene_script_generation_tool: "glm-4.5"        # 单场景脚本生成
-  script_generation_tool: "glm-4.5"              # 多场景脚本生成（工具级映射）
+  role_analysis_tool: "glm-light"     # 角色分析工具默认使用轻量高性价比模型
+  concept_generation_tool: "glm-default"  # 概念生成工具偏向更强模型
+  scene_continuity_analysis_tool: "glm-light"  # 连续性分析工具轻量即可
+  intelligent_scene_planning: "glm-light"      # 智能场景规划更偏速度
+  narrative_structure_generation_tool: "glm-light"  # 叙事结构生成轻量即可
+  parameter_optimization: "glm-light"          # 参数优化工具（时长推荐等）
+  image_generation: "glm-light"                # 图像工具中的提示词生成等文本能力
+  quality_analysis_tool: "glm-light"           # 质量分析
+  scene_script_generation_tool: "glm-default"  # 单场景脚本生成
+  script_generation_tool: "glm-default"        # 多场景脚本生成（工具级映射）
 
 # Tool提供商映射（可选）：用于指定具体工具优先使用的服务商（zhipu/doubao/...）
 tool_provider_mapping:
@@ -46,7 +46,7 @@ agent_thinking_mode:
 # AI服务提供商配置
 providers:
   zhipu:
-    default_model: "glm-4.5"        # 智谱AI默认使用最新GLM-4.5
+    default_model: "glm-default"   # 智谱AI默认使用主模型
     enabled: true
     rate_limit: 100                 # 每分钟请求限制
     timeout: 120                     # 请求超时时间（秒）- 小于Agent总超时以便触发回退
@@ -147,41 +147,41 @@ environments:
   development:
     # 开发环境使用更快的轻量模型
     agent_model_mapping:
-      concept_planner: "glm-4.5-air"
-      script_writer: "glm-4.5-air"
-      quality_checker: "glm-4.5-air"
-      default: "glm-4.5-air"
+      concept_planner: "glm-light"
+      script_writer: "glm-light"
+      quality_checker: "glm-light"
+      default: "glm-light"
     tool_model_mapping:
-      role_analysis_tool: "glm-4.5-air"
-      concept_generation_tool: "glm-4.5-air"
-      scene_continuity_analysis_tool: "glm-4.5-air"
-      intelligent_scene_planning: "glm-4.5-air"
-      narrative_structure_generation_tool: "glm-4.5-air"
-      parameter_optimization: "glm-4.5-air"
-      image_generation: "glm-4.5-air"
-      quality_analysis_tool: "glm-4.5-air"
-      scene_script_generation_tool: "glm-4.5-air"
-      script_generation_tool: "glm-4.5-air"
+      role_analysis_tool: "glm-light"
+      concept_generation_tool: "glm-light"
+      scene_continuity_analysis_tool: "glm-light"
+      intelligent_scene_planning: "glm-light"
+      narrative_structure_generation_tool: "glm-light"
+      parameter_optimization: "glm-light"
+      image_generation: "glm-light"
+      quality_analysis_tool: "glm-light"
+      scene_script_generation_tool: "glm-light"
+      script_generation_tool: "glm-light"
   
   production:
-    # 生产环境使用最好的GLM-4.5模型
+    # 生产环境使用默认主模型
     agent_model_mapping:
-      concept_planner: "glm-4.5"
-      script_writer: "glm-4.5"
-      quality_checker: "glm-4.5-air"
-      audio_generator: "glm-4.5"
-      default: "glm-4.5"
+      concept_planner: "glm-default"
+      script_writer: "glm-default"
+      quality_checker: "glm-light"
+      audio_generator: "glm-default"
+      default: "glm-default"
     tool_model_mapping:
-      role_analysis_tool: "glm-4.5"
-      concept_generation_tool: "glm-4.5"
-      scene_continuity_analysis_tool: "glm-4.5"
-      intelligent_scene_planning: "glm-4.5"
-      narrative_structure_generation_tool: "glm-4.5"
-      parameter_optimization: "glm-4.5"
-      image_generation: "glm-4.5"
-      quality_analysis_tool: "glm-4.5"
-      scene_script_generation_tool: "glm-4.5"
-      script_generation_tool: "glm-4.5"
+      role_analysis_tool: "glm-default"
+      concept_generation_tool: "glm-default"
+      scene_continuity_analysis_tool: "glm-default"
+      intelligent_scene_planning: "glm-default"
+      narrative_structure_generation_tool: "glm-default"
+      parameter_optimization: "glm-default"
+      image_generation: "glm-default"
+      quality_analysis_tool: "glm-default"
+      scene_script_generation_tool: "glm-default"
+      script_generation_tool: "glm-default"
 
 # 成本控制配置
 cost_control:

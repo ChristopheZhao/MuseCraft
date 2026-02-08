@@ -1,35 +1,35 @@
 default:
   provider: zhipu
-  model: glm-4.5
+  model: glm-default
 
 agents.image_generator:
   observe:
     provider: zhipu
-    model: glm-4.5-air
+    model: glm-light
   plan:
     provider: zhipu
-    model: glm-4.5
+    model: glm-default
   act:
     provider: zhipu
-    model: glm-4.5
+    model: glm-default
 
 agents.video_generator:
   observe:
     provider: zhipu
-    model: glm-4.5-air
+    model: glm-light
   plan:
     provider: zhipu
-    model: glm-4.5
+    model: glm-default
   act:
     provider: zhipu
-    model: glm-4.5
+    model: glm-default
 
 agents.voice_synthesizer:
   plan:
     provider: zhipu
-    model: glm-4.5
+    model: glm-default
 
 agents.orchestrator:
   plan:
     provider: zhipu
-    model: glm-4.5-air
+    model: glm-light

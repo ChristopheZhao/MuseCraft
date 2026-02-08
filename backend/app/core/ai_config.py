@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 import json
+import logging
 from .config import settings
 
 
@@ -43,6 +44,7 @@ class AIConfigManager:
     """AI配置管理器"""
     
     def __init__(self):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.providers: Dict[str, ProviderConfig] = {}
         self.models: Dict[str, ModelConfig] = {}
         self.agent_model_mapping: Dict[str, str] = {}
@@ -52,6 +54,38 @@ class AIConfigManager:
         self.agent_thinking_mode: Dict[str, str] = {}  # agent -> "thinking" | "standard"
         self._load_default_config()
         self._load_user_config()
+        self._log_resolved_mappings()
+
+    def _log_resolved_mappings(self) -> None:
+        try:
+            resolved_agents = {
+                name: self._resolve_model_alias(model)
+                for name, model in (self.agent_model_mapping or {}).items()
+            }
+            resolved_tools = {
+                name: self._resolve_model_alias(model)
+                for name, model in (self.tool_model_mapping or {}).items()
+            }
+            resolved_fallbacks = {
+                name: self._resolve_model_alias(model)
+                for name, model in (self.agent_fallback_model_mapping or {}).items()
+            }
+            resolved_providers = {}
+            for name, cfg in (self.providers or {}).items():
+                default_model = getattr(cfg, "default_model", "")
+                resolved_providers[name] = self._resolve_model_alias(default_model) if default_model else default_model
+            self.logger.info(
+                "AI models resolved: env=%s default=%s light=%s agents=%s tools=%s providers=%s fallbacks=%s",
+                getattr(settings, "ENVIRONMENT", "development"),
+                settings.GLM_DEFAULT_MODEL,
+                settings.GLM_LIGHT_MODEL,
+                resolved_agents,
+                resolved_tools,
+                resolved_providers,
+                resolved_fallbacks,
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to log resolved AI model mappings: %s", exc)
     
     def _load_default_config(self):
         """加载默认配置"""
@@ -110,6 +144,14 @@ class AIConfigManager:
             # GLM模型配置
             glm_models = {
                 # GLM-4.5 系列 (最新一代)
+                "glm-4.7": ModelConfig(
+                    name="glm-4.7",
+                    provider="zhipu",
+                    max_tokens=settings.LLM_MAX_TOKENS_THINKING,
+                    temperature=0.7,
+                    capabilities=["text_generation", "chat", "chinese", "reasoning", "long_context", "latest"],
+                    fallback_model="glm-4.5-air"
+                ),
                 "glm-4.5": ModelConfig(
                     name="glm-4.5",
                     provider="zhipu",
@@ -366,7 +408,7 @@ class AIConfigManager:
                     self.providers[provider_name] = existing
                 # 合入用户配置字段
                 if "default_model" in provider_config:
-                    existing.default_model = provider_config["default_model"]
+                    existing.default_model = self._resolve_model_alias(provider_config["default_model"])
                 if "enabled" in provider_config:
                     existing.enabled = provider_config["enabled"]
                 if "timeout" in provider_config:
@@ -389,18 +431,30 @@ class AIConfigManager:
                         existing.timeout = model_config["timeout"]
                     if "fallback_model" in model_config:
                         existing.fallback_model = model_config["fallback_model"]
+
+    def _resolve_model_alias(self, model_name: Optional[str]) -> Optional[str]:
+        if not model_name:
+            return model_name
+        if model_name == "glm-default":
+            return settings.GLM_DEFAULT_MODEL
+        if model_name == "glm-light":
+            return settings.GLM_LIGHT_MODEL
+        return model_name
     
     def get_model_for_agent(self, agent_name: str) -> str:
         """获取Agent应该使用的模型"""
-        return self.agent_model_mapping.get(agent_name, self.agent_model_mapping["default"])
+        model = self.agent_model_mapping.get(agent_name, self.agent_model_mapping["default"])
+        return self._resolve_model_alias(model)
     
     def get_model_for_tool(self, tool_name: str) -> Optional[str]:
         """获取工具应该使用的模型（如果配置了）"""
-        return self.tool_model_mapping.get(tool_name)
+        model = self.tool_model_mapping.get(tool_name)
+        return self._resolve_model_alias(model)
 
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """获取模型配置"""
-        return self.models.get(model_name)
+        resolved = self._resolve_model_alias(model_name)
+        return self.models.get(resolved)
 
     def get_thinking_mode_for_agent(self, agent_name: str) -> str:
         """获取Agent的默认思维链模式: "thinking" | "standard""" 
@@ -422,10 +476,11 @@ class AIConfigManager:
     def get_fallback_model_for_agent(self, agent_name: str) -> Optional[str]:
         """获取Agent的备用模型：优先显式 agent_fallback_model_mapping，其次当前主模型的 ModelConfig.fallback_model。"""
         if agent_name in self.agent_fallback_model_mapping:
-            return self.agent_fallback_model_mapping[agent_name]
+            return self._resolve_model_alias(self.agent_fallback_model_mapping[agent_name])
         primary = self.get_model_for_agent(agent_name)
         mc = self.get_model_config(primary) if primary else None
-        return getattr(mc, 'fallback_model', None) if mc else None
+        fallback = getattr(mc, 'fallback_model', None) if mc else None
+        return self._resolve_model_alias(fallback) if fallback else None
     
     def list_available_models(self, capability: Optional[str] = None) -> list:
         """列出可用模型"""

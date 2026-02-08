@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = config("MAX_FILE_SIZE", default=100, cast=int)  # MB
     # File download/upload robustness
     FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=120, cast=int)
-    FILE_STORAGE_TOOL_TIMEOUT: int = config("FILE_STORAGE_TOOL_TIMEOUT", default=120, cast=int)
+    FILE_STORAGE_TOOL_TIMEOUT: int = config("FILE_STORAGE_TOOL_TIMEOUT", default=240, cast=int)
     FILE_STORAGE_DOWNLOAD_RETRIES: int = config("FILE_STORAGE_DOWNLOAD_RETRIES", default=3, cast=int)
     
     # AWS S3 Settings
@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     GLM_API_KEY: Optional[str] = config("GLM_API_KEY", default=None)
     GLM_BASE_URL: str = config("GLM_BASE_URL", default="https://open.bigmodel.cn/api/paas/v4")
     GLM_DEFAULT_MODEL: str = config("GLM_DEFAULT_MODEL", default="glm-4-plus")
+    GLM_LIGHT_MODEL: str = config("GLM_LIGHT_MODEL", default="glm-4.5-air")
     DOUBAO_API_KEY: Optional[str] = config("DOUBAO_API_KEY", default=None)
     DOUBAO_BASE_URL: str = config("DOUBAO_BASE_URL", default="https://ark.cn-beijing.volces.com")
     # Doubao (Volcengine) Video/Image API path overrides (tenant-specific gateways)
@@ -143,6 +144,8 @@ class Settings(BaseSettings):
 
     # Orchestration defaults
     DEFAULT_GENERATION_MODE: str = config("DEFAULT_GENERATION_MODE", default="quick")
+    VIDEO_COMPOSER_MAX_ITERATIONS: int = config("VIDEO_COMPOSER_MAX_ITERATIONS", default=6, cast=int)
+    VIDEO_COMPOSER_TIMEOUT_SECONDS: int = config("VIDEO_COMPOSER_TIMEOUT_SECONDS", default=600, cast=int)
     # 轨迹事件日志：是否启用 episodic 事件落文件
     EPISODIC_EVENT_ENABLED: bool = config("EPISODIC_EVENT_ENABLED", default=True, cast=bool)
     EPISODIC_EVENT_LOG_PATH: str = config("EPISODIC_EVENT_LOG_PATH", default="./logs/episodic_events.log")
@@ -163,6 +166,7 @@ class Settings(BaseSettings):
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
     SUNO_BASE_URL: str = config("SUNO_BASE_URL", default="https://api.sunoapi.org")
+    AUDIO_SFX_REQUIRED_DEFAULT: bool = config("AUDIO_SFX_REQUIRED_DEFAULT", default=False, cast=bool)
 
     # Voice Synthesis configuration
     VOICE_PRIMARY_PROVIDER: str = config("VOICE_PRIMARY_PROVIDER", default="aliyun")
@@ -271,6 +275,7 @@ class Settings(BaseSettings):
     WORKFLOW_OPTIMIZATION_LEVEL: str = config("WORKFLOW_OPTIMIZATION_LEVEL", default="balanced")  # conservative, balanced, aggressive
     WORKFLOW_EXECUTION_STRATEGY: str = config("WORKFLOW_EXECUTION_STRATEGY", default="adaptive")  # sequential, parallel, adaptive, pipeline
     MAX_CONCURRENT_AGENTS: int = config("MAX_CONCURRENT_AGENTS", default=4, cast=int)
+    SCRIPT_GENERATION_MAX_CONCURRENCY: int = config("SCRIPT_GENERATION_MAX_CONCURRENCY", default=3, cast=int)
     ENABLE_WORKFLOW_CACHING: bool = config("ENABLE_WORKFLOW_CACHING", default=True, cast=bool)
     
     # Quality Control Settings
@@ -409,6 +414,11 @@ class Settings(BaseSettings):
     COMPOSER_INJECT_SILENT_AUDIO: bool = config("COMPOSER_INJECT_SILENT_AUDIO", default=True, cast=bool)
     COMPOSER_SILENT_AUDIO_SAMPLE_RATE: int = config("COMPOSER_SILENT_AUDIO_SAMPLE_RATE", default=48000, cast=int)
     COMPOSER_SILENT_AUDIO_CHANNELS: int = config("COMPOSER_SILENT_AUDIO_CHANNELS", default=2, cast=int)
+    COMPOSER_HIDE_SCENE_AUDIO_ON_REF: bool = config(
+        "COMPOSER_HIDE_SCENE_AUDIO_ON_REF",
+        default=True,
+        cast=bool,
+    )
     
     # Agent ReAct Configuration - ReAct循环最大迭代次数配置（业务逻辑配置，不放在.env）
     VIDEO_GENERATOR_MAX_ITERATIONS: int = 14   # 视频生成Agent最大迭代次数

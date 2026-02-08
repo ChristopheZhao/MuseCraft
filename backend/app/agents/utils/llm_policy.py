@@ -3,6 +3,7 @@ import yaml
 from typing import Dict, Any, Optional
 
 from ..tools.ai_services.service_interfaces import get_llm_service, ServiceProvider
+from ...core.config import settings
 
 
 class RoleLLM:
@@ -53,6 +54,15 @@ class LLMPolicyManager:
         agent_pol = self._data.get(agent_key, {})
         return {**default, **agent_pol}
 
+    def _resolve_model_alias(self, model: Optional[str]) -> Optional[str]:
+        if not model:
+            return model
+        if model == "glm-default":
+            return settings.GLM_DEFAULT_MODEL
+        if model == "glm-light":
+            return settings.GLM_LIGHT_MODEL
+        return model
+
     def build_llms_for_agent(self, agent_name: str) -> Dict[str, RoleLLM]:
         pol = self.get_policy_for_agent(agent_name)
         handles: Dict[str, RoleLLM] = {}
@@ -62,7 +72,7 @@ class LLMPolicyManager:
             if not cfg:
                 continue
             provider = (cfg.get("provider") or "zhipu").lower()
-            model = cfg.get("model")
+            model = self._resolve_model_alias(cfg.get("model"))
             # Extendable: map provider string to enum
             prov_enum = ServiceProvider.ZHIPU if provider == "zhipu" else ServiceProvider.ZHIPU
             service = get_llm_service(prov_enum)
@@ -72,4 +82,3 @@ class LLMPolicyManager:
             some = next(iter(handles.values()))
             handles["default"] = some
         return handles
-
