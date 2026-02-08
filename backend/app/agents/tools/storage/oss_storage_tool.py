@@ -242,6 +242,16 @@ class OSSStorageTool(AsyncTool):
                             url = f"https://{self.bucket_name}.{self.endpoint.replace('https://', '').replace('http://', '')}/{remote_path}"
                         else:
                             url = self.bucket.sign_url('GET', remote_path, self.default_expiry)
+                        try:
+                            self.logger.info(
+                                "OSS_UPLOAD_SKIPPED remote_path=%s overwrite=%s public_read=%s url=%s",
+                                remote_path,
+                                overwrite,
+                                public_read,
+                                url,
+                            )
+                        except Exception:
+                            pass
                         return {
                             "__skipped__": True,
                             "reason": "already_exists",

@@ -79,6 +79,9 @@ backend/storage/*.sqlite
 backend/storage/*.sqlite-*
 backend/app/agents/storage/*.sqlite-*
 
+storage/temp/*
+storage/outputs/*
+
 # 营销文件
 public/marketing/*
 
