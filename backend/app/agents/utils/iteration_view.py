@@ -130,7 +130,7 @@ def _resolve_generation_tool_prefixes(agent_name: str) -> Set[str]:
     """Resolve which tool namespaces count as "generation tools" for failure statistics."""
     name = str(agent_name or "")
     if name == "image_generator":
-        return {"image_generation."}
+        return {"image_generation.", "image_prompt_composer."}
     if name == "video_generator":
         return {"video_generation."}
     if name == "voice_synthesizer":

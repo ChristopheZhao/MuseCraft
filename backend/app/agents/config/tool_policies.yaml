@@ -1,3 +1,5 @@
+# 说明：tool_policies 仅用于覆盖/收紧已分配工具的暴露与动作白名单，并非完整清单。
+# 未在此列出的工具仍按工具自身可见性生效；最终可用 FC 列表见运行时日志。
 agents:
   video_generator:
     video_generation:
@@ -8,43 +10,24 @@ agents:
       expose: true
       allowed_actions:
         - generate_with_autoprompt
-    scene_continuity_preparation:
+    video_prompt_composer:
       expose: true
       allowed_actions:
-        - prepare_scene_input
-    consistency_tool:
-      expose: true
-      allowed_actions:
-        - get_prompt_assets
+        - build_prompt
 
   image_generator:
-    image_generation:
+    image_prompt_composer:
       expose: true
       allowed_actions:
-        - generate_with_autoprompt
-    consistency_tool:
-      expose: true
-      allowed_actions:
-        - get_prompt_assets
-      # 可选：声明可观测附件的导出规则（Iter->OBS），用于通用抽取器（当前实现对 assets 进行通用白名单抽取，此配置为将来细化预留）
-      obs_export:
-        source: result.assets
-        fields:
-          style:
-            keys: [color_palette, mood, composition, lighting, style_tags]
-          characters:
-            keys: [name, traits, prompt_snippet, descriptions]
-          environment:
-            keys: [title, visual_description, narrative_description, props]
-          continuity:
-            keys: [prev_scene_no, motion_guidance, tail_frame_ref]
+        - generate
 
   script_writer:
-    # 脚本生成：仅暴露场景脚本生成动作
+    # 脚本生成：仅暴露场景脚本生成动作（单条/批量）
     script_generation:
       expose: true
       allowed_actions:
         - generate_scene_script
+        - generate_scene_scripts_batch
     # 场景连续性分析：用于基于脚本文本推断场景延续关系
     scene_continuity_analysis_tool:
       expose: true
@@ -56,6 +39,12 @@ agents:
       allowed_actions:
         - analyze_roles_and_scenes
 
+  voice_synthesizer:
+    voice_synth_tool:
+      expose: true
+      allowed_actions:
+        - synthesize_voice_aligned
+
   audio_generator:
     file_storage_tool:
       expose: true
@@ -63,7 +52,18 @@ agents:
         - download_from_url
 
   video_composer:
-    file_storage_tool:
+    composition_tool:
       expose: true
       allowed_actions:
-        - download_from_url
+        - synchronize_audio
+        - compose_story_video
+    ffmpeg_tool:
+      expose: true
+      allowed_actions:
+        - create_slideshow
+    audio_processor:
+      expose: true
+      allowed_actions:
+        - adjust_volume
+        - add_fade_effects
+        - ensure_duration

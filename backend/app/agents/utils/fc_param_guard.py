@@ -70,7 +70,7 @@ class FCParamGuard:
                     "image_generator": {
                         "functions": [
                             {
-                                "name": "image_generation.generate_with_autoprompt",
+                                "name": "image_prompt_composer.generate",
                                 "params": {
                                     "size": {
                                         "allowed_values": ["1024x1024", "1024x1792", "1792x1024"],

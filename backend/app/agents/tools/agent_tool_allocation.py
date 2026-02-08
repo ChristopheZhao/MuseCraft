@@ -50,8 +50,7 @@ class AgentToolAllocator:
             
             # 图像生成Agent - 视觉创作和图像处理
             AgentType.IMAGE_GENERATOR: [
-                "image_generation",             # 图像生成工具（业务逻辑封装）
-                "consistency_tool",             # 一致性提示资产查询
+                "image_prompt_composer",        # 图像提示词合成 + 一致性注入 + 生成
                 # Image 阶段不做连续性判定，移除 continuity 分析相关工具
             ],
             
@@ -59,9 +58,7 @@ class AgentToolAllocator:
             AgentType.VIDEO_GENERATOR: [
                 "video_generation",                    # 视频生成（核心工具）
                 "image_generation",                    # 补充图像生成（用于敏感图替换）
-                "video_prompt_builder",                # 提示词构建（风格/角色整合）
-                "scene_continuity_preparation",       # 连续性准备（组合工具）
-                "consistency_tool",                   # 一致性资产查询与注册
+                "video_prompt_composer",               # 提示词构建（含一致性注入）
                 "file_storage_tool"                   # 文件存储
             ],
             

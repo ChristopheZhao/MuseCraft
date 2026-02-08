@@ -57,6 +57,8 @@ _LAZY_IMPORTS = {
     "OrchestratorControlTool": (".orchestrator_control_tool", "OrchestratorControlTool"),
     "ConsistencyTool": (".consistency_tool", "ConsistencyTool"),
     "VideoPromptBuilderTool": (".video_prompt_builder_tool", "VideoPromptBuilderTool"),
+    "VideoPromptComposerTool": (".video_prompt_composer_tool", "VideoPromptComposerTool"),
+    "ImagePromptComposerTool": (".image_prompt_composer_tool", "ImagePromptComposerTool"),
 }
 
 
@@ -107,6 +109,8 @@ def register_default_tools() -> None:
     from .ai_services.role_analysis_tool import RoleAnalysisTool
     from .consistency_tool import ConsistencyTool
     from .video_prompt_builder_tool import VideoPromptBuilderTool
+    from .video_prompt_composer_tool import VideoPromptComposerTool
+    from .image_prompt_composer_tool import ImagePromptComposerTool
     from .memory_tool import MemoryTool
     from .orchestrator_control_tool import OrchestratorControlTool
 
@@ -140,6 +144,8 @@ def register_default_tools() -> None:
     registry.register_tool(RoleAnalysisTool)
     registry.register_tool(ConsistencyTool)
     registry.register_tool(VideoPromptBuilderTool)
+    registry.register_tool(VideoPromptComposerTool)
+    registry.register_tool(ImagePromptComposerTool)
     registry.register_tool(MemoryTool, auto_load=False)
     registry.register_tool(OrchestratorControlTool)
 
@@ -154,4 +160,3 @@ __all__ = [
     "ToolValidationError",
     "register_default_tools",
 ]
-

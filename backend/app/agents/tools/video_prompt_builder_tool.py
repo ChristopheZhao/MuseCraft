@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .base_tool import (
@@ -183,13 +184,39 @@ class VideoPromptBuilderTool(AsyncTool):
         path = ref.strip()
         if path.startswith("file://"):
             path = path[len("file://"):]
-        if not os.path.exists(path):
+        candidate_paths = []
+        try:
+            candidate = Path(path)
+        except Exception as exc:
+            raise ToolValidationError(
+                f"scene_info_ref 路径解析失败: {exc}",
+                tool_name=self.metadata.name,
+            ) from exc
+        if candidate is not None:
+            if candidate.is_absolute():
+                candidate_paths.append(candidate)
+            else:
+                candidate_paths.append(candidate)
+                try:
+                    backend_root = Path(__file__).resolve().parents[3]
+                    candidate_paths.append(backend_root / candidate)
+                except Exception:
+                    pass
+        resolved_path = None
+        for cand in candidate_paths:
+            try:
+                if cand and cand.exists():
+                    resolved_path = cand
+                    break
+            except Exception:
+                continue
+        if resolved_path is None:
             raise ToolValidationError(
                 f"scene_info_ref 不存在: {path}",
                 tool_name=self.metadata.name,
             )
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(resolved_path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
         except Exception as exc:
             raise ToolValidationError(
