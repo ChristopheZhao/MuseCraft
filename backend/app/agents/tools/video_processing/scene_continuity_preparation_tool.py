@@ -412,7 +412,8 @@ class SceneContinuityPreparationTool(AsyncTool):
             upload_params = {
                 "remote_path": remote_path,
                 "content_type": "image/jpeg",
-                "public_read": True
+                "public_read": True,
+                "overwrite": True,
             }
             
             # 处理不同格式的frame_data
@@ -446,7 +447,17 @@ class SceneContinuityPreparationTool(AsyncTool):
             # 处理ToolOutput格式
             if hasattr(result, 'success') and result.success:
                 upload_result = result.result
+                try:
+                    self.logger.info(
+                        "CONTINUITY_FRAME_UPLOADED scene=%s remote_path=%s url=%s",
+                        scene_number,
+                        upload_result.get("remote_path") if isinstance(upload_result, dict) else None,
+                        upload_result.get("url") if isinstance(upload_result, dict) else None,
+                    )
+                except Exception:
+                    pass
                 return {
+                    "success": True,
                     "url": upload_result.get("url"),
                     "upload_info": {
                         "remote_path": remote_path,
@@ -455,7 +466,7 @@ class SceneContinuityPreparationTool(AsyncTool):
                     }
                 }
             error_msg = result.error if hasattr(result, 'error') else "Unknown upload error"
-            raise ToolError(error_msg, error_code="oss_upload_failed")
+            return {"success": False, "error": error_msg}
 
         except Exception as e:
             raise ToolError(str(e), error_code="oss_upload_error")

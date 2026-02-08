@@ -321,6 +321,10 @@ class VideoGenerationTool(AsyncTool):
                 "type": "object",
                 "properties": {
                     "scene_number": {"type": ["integer", "string"], "description": "可选：用于管道追踪与尾帧登记"},
+                    "scene_info_ref": {
+                        "type": "string",
+                        "description": "可选：场景信息引用路径；若提供则工具内部构建包含一致性约束的完整提示词"
+                    },
                     "emit_last_frame": {"type": "string", "enum": ["auto", "always", "never"], "description": "生成成功后是否自动提取并上传尾帧（auto按DAG出边判断）"},
                     "workflow_state_id": {"type": "string", "description": "可选：在auto模式下用于出边计算"},
                     "prompt": prompt_field,
@@ -367,7 +371,7 @@ class VideoGenerationTool(AsyncTool):
                         "description": "可选：需要避免的元素列表（将合并到提示词）"
                     }
                 },
-                "required": ["scene_number", "prompt", "duration"]
+                "required": ["scene_number", "duration"]
             },
             "get_capabilities": {
                 "type": "object",
@@ -998,8 +1002,58 @@ class VideoGenerationTool(AsyncTool):
 
     async def _generate_with_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """合并连续性准备与生成（确定性）：解析上一场景尾帧 → 生成 → 可选存尾帧。"""
+        scene_number = params.get("scene_number")
+        scene_info_ref = params.get("scene_info_ref")
         prompt = params.get("prompt")
         duration = params.get("duration")
+        if not prompt and not scene_info_ref:
+            raise ToolValidationError("prompt or scene_info_ref is required", self.metadata.name)
+
+        if scene_info_ref and scene_number is not None:
+            try:
+                from ..tool_registry import get_tool_registry
+                from ..base_tool import ToolInput as TI
+
+                registry = get_tool_registry()
+                composer = registry.get_tool("video_prompt_composer")
+                if not composer:
+                    raise ToolError("video_prompt_composer unavailable", self.metadata.name)
+                resp = await composer.execute(
+                    TI(
+                        action="build_prompt",
+                        parameters={
+                            "scene_number": scene_number,
+                            "scene_info_ref": scene_info_ref,
+                        },
+                    )
+                )
+                payload = getattr(resp, "result", resp)
+                if not isinstance(payload, dict) or not payload.get("prompt_text"):
+                    raise ToolError("video_prompt_composer returned empty prompt", self.metadata.name)
+                prompt = payload.get("prompt_text")
+                params["prompt"] = prompt
+                meta = payload.get("metadata") if isinstance(payload, dict) else {}
+                injected = None
+                categories = None
+                if isinstance(meta, dict):
+                    injected = meta.get("consistency_injected")
+                    categories = meta.get("consistency_categories")
+                try:
+                    prompt_bytes_len = len(str(prompt).encode("utf-8")) if isinstance(prompt, str) else 0
+                    self.logger.info(
+                        "PROMPT_COMPOSED(generate_with_continuity): scene=%s composed_len=%d injected=%s categories=%s",
+                        scene_number,
+                        prompt_bytes_len,
+                        injected,
+                        categories,
+                    )
+                except Exception:
+                    pass
+            except ToolError:
+                raise
+            except Exception as exc:
+                raise ToolError(f"Prompt composition failed: {exc}", self.metadata.name) from exc
+
         if not prompt or duration is None:
             raise ToolValidationError("prompt and duration are required", self.metadata.name)
 
@@ -1132,13 +1186,50 @@ class VideoGenerationTool(AsyncTool):
         except Exception:
             pass
 
-        # 解析连续性帧：优先 continuity_frame；不再在工具内做隐式推断/抽帧，统一由连续性准备工具负责
+        # 解析连续性帧：优先 continuity_frame；若提供 previous_video_url 则调用连续性准备工具
         continuity_frame: Optional[str] = params.get("continuity_frame")
         image_url: Optional[str] = params.get("image_url")
-        # 关闭内部连续性回退：当未显式提供 continuity_frame 时，不再尝试从依赖/Shared WM/上游视频自动抽帧
-        if not continuity_frame:
+        previous_video_url: Optional[str] = params.get("previous_video_url")
+        prev_scene_no: Optional[int] = None
+        try:
+            raw_prev = params.get("depends_on_scene")
+            if raw_prev is not None and str(raw_prev).isdigit():
+                prev_scene_no = int(raw_prev)
+        except Exception:
+            prev_scene_no = None
+
+        if not continuity_frame and previous_video_url and scene_key is not None:
             try:
-                self.logger.info("CONTINUITY_DISABLED: no continuity_frame provided; generating without continuity")
+                from ..tool_registry import get_tool_registry
+                from ..base_tool import ToolInput as TI
+
+                registry = get_tool_registry()
+                prep_tool = registry.get_tool("scene_continuity_preparation")
+                if not prep_tool:
+                    raise ToolError("scene_continuity_preparation not available", self.metadata.name)
+
+                prep_params: Dict[str, Any] = {
+                    "scene_number": int(scene_key),
+                    "previous_scene_video_url": previous_video_url,
+                }
+                if image_url:
+                    prep_params["fallback_image_url"] = image_url
+
+                resp = await prep_tool.execute(TI(action="prepare_scene_input", parameters=prep_params))
+                payload = getattr(resp, "result", resp)
+                if isinstance(payload, dict):
+                    continuity_frame = payload.get("image_url") or None
+                    if continuity_frame:
+                        params["image_from_continuity"] = bool(payload.get("continuity_used"))
+            except Exception as e:
+                try:
+                    self.logger.warning(f"CONTINUITY_EXTRACT_FAILED: {e}")
+                except Exception:
+                    pass
+
+        if not continuity_frame and not image_url and not previous_video_url:
+            try:
+                self.logger.info("CONTINUITY_DISABLED: no continuity or reference image; fallback to text")
             except Exception:
                 pass
 

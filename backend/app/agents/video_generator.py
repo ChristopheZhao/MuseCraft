@@ -271,6 +271,17 @@ class VideoGeneratorAgent(ReActAgent):
                 shared_memory=shared_wm,
                 include_prompt=True,
             )
+            try:
+                local_count = sum(1 for r in normalized_results if r.get("video_path"))
+                url_only = sum(1 for r in normalized_results if r.get("video_url") and not r.get("video_path"))
+                self.logger.info(
+                    "VIDEO_PERSISTENCE summary: total=%s local_paths=%s url_only=%s",
+                    len(normalized_results),
+                    local_count,
+                    url_only,
+                )
+            except Exception:
+                pass
 
             # 执行摘要
             success_cnt = sum(1 for r in (normalized_results or []) if r.get("success"))
