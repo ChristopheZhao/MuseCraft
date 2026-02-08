@@ -133,7 +133,6 @@ class VoiceSynthesizerAgent(ReActAgent):
             return items or None
         return None
 
-
     def _persist_voice_artifacts(
         self,
         *,
