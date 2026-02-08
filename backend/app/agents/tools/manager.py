@@ -332,6 +332,7 @@ class ToolManager:
         file_path = (
             data.get("file_path")
             or data.get("output_path")
+            or data.get("output_file")
             or data.get("local_path")
         )
 

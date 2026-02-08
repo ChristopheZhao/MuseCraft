@@ -98,6 +98,18 @@ class FFmpegTool(AsyncTool):
         os.makedirs(self.temp_dir, exist_ok=True)
         
         self.logger.info(f"Initialized FFmpeg tool with output dir: {self.output_dir}")
+
+    def _resolve_output_path(self, output_filename: str) -> str:
+        output_name = str(output_filename or "").strip()
+        if not output_name:
+            raise ToolValidationError("output_filename is required", self.metadata.name)
+        candidate = Path(output_name)
+        if candidate.is_absolute() or candidate.parent != Path("."):
+            output_path = candidate
+        else:
+            output_path = Path(self.output_dir) / candidate
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(output_path)
     
     def get_available_actions(self) -> List[str]:
         return [
@@ -266,7 +278,7 @@ class FFmpegTool(AsyncTool):
                 for clip in video_clips:
                     f.write(f"file '{os.path.abspath(clip)}'\n")
             
-            output_path = os.path.join(self.output_dir, output_filename)
+            output_path = self._resolve_output_path(output_filename)
             
             # 构建FFmpeg命令
             cmd = [
@@ -322,7 +334,7 @@ class FFmpegTool(AsyncTool):
             if not os.path.exists(input_file):
                 raise ToolError(f"Input file not found: {input_file}", self.metadata.name)
             
-            output_path = os.path.join(self.output_dir, output_filename)
+            output_path = self._resolve_output_path(output_filename)
             
             # 质量设置
             quality_settings = {
@@ -390,7 +402,7 @@ class FFmpegTool(AsyncTool):
                 if not os.path.exists(file_path):
                     raise ToolError(f"File not found: {file_path}", self.metadata.name)
             
-            output_path = os.path.join(self.output_dir, output_filename)
+            output_path = self._resolve_output_path(output_filename)
             
             # 检查视频是否包含音频流
             def _resolve_audio_stream_ref(path: str) -> Optional[str]:
@@ -588,7 +600,7 @@ class FFmpegTool(AsyncTool):
             if len(images) == 0:
                 raise ToolError("No images provided for slideshow", self.metadata.name)
             
-            output_path = os.path.join(self.output_dir, output_filename)
+            output_path = self._resolve_output_path(output_filename)
             
             # 如果只有一张图片，简单处理
             if len(images) == 1:
@@ -816,7 +828,7 @@ class FFmpegTool(AsyncTool):
             if not output_filename:
                 base = os.path.splitext(os.path.basename(video_path))[0]
                 output_filename = f"{base}_last_frame.{output_format}"
-            out_path = os.path.join(self.output_dir, output_filename)
+            out_path = self._resolve_output_path(output_filename)
 
             # 构建vf
             vf = None
@@ -881,7 +893,7 @@ class FFmpegTool(AsyncTool):
                 raise ToolError(f"Audio file not found: {file_path}", self.metadata.name)
 
         output_filename = params.get("output_filename") or f"concat_{uuid.uuid4().hex}.wav"
-        output_path = os.path.join(self.output_dir, output_filename)
+        output_path = self._resolve_output_path(output_filename)
 
         tmp_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", dir=self.temp_dir)
         try:
@@ -926,10 +938,11 @@ class FFmpegTool(AsyncTool):
                 pass
 
     async def _merge_videos(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """拼接多个视频片段为一个视频（无音频混合）。"""
+        """拼接多个视频片段为一个视频（可选保留音轨）。"""
         try:
             video_clips = params.get("video_clips") or []
             output_filename = params.get("output_filename") or "merged_output.mp4"
+            preserve_audio = bool(params.get("preserve_audio", False))
             if not video_clips or not isinstance(video_clips, list):
                 raise ToolValidationError("video_clips is required and must be a list", self.metadata.name)
 
@@ -938,7 +951,7 @@ class FFmpegTool(AsyncTool):
                 if not os.path.exists(clip):
                     raise ToolError(f"Video clip not found: {clip}", self.metadata.name)
 
-            output_path = os.path.join(self.output_dir, output_filename)
+            output_path = self._resolve_output_path(output_filename)
 
             # 单文件：直接复制到输出目录
             if len(video_clips) == 1:
@@ -964,9 +977,12 @@ class FFmpegTool(AsyncTool):
                 "-preset", "medium",
                 "-crf", "23",
                 "-r", str(self.default_fps),
-                "-an",
-                output_path
             ]
+            if preserve_audio:
+                cmd.extend(["-c:a", "aac"])
+            else:
+                cmd.append("-an")
+            cmd.append(output_path)
 
             self.logger.info(f"Merging videos: {' '.join(cmd)}")
             process = await asyncio.create_subprocess_exec(
@@ -1007,7 +1023,7 @@ class FFmpegTool(AsyncTool):
                     return False
 
             if inject_silent and not _has_audio_stream(output_path):
-                temp_out = os.path.join(self.output_dir, f"temp_{os.path.basename(output_path)}")
+                temp_out = os.path.join(os.path.dirname(output_path), f"temp_{os.path.basename(output_path)}")
                 cmd2 = [
                     "ffmpeg", "-y",
                     "-i", output_path,

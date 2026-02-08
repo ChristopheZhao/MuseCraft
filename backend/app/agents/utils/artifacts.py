@@ -256,7 +256,12 @@ def _pick_from_payload(payload: Dict[str, Any], kind: str, require_local: bool) 
     if not isinstance(payload, dict):
         return None
     # Prefer local path
-    fp = payload.get("file_path") or payload.get("output_path") or payload.get("local_path")
+    fp = (
+        payload.get("file_path")
+        or payload.get("output_path")
+        or payload.get("output_file")
+        or payload.get("local_path")
+    )
     if isinstance(fp, str) and fp:
         if require_local and not os.path.exists(fp):
             # caller要求必须是本地存在的文件

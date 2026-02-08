@@ -1,346 +1,228 @@
 """
 Video Composer Agent - Combines individual video clips into final video
 """
-import asyncio
-import json
 import os
-import shutil
+import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
-from .base import BaseAgent, AgentError
-from ..models import Task, AgentType, Scene, Resource, ResourceType
-from ..services.file_storage import FileStorageService
+from .react_agent import ReActAgent
+from ..models import Task, AgentType
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
-from ..services.memory_provider import MemoryServices
-from .utils.memory_helpers import read_shared_fact, write_shared_fact
+from .utils.memory_helpers import write_shared_fact
 
 
-class VideoComposerAgent(BaseAgent):
+class VideoComposerAgent(ReActAgent):
     """
     Video Composer Agent combines individual scene videos into a final cohesive video
     with transitions, audio, and effects
     """
-    
-    def __init__(self, llms=None, memory_services: Optional[MemoryServices] = None):
+
+    def __init__(self, llms=None, memory_services: Optional[Any] = None):
+        max_iters = int(getattr(settings, "VIDEO_COMPOSER_MAX_ITERATIONS", 3))
+        if max_iters < 2:
+            max_iters = 2
+        timeout_seconds = int(getattr(settings, "VIDEO_COMPOSER_TIMEOUT_SECONDS", 600))
         super().__init__(
             agent_type=AgentType.VIDEO_COMPOSER,
             agent_name="video_composer",
-            timeout_seconds=600,  # 10 minutes for video composition
+            timeout_seconds=timeout_seconds,
             max_retries=2,
+            max_iterations=max_iters,
+            tools=[
+                "composition_tool",
+                "ffmpeg_tool",
+                "audio_processor",
+            ],
             llms=llms,
             memory_services=memory_services,
         )
-        # Dedicated storage service for managing final deliverables.
-        self.file_storage = FileStorageService()
-    
-    async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
-        db: Session
-    ) -> Dict[str, Any]:
-        """Compose final video from individual scene videos, or add background music if requested"""
-        
-        # Validate input
-        self._validate_input(input_data, ["workflow_state_id"])
-        
-        workflow_state_id = input_data["workflow_state_id"]
-        # 读取 MAS WorkingMemory 视图（不可用时降级到最小上下文，而非中断）
-        from .utils.memory_helpers import get_mas_working_memory
-        wm = None
-        try:
-            wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
-        except Exception as _wm_err:
-            self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
 
-        # Unified ReAct planning: let the model decide VO/BGM composition steps
-        # Build neutral observation (no tool names), include hints but do not hard-branch
-        await self._update_progress(10, "Gathering composition context", db)
-        final_video_facts = wm.get("project.final_video", {}) if wm else {}
-        video_path = input_data.get("final_video_path") or final_video_facts.get("path", '')
-        bgm_facts = wm.get("project.background_music", {}) if wm else {}
-        voice_settings = wm.get("project.voice_settings", {}) if wm else {}
-        voice_assets_facts = wm.get("project.voice_assets", {}) if wm else {}
-        vm_state = wm.get("project.voice_mixing_state", {}) if wm else {}
-
-        # 从 Shared WM 收集“可合成的场景视频片段/旁白音轨”事实，用于让规划阶段具备可执行输入。
-        scene_videos: List[Dict[str, Any]] = []
-        scene_voiceovers: List[Dict[str, Any]] = []
-        try:
-            overview = wm.get("scene_overview", {}) if wm else {}
-            duration_by_scene: Dict[int, float] = {}
-            for s in (overview.get("scenes") if isinstance(overview, dict) else []) or []:
-                if not isinstance(s, dict):
-                    continue
-                try:
-                    sn = int(s.get("scene_number"))
-                except Exception:
-                    continue
-                try:
-                    duration_by_scene[sn] = float(s.get("duration") or 0.0)
-                except Exception:
-                    duration_by_scene[sn] = 0.0
-
-            video_bucket = wm.get("scene_outputs.video", {}) if wm else {}
-            if isinstance(video_bucket, dict) and video_bucket:
-                for k, rec in video_bucket.items():
-                    if not isinstance(rec, dict):
-                        continue
-                    try:
-                        sn = int(rec.get("scene_number") or k)
-                    except Exception:
-                        continue
-                    scene_videos.append(
-                        {
-                            "scene_number": sn,
-                            "local_path": rec.get("video_path") or "",
-                            "video_url": rec.get("video_url") or "",
-                            "duration": float(rec.get("duration_sec") or duration_by_scene.get(sn) or 0.0),
-                        }
-                    )
-            scene_videos.sort(key=lambda x: int(x.get("scene_number") or 0))
-
-            voice_bucket = wm.get("scene_outputs.voice", {}) if wm else {}
-            if isinstance(voice_bucket, dict) and voice_bucket:
-                for k, rec in voice_bucket.items():
-                    if not isinstance(rec, dict):
-                        continue
-                    try:
-                        sn = int(rec.get("scene_number") or k)
-                    except Exception:
-                        continue
-                    scene_voiceovers.append(
-                        {
-                            "scene_number": sn,
-                            "local_path": rec.get("audio_path") or "",
-                            "audio_url": rec.get("audio_url") or "",
-                            "duration": float(rec.get("duration_sec") or 0.0),
-                        }
-                    )
-            scene_voiceovers.sort(key=lambda x: int(x.get("scene_number") or 0))
-        except Exception:
-            scene_videos = []
-            scene_voiceovers = []
-
-        compose_needed = bool((not str(video_path or "").strip()) and len(scene_videos) > 0)
-
-        # 单写模式：从 artifacts 收集可用资产（compose/bgm/voiceover/video_only）
-        try:
-            from ..core.config import settings as _cfg
-            single_write = bool(getattr(_cfg, 'ARTIFACTS_SINGLE_WRITE_MODE', False))
-        except Exception:
-            single_write = False
-
-        # 兼容单写模式：从 MAS WM facts/scene_outputs 读取最新资产
-        if single_write:
-            # 优先使用已写入 facts，scene_outputs 中的音视频可选读取
-            try:
-                scene_outputs = wm.get("scene_outputs", {}) if wm else {}
-            except Exception:
-                scene_outputs = {}
-            # compose 视频
-            if not video_path:
-                try:
-                    video_bucket = scene_outputs.get("scene_outputs.video") or scene_outputs.get("video") or {}
-                    latest_video = max(video_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(video_bucket, dict) else {}
-                    if isinstance(latest_video, dict):
-                        video_path = latest_video.get("file_path") or latest_video.get("url") or video_path
-                except Exception:
-                    pass
-            # bgm
-            if not bgm_facts:
-                try:
-                    audio_bucket = scene_outputs.get("scene_outputs.audio") or scene_outputs.get("audio") or {}
-                    latest_audio = max(audio_bucket.values(), key=lambda v: v.get("ts", 0)) if isinstance(audio_bucket, dict) else {}
-                    if isinstance(latest_audio, dict):
-                        bgm_facts = {
-                            "audio_path": latest_audio.get("file_path", ""),
-                            "audio_url": latest_audio.get("url", ""),
-                            "duration": latest_audio.get("duration_sec") or 0.0,
-                            "style": voice_settings.get("style_name") if isinstance(voice_settings, dict) else "",
-                            "available": True,
-                        }
-                except Exception:
-                    pass
-
-        obs_unified = {
-            "final_video": {"path": video_path, "url": final_video_facts.get("url", "")},
-            "scene_videos": scene_videos,
-            "scene_voiceovers": scene_voiceovers,
-            "background_music": {
-                "path": bgm_facts.get("audio_path", ""),
-                "url": bgm_facts.get("audio_url", ""),
-                "duration": bgm_facts.get("duration", 0.0),
-                "style": bgm_facts.get("style", ""),
-            },
-            "voice_assets": [
-                {
-                    "scene_number": int(k) if str(k).isdigit() else k,
-                    "local_path": (v or {}).get("local_path", ""),
-                    "audio_url": (v or {}).get("audio_url", ""),
-                    "duration": (v or {}).get("duration", 0.0),
-                }
-                for k, v in (voice_assets_facts.items() if isinstance(voice_assets_facts, dict) else [])
-            ],
-            "voice_settings": voice_settings,
-            "ducking_config": vm_state.get("ducking_config", {}),
-            "requests": {
-                "compose_requested": compose_needed,
-                "voiceover_requested": bool(input_data.get("add_voiceover")),
-                "bgm_requested": bool(input_data.get("add_bgm")),
-            },
-        }
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是视频合成代理。你必须遵循观察到的事实中的 requests 字段来完成工作："
-                    "requests.compose_requested / requests.voiceover_requested / requests.bgm_requested 是上游明确下发的需求。"
-                    "当某个 request 为 true 且输入资源足以执行时，你应调用函数完成对应动作；"
-                    "当 request 为 false 时，不要为该项执行任何函数调用。"
-                    "你需要根据事实自主选择调用哪些函数（若无需处理则不调用）。"
-                    "要求：a) 产出本地可用的 mp4 成片路径；b) 遵循 ducking_config 等约束；"
-                    "c) 如资源仅有 URL，应先按策略落盘后再混流；d) 仅进行函数调用，不要输出解释文本。"
-                    f"观察：{json.dumps(obs_unified, ensure_ascii=False)}"
-                ),
-            },
-            {"role": "user", "content": "符合条件时直接调用函数完成；否则无需调用。"},
-        ]
-        fc = await self.llm_function_call(
+    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+        """PLAN：使用模板和分区化上下文生成 FC 规划。"""
+        messages = self.build_plan_messages(current_state or {})
+        fc_plan = await self.llm_function_call(
             messages=messages,
-            context_description="video composer unified plan",
+            context_description="video_composer_plan_fc",
             temperature=0.2,
             tools_override=None,
         )
-        executed_calls = []
-        if isinstance(fc, dict) and fc.get("approach") == "function_call_plan" and fc.get("tool_calls"):
-            executed_calls = await self.execute_tool_calls(fc["tool_calls"])
-            # 统一抽取视频产物（先看last_round_results，再看executed_calls）
-            try:
-                last = []
-            except Exception:
-                last = []
-            mixed_path = pick_artifact_path_from_results(last, kind="video", require_local=True)
-            if not mixed_path:
-                mixed_path = pick_artifact_path_from_results(executed_calls, kind="video", require_local=True)
+        planned_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
+        plan_llm = fc_plan.get("llm_response") if isinstance(fc_plan, dict) else None
 
-            if mixed_path and os.path.exists(mixed_path):
-                await self._update_progress(90, "Finalizing composed video", db)
-                stored_path = self._store_final_video_output(mixed_path, suffix="final_composed")
-                # 发布操作交由编排层（MAS）统一处理；此处仅生成本地可用产物并写回事实
-                final_url = self._resolve_local_public_url("", stored_path)
-                try:
-                    fv = {
-                        "path": stored_path,
-                        "url": final_url,
-                        # storage 字段保持最小本地描述，避免在 Agent 内做外部发布
-                        "storage": {
-                            "provider": "local",
-                            "url": final_url,
-                            "skipped": True,
-                        },
-                    }
-                    # 始终写入 final_video 事实：供持久化读取最终交付物
-                    write_shared_fact(str(workflow_state_id), "project.final_video", fv, service=self.short_term_service)
-                    # 统一写回：记录本轮 Composer 产物（作为阶段性artifact）
-                    self.write_shared_artifact(
-                        kind="video",
-                        stage="compose",
-                        payload={"file_path": stored_path, "url": final_url, "metadata": {"source": "composer"}},
-                        scene_number=None,
-                        tool="composition_tool/ffmpeg_tool",
-                        workflow_state_id=str(workflow_state_id),
-                    )
-                except Exception as exc:
-                    self.logger.error("WM write final_video failed: %s", exc, exc_info=True)
-                    raise AgentError("Shared WM write failed (final_video)") from exc
-
-                return {
-                    "final_video_path": stored_path,
-                    "final_video_url": final_url,
-                    "subtask_state": "complete",
-                    "loop_end_reason": "natural_complete",
-                    "workflow_state_id": workflow_state_id,
-                }
-
-            # FC已规划但无本地成片：遵循ReAct返回partial，由上层续派
+        if not planned_calls:
             return {
-                "subtask_state": "partial",
-                "loop_end_reason": "no_planned_output",
-                "workflow_state_id": workflow_state_id,
+                "action": "noop",
+                "plan_llm": plan_llm,
+                "reason": "no_calls_planned",
             }
-        # End unified ReAct planning block; 如果未产出本地成片，则返回 partial 由上层续派
+
         return {
-            "subtask_state": "partial",
-            "loop_end_reason": "no_planned_output",
-            "workflow_state_id": workflow_state_id,
+            "action": "execute_planned_calls",
+            "tool_calls": planned_calls,
+            "plan_llm": plan_llm,
         }
 
-    # _resolve_voice_segment: 已移除（由高阶组合工具或 PLAN 决策使用的原子工具承担）
+    def _resolve_mix_type(self, input_data: Dict[str, Any]) -> str:
+        static_ctx = input_data.get("static_context") if isinstance(input_data, dict) else {}
+        static_ctx = static_ctx if isinstance(static_ctx, dict) else {}
+        requests = static_ctx.get("requests") if isinstance(static_ctx.get("requests"), dict) else {}
+        scene_media_has_voice = bool(static_ctx.get("scene_media_has_voice")) and bool(static_ctx.get("scene_media_ref"))
+        if input_data.get("add_bgm") or requests.get("bgm_requested"):
+            return "bgm"
+        if input_data.get("add_voiceover") or requests.get("voiceover_requested") or scene_media_has_voice:
+            return "voiceover"
+        return "compose"
 
-    # --- Helpers: artifact extraction (供应商与工具无关，中立字段优先) ---
-    # Helpers moved to shared utils.artifacts.pick_artifact_path_from_results
-    
-        
-    
-    # deprecated: removed helpers (_create_composition_timeline/_find_scene_script/_get_transition_type/_prepare_audio_elements)
-    
-    # deprecated: compose via ffmpeg command builders removed
-    
-    # deprecated: filter graph helpers removed
-    
-    # deprecated
-    
-    # deprecated: DB persistence helpers removed
-    
-    # deprecated: metadata helpers removed
-    
-    # deprecated: summary helpers removed
-    
-    # deprecated: timeline/audio-elements helpers removed from agent scope
-    
-    # deprecated: compose_final_video_from_data removed; composition is planned via tools
+    def _resolve_output_suffix(self, mix_type: str) -> str:
+        if mix_type == "bgm":
+            return "final_with_bgm"
+        if mix_type == "voiceover":
+            return "final_with_voiceover"
+        return "final_composed"
 
-    def _store_final_video_output(
+    def _build_mix_receipt(
         self,
-        source_path: str,
-        suffix: str = "final_video",
-        move: bool = True
-    ) -> str:
-        """Persist the composed video into the protected final-output directory."""
+        *,
+        input_data: Dict[str, Any],
+        output_path: str,
+        output_url: str,
+    ) -> Dict[str, Any]:
+        mix_type = self._resolve_mix_type(input_data)
+        static_ctx = input_data.get("static_context") if isinstance(input_data, dict) else {}
+        static_ctx = static_ctx if isinstance(static_ctx, dict) else {}
+        final_video_ctx = static_ctx.get("final_video") if isinstance(static_ctx, dict) else {}
+        bgm_ctx = static_ctx.get("background_music") if isinstance(static_ctx, dict) else {}
+        voice_assets_ctx = static_ctx.get("voice_assets") if isinstance(static_ctx, dict) else []
 
-        if not source_path or not os.path.exists(source_path):
-            raise AgentError(f"Final video source missing: {source_path}")
+        receipt: Dict[str, Any] = {
+            "mix_type": mix_type,
+            "output_path": output_path,
+            "output_url": output_url,
+            "inputs": {},
+            "execution_id": self._get_execution_id() or "",
+            "ts": time.time(),
+        }
+        if isinstance(final_video_ctx, dict) and (final_video_ctx.get("path") or final_video_ctx.get("url")):
+            receipt["inputs"]["video"] = {
+                "path": final_video_ctx.get("path", ""),
+                "url": final_video_ctx.get("url", ""),
+            }
+        if mix_type == "bgm" and isinstance(bgm_ctx, dict):
+            receipt["inputs"]["background_music"] = {
+                "path": bgm_ctx.get("path", ""),
+                "url": bgm_ctx.get("url", ""),
+            }
+        if mix_type == "voiceover" and isinstance(voice_assets_ctx, list):
+            receipt["inputs"]["voice_assets"] = voice_assets_ctx
+        return receipt
 
-        source = Path(source_path)
-        destination_dir = self.file_storage.get_final_output_dir("video")
-        extension = source.suffix or ".mp4"
+    async def _execute_action(
+        self,
+        action_plan: Dict[str, Any],
+        input_data: Dict[str, Any],
+        db: Session,
+        iteration: int,
+    ) -> Dict[str, Any]:
+        """ACT：执行规划的工具调用并写回成片事实。"""
+        act = (action_plan or {}).get("action")
+        params = (action_plan or {}).get("parameters", {})
+        call_tools = list(action_plan.get("tool_calls") or params.get("call_tools") or [])
+        plan_llm = action_plan.get("plan_llm") or params.get("plan_llm")
+        if act == "noop" or not call_tools:
+            return {
+                "success": True,
+                "executed_calls": [],
+                "plan_llm": plan_llm,
+            }
 
-        exec_id = self._get_execution_id() or "run"
-        candidate = destination_dir / f"{suffix}_{exec_id}{extension}"
-        counter = 1
-        while candidate.exists():
-            candidate = destination_dir / f"{suffix}_{exec_id}_{counter}{extension}"
-            counter += 1
+        executed_calls = await self.execute_tool_calls(call_tools)
+        mixed_path = pick_artifact_path_from_results(
+            executed_calls,
+            kind="video",
+            require_local=True,
+        )
 
-        # Move or copy depending on caller intent.
-        if move:
-            shutil.move(str(source), candidate)
-        else:
-            shutil.copy2(str(source), candidate)
+        if not mixed_path or not os.path.exists(mixed_path):
+            return {
+                "success": False,
+                "action_performed": "video_composition",
+                "executed_calls": executed_calls,
+                "plan_llm": plan_llm,
+            }
 
-        # Harden permissions to avoid accidental deletion/overwrite.
-        try:
-            candidate.chmod(0o444)
-        except Exception:
-            # Some filesystems (e.g. Windows) may not support POSIX-style chmod.
-            pass
+        mix_type = self._resolve_mix_type(input_data)
+        stored_path = mixed_path
+        final_url = self._resolve_local_public_url("", stored_path)
+        mix_receipt = self._build_mix_receipt(
+            input_data=input_data,
+            output_path=stored_path,
+            output_url=final_url,
+        )
+        workflow_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+        if workflow_id:
+            payload = {
+                "path": stored_path,
+                "url": final_url,
+                "storage": {
+                    "provider": "local",
+                    "url": final_url,
+                    "skipped": True,
+                },
+            }
+            try:
+                write_shared_fact(
+                    workflow_id,
+                    "project.final_video",
+                    payload,
+                    service=self.short_term_service,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "MAS write failed: project.final_video agent=%s wf_id=%s err=%s",
+                    self.agent_name,
+                    workflow_id,
+                    exc,
+                    exc_info=True,
+                )
+            if isinstance(mix_receipt, dict) and mix_receipt:
+                try:
+                    write_shared_fact(
+                        workflow_id,
+                        "project.final_video_mix",
+                        dict(mix_receipt),
+                        service=self.short_term_service,
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "MAS write failed: project.final_video_mix agent=%s wf_id=%s err=%s",
+                        self.agent_name,
+                        workflow_id,
+                        exc,
+                        exc_info=True,
+                    )
+        return {
+            "success": True,
+            "action_performed": "video_composition",
+            "final_video_path": stored_path,
+            "final_video_url": final_url,
+            "mix_receipt": mix_receipt,
+            "executed_calls": executed_calls,
+            "plan_llm": plan_llm,
+        }
 
-        self.logger.info(f"📦 Final video stored in safeguarded directory: {candidate}")
-        return str(candidate)
+    async def _reflect_on_results(
+        self,
+        action_result: Dict[str, Any],
+        current_state: Dict[str, Any],
+        task: Task,
+        iteration: int,
+    ) -> Dict[str, Any]:
+        ok = bool(action_result.get("success"))
+        summary = "合成成功" if ok else "合成未成功"
+        return {"success": ok, "reflection_summary": summary}
 
     def _build_local_serving_url(self, local_path: str) -> str:
         """根据本地存储路径生成可通过 FastAPI 静态目录访问的 URL。"""
@@ -376,7 +258,7 @@ class VideoComposerAgent(BaseAgent):
     async def _publish_final_video(
         self,
         local_path: str,
-        workflow_state_id: str
+        workflow_state_id: str,
     ) -> Dict[str, Any]:
         """Upload the final video to remote storage (OSS preferred)."""
 
@@ -404,11 +286,11 @@ class VideoComposerAgent(BaseAgent):
                                 "agent": self.agent_name,
                                 "execution_id": exec_id,
                             },
-                        }
+                        },
                     }
                 }
                 oss_exec = await self.execute_tool_calls([oss_call])
-                payload = (oss_exec[0].get('result') if (oss_exec and isinstance(oss_exec[0], dict)) else {}) or {}
+                payload = (oss_exec[0].get("result") if (oss_exec and isinstance(oss_exec[0], dict)) else {}) or {}
                 if isinstance(payload, dict):
                     publication.update(
                         {
@@ -436,17 +318,13 @@ class VideoComposerAgent(BaseAgent):
 
         return publication
 
-    
-    
-    # deprecated: metadata-from-data removed
-    
     def _create_composition_summary_from_data(
-        self, 
-        timeline: List[Dict], 
-        metadata: Dict[str, Any]
+        self,
+        timeline: List[Dict],
+        metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Create summary from SceneData"""
-        
+
         return {
             "total_scenes": len(timeline),
             "total_duration": metadata["duration"],
@@ -458,13 +336,13 @@ class VideoComposerAgent(BaseAgent):
                     "scene_number": entry["scene_number"],
                     "duration": entry["duration"],
                     "transition_in": entry["transition_in"],
-                    "transition_out": entry["transition_out"]
+                    "transition_out": entry["transition_out"],
                 }
                 for entry in timeline
             ],
             "technical_specs": {
                 "format": metadata["format"],
                 "codec": metadata["codec"],
-                "frame_rate": metadata["frame_rate"]
-            }
+                "frame_rate": metadata["frame_rate"],
+            },
         }
