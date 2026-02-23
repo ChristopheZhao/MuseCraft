@@ -21,6 +21,150 @@ from ....services.file_storage import FileStorageService
 class CompositionTool(AsyncTool):
     """高阶合成工具：封装常见、确定性的步骤序列，供 LLM 直接调用。"""
 
+    @staticmethod
+    def _normalize_audio_strategy(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        alias_map = {
+            "adaptive": "adaptive",
+            "auto": "adaptive",
+            "prefer_native": "adaptive",
+            "provider_only": "provider_only",
+            "native_only": "provider_only",
+            "mas_only": "mas_only",
+            "agent_only": "mas_only",
+        }
+        return alias_map.get(raw, "adaptive")
+
+    @staticmethod
+    def _normalize_int(value: Any) -> Any:
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    async def _probe_clip_audio_profile(self, ffmpeg_tool, clip_path: str) -> Any:
+        """Return audio profile dict when probe succeeds, None when unknown."""
+        if not isinstance(clip_path, str) or not clip_path.strip():
+            return None
+        normalized = clip_path.strip()
+        if normalized.startswith("file://"):
+            normalized = normalized[7:]
+        if not os.path.exists(normalized):
+            return None
+        try:
+            res = await ffmpeg_tool.execute(
+                ToolInput(action="get_video_info", parameters={"file_path": normalized})
+            )
+            payload = getattr(res, "result", res) or {}
+            if not isinstance(payload, dict):
+                return None
+
+            codec_raw = payload.get("audio_codec")
+            audio_codec = codec_raw.strip().lower() if isinstance(codec_raw, str) and codec_raw.strip() else None
+            sample_rate = self._normalize_int(payload.get("sample_rate"))
+            channels = self._normalize_int(payload.get("channels"))
+            has_audio = bool(audio_codec or sample_rate or channels)
+            return {
+                "has_audio": has_audio,
+                "audio_codec": audio_codec,
+                "sample_rate": sample_rate,
+                "channels": channels,
+            }
+        except Exception:
+            return None
+
+    async def _probe_clip_has_audio(self, ffmpeg_tool, clip_path: str) -> Any:
+        """Return True/False when probe succeeds, None when unknown."""
+        profile = await self._probe_clip_audio_profile(ffmpeg_tool, clip_path)
+        if profile is None:
+            return None
+        return bool(profile.get("has_audio"))
+
+    @staticmethod
+    def _are_audio_profiles_compatible(audio_profiles: List[Dict[str, Any]]) -> bool:
+        if not audio_profiles:
+            return False
+
+        baseline: Dict[str, Any] | None = None
+        for profile in audio_profiles:
+            if not profile.get("has_audio"):
+                return False
+
+            current: Dict[str, Any] = {}
+            for key in ("audio_codec", "sample_rate", "channels"):
+                value = profile.get(key)
+                if value in (None, ""):
+                    return False
+                current[key] = value
+
+            if baseline is None:
+                baseline = current
+                continue
+            if current != baseline:
+                return False
+        return True
+
+    async def _resolve_preserve_source_audio(
+        self,
+        params: Dict[str, Any],
+        *,
+        clips: List[str],
+        ffmpeg_tool,
+    ) -> bool:
+        """Resolve preserve_audio from policy + runtime clip audio facts."""
+        explicit = params.get("preserve_audio")
+        if isinstance(explicit, bool):
+            return explicit
+        if isinstance(explicit, str):
+            lowered = explicit.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+
+        try:
+            from ....core.config import settings as _cfg  # type: ignore
+            strategy = self._normalize_audio_strategy(getattr(_cfg, "VIDEO_AUDIO_STRATEGY", "adaptive"))
+            fallback_default = bool(getattr(_cfg, "COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT", False))
+        except Exception:
+            strategy = "adaptive"
+            fallback_default = False
+
+        if strategy == "mas_only":
+            return False
+
+        checked = 0
+        with_audio = 0
+        unknown = 0
+        without_audio = 0
+        audio_profiles: List[Dict[str, Any]] = []
+        for clip in clips or []:
+            profile = await self._probe_clip_audio_profile(ffmpeg_tool, clip)
+            if profile is None:
+                unknown += 1
+                continue
+            checked += 1
+            if bool(profile.get("has_audio")):
+                with_audio += 1
+                audio_profiles.append(profile)
+            else:
+                without_audio += 1
+
+        all_have_audio = bool(
+            clips
+            and checked == len(clips)
+            and with_audio == len(clips)
+            and without_audio == 0
+            and unknown == 0
+        )
+        audio_compatible = all_have_audio and self._are_audio_profiles_compatible(audio_profiles)
+        if strategy in {"provider_only", "adaptive"}:
+            # Conservative guard: preserve only when every clip has audio and profiles are compatible.
+            return audio_compatible
+        return fallback_default
+
     def _resolve_final_output_path(self, output_filename: str) -> str:
         """将输出落在最终目录，避免临时路径进入审计与上下文。"""
         safe_name = Path(output_filename or "").name.strip()
@@ -160,6 +304,10 @@ class CompositionTool(AsyncTool):
                         },
                     },
                     "output_filename": {"type": "string", "description": "输出文件名，例如 final_story.mp4"},
+                    "preserve_audio": {
+                        "type": "boolean",
+                        "description": "可选：拼接阶段是否保留源视频音轨；不传时按系统策略自适应",
+                    },
                 },
                 "required": ["output_filename"],
             }
@@ -226,7 +374,11 @@ class CompositionTool(AsyncTool):
             if any(audio_files) and not all(audio_files):
                 raise ToolError("audio_file missing for some scenes", self.metadata.name)
 
-            preserve_audio = False
+            preserve_audio = await self._resolve_preserve_source_audio(
+                params,
+                clips=clips,
+                ffmpeg_tool=ffmpeg,
+            )
             if all(audio_files) and audio_files:
                 processed: List[str] = []
                 for idx, (video_file, audio_file) in enumerate(zip(clips, audio_files), start=1):

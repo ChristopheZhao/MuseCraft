@@ -7,6 +7,7 @@ import os
 import logging
 import json
 import uuid
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -41,8 +42,7 @@ from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 from .tools.tool_registry import get_tool_registry
 from ..core.config import settings
-
-from typing import Optional
+from ..core.video_config_manager import get_video_config
 
 
 class OrchestratorAgent(BaseAgent):
@@ -57,6 +57,7 @@ class OrchestratorAgent(BaseAgent):
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         self._llm_policy = LLMPolicyManager(policy_file)
         self._memory_services = memory_services or build_memory_services()
+        self.video_config = get_video_config()
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="orchestrator",
@@ -1222,6 +1223,181 @@ class OrchestratorAgent(BaseAgent):
         except Exception as exc:
             self.logger.error("❌ Failed to store composer outputs: %s", exc, exc_info=True)
             raise AgentError("Shared WM write failed (final_video)") from exc
+
+    @staticmethod
+    def _normalize_audio_strategy(value: Any) -> str:
+        """Normalize orchestration strategy to known values."""
+        raw = str(value or "").strip().lower()
+        alias_map = {
+            "adaptive": "adaptive",
+            "auto": "adaptive",
+            "prefer_native": "adaptive",
+            "provider_only": "provider_only",
+            "native_only": "provider_only",
+            "mas_only": "mas_only",
+            "agent_only": "mas_only",
+        }
+        return alias_map.get(raw, "adaptive")
+
+    def _resolve_audio_orchestration_strategy(self, workflow_state_id: str) -> str:
+        """Resolve orchestration strategy from global configuration."""
+        _ = workflow_state_id
+        return self._normalize_audio_strategy(getattr(settings, "VIDEO_AUDIO_STRATEGY", "adaptive"))
+
+    def _get_video_audio_capability(self) -> Dict[str, Any]:
+        """Read current provider audio capability from video config manager."""
+        try:
+            provider_cfg = self.video_config.get_current_provider_config()
+            return {
+                "provider": provider_cfg.provider_name,
+                "supports_native_audio": bool(getattr(provider_cfg, "supports_native_audio", False)),
+                "native_audio_param_name": str(getattr(provider_cfg, "native_audio_param_name", "generate_audio") or "generate_audio"),
+                "native_audio_default_enabled": getattr(provider_cfg, "native_audio_default_enabled", None),
+            }
+        except Exception:
+            return {
+                "provider": "",
+                "supports_native_audio": False,
+                "native_audio_param_name": "generate_audio",
+                "native_audio_default_enabled": None,
+            }
+
+    def _should_run_audio_generator(self, workflow_state_id: str) -> bool:
+        """Runtime-fact driven audio orchestration.
+
+        Decision principle:
+        - Only skip AUDIO_GENERATOR when runtime facts confirm all scene videos have audio streams.
+        - Any unknown/silent/missing evidence keeps AUDIO_GENERATOR enabled.
+        """
+        strategy = self._resolve_audio_orchestration_strategy(workflow_state_id)
+        audio_facts = self._collect_runtime_video_audio_facts(workflow_state_id)
+        all_have_audio = bool(audio_facts.get("all_have_audio"))
+
+        if strategy == "mas_only":
+            return True
+        if strategy in {"provider_only", "adaptive"}:
+            return not all_have_audio
+        return True
+
+    def _collect_runtime_video_audio_facts(self, workflow_state_id: str) -> Dict[str, Any]:
+        """Collect runtime audio facts from scene_outputs.video.
+
+        Returns conservative facts: any missing path/probe failure is treated as unknown.
+        """
+        wf_id = str(workflow_state_id or "").strip()
+        if not wf_id:
+            return {
+                "total_scenes": 0,
+                "records": 0,
+                "checked": 0,
+                "with_audio": 0,
+                "without_audio": 0,
+                "unknown": 0,
+                "all_have_audio": False,
+                "reason": "workflow_id_missing",
+            }
+
+        try:
+            wm = get_mas_working_memory(wf_id, service=self.short_term_service)
+        except Exception:
+            wm = None
+
+        overview = wm.get("scene_overview", {}) if wm is not None else {}
+        raw_scenes = overview.get("scenes") if isinstance(overview, dict) else []
+        total_scenes = len(raw_scenes) if isinstance(raw_scenes, list) else 0
+
+        video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
+        if not isinstance(video_bucket, dict):
+            video_bucket = {}
+
+        records = 0
+        checked = 0
+        with_audio = 0
+        without_audio = 0
+        unknown = 0
+
+        for rec in video_bucket.values():
+            if not isinstance(rec, dict):
+                continue
+            records += 1
+            video_path = (
+                rec.get("video_path")
+                or rec.get("path")
+                or rec.get("file_path")
+                or ""
+            )
+            if not isinstance(video_path, str) or not video_path.strip():
+                unknown += 1
+                continue
+            normalized = video_path.strip()
+            if normalized.startswith("file://"):
+                normalized = normalized[7:]
+            if not os.path.exists(normalized):
+                unknown += 1
+                continue
+            has_audio = self._probe_video_audio_stream(normalized)
+            if has_audio is None:
+                unknown += 1
+                continue
+            checked += 1
+            if has_audio:
+                with_audio += 1
+            else:
+                without_audio += 1
+
+        expected = total_scenes or records
+        all_have_audio = bool(
+            expected > 0
+            and checked >= expected
+            and without_audio == 0
+            and unknown == 0
+        )
+        reason = "all_have_audio" if all_have_audio else "audio_missing_or_unknown"
+        if records == 0:
+            reason = "video_outputs_missing"
+
+        return {
+            "total_scenes": total_scenes,
+            "records": records,
+            "checked": checked,
+            "with_audio": with_audio,
+            "without_audio": without_audio,
+            "unknown": unknown,
+            "all_have_audio": all_have_audio,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _probe_video_audio_stream(video_path: str) -> Optional[bool]:
+        """Probe local video audio stream presence via ffprobe.
+
+        Returns:
+        - True/False when probe succeeds
+        - None when probe cannot be completed
+        """
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=index",
+                    "-of",
+                    "csv=p=0",
+                    video_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if probe.returncode != 0:
+                return None
+            return bool((probe.stdout or "").strip())
+        except Exception:
+            return None
     
     def _should_run_agent(self, agent_type: AgentType, workflow_state_id: str) -> bool:
         if agent_type == AgentType.VOICE_SYNTHESIZER:
@@ -1235,6 +1411,31 @@ class OrchestratorAgent(BaseAgent):
                 return any(bool(g.get("should_narrate", True)) for g in scene_guidance if isinstance(g, dict))
             # 若缺少逐场景指导，则默认尝试执行，由下游Agent自我校验
             return True
+        if agent_type == AgentType.AUDIO_GENERATOR:
+            should_run = self._should_run_audio_generator(workflow_state_id)
+            try:
+                capability = self._get_video_audio_capability()
+                strategy = self._resolve_audio_orchestration_strategy(workflow_state_id)
+                facts = self._collect_runtime_video_audio_facts(workflow_state_id)
+                self.logger.info(
+                    "AUDIO_ORCHESTRATION: strategy=%s provider=%s supports_native_audio=%s run_audio_agent=%s facts=%s",
+                    strategy,
+                    capability.get("provider"),
+                    bool(capability.get("supports_native_audio")),
+                    should_run,
+                    {
+                        "records": facts.get("records"),
+                        "checked": facts.get("checked"),
+                        "with_audio": facts.get("with_audio"),
+                        "without_audio": facts.get("without_audio"),
+                        "unknown": facts.get("unknown"),
+                        "all_have_audio": facts.get("all_have_audio"),
+                        "reason": facts.get("reason"),
+                    },
+                )
+            except Exception:
+                pass
+            return should_run
         return True
 
     async def _prepare_agent_context(self, workflow_data: Dict[str, Any], agent_type: AgentType, workflow_id: str) -> Dict[str, Any]:
