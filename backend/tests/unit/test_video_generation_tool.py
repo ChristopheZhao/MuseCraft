@@ -182,3 +182,40 @@ def test_generate_video_propagates_sensitive_error_code(monkeypatch):
         asyncio.run(_run())
 
     assert excinfo.value.error_code == "OutputVideoSensitiveContentDetected"
+
+
+def test_get_capabilities_filters_blank_supported_models():
+    tool = object.__new__(VideoGenerationTool)
+    tool.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+    provider_cfg = types.SimpleNamespace(
+        provider_name="doubao",
+        model_name="",
+        duration_capabilities=[5, 10],
+        max_duration=10,
+        default_duration=5,
+        supports_first_last_frame=True,
+        resolution_options=["720p"],
+        frame_rate_options=[24],
+        supports_native_audio=True,
+        native_audio_param_name="generate_audio",
+        native_audio_default_enabled=True,
+        amplification_ratio=1.0,
+    )
+
+    class _StubVideoConfig:
+        def get_current_provider_config(self):
+            return provider_cfg
+
+        def get_system_duration_capability(self):
+            return {"min_duration": 5, "max_duration": 10}
+
+    class _StubVideoService:
+        def get_supported_models(self):
+            return ["", "  ", "doubao-seedance-1-5-pro", "doubao-seedance-1-5-pro"]
+
+    tool.video_config = _StubVideoConfig()
+    tool.video_service = _StubVideoService()
+
+    result = asyncio.run(tool._get_capabilities())
+    assert result["supported_models"] == ["doubao-seedance-1-5-pro"]

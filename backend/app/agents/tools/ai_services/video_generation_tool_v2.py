@@ -733,6 +733,17 @@ class VideoGenerationTool(AsyncTool):
 
         try:
             # 调用视频服务生成视频
+            native_audio = self._resolve_native_audio_request(params)
+            try:
+                self.logger.info(
+                    "NATIVE_AUDIO: strategy=%s provider=%s supports=%s requested=%s",
+                    native_audio.get("strategy"),
+                    native_audio.get("provider"),
+                    bool(native_audio.get("supports_native_audio")),
+                    bool(native_audio.get("generate_audio")),
+                )
+            except Exception:
+                pass
             result = await self.video_service.generate_video(
                 prompt=prompt,
                 model=model,
@@ -741,7 +752,8 @@ class VideoGenerationTool(AsyncTool):
                 first_frame_image=first_frame_image,
                 last_frame_image=last_frame_image,
                 resolution=resolution_applied or params.get("resolution"),
-                ratio=ratio_applied or params.get("ratio")
+                ratio=ratio_applied or params.get("ratio"),
+                generate_audio=bool(native_audio.get("generate_audio")),
             )
             
             # 增强返回结果
@@ -755,6 +767,8 @@ class VideoGenerationTool(AsyncTool):
                     "prompt": prompt,
                     "duration": duration,
                     "model": model,
+                    "audio_strategy": native_audio.get("strategy"),
+                    "generate_audio": bool(native_audio.get("generate_audio")),
                     "resolution_requested": resolution_requested,
                     "resolution_applied": resolution_applied or params.get("resolution"),
                     "ratio_requested": ratio_requested,
@@ -771,6 +785,7 @@ class VideoGenerationTool(AsyncTool):
                     "image_input_url": final_image_input if isinstance(final_image_input, str) else None
                 }
             })
+            result["native_audio"] = native_audio
             # 工具层最小验证：必须产生可访问 video_url，否则标记为失败并将 fallback_reason 透传为 error_type
             if not isinstance(result, dict) or not result.get('video_url'):
                 status = (result or {}).get('status') if isinstance(result, dict) else None
@@ -977,6 +992,63 @@ class VideoGenerationTool(AsyncTool):
 
         result["all"] = [item for item in (result["style"] + result["negative"]) if item]
         return result
+
+    @staticmethod
+    def _normalize_audio_strategy(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        alias_map = {
+            "adaptive": "adaptive",
+            "auto": "adaptive",
+            "prefer_native": "adaptive",
+            "provider_only": "provider_only",
+            "native_only": "provider_only",
+            "mas_only": "mas_only",
+            "agent_only": "mas_only",
+        }
+        return alias_map.get(raw, "adaptive")
+
+    def _resolve_native_audio_request(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve provider-native audio request from capability and orchestration policy."""
+        provider_cfg = self.video_config.get_current_provider_config()
+        supports_native = bool(getattr(provider_cfg, "supports_native_audio", False))
+        explicit_generate_audio = params.get("generate_audio")
+        if isinstance(explicit_generate_audio, str):
+            lowered = explicit_generate_audio.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                explicit_generate_audio = True
+            elif lowered in {"false", "0", "no", "off"}:
+                explicit_generate_audio = False
+            else:
+                explicit_generate_audio = None
+        elif not isinstance(explicit_generate_audio, bool):
+            explicit_generate_audio = None
+
+        if isinstance(explicit_generate_audio, bool):
+            generate_audio = explicit_generate_audio and supports_native
+            return {
+                "strategy": "explicit",
+                "provider": provider_cfg.provider_name,
+                "supports_native_audio": supports_native,
+                "generate_audio": bool(generate_audio),
+            }
+
+        strategy_value = params.get("audio_strategy") or getattr(settings, "VIDEO_AUDIO_STRATEGY", "adaptive")
+        strategy = self._normalize_audio_strategy(strategy_value)
+
+        if strategy == "mas_only":
+            generate_audio = False
+        elif strategy == "provider_only":
+            generate_audio = True if supports_native else False
+        else:
+            # adaptive(default): enable provider-native audio only when provider supports it.
+            generate_audio = True if supports_native else False
+
+        return {
+            "strategy": strategy,
+            "provider": provider_cfg.provider_name,
+            "supports_native_audio": supports_native,
+            "generate_audio": bool(generate_audio),
+        }
 
     async def _rewrite_prompt_for_safety(
         self,
@@ -1480,16 +1552,48 @@ class VideoGenerationTool(AsyncTool):
     async def _get_capabilities(self) -> Dict[str, Any]:
         """获取视频生成能力信息"""
         provider_config = self.video_config.get_current_provider_config()
-        
+        supported_models: List[str] = []
+        provider_model = provider_config.model_name.strip() if isinstance(provider_config.model_name, str) else ""
+        if provider_model:
+            supported_models.append(provider_model)
+        if self.video_service and hasattr(self.video_service, "get_supported_models"):
+            try:
+                service_models = self.video_service.get_supported_models()
+                if isinstance(service_models, list) and service_models:
+                    dedup: List[str] = []
+                    seen = set()
+                    for item in service_models:
+                        if not isinstance(item, str):
+                            continue
+                        model = item.strip()
+                        if not model or model in seen:
+                            continue
+                        seen.add(model)
+                        dedup.append(model)
+                    if dedup:
+                        supported_models = dedup
+            except Exception:
+                pass
+        if provider_model and provider_model not in supported_models:
+            supported_models.append(provider_model)
+
+        audio_capability = {
+            "supports_native_audio": bool(getattr(provider_config, "supports_native_audio", False)),
+            "native_audio_param_name": str(getattr(provider_config, "native_audio_param_name", "generate_audio") or "generate_audio"),
+            "native_audio_default_enabled": getattr(provider_config, "native_audio_default_enabled", None),
+            "audio_strategy": self._normalize_audio_strategy(getattr(settings, "VIDEO_AUDIO_STRATEGY", "adaptive")),
+        }
+
         return {
             "provider": provider_config.provider_name,
-            "supported_models": [provider_config.model_name],
+            "supported_models": supported_models,
             "duration_options": provider_config.duration_capabilities,
             "max_duration": provider_config.max_duration,
             "default_duration": provider_config.default_duration,
             "supports_first_last_frame": provider_config.supports_first_last_frame,
             "resolution_options": provider_config.resolution_options,
             "frame_rate_options": provider_config.frame_rate_options,
+            "audio_capability": audio_capability,
             "amplification_ratio": provider_config.amplification_ratio,
             "system_capability": self.video_config.get_system_duration_capability()
         }
