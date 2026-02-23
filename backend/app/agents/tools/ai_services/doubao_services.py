@@ -69,17 +69,6 @@ class DoubaoVideoService(VideoModelServiceInterface):
             self.poll_interval = int(self.config.get("poll_interval") or _get_env("DOUBAO_POLL_INTERVAL", 5) or 5)
         except Exception:
             self.poll_interval = 5
-
-        # Supported models (align with latest product names if different in your tenant)
-        # 推荐：
-        # - 文/图（首帧）生视频：doubao-seedance-1-0-pro-250528
-        # - 图生视频（首/尾帧/参考图）：doubao-seedance-1-0-lite-i2v-250428
-        # - 文生视频（Lite）：doubao-seedance-1-0-lite-t2v-250428
-        self.supported_models = [
-            "doubao-seedance-1-0-pro-250528",
-            "doubao-seedance-1-0-lite-i2v-250428",
-            "doubao-seedance-1-0-lite-t2v-250428",
-        ]
         provider_key = self.config.get("provider_key") or _get_env("DOUBAO_VIDEO_PROVIDER_KEY", "doubao")
         self.provider_key = str(provider_key).strip() or "doubao"
 
@@ -91,7 +80,43 @@ class DoubaoVideoService(VideoModelServiceInterface):
         return ServiceProvider.ZHIPU.value if False else "doubao"  # keep literal to avoid enum drift
 
     def get_supported_models(self) -> List[str]:
-        return list(self.supported_models)
+        try:
+            from ....core.video_config_manager import get_video_config
+
+            models = get_video_config().get_provider_supported_models(self.provider_key)
+            if models:
+                return models
+        except Exception:
+            pass
+
+        # fallback: keep legacy env-driven behaviour
+        models: List[str] = []
+        seen = set()
+        for env_name in (
+            "DOUBAO_T2V_MODEL",
+            "DOUBAO_I2V_SINGLE_MODEL",
+            "DOUBAO_I2V_SINGLE_ALTER_MODEL",
+            "DOUBAO_I2V_FLF_MODEL",
+        ):
+            value = _get_env(env_name, None)
+            if not isinstance(value, str):
+                continue
+            model = value.strip()
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            models.append(model)
+        provider_cfg = self._get_provider_config()
+        if provider_cfg:
+            for candidate in [provider_cfg.model_name] + list((provider_cfg.mode_model_mapping or {}).values()):
+                if not isinstance(candidate, str):
+                    continue
+                model = candidate.strip()
+                if not model or model in seen:
+                    continue
+                seen.add(model)
+                models.append(model)
+        return models
 
     def get_duration_capabilities(self) -> List[int]:
         try:
@@ -115,6 +140,54 @@ class DoubaoVideoService(VideoModelServiceInterface):
             return cfg
         except Exception:
             return None
+
+    def _resolve_mode_model(
+        self,
+        *,
+        mode: str,
+        config_key: str,
+        env_name: str,
+        explicit_model: Optional[str] = None,
+    ) -> str:
+        """Resolve model name by provider+mode with clear precedence."""
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            return explicit_model.strip()
+
+        override_model = self.config.get(config_key)
+        if isinstance(override_model, str) and override_model.strip():
+            return override_model.strip()
+
+        try:
+            from ....core.video_config_manager import get_video_config
+
+            resolved = get_video_config().resolve_model_for_mode(
+                self.provider_key,
+                mode=mode,
+                explicit_model=None,
+                default_model=None,
+            )
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        except Exception:
+            pass
+
+        fallback = _get_env(env_name, None)
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback.strip()
+
+        provider_cfg = self._get_provider_config()
+        if provider_cfg:
+            mode_key = str(mode or "").strip().lower()
+            mapped = (provider_cfg.mode_model_mapping or {}).get(mode_key)
+            if isinstance(mapped, str) and mapped.strip():
+                return mapped.strip()
+            if isinstance(provider_cfg.model_name, str) and provider_cfg.model_name.strip():
+                return provider_cfg.model_name.strip()
+
+        raise RuntimeError(
+            f"Doubao model is not configured for mode={mode}; "
+            f"set provider mode_model_mapping or env {env_name}"
+        )
 
     def get_capabilities(self) -> VideoCapabilities:
         caps = VideoCapabilities()
@@ -166,49 +239,54 @@ class DoubaoVideoService(VideoModelServiceInterface):
         if not self.is_available():
             raise RuntimeError("DoubaoVideoService not available - API key/base_url missing")
 
-        # Choose model based on inputs if caller doesn't specify an explicit one
-        chosen_model = (model or "doubao-seedance-pro").strip()
         generation_mode = "text_to_video"
         images_payload: List[Dict[str, str]] | None = None
-
-        # 成本策略：
-        # - 首尾帧：用 lite-i2v（支持FLF，成本低于 wan2-*）
-        # - 单图：用 pronew/pro（首帧I2V更便宜）；默认 pronew，可通过 env 覆盖
-        # - 纯文本：用 pro
-        iv2_flf_model = self.config.get("i2v_flf_model") or _get_env(
-            "DOUBAO_I2V_FLF_MODEL", "doubao-seedance-1-0-lite-i2v-250428"
-        )
-        iv2_single_model = self.config.get("i2v_single_model") or _get_env(
-            "DOUBAO_I2V_SINGLE_MODEL", "doubao-seedance-1-0-pro-250528"
-        )
-        # 可选：单图 I2V 替代模型（用于超时回退）
-        iv2_single_alt_model = self.config.get("i2v_single_alter_model") or _get_env(
-            "DOUBAO_I2V_SINGLE_ALTER_MODEL", "doubao-seedance-1-0-lite-i2v-250428"
-        )
-        t2v_model = self.config.get("t2v_model") or _get_env(
-            "DOUBAO_T2V_MODEL", "doubao-seedance-1-0-pro-250528"
-        )
+        explicit_model = model.strip() if isinstance(model, str) and model.strip() else None
+        iv2_single_alt_model: Optional[str] = None
+        allow_i2v_timeout_fallback = False
 
         if first_frame_image and last_frame_image:
             generation_mode = "first_last_frame"
-            if model is None:
-                chosen_model = iv2_flf_model
             images_payload = [
                 {"url": first_frame_image, "role": "first_frame"},
                 {"url": last_frame_image, "role": "last_frame"},
             ]
+            chosen_model = self._resolve_mode_model(
+                mode="first_last_frame",
+                config_key="i2v_flf_model",
+                env_name="DOUBAO_I2V_FLF_MODEL",
+                explicit_model=explicit_model,
+            )
         else:
             ref_image = first_frame_image or image_url
             if ref_image:
                 generation_mode = "image_to_video"
-                if model is None:
-                    chosen_model = iv2_single_model
+                allow_i2v_timeout_fallback = explicit_model is None
+                chosen_model = self._resolve_mode_model(
+                    mode="image_to_video",
+                    config_key="i2v_single_model",
+                    env_name="DOUBAO_I2V_SINGLE_MODEL",
+                    explicit_model=explicit_model,
+                )
                 images_payload = [{"url": ref_image, "role": "image"}]
+                if allow_i2v_timeout_fallback:
+                    try:
+                        iv2_single_alt_model = self._resolve_mode_model(
+                            mode="image_to_video_fallback",
+                            config_key="i2v_single_alter_model",
+                            env_name="DOUBAO_I2V_SINGLE_ALTER_MODEL",
+                            explicit_model=None,
+                        )
+                    except Exception:
+                        iv2_single_alt_model = None
             else:
-                # 纯文本
                 generation_mode = "text_to_video"
-                if model is None:
-                    chosen_model = t2v_model
+                chosen_model = self._resolve_mode_model(
+                    mode="text_to_video",
+                    config_key="t2v_model",
+                    env_name="DOUBAO_T2V_MODEL",
+                    explicit_model=explicit_model,
+                )
 
         requested_resolution = kwargs.get("resolution") or kwargs.get("rs")
         if isinstance(requested_resolution, (list, tuple, dict)):
@@ -273,6 +351,18 @@ class DoubaoVideoService(VideoModelServiceInterface):
             else:
                 ratio_for_api = ratio_alias_inverse.get(ratio_canonical, ratio_canonical)
 
+        requested_generate_audio = kwargs.get("generate_audio")
+        if isinstance(requested_generate_audio, str):
+            lowered = requested_generate_audio.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                requested_generate_audio = True
+            elif lowered in {"false", "0", "no", "off"}:
+                requested_generate_audio = False
+            else:
+                requested_generate_audio = None
+        elif not isinstance(requested_generate_audio, bool):
+            requested_generate_audio = None
+
         # 组装请求头与URL
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -299,7 +389,10 @@ class DoubaoVideoService(VideoModelServiceInterface):
                         if not url:
                             continue
                         content_items.append({"type": "image_url", "image_url": {"url": url}})
-                return {"model": model_name, "content": content_items}
+                payload = {"model": model_name, "content": content_items}
+                if isinstance(requested_generate_audio, bool):
+                    payload["generate_audio"] = requested_generate_audio
+                return payload
             # 旧版 /video/generations 风格
             pay: Dict[str, Any] = {
                 "model": model_name,
@@ -314,6 +407,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
             if ratio_for_api:
                 pay["rt"] = ratio_for_api
                 pay["ratio"] = ratio_for_api
+            if isinstance(requested_generate_audio, bool):
+                pay["generate_audio"] = requested_generate_audio
             return pay
 
         async def _create_and_poll(model_name: str) -> Dict[str, Any]:
@@ -349,7 +444,7 @@ class DoubaoVideoService(VideoModelServiceInterface):
         first_attempt_task_id = task_id
 
         # 超时且为单图 I2V 且配置了备用模型 → 回退一次
-        if (not video_url) and generation_mode == "image_to_video" and (first_attempt_model == iv2_single_model):
+        if (not video_url) and generation_mode == "image_to_video" and allow_i2v_timeout_fallback:
             if iv2_single_alt_model and iv2_single_alt_model != first_attempt_model:
                 try:
                     self.logger.info(
@@ -398,6 +493,7 @@ class DoubaoVideoService(VideoModelServiceInterface):
             "requested_resolution": requested_resolution,
             "ratio": ratio_for_api or ratio_canonical,
             "requested_ratio": requested_ratio,
+            "generate_audio": requested_generate_audio,
         }
         if provider_error:
             result["provider_error"] = provider_error
@@ -499,25 +595,29 @@ class DoubaoVLMService(VLMServiceInterface):
             or _get_env("DOUBAO_IMAGE_CREATE_PATH", "/api/v3/images/generations")
         )
         self.timeout = int(self.config.get("timeout") or _get_env("AI_SERVICE_TIMEOUT", 120) or 120)
-        self.model_generation = self.config.get("image_model") or _get_env("DOUBAO_IMAGE_MODEL", "doubao-seedream-4-0-250828")
+        model_cfg = self.config.get("image_model") or _get_env("DOUBAO_IMAGE_MODEL", None) or ""
+        self.model_generation = str(model_cfg).strip()
 
     def is_available(self) -> bool:
-        return bool(self.api_key and self.base_url)
+        return bool(self.api_key and self.base_url and self.model_generation)
 
     def get_provider_name(self) -> str:
         return "doubao"
 
     def get_supported_models(self) -> Dict[str, List[str]]:
-        return {"generation": [self.model_generation], "vision": []}
+        generation = [self.model_generation] if self.model_generation else []
+        return {"generation": generation, "vision": []}
 
     async def image_understanding(self, image_input: Union[str, bytes], prompt: str, model: str | None = None, **kwargs) -> Dict[str, Any]:
         raise NotImplementedError("Doubao image understanding not implemented")
 
     async def image_generation(self, prompt: str, model: str | None = None, size: str = "1024x1024", style: str = "vivid", quality: str = "standard", **kwargs) -> Dict[str, Any]:
         if not self.is_available():
-            raise RuntimeError("DoubaoVLMService not available - API key/base_url missing")
+            raise RuntimeError("DoubaoVLMService not available - API key/base_url/model missing")
 
-        chosen_model = (model or self.model_generation).strip()
+        chosen_model = str(model or self.model_generation or "").strip()
+        if not chosen_model:
+            raise RuntimeError("Doubao image model is not configured; set DOUBAO_IMAGE_MODEL")
         payload: Dict[str, Any] = {
             "model": chosen_model,
             "prompt": prompt,
