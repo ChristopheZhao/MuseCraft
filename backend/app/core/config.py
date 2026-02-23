@@ -128,19 +128,13 @@ class Settings(BaseSettings):
         default="/api/v3/contents/generations/tasks/{task_id}",
     )
     # Optional: model overrides per mode (text-to-video, single image-to-video, first/last frame)
-    # Recommended defaults (can be overridden per tenant):
-    # - PRO (text-to-video, and supports first-frame i2v): doubao-seedance-1-0-pro-250528
-    # - Lite i2v (first/last-frame and reference image): doubao-seedance-1-0-lite-i2v-250428
-    # - Lite t2v: doubao-seedance-1-0-lite-t2v-250428
-    DOUBAO_T2V_MODEL: str = config("DOUBAO_T2V_MODEL", default="doubao-seedance-1-0-pro-250528")
-    # doubao-seedance-1-0-lite-i2v-250428
-    DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    # doubao-seedance-1-0-pro-250528
-    # DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-pro-250528")
-    DOUBAO_I2V_SINGLE_ALTER_MODEL: str = config("DOUBAO_I2V_SINGLE_ALTER_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    # Doubao image generation (Seedream)
-    DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
+    # NOTE: model ids are configured only via env/config; code should not hardcode version strings.
+    DOUBAO_T2V_MODEL: str = config("DOUBAO_T2V_MODEL", default="")
+    DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="")
+    DOUBAO_I2V_SINGLE_ALTER_MODEL: str = config("DOUBAO_I2V_SINGLE_ALTER_MODEL", default="")
+    DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="")
+    # Doubao image generation model id (configured via env/config)
+    DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="")
 
     # Orchestration defaults
     DEFAULT_GENERATION_MODE: str = config("DEFAULT_GENERATION_MODE", default="quick")
@@ -158,10 +152,16 @@ class Settings(BaseSettings):
     # Video Generation APIs
     MINIMAX_API_KEY: Optional[str] = config("MINIMAX_API_KEY", default=None)
     MINIMAX_BASE_URL: str = config("MINIMAX_BASE_URL", default="https://api.minimaxi.com/v1")
+    # Video model ids are configured via env/config only; do not hardcode versioned defaults in code.
+    MINIMAX_VIDEO_MODEL: str = config("MINIMAX_VIDEO_MODEL", default="")
     HUNYUAN_VIDEO_API_KEY: Optional[str] = config("HUNYUAN_VIDEO_API_KEY", default=None)
     HUNYUAN_VIDEO_BASE_URL: str = config("HUNYUAN_VIDEO_BASE_URL", default="https://api.hunyuan.cloud.tencent.com/v1")
     DOUBAO_VIDEO_API_KEY: Optional[str] = config("DOUBAO_VIDEO_API_KEY", default=None)
     DOUBAO_VIDEO_BASE_URL: str = config("DOUBAO_VIDEO_BASE_URL", default="https://ark.cn-beijing.volces.com")
+    COGVIDEOX3_MODEL: str = config("COGVIDEOX3_MODEL", default="")
+    COGVIDEOX2_MODEL: str = config("COGVIDEOX2_MODEL", default="")
+    RUNWAY_VIDEO_MODEL: str = config("RUNWAY_VIDEO_MODEL", default="")
+    PIKA_VIDEO_MODEL: str = config("PIKA_VIDEO_MODEL", default="")
     
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
@@ -376,6 +376,11 @@ class Settings(BaseSettings):
 
     # Audio mixing strategy
     AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # composer | agent
+    # Video-audio orchestration strategy (capability-adaptive):
+    # - adaptive: provider supports native audio -> skip AUDIO_GENERATOR; otherwise run AUDIO_GENERATOR
+    # - mas_only: always run AUDIO_GENERATOR and disable provider native audio path
+    # - provider_only: prefer provider native audio; if provider doesn't support it, fallback to MAS audio agent
+    VIDEO_AUDIO_STRATEGY: str = config("VIDEO_AUDIO_STRATEGY", default="adaptive")
     AUDIO_FADE_IN_DURATION: float = config("AUDIO_FADE_IN_DURATION", default=1.0, cast=float)
     AUDIO_FADE_OUT_DURATION: float = config("AUDIO_FADE_OUT_DURATION", default=1.0, cast=float)
     # Image/Video analysis + prompt generation token budgets
@@ -414,6 +419,11 @@ class Settings(BaseSettings):
     COMPOSER_INJECT_SILENT_AUDIO: bool = config("COMPOSER_INJECT_SILENT_AUDIO", default=True, cast=bool)
     COMPOSER_SILENT_AUDIO_SAMPLE_RATE: int = config("COMPOSER_SILENT_AUDIO_SAMPLE_RATE", default=48000, cast=int)
     COMPOSER_SILENT_AUDIO_CHANNELS: int = config("COMPOSER_SILENT_AUDIO_CHANNELS", default=2, cast=int)
+    COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT: bool = config(
+        "COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT",
+        default=False,
+        cast=bool,
+    )
     COMPOSER_HIDE_SCENE_AUDIO_ON_REF: bool = config(
         "COMPOSER_HIDE_SCENE_AUDIO_ON_REF",
         default=True,

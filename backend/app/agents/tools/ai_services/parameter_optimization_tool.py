@@ -7,6 +7,8 @@ import logging
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from .service_interfaces import get_llm_service
+from ....core.config import settings
+from ....core.video_config_manager import get_video_config
 
 
 class ParameterOptimizationTool(AsyncTool):
@@ -382,11 +384,22 @@ class ParameterOptimizationTool(AsyncTool):
         
         # 添加提供商特定的优化
         if provider == "zhipu":
-            all_parameters.update({
-                "model": "cogvideox-3",
+            provider_key = str(getattr(settings, "VIDEO_GENERATION_PROVIDER", "") or "").strip().lower()
+            if provider_key not in {"cogvideox-3", "cogvideox-2"}:
+                provider_key = "cogvideox-3"
+            resolved_model = get_video_config().resolve_model_for_mode(
+                provider_key,
+                mode="text_to_video",
+                explicit_model=None,
+                default_model=getattr(settings, "COGVIDEOX3_MODEL", None),
+            )
+            provider_defaults = {
                 "size": "1024x576",
-                "with_audio": True
-            })
+                "with_audio": True,
+            }
+            if isinstance(resolved_model, str) and resolved_model.strip():
+                provider_defaults["model"] = resolved_model.strip()
+            all_parameters.update(provider_defaults)
         
         return {
             "optimization_type": "comprehensive",

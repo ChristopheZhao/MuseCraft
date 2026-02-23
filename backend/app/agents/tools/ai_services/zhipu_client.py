@@ -98,11 +98,19 @@ class ZhipuClientTool(AsyncTool):
             "cogview-3",         # CogView-3 图像生成
             "cogview-3-plus",    # CogView-3 Plus
         ]
-        
-        self.video_models = [
-            "cogvideox",         # CogVideoX 视频生成
-            "cogvideox-3",       # CogVideoX-3 支持首尾帧
-        ]
+
+        provider_key = self.config.get("video_provider_key") or getattr(settings, "ZHIPU_VIDEO_PROVIDER_KEY", None)
+        if not provider_key:
+            vg_provider = str(getattr(settings, "VIDEO_GENERATION_PROVIDER", "") or "").strip().lower()
+            if vg_provider in {"cogvideox-3", "cogvideox-2"}:
+                provider_key = vg_provider
+            elif vg_provider == "zhipu":
+                provider_key = "cogvideox-3"
+            else:
+                provider_key = "cogvideox-3"
+        self.video_provider_key = str(provider_key).strip()
+        self.video_models = self._load_video_models()
+        self.default_video_model = self.video_models[0] if self.video_models else None
         
         self.code_models = [
             "codegeex-4",        # CodeGeeX-4 代码生成
@@ -141,6 +149,18 @@ class ZhipuClientTool(AsyncTool):
             _vcaps = get_video_config().get_current_provider_config().duration_capabilities
         except Exception:
             _vcaps = [5, 10]
+        video_schema_properties: Dict[str, Any] = {
+            "prompt": {"type": "string", "description": "视频生成提示"},
+            "image_url": {"type": "string", "description": "参考图片URL（可选）"},
+            "first_frame_image": {"type": "string", "description": "首帧图片URL（首尾帧模式）"},
+            "last_frame_image": {"type": "string", "description": "尾帧图片URL（首尾帧模式）"},
+            "duration": {"type": "integer", "description": "视频时长（秒），取值受当前提供商能力限制", "enum": _vcaps},
+        }
+        if self.video_models:
+            video_schema_properties["model"] = {"type": "string", "enum": self.video_models}
+        else:
+            video_schema_properties["model"] = {"type": "string", "description": "可选：视频模型名称（由配置管理器统一解析）"}
+
         schemas = {
             "chat_completion": {
                 "type": "object",
@@ -186,14 +206,7 @@ class ZhipuClientTool(AsyncTool):
             },
             "generate_video": {
                 "type": "object", 
-                "properties": {
-                    "prompt": {"type": "string", "description": "视频生成提示"},
-                    "image_url": {"type": "string", "description": "参考图片URL（可选）"},
-                    "first_frame_image": {"type": "string", "description": "首帧图片URL（CogVideoX-3首尾帧模式）"},
-                    "last_frame_image": {"type": "string", "description": "尾帧图片URL（CogVideoX-3首尾帧模式）"},
-                    "model": {"type": "string", "enum": self.video_models},
-                    "duration": {"type": "integer", "description": "视频时长（秒），取值受当前提供商能力限制", "enum": _vcaps}
-                },
+                "properties": video_schema_properties,
                 "required": ["prompt"]
             },
             "generate_code": {
@@ -236,6 +249,58 @@ class ZhipuClientTool(AsyncTool):
         }
         
         return schemas.get(action, {})
+
+    def _load_video_models(self) -> List[str]:
+        models: List[str] = []
+        seen = set()
+        try:
+            from ....core.video_config_manager import get_video_config
+            provider_models = get_video_config().get_provider_supported_models(self.video_provider_key)
+            for candidate in provider_models:
+                if not isinstance(candidate, str):
+                    continue
+                value = candidate.strip()
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                models.append(value)
+        except Exception:
+            pass
+
+        for candidate in (getattr(settings, "COGVIDEOX3_MODEL", None), getattr(settings, "COGVIDEOX2_MODEL", None)):
+            if not isinstance(candidate, str):
+                continue
+            value = candidate.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            models.append(value)
+        return models
+
+    def _resolve_video_model(self, mode: str, explicit_model: Optional[str] = None) -> str:
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            return explicit_model.strip()
+
+        try:
+            from ....core.video_config_manager import get_video_config
+            resolved = get_video_config().resolve_model_for_mode(
+                self.video_provider_key,
+                mode=mode,
+                explicit_model=None,
+                default_model=None,
+            )
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        except Exception:
+            pass
+
+        if isinstance(self.default_video_model, str) and self.default_video_model.strip():
+            return self.default_video_model.strip()
+
+        raise ToolError(
+            "Zhipu video model is not configured; please set COGVIDEOX3_MODEL/COGVIDEOX2_MODEL or provider mode_model_mapping",
+            self.metadata.name,
+        )
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行智谱AI API调用"""
@@ -486,8 +551,18 @@ class ZhipuClientTool(AsyncTool):
     async def _generate_video(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """视频生成 - 支持首尾帧模式"""
         try:
+            if params.get("first_frame_image") and params.get("last_frame_image"):
+                generation_mode = "first_last_frame"
+                mode_key = "first_last_frame"
+            elif params.get("image_url"):
+                generation_mode = "single_image"
+                mode_key = "image_to_video"
+            else:
+                generation_mode = "text_only"
+                mode_key = "text_to_video"
+
             payload = {
-                "model": params.get("model", "cogvideox"),
+                "model": self._resolve_video_model(mode=mode_key, explicit_model=params.get("model")),
                 "prompt": params["prompt"]
             }
             
@@ -496,19 +571,17 @@ class ZhipuClientTool(AsyncTool):
             if duration:
                 payload["duration"] = duration
             
-            # 优先使用首尾帧模式（CogVideoX-3）
-            if params.get("first_frame_image") and params.get("last_frame_image"):
+            # 首尾帧模式
+            if generation_mode == "first_last_frame":
                 # payload["first_frame_image"] = params["first_frame_image"]
                 # payload["last_frame_image"] = params["last_frame_image"]
                 payload["image_url"] = [params["first_frame_image"], params["last_frame_image"]]
-                # 强制使用CogVideoX-3模型
-                payload["model"] = "cogvideox-3"
-                self.logger.info("Using CogVideoX-3 first/last frame mode")
+                self.logger.info("Using first/last frame mode with model: %s", payload["model"])
             
             # 添加参考图片（传统单图模式）
-            elif params.get("image_url"):
+            elif generation_mode == "single_image":
                 payload["image_url"] = params["image_url"]
-                self.logger.info("Using traditional single image mode")
+                self.logger.info("Using single image mode with model: %s", payload["model"])
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -551,7 +624,7 @@ class ZhipuClientTool(AsyncTool):
                     "video_url": video_url,
                     "model": payload["model"],
                     "prompt": params["prompt"],
-                    "generation_mode": "first_last_frame" if payload.get("first_frame_image") else "single_image",
+                    "generation_mode": generation_mode,
                     "duration": params.get("duration", 5.0),  # 使用传入的duration，默认5秒
                     "usage": result.get("usage", {}),
                     "timeout": status == "timeout"  # 添加超时标记

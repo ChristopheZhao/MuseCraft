@@ -23,6 +23,10 @@ class VideoProviderConfig:
     resolution_aliases: Dict[str, str] = field(default_factory=dict)
     ratio_options: List[str] = field(default_factory=list)
     ratio_aliases: Dict[str, str] = field(default_factory=dict)
+    mode_model_mapping: Dict[str, str] = field(default_factory=dict)
+    supports_native_audio: bool = False
+    native_audio_param_name: str = "generate_audio"
+    native_audio_default_enabled: Optional[bool] = None
 
 
 class VideoConfigManager:
@@ -43,7 +47,7 @@ class VideoConfigManager:
             # CogVideoX-3 (智谱AI)
             "cogvideox-3": VideoProviderConfig(
                 provider_name="cogvideox-3",
-                model_name="cogvideox-3",
+                model_name=settings.COGVIDEOX3_MODEL,
                 # 从配置读取可用离散时长，避免写死 [5,10]
                 duration_capabilities=getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]),
                 max_duration=10,
@@ -81,7 +85,7 @@ class VideoConfigManager:
             # CogVideoX-2 (智谱AI 旧版)
             "cogvideox-2": VideoProviderConfig(
                 provider_name="cogvideox-2",
-                model_name="cogvideox-2",
+                model_name=settings.COGVIDEOX2_MODEL,
                 duration_capabilities=[6],
                 max_duration=6,
                 default_duration=6,
@@ -94,7 +98,7 @@ class VideoConfigManager:
             # Runway (备用)
             "runway": VideoProviderConfig(
                 provider_name="runway",
-                model_name="runway-gen3",
+                model_name=settings.RUNWAY_VIDEO_MODEL,
                 duration_capabilities=[4, 10],
                 max_duration=10,
                 default_duration=4,
@@ -107,7 +111,7 @@ class VideoConfigManager:
             # Pika Labs (备用)
             "pika": VideoProviderConfig(
                 provider_name="pika",
-                model_name="pika-v1",
+                model_name=settings.PIKA_VIDEO_MODEL,
                 duration_capabilities=[3],
                 max_duration=3,
                 default_duration=3,
@@ -120,7 +124,7 @@ class VideoConfigManager:
             # Minimax (备用)
             "minimax": VideoProviderConfig(
                 provider_name="minimax",
-                model_name="video-01",
+                model_name=settings.MINIMAX_VIDEO_MODEL,
                 duration_capabilities=[6],
                 max_duration=6,
                 default_duration=6,
@@ -133,7 +137,7 @@ class VideoConfigManager:
             # Doubao (Volcengine Seedance)
             "doubao": VideoProviderConfig(
                 provider_name="doubao",
-                model_name="doubao-seedance-1-0-pro-250528",
+                model_name=settings.DOUBAO_T2V_MODEL,
                 duration_capabilities=getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10]),
                 max_duration=10,
                 default_duration=getattr(settings, "DEFAULT_SCENE_DURATION", 5),
@@ -149,7 +153,16 @@ class VideoConfigManager:
                 ratio_options=["16:9", "9:16", "1:1", "adaptive"],
                 ratio_aliases={
                     "default": "adaptive",
-                }
+                },
+                mode_model_mapping={
+                    "text_to_video": settings.DOUBAO_T2V_MODEL,
+                    "image_to_video": settings.DOUBAO_I2V_SINGLE_MODEL,
+                    "image_to_video_fallback": settings.DOUBAO_I2V_SINGLE_ALTER_MODEL,
+                    "first_last_frame": settings.DOUBAO_I2V_FLF_MODEL,
+                },
+                supports_native_audio=True,
+                native_audio_param_name="generate_audio",
+                native_audio_default_enabled=True,
             )
         }
         
@@ -162,6 +175,82 @@ class VideoConfigManager:
     def get_provider_config(self, provider_name: str) -> Optional[VideoProviderConfig]:
         """获取指定提供商的配置"""
         return self._providers.get(provider_name)
+
+    @staticmethod
+    def _collect_supported_models(config: Optional[VideoProviderConfig]) -> List[str]:
+        models: List[str] = []
+        seen = set()
+        if not config:
+            return models
+
+        def _append(candidate: Any) -> None:
+            if not isinstance(candidate, str):
+                return
+            value = candidate.strip()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            models.append(value)
+
+        _append(config.model_name)
+        for value in (config.mode_model_mapping or {}).values():
+            _append(value)
+        return models
+
+    def get_provider_supported_models(self, provider_name: str) -> List[str]:
+        """返回提供商的模型清单（主模型 + 模式映射模型）。"""
+        config = self.get_provider_config(provider_name)
+        if config is None:
+            return []
+        return self._collect_supported_models(config)
+
+    def get_provider_audio_capability(self, provider_name: str) -> Dict[str, Any]:
+        """返回 provider 的原生音频能力声明。"""
+        config = self.get_provider_config(provider_name) if provider_name else None
+        if config is None:
+            config = self.get_current_provider_config()
+        if config is None:
+            return {
+                "supports_native_audio": False,
+                "native_audio_param_name": "generate_audio",
+                "native_audio_default_enabled": None,
+            }
+        return {
+            "supports_native_audio": bool(config.supports_native_audio),
+            "native_audio_param_name": str(config.native_audio_param_name or "generate_audio"),
+            "native_audio_default_enabled": config.native_audio_default_enabled,
+        }
+
+    def resolve_model_for_mode(
+        self,
+        provider_name: str,
+        *,
+        mode: str,
+        explicit_model: Optional[str] = None,
+        default_model: Optional[str] = None,
+    ) -> Optional[str]:
+        """根据 provider+mode 解析最终模型名。"""
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            return explicit_model.strip()
+
+        config = self.get_provider_config(provider_name) if provider_name else None
+        if config is None:
+            config = self.get_current_provider_config()
+        if config is None:
+            return default_model.strip() if isinstance(default_model, str) and default_model.strip() else None
+
+        mode_key = str(mode or "").strip().lower()
+        mapping = config.mode_model_mapping or {}
+        candidate = mapping.get(mode_key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+        if isinstance(config.model_name, str) and config.model_name.strip():
+            return config.model_name.strip()
+
+        if isinstance(default_model, str) and default_model.strip():
+            return default_model.strip()
+        return None
     
     def set_current_provider(self, provider_name: str) -> bool:
         """设置当前使用的视频生成提供商"""
@@ -227,6 +316,10 @@ class VideoConfigManager:
             # 基础配置
             "provider_name": config.provider_name,
             "model_name": config.model_name,
+            "mode_model_mapping": dict(config.mode_model_mapping or {}),
+            "supports_native_audio": bool(config.supports_native_audio),
+            "native_audio_param_name": str(config.native_audio_param_name or "generate_audio"),
+            "native_audio_default_enabled": config.native_audio_default_enabled,
             "default_duration": config.default_duration,
             "max_duration": config.max_duration,
             "amplification_ratio": config.amplification_ratio,

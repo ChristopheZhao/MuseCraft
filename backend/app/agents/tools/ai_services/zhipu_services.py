@@ -623,14 +623,20 @@ class ZhipuVideoService(VideoModelServiceInterface):
         self.base_url = self.config.get("base_url", "https://open.bigmodel.cn/api/paas/v4")
         self.timeout = self.config.get("timeout", 600)  # 视频生成需要很长时间
         
-        # 支持的模型和能力
-        self.supported_models = ["cogvideox", "cogvideox-3"]
+        # 支持的模型和能力（模型清单由 provider 配置动态提供）
+        self.supported_models = []
         # CogVideoX支持的离散时长，从配置读取，避免写死
         self.duration_capabilities = getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10])
-        self.supports_first_last = True  # CogVideoX-3支持首尾帧模式
+        self.supports_first_last = True
         provider_key = self.config.get("provider_key") or getattr(settings, "ZHIPU_VIDEO_PROVIDER_KEY", None)
         if not provider_key or not str(provider_key).strip():
-            provider_key = "cogvideox-3"
+            vg_provider = str(getattr(settings, "VIDEO_GENERATION_PROVIDER", "") or "").strip().lower()
+            if vg_provider in {"cogvideox-3", "cogvideox-2"}:
+                provider_key = vg_provider
+            elif vg_provider == "zhipu":
+                provider_key = "cogvideox-3"
+            else:
+                provider_key = "cogvideox-3"
         self.provider_key = str(provider_key).strip()
     
     def _get_api_key(self) -> Optional[str]:
@@ -657,7 +663,22 @@ class ZhipuVideoService(VideoModelServiceInterface):
     
     def get_supported_models(self) -> List[str]:
         """获取支持的视频模型列表"""
-        return self.supported_models.copy()
+        try:
+            from ....core.video_config_manager import get_video_config
+            models = get_video_config().get_provider_supported_models(self.provider_key)
+            if models:
+                return models
+        except Exception:
+            pass
+
+        models: List[str] = []
+        for candidate in (getattr(settings, "COGVIDEOX3_MODEL", None), getattr(settings, "COGVIDEOX2_MODEL", None)):
+            if not isinstance(candidate, str):
+                continue
+            model = candidate.strip()
+            if model and model not in models:
+                models.append(model)
+        return models
     
     def get_duration_capabilities(self) -> List[int]:
         """获取支持的视频时长选项"""
@@ -665,6 +686,9 @@ class ZhipuVideoService(VideoModelServiceInterface):
     
     def supports_first_last_frame(self) -> bool:
         """是否支持首尾帧模式"""
+        cfg = self._get_provider_config()
+        if cfg is not None:
+            return bool(getattr(cfg, "supports_first_last_frame", self.supports_first_last))
         return self.supports_first_last
 
     def _get_provider_config(self):
@@ -679,6 +703,43 @@ class ZhipuVideoService(VideoModelServiceInterface):
             return cfg
         except Exception:
             return None
+
+    def _resolve_mode_model(
+        self,
+        *,
+        mode: str,
+        explicit_model: Optional[str] = None,
+    ) -> str:
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            return explicit_model.strip()
+
+        try:
+            from ....core.video_config_manager import get_video_config
+            resolved = get_video_config().resolve_model_for_mode(
+                self.provider_key,
+                mode=mode,
+                explicit_model=None,
+                default_model=None,
+            )
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        except Exception:
+            pass
+
+        provider_cfg = self._get_provider_config()
+        if provider_cfg is not None and isinstance(getattr(provider_cfg, "model_name", None), str):
+            model_name = provider_cfg.model_name.strip()
+            if model_name:
+                return model_name
+
+        fallback = getattr(settings, "COGVIDEOX3_MODEL", None)
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback.strip()
+
+        raise RuntimeError(
+            f"Zhipu video model is not configured for mode={mode}; "
+            "please configure COGVIDEOX3_MODEL/COGVIDEOX2_MODEL or provider mode_model_mapping"
+        )
 
     def get_capabilities(self) -> VideoCapabilities:
         caps = VideoCapabilities()
@@ -747,9 +808,21 @@ class ZhipuVideoService(VideoModelServiceInterface):
         
         if not self.is_available():
             raise RuntimeError("ZhipuVideoService not available - API key required")
-        
+
+        if first_frame_image and last_frame_image:
+            generation_mode = "first_last_frame"
+        elif image_url:
+            generation_mode = "single_image"
+        else:
+            generation_mode = "text_only"
+
+        mode_key_map = {
+            "text_only": "text_to_video",
+            "single_image": "image_to_video",
+            "first_last_frame": "first_last_frame",
+        }
         payload = {
-            "model": model or "cogvideox",
+            "model": self._resolve_mode_model(mode=mode_key_map[generation_mode], explicit_model=model),
             "prompt": prompt
         }
 
@@ -762,17 +835,12 @@ class ZhipuVideoService(VideoModelServiceInterface):
             normalized_size = size_param.strip()
             payload["size"] = resolution_aliases.get(normalized_size, normalized_size)
 
-        target_model = payload["model"]
         prompt_bytes = prompt.encode("utf-8") if isinstance(prompt, str) else b""
         limit_bytes = prompt_limits.get("max_bytes") or self.PROMPT_MAX_BYTES
         approx_cn = prompt_limits.get("approx_chinese_chars")
         approx_en = prompt_limits.get("approx_english_chars")
 
-        if (
-            target_model in {"cogvideox", "cogvideox-3"}
-            and limit_bytes
-            and len(prompt_bytes) > int(limit_bytes)
-        ):
+        if limit_bytes and len(prompt_bytes) > int(limit_bytes):
             hint_parts: List[str] = []
             if approx_cn:
                 hint_parts.append(f"约{approx_cn}个中文字符")
@@ -787,21 +855,15 @@ class ZhipuVideoService(VideoModelServiceInterface):
         if duration:
             payload["duration"] = duration
         
-        # 优先使用首尾帧模式（CogVideoX-3）
-        if first_frame_image and last_frame_image:
+        # 首尾帧模式
+        if generation_mode == "first_last_frame":
             payload["image_url"] = [first_frame_image, last_frame_image]
-            # 强制使用CogVideoX-3模型
-            payload["model"] = "cogvideox-3"
-            generation_mode = "first_last_frame"
-            self.logger.info("Using CogVideoX-3 first/last frame mode")
+            self.logger.info("Using first/last frame mode with model: %s", payload["model"])
         
-        # 添加参考图片（传统单图模式）
-        elif image_url:
+        # 单图模式
+        elif generation_mode == "single_image":
             payload["image_url"] = image_url
-            generation_mode = "single_image"
-            self.logger.info("Using traditional single image mode")
-        else:
-            generation_mode = "text_only"
+            self.logger.info("Using single image mode with model: %s", payload["model"])
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
