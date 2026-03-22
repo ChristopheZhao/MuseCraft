@@ -181,6 +181,17 @@ class AudioGeneratorAgent(ReActAgent):
             "action_performed": "bgm_generation",
             "background_music": background_music,
             "generation_results": [{"success": ok, **background_music}],
+            "orchestration_report": {
+                "status": "completed" if ok else "partial",
+                "boundary_event": "audio_completed",
+                "gate_triggers": [],
+                "artifacts": [{"kind": "shared_fact", "ref": "project.background_music"}],
+                "reflection": {
+                    "completion_state": "completed" if ok else "partial",
+                    "reported_gaps": [] if ok else ["background_music_generation_failed"],
+                    "reported_hints": [],
+                },
+            },
             "executed_calls": executed_calls,
             "plan_llm": plan_llm,
         }

@@ -8,10 +8,15 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .react_agent import ReActAgent
+from .base import AgentError
 from ..models import Task, AgentType
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
 from .utils.memory_helpers import write_shared_fact
+from ..services.video_composer_execution_contract import (
+    get_video_composer_compose_mode,
+    get_video_composer_execution_contract,
+)
 
 
 class VideoComposerAgent(ReActAgent):
@@ -65,16 +70,29 @@ class VideoComposerAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    def _resolve_mix_type(self, input_data: Dict[str, Any]) -> str:
-        static_ctx = input_data.get("static_context") if isinstance(input_data, dict) else {}
-        static_ctx = static_ctx if isinstance(static_ctx, dict) else {}
-        requests = static_ctx.get("requests") if isinstance(static_ctx.get("requests"), dict) else {}
-        scene_media_has_voice = bool(static_ctx.get("scene_media_has_voice")) and bool(static_ctx.get("scene_media_ref"))
-        if input_data.get("add_bgm") or requests.get("bgm_requested"):
-            return "bgm"
-        if input_data.get("add_voiceover") or requests.get("voiceover_requested") or scene_media_has_voice:
-            return "voiceover"
-        return "compose"
+    def _resolve_execution_contract(
+        self,
+        input_data: Dict[str, Any],
+        workflow_state_id: str,
+    ) -> Dict[str, Any]:
+        try:
+            return get_video_composer_execution_contract(
+                input_data,
+                workflow_state_id=str(workflow_state_id or ""),
+            )
+        except ValueError as exc:
+            raise AgentError(f"Invalid video_composer execution boundary: {exc}") from exc
+
+    def _resolve_execution_boundary(
+        self,
+        input_data: Dict[str, Any],
+        workflow_state_id: str,
+    ) -> Dict[str, Any]:
+        execution_contract = self._resolve_execution_contract(input_data, workflow_state_id)
+        return {
+            "execution_contract": execution_contract,
+            "compose_mode": get_video_composer_compose_mode(execution_contract),
+        }
 
     def _resolve_output_suffix(self, mix_type: str) -> str:
         if mix_type == "bgm":
@@ -87,10 +105,10 @@ class VideoComposerAgent(ReActAgent):
         self,
         *,
         input_data: Dict[str, Any],
+        mix_type: str,
         output_path: str,
         output_url: str,
     ) -> Dict[str, Any]:
-        mix_type = self._resolve_mix_type(input_data)
         static_ctx = input_data.get("static_context") if isinstance(input_data, dict) else {}
         static_ctx = static_ctx if isinstance(static_ctx, dict) else {}
         final_video_ctx = static_ctx.get("final_video") if isinstance(static_ctx, dict) else {}
@@ -153,15 +171,17 @@ class VideoComposerAgent(ReActAgent):
                 "plan_llm": plan_llm,
             }
 
-        mix_type = self._resolve_mix_type(input_data)
+        workflow_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+        boundary = self._resolve_execution_boundary(input_data, workflow_id)
+        mix_type = boundary["compose_mode"]
         stored_path = mixed_path
         final_url = self._resolve_local_public_url("", stored_path)
         mix_receipt = self._build_mix_receipt(
             input_data=input_data,
+            mix_type=mix_type,
             output_path=stored_path,
             output_url=final_url,
         )
-        workflow_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
         if workflow_id:
             payload = {
                 "path": stored_path,
@@ -209,6 +229,21 @@ class VideoComposerAgent(ReActAgent):
             "final_video_path": stored_path,
             "final_video_url": final_url,
             "mix_receipt": mix_receipt,
+            "orchestration_report": {
+                "status": "completed",
+                "boundary_event": "compose_completed",
+                "gate_triggers": ["workflow_global_bgm_mix_delivery"] if mix_type == "bgm" else [],
+                "artifacts": [
+                    {"kind": "shared_fact", "ref": "project.final_video"},
+                    {"kind": "shared_fact", "ref": "project.final_video_mix"},
+                ],
+                "reflection": {
+                    "completion_state": "completed",
+                    "mix_type": mix_type,
+                    "reported_gaps": [],
+                    "reported_hints": [],
+                },
+            },
             "executed_calls": executed_calls,
             "plan_llm": plan_llm,
         }

@@ -32,6 +32,7 @@ async def test_complete_system_integration():
         from app.agents.video_composer import VideoComposerAgent  
         from app.agents.orchestrator import OrchestratorAgent
         from app.agents.tools.ai_services.suno_client import SunoClientTool
+        from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         from types import SimpleNamespace
         from app.models.agent import AgentType
         
@@ -51,20 +52,28 @@ async def test_complete_system_integration():
         
         # Test Orchestrator
         orchestrator = OrchestratorAgent()
-        workflow_order = [agent.value for agent in orchestrator.workflow_order]
         print(f"   ✅ OrchestratorAgent initialized")
-        print(f"      Workflow order: {' → '.join(workflow_order)}")
-        
-        # Verify AudioGenerator is in correct position
-        if 'audio_generator' in workflow_order:
-            audio_index = workflow_order.index('audio_generator')
-            video_index = workflow_order.index('video_generator') 
-            composer_index = workflow_order.index('video_composer')
-            
-            if video_index < audio_index < composer_index:
-                print("   ✅ AudioGenerator positioned correctly in workflow")
-            else:
-                print("   ⚠️ AudioGenerator workflow position issue")
+        registered_agents = {agent_type.value for agent_type in orchestrator.agents.keys()}
+        print(f"      Registered agents: {', '.join(sorted(registered_agents))}")
+
+        queue = OrchestrationStateAdapter.build_execution_queue(
+            task_specs={
+                AgentType.VIDEO_GENERATOR: {"run": True, "order": 1},
+                AgentType.AUDIO_GENERATOR: {"run": True, "order": 2},
+                AgentType.VIDEO_COMPOSER: {"run": True, "order": 3},
+            },
+            candidate_agents=[
+                AgentType.VIDEO_GENERATOR,
+                AgentType.AUDIO_GENERATOR,
+                AgentType.VIDEO_COMPOSER,
+            ],
+        )
+        queue_values = [agent.value for agent in queue]
+        print(f"      Derived queue: {' → '.join(queue_values)}")
+        if queue_values == ["video_generator", "audio_generator", "video_composer"]:
+            print("   ✅ AudioGenerator positioned correctly via task_specs")
+        else:
+            print("   ⚠️ AudioGenerator task_specs ordering issue")
         
         print("✅ Component Integration: PASSED")
         
@@ -79,9 +88,10 @@ async def test_complete_system_integration():
         # Create Shared WM context
         from app.agents.memory.short_term import get_working_memory_service
         from app.agents.memory.short_term import SceneSnapshot
+        from types import SimpleNamespace
         wm_service = get_working_memory_service()
-        mas = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
         wf_id = "wf-final-integration"
+        mas = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
         # Add concept and scenes
         mas.put("project.concept_plan", {
             "core_message": "展示旅行的美好时光",
@@ -100,7 +110,7 @@ async def test_complete_system_integration():
         audio_agent = AudioGeneratorAgent()
         scene_list = [SimpleNamespace(duration=10), SimpleNamespace(duration=10), SimpleNamespace(duration=10)]
         music_requirements = audio_agent._extract_music_requirements(
-            store.get(wf_id, "project.concept_plan", default={}),
+            mas.get("project.concept_plan", {}),
             scene_list,
             {"duration": 30}
         )

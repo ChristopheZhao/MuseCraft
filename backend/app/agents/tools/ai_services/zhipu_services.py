@@ -5,6 +5,7 @@
 import json
 import httpx
 import asyncio
+import time
 from typing import Dict, Any, List, Optional, Union
 import logging
 
@@ -70,6 +71,155 @@ class ZhipuLLMService(LLMServiceInterface):
     def get_supported_models(self) -> List[str]:
         """获取支持的LLM模型列表"""
         return self.supported_models.copy()
+
+    def _resolve_effective_timeout(
+        self,
+        *,
+        model: Optional[str],
+        request_timeout: Optional[Union[int, float]],
+    ) -> float:
+        """Resolve the total deadline budget for a single provider call."""
+        effective_timeout: Optional[float] = None
+        try:
+            if request_timeout is not None:
+                effective_timeout = float(request_timeout)
+            elif model:
+                try:
+                    from ....core.ai_config import get_ai_config  # type: ignore
+
+                    mc = get_ai_config().get_model_config(model)
+                    if mc and getattr(mc, "timeout", None):
+                        effective_timeout = float(mc.timeout)
+                except Exception:
+                    pass
+
+            if effective_timeout is None:
+                effective_timeout = float(self.timeout)
+            else:
+                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
+        except Exception:
+            effective_timeout = float(self.timeout)
+        return effective_timeout
+
+    def _remaining_fallback_budget(self, total_timeout: float, started_at: float) -> float:
+        elapsed = max(0.0, time.monotonic() - started_at)
+        safety_margin = max(0.0, float(getattr(settings, "LLM_REQUEST_SAFETY_MARGIN", 5) or 5))
+        remaining = max(0.0, float(total_timeout) - elapsed)
+        if remaining > safety_margin:
+            remaining -= safety_margin
+        return max(0.0, remaining)
+
+    async def _post_with_shared_deadline(
+        self,
+        *,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        total_timeout: float,
+        log_prefix: str,
+    ) -> Dict[str, Any]:
+        async def _post_once(timeout_val: float, trust_env: bool = True):
+            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"{log_prefix} API error: {resp.status_code} - {resp.text}")
+                return resp.json()
+
+        fallback_enabled = bool(getattr(settings, "NETWORK_DIRECT_FALLBACK_ON_TIMEOUT", False))
+        if not fallback_enabled:
+            return await _post_once(float(total_timeout), True)
+
+        primary_ratio = float(getattr(settings, "LLM_PRIMARY_TIMEOUT_RATIO", 0.5) or 0.5)
+        primary_ratio = max(0.1, min(1.0, primary_ratio))
+        primary_timeout = max(5.0, min(float(total_timeout), float(total_timeout) * primary_ratio))
+        started_at = time.monotonic()
+
+        try:
+            result = await _post_once(primary_timeout, True)
+            try:
+                self.logger.info(
+                    "%s completed mode=proxy allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                    log_prefix,
+                    primary_timeout,
+                    max(0.0, time.monotonic() - started_at),
+                    False,
+                    self._remaining_fallback_budget(float(total_timeout), started_at),
+                )
+            except Exception:
+                pass
+            return result
+        except httpx.TimeoutException:
+            remaining_budget = self._remaining_fallback_budget(float(total_timeout), started_at)
+            min_remaining = min(
+                float(total_timeout),
+                max(1.0, float(getattr(settings, "LLM_FALLBACK_TIMEOUT_MIN", 20) or 20)),
+            )
+            if remaining_budget < min_remaining:
+                raise RuntimeError(f"{log_prefix} request timeout (budget exhausted before direct fallback)")
+            try:
+                self.logger.warning(
+                    "%s proxy timeout; fallback direct with remaining_budget=%.1fs total_budget=%.1fs elapsed=%.1fs",
+                    log_prefix,
+                    remaining_budget,
+                    float(total_timeout),
+                    max(0.0, time.monotonic() - started_at),
+                )
+            except Exception:
+                pass
+            try:
+                result = await _post_once(remaining_budget, False)
+                try:
+                    self.logger.info(
+                        "%s completed mode=direct allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                        log_prefix,
+                        remaining_budget,
+                        max(0.0, time.monotonic() - started_at),
+                        True,
+                        self._remaining_fallback_budget(float(total_timeout), started_at),
+                    )
+                except Exception:
+                    pass
+                return result
+            except httpx.TimeoutException:
+                raise RuntimeError(f"{log_prefix} request timeout")
+            except Exception as e2:
+                raise RuntimeError(f"{log_prefix} failed: {str(e2)}")
+        except httpx.ConnectError as conn_err:
+            remaining_budget = self._remaining_fallback_budget(float(total_timeout), started_at)
+            min_remaining = min(
+                float(total_timeout),
+                max(1.0, float(getattr(settings, "LLM_FALLBACK_TIMEOUT_MIN", 20) or 20)),
+            )
+            if remaining_budget < min_remaining:
+                raise RuntimeError(
+                    f"{log_prefix} connection failed and budget exhausted before direct fallback: {str(conn_err)}"
+                )
+            try:
+                self.logger.warning(
+                    "%s proxy connect error; fallback direct with remaining_budget=%.1fs total_budget=%.1fs (%s)",
+                    log_prefix,
+                    remaining_budget,
+                    float(total_timeout),
+                    conn_err,
+                )
+            except Exception:
+                pass
+            try:
+                result = await _post_once(remaining_budget, False)
+                try:
+                    self.logger.info(
+                        "%s completed mode=direct allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                        log_prefix,
+                        remaining_budget,
+                        max(0.0, time.monotonic() - started_at),
+                        True,
+                        self._remaining_fallback_budget(float(total_timeout), started_at),
+                    )
+                except Exception:
+                    pass
+                return result
+            except Exception as e2:
+                raise RuntimeError(f"{log_prefix} failed: {str(e2)}")
     
     async def chat_completion(
         self, 
@@ -110,79 +260,28 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
-        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
-        effective_timeout = None
+        effective_timeout = self._resolve_effective_timeout(
+            model=model,
+            request_timeout=kwargs.get("request_timeout"),
+        )
         try:
-            req_to = kwargs.get("request_timeout")
-            if req_to is not None:
-                effective_timeout = float(req_to)
-            else:
-                # 尝试读取模型级超时
-                if model:
-                    try:
-                        from ....core.ai_config import get_ai_config  # type: ignore
-                        mc = get_ai_config().get_model_config(model)
-                        if mc and getattr(mc, 'timeout', None):
-                            effective_timeout = float(mc.timeout)
-                    except Exception:
-                        pass
-            if effective_timeout is None:
-                effective_timeout = float(self.timeout)
-            else:
-                # 不超过provider默认；也允许更小，以适配回退场景的剩余时间
-                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
-            try:
-                self.logger.info(f"Zhipu.chat_completion using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
-            except Exception:
-                pass
+            self.logger.info(
+                "Zhipu.chat_completion using response_format=%s max_tokens=%s timeout=%s",
+                payload.get("response_format"),
+                payload.get("max_tokens"),
+                effective_timeout,
+            )
         except Exception:
-            effective_timeout = float(self.timeout)
+            pass
 
-        # 统一：遵循系统/进程代理（trust_env=True），使用单一超时；读超时下先同配置重试一次，再按需直连兜底
-        async def _post_once(timeout_val: float, trust_env: bool = True):
-            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                )
-                if resp.status_code != 200:
-                    raise RuntimeError(
-                        f"Zhipu LLM API error: {resp.status_code} - {resp.text}"
-                    )
-                return resp.json()
-
-        # 简化版：一次按系统代理请求，超时则（可选）再直连一次；不做时间切分
         try:
-            result = await _post_once(float(effective_timeout), True)
-        except httpx.TimeoutException:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.chat_completion proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except httpx.TimeoutException:
-                    raise RuntimeError("Zhipu LLM API request timeout")
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
-            else:
-                raise RuntimeError("Zhipu LLM API request timeout")
-        except httpx.ConnectError as conn_err:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.chat_completion proxy connect error; fallback direct with timeout={float(effective_timeout):.1f}s ({conn_err})"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
-            else:
-                raise RuntimeError(f"Zhipu LLM chat completion connection failed: {str(conn_err)}")
+            result = await self._post_with_shared_deadline(
+                endpoint=f"{self.base_url}/chat/completions",
+                headers=headers,
+                payload=payload,
+                total_timeout=float(effective_timeout),
+                log_prefix="Zhipu LLM API",
+            )
         except Exception as e:
             raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e)}")
 
@@ -278,76 +377,28 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
-        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
-        effective_timeout = None
+        effective_timeout = self._resolve_effective_timeout(
+            model=model,
+            request_timeout=kwargs.get("request_timeout"),
+        )
         try:
-            req_to = kwargs.get("request_timeout")
-            if req_to is not None:
-                effective_timeout = float(req_to)
-            else:
-                if model:
-                    try:
-                        from ....core.ai_config import get_ai_config  # type: ignore
-                        mc = get_ai_config().get_model_config(model)
-                        if mc and getattr(mc, 'timeout', None):
-                            effective_timeout = float(mc.timeout)
-                    except Exception:
-                        pass
-            if effective_timeout is None:
-                effective_timeout = float(self.timeout)
-            else:
-                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
-            try:
-                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
-            except Exception:
-                pass
+            self.logger.info(
+                "Zhipu.function_call using response_format=%s max_tokens=%s timeout=%s",
+                payload.get("response_format"),
+                payload.get("max_tokens"),
+                effective_timeout,
+            )
         except Exception:
-            effective_timeout = float(self.timeout)
+            pass
 
-        async def _post_once(timeout_val: float, trust_env: bool = True):
-            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                )
-                if resp.status_code != 200:
-                    raise RuntimeError(
-                        f"Zhipu Function Call API error: {resp.status_code} - {resp.text}"
-                    )
-                return resp.json()
-
-        # 简化版：一次按系统代理请求，超时则（可选）再直连一次
         try:
-            result = await _post_once(float(effective_timeout), True)
-        except httpx.TimeoutException:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.function_call proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except httpx.TimeoutException:
-                    raise RuntimeError("Zhipu Function Call API request timeout")
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
-            else:
-                raise RuntimeError("Zhipu Function Call API request timeout")
-        except httpx.ConnectError as conn_err:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.function_call proxy connect error; fallback direct with timeout={float(effective_timeout):.1f}s ({conn_err})"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
-            else:
-                raise RuntimeError(f"Zhipu Function Call connection failed: {str(conn_err)}")
+            result = await self._post_with_shared_deadline(
+                endpoint=f"{self.base_url}/chat/completions",
+                headers=headers,
+                payload=payload,
+                total_timeout=float(effective_timeout),
+                log_prefix="Zhipu Function Call API",
+            )
         except Exception as e:
             raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
 

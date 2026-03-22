@@ -22,20 +22,6 @@ class CompositionTool(AsyncTool):
     """高阶合成工具：封装常见、确定性的步骤序列，供 LLM 直接调用。"""
 
     @staticmethod
-    def _normalize_audio_strategy(value: Any) -> str:
-        raw = str(value or "").strip().lower()
-        alias_map = {
-            "adaptive": "adaptive",
-            "auto": "adaptive",
-            "prefer_native": "adaptive",
-            "provider_only": "provider_only",
-            "native_only": "provider_only",
-            "mas_only": "mas_only",
-            "agent_only": "mas_only",
-        }
-        return alias_map.get(raw, "adaptive")
-
-    @staticmethod
     def _normalize_int(value: Any) -> Any:
         try:
             if value in (None, ""):
@@ -113,7 +99,11 @@ class CompositionTool(AsyncTool):
         clips: List[str],
         ffmpeg_tool,
     ) -> bool:
-        """Resolve preserve_audio from policy + runtime clip audio facts."""
+        """Resolve preserve_audio from explicit input + local clip facts.
+
+        Boundary:
+        - composition tool does not decide cross-agent orchestration strategy.
+        """
         explicit = params.get("preserve_audio")
         if isinstance(explicit, bool):
             return explicit
@@ -126,14 +116,12 @@ class CompositionTool(AsyncTool):
 
         try:
             from ....core.config import settings as _cfg  # type: ignore
-            strategy = self._normalize_audio_strategy(getattr(_cfg, "VIDEO_AUDIO_STRATEGY", "adaptive"))
             fallback_default = bool(getattr(_cfg, "COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT", False))
         except Exception:
-            strategy = "adaptive"
             fallback_default = False
 
-        if strategy == "mas_only":
-            return False
+        if not clips:
+            return fallback_default
 
         checked = 0
         with_audio = 0
@@ -160,10 +148,8 @@ class CompositionTool(AsyncTool):
             and unknown == 0
         )
         audio_compatible = all_have_audio and self._are_audio_profiles_compatible(audio_profiles)
-        if strategy in {"provider_only", "adaptive"}:
-            # Conservative guard: preserve only when every clip has audio and profiles are compatible.
-            return audio_compatible
-        return fallback_default
+        # Conservative guard: preserve only when every clip has audio and profiles are compatible.
+        return audio_compatible
 
     def _resolve_final_output_path(self, output_filename: str) -> str:
         """将输出落在最终目录，避免临时路径进入审计与上下文。"""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -12,6 +13,8 @@ from ..agents.episode_orchestrator import EpisodeOrchestratorAgent
 from ..services.memory_provider import build_memory_services
 from .constants import GenerationMode
 from .config import settings
+
+logger = logging.getLogger("mode_router")
 
 
 def resolve_generation_mode(
@@ -51,7 +54,9 @@ async def dispatch_generation(
 
     if mode == GenerationMode.PROJECT:
         memory_services = build_memory_services()
+        logger.info("MODE_ROUTER project dispatch: built memory services for task %s", task.id)
         coordinator = EpisodeOrchestratorAgent(memory_services=memory_services)
+        logger.info("MODE_ROUTER project dispatch: coordinator constructed for task %s", task.id)
         return await coordinator.execute(
             task=task,
             input_data=input_data,
@@ -60,7 +65,9 @@ async def dispatch_generation(
         )
 
     memory_services = build_memory_services()
+    logger.info("MODE_ROUTER quick dispatch: built memory services for task %s", task.id)
     orchestrator = OrchestratorAgent(memory_services=memory_services)
+    logger.info("MODE_ROUTER quick dispatch: orchestrator constructed for task %s", task.id)
     return await orchestrator.execute(
         task=task,
         input_data=input_data,

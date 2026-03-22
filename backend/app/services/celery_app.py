@@ -1,9 +1,12 @@
 """
 Celery application configuration
 """
+import logging
+
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import setup_logging, worker_process_init
 from ..core.config import settings
+from ..core.logging_config import configure_logging
 
 # Create Celery app
 celery_app = Celery(
@@ -29,7 +32,15 @@ celery_app.conf.update(
     },
     worker_log_format='[%(asctime)s: %(levelname)s/%(processName)s] %(message)s',
     worker_task_log_format='[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s',
+    worker_hijack_root_logger=False,
 )
+
+
+@setup_logging.connect
+def _setup_celery_logging(**kwargs):
+    """Centralize Celery logging through the shared logging owner."""
+
+    configure_logging(force=True)
 
 
 @worker_process_init.connect
@@ -41,15 +52,6 @@ def _init_worker_process(**kwargs):
     """
     import logging
 
-    # Configure MAS rotating file handler if enabled (独立文件通道，不影响控制台)
-    try:
-        from ..core.logging_utils import configure_mas_logging
-        configure_mas_logging()
-    except Exception:
-        pass
-
-    # 保持注入单一来源：不在此处加专属 handler，避免局部规则影响全局可追溯性
-
     # Register default tools once per worker process
     try:
         from ..agents.tools import register_default_tools
@@ -58,11 +60,20 @@ def _init_worker_process(**kwargs):
         logging.getLogger("celery_task").warning(f"Tool registry init failed in worker_process_init: {e}")
 
 
+class ProcessVideoTaskError(RuntimeError):
+    """Raised when a queued video-processing run fails in a business-aware way."""
+
+
+def _load_sync_process_video_task():
+    from .task_queue import sync_process_video_task
+
+    return sync_process_video_task
+
+
 @celery_app.task(bind=True, name="process_video_task")
 def process_video_task(self, task_id: int):
     """Celery task for processing video generation"""
     
-    import logging
     logger = logging.getLogger("celery_task")
     
     logger.info(f"=== Starting Celery task for task_id: {task_id} ===")
@@ -75,7 +86,7 @@ def process_video_task(self, task_id: int):
     
     try:
         logger.info("Importing sync_process_video_task function...")
-        from .task_queue import sync_process_video_task
+        sync_process_video_task = _load_sync_process_video_task()
         logger.info("Successfully imported sync_process_video_task")
         
         logger.info(f"Calling sync_process_video_task with task_id: {task_id}")
@@ -83,37 +94,22 @@ def process_video_task(self, task_id: int):
         result = sync_process_video_task(task_id)
         logger.info(f"sync_process_video_task returned: {result}")
         
-        # Update final state
         if isinstance(result, dict) and "error" in result:
             logger.error(f"Task failed with error: {result['error']}")
-            self.update_state(
-                state='FAILURE',
-                meta={'error': result["error"]}
-            )
-            raise Exception(result["error"])
-        else:
-            logger.info("Task completed successfully")
-            self.update_state(
-                state='SUCCESS',
-                meta={'result': result, 'status': 'Video processing completed'}
-            )
-            return result
+            raise ProcessVideoTaskError(str(result["error"]))
+
+        logger.info("Task completed successfully")
+        return result
             
     except ImportError as e:
         error_msg = f"Failed to import sync_process_video_task: {str(e)}"
         logger.error(error_msg)
-        self.update_state(
-            state='FAILURE',
-            meta={'error': error_msg}
-        )
-        raise Exception(error_msg)
+        raise ProcessVideoTaskError(error_msg) from e
+    except ProcessVideoTaskError:
+        raise
     except Exception as e:
         error_msg = f"Unexpected error in Celery task: {str(e)}"
         logger.error(error_msg, exc_info=True)
-        self.update_state(
-            state='FAILURE',
-            meta={'error': error_msg}
-        )
         raise
 
 

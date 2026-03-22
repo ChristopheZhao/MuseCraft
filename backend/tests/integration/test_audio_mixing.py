@@ -152,9 +152,24 @@ async def test_audio_mixing_with_final_video(tmp_path):
         result = await agent.execute(task=task, input_data={"workflow_state_id": ws.task_id}, db=db, execution_order=1)
 
         # Then call Composer to add BGM
+        if 'app.' in str(type(agent)):
+            from app.services.video_composer_execution_contract import build_video_composer_execution_contract  # type: ignore
+        else:
+            from backend.app.services.video_composer_execution_contract import build_video_composer_execution_contract  # type: ignore
         from app.agents.video_composer import VideoComposerAgent as _VCA  # type: ignore
         comp = _VCA() if 'app.' in str(type(agent)) else __import__('backend.app.agents.video_composer', fromlist=['VideoComposerAgent']).VideoComposerAgent()
-        comp_out = await comp.execute(task=task, input_data={"workflow_state_id": ws.task_id, "add_bgm": True}, db=db, execution_order=2)
+        comp_out = await comp.execute(
+            task=task,
+            input_data={
+                "workflow_state_id": ws.task_id,
+                "execution_contract": build_video_composer_execution_contract(
+                    workflow_state_id=ws.task_id,
+                    compose_mode="bgm",
+                ),
+            },
+            db=db,
+            execution_order=2,
+        )
 
         # Restore
         registry.get_tool = original_get_tool  # type: ignore

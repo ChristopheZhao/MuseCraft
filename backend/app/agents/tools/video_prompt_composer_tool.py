@@ -56,6 +56,56 @@ class VideoPromptComposerTool(AsyncTool):
         if not isinstance(parameters.get("scene_info_ref"), str) or not parameters.get("scene_info_ref"):
             raise ToolValidationError("scene_info_ref must be a non-empty string", self.metadata.name)
 
+    @staticmethod
+    def _extract_tool_payload(
+        output: Any,
+        *,
+        tool_name: str,
+        action: str,
+        caller_tool: str,
+    ) -> Dict[str, Any]:
+        """Unwrap tool output and preserve failure diagnostics across wrapper layers."""
+        if hasattr(output, "success"):
+            success = bool(getattr(output, "success", False))
+            if not success:
+                err = str(getattr(output, "error", "") or "unknown error")
+                meta = getattr(output, "metadata", {}) or {}
+                error_type = meta.get("error_type") if isinstance(meta, dict) else None
+                details_raw = meta.get("error_details_struct") if isinstance(meta, dict) else None
+                details = details_raw if isinstance(details_raw, dict) else {}
+                raise ToolError(
+                    f"{tool_name}.{action} failed: {err}",
+                    caller_tool,
+                    error_code=error_type,
+                    details=details,
+                )
+            payload = getattr(output, "result", None)
+            if not isinstance(payload, dict):
+                raise ToolError(f"{tool_name}.{action} returned empty payload", caller_tool)
+            return payload
+
+        if isinstance(output, dict):
+            if output.get("success") is False:
+                err = str(output.get("error") or "unknown error")
+                meta = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+                error_type = meta.get("error_type") if isinstance(meta, dict) else None
+                details_raw = meta.get("error_details_struct") if isinstance(meta, dict) else None
+                details = details_raw if isinstance(details_raw, dict) else {}
+                raise ToolError(
+                    f"{tool_name}.{action} failed: {err}",
+                    caller_tool,
+                    error_code=error_type,
+                    details=details,
+                )
+            if isinstance(output.get("result"), dict):
+                return output["result"]
+            return output
+
+        raise ToolError(
+            f"{tool_name}.{action} returned invalid output type: {type(output).__name__}",
+            caller_tool,
+        )
+
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         if tool_input.action != "build_prompt":
             raise ToolValidationError(
@@ -83,9 +133,12 @@ class VideoPromptComposerTool(AsyncTool):
             timeout=tool_input.timeout,
         )
         builder_res = await builder.execute(builder_input)
-        builder_payload = builder_res.result if hasattr(builder_res, "result") else builder_res
-        if not isinstance(builder_payload, dict):
-            raise ToolError("video_prompt_builder returned empty payload", self.metadata.name)
+        builder_payload = self._extract_tool_payload(
+            builder_res,
+            tool_name="video_prompt_builder",
+            action="build_prompt",
+            caller_tool=self.metadata.name,
+        )
 
         consistency_input = ToolInput(
             action="get_prompt_assets",
@@ -94,9 +147,12 @@ class VideoPromptComposerTool(AsyncTool):
             timeout=tool_input.timeout,
         )
         consistency_res = await consistency.execute(consistency_input)
-        consistency_payload = consistency_res.result if hasattr(consistency_res, "result") else consistency_res
-        if not isinstance(consistency_payload, dict):
-            raise ToolError("consistency_tool returned empty payload", self.metadata.name)
+        consistency_payload = self._extract_tool_payload(
+            consistency_res,
+            tool_name="consistency_tool",
+            action="get_prompt_assets",
+            caller_tool=self.metadata.name,
+        )
 
         assets = consistency_payload.get("assets") if isinstance(consistency_payload, dict) else {}
         prompt_text = builder_payload.get("prompt_text") or ""

@@ -6,11 +6,27 @@ from .task import Task, TaskStatus, TaskType
 from .scene import Scene, SceneType
 from .resource import Resource, ResourceType
 from .agent import AgentType, AgentStatus
+from .workflow_runtime import (
+    WorkflowSession,
+    WorkflowSessionStatus,
+    WorkflowNodeState,
+    WorkflowNodeStatus,
+    WorkflowNodeAttempt,
+    WorkflowAttemptStatus,
+    WorkflowGate,
+    WorkflowGateStatus,
+    WorkflowGateDecision,
+)
 
 __all__ = [
     "BaseModel",
     "Task", "TaskStatus", "TaskType",
     "Scene", "SceneType", 
     "Resource", "ResourceType",
-    "AgentType", "AgentStatus"
+    "AgentType", "AgentStatus",
+    "WorkflowSession", "WorkflowSessionStatus",
+    "WorkflowNodeState", "WorkflowNodeStatus",
+    "WorkflowNodeAttempt", "WorkflowAttemptStatus",
+    "WorkflowGate", "WorkflowGateStatus",
+    "WorkflowGateDecision",
 ]

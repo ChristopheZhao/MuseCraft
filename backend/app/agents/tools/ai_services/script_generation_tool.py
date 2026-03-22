@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, List, Optional
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError, ToolValidationError
+from ....services.script_review_contract import format_script_review_guidance
 
 
 class ScriptGenerationTool(AsyncTool):
@@ -76,6 +77,14 @@ class ScriptGenerationTool(AsyncTool):
                     "type": "object",
                     "description": "上下文信息"
                 },
+                "script_review_contract": {
+                    "type": "object",
+                    "description": "脚本审阅阶段生成的显式修订/重规划约束"
+                },
+                "review_guidance": {
+                    "type": "string",
+                    "description": "面向脚本生成的可读审阅指导文本"
+                },
                 # 允许调用方（Agent）通过配置传入模型与token预算
                 "model": {
                     "type": "string",
@@ -109,6 +118,8 @@ class ScriptGenerationTool(AsyncTool):
                             },
                             "video_style": {"type": "string"},
                             "context": {"type": "object"},
+                            "script_review_contract": {"type": "object"},
+                            "review_guidance": {"type": "string"},
                             "voice_guidance": {"type": "object"},
                             "intelligent_style_design": {"type": "object"},
                             "model": {"type": "string"},
@@ -186,6 +197,10 @@ class ScriptGenerationTool(AsyncTool):
         intelligent_style_design = params.get("intelligent_style_design", {})
         video_style = params.get("video_style", "professional")  # 向后兼容
         context = params.get("context", {})
+        script_review_contract = params.get("script_review_contract") or {}
+        review_guidance = str(params.get("review_guidance") or "").strip()
+        if not review_guidance:
+            review_guidance = format_script_review_guidance(script_review_contract)
         voice_guidance = params.get("voice_guidance", {}) or {}
         should_narrate = bool(voice_guidance.get("should_narrate", True))
         pace_tag = str(voice_guidance.get("pace_tag", "")).strip().lower()
@@ -261,6 +276,7 @@ class ScriptGenerationTool(AsyncTool):
                 "target_char_count": target_char_count,
                 "pace_tag": pace_tag,
                 "video_style": video_style,
+                "review_guidance": review_guidance,
             },
         )
 

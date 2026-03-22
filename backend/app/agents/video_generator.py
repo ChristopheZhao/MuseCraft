@@ -27,6 +27,7 @@ from .utils.artifacts import (
 from .memory.short_term.working_memory import WorkingMemory
 from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.memory_helpers import get_mas_working_memory
+from ..services.video_execution_contract import get_video_generation_execution_contract
 
 
 
@@ -246,6 +247,11 @@ class VideoGeneratorAgent(ReActAgent):
                 or self.workflow_state_id
             )
             wf_id = str(wf_id) if wf_id else ""
+            execution_contract = self._resolve_execution_contract(input_data, wf_id)
+            self._validate_video_generation_calls_against_contract(
+                planned_calls,
+                execution_contract=execution_contract,
+            )
 
             # 执行规划好的调用序列（顺序执行，不做阶段过滤）
             executed_calls = await self.execute_tool_calls(planned_calls)
@@ -314,6 +320,76 @@ class VideoGeneratorAgent(ReActAgent):
         if not uploader:
             return results
         return await ensure_persisted_videos(results, uploader)
+
+    def _resolve_execution_contract(
+        self,
+        input_data: Dict[str, Any],
+        workflow_id: str,
+    ) -> Dict[str, Any]:
+        return get_video_generation_execution_contract(
+            input_data,
+            workflow_state_id=str(workflow_id or ""),
+        )
+
+    def _validate_video_generation_calls_against_contract(
+        self,
+        planned_calls: List[Dict[str, Any]],
+        *,
+        execution_contract: Dict[str, Any],
+    ) -> None:
+        if not isinstance(planned_calls, list) or not planned_calls:
+            return
+
+        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
+        if not isinstance(storage, dict):
+            storage = {}
+        constraints = execution_contract.get("constraints") if isinstance(execution_contract, dict) else {}
+        if not isinstance(constraints, dict):
+            constraints = {}
+
+        required_workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
+        required_generate_audio = constraints.get("generate_audio")
+
+        for call in planned_calls:
+            if not isinstance(call, dict):
+                continue
+            fn_meta = call.get("function")
+            if not isinstance(fn_meta, dict):
+                continue
+            fn_name = str(fn_meta.get("name") or "")
+            if not fn_name.startswith("video_generation."):
+                continue
+
+            raw_args = fn_meta.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except Exception as exc:
+                    raise AgentError(f"视频生成工具参数不是合法 JSON: {exc}") from exc
+            elif isinstance(raw_args, dict):
+                args = dict(raw_args)
+            else:
+                args = {}
+            if not isinstance(args, dict):
+                raise AgentError("视频生成工具参数必须是对象")
+
+            if required_workflow_state_id:
+                actual_workflow_state_id = str(args.get("workflow_state_id") or "").strip()
+                if actual_workflow_state_id != required_workflow_state_id:
+                    raise AgentError(
+                        "视频生成调用缺少或违背 execution_contract.storage.workflow_state_id"
+                    )
+
+            if isinstance(required_generate_audio, bool):
+                actual_generate_audio = args.get("generate_audio")
+                if not isinstance(actual_generate_audio, bool):
+                    raise AgentError(
+                        "视频生成调用缺少 execution_contract.constraints.generate_audio"
+                    )
+                if bool(actual_generate_audio) != bool(required_generate_audio):
+                    raise AgentError(
+                        "视频生成调用的 generate_audio 与 execution_contract 不一致"
+                    )
 
     def _get_video_uploader(self):
         if self._video_uploader is not None:
@@ -385,6 +461,19 @@ class VideoGeneratorAgent(ReActAgent):
         result["failed"] = failed
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
+        result["orchestration_report"] = {
+            "status": "completed",
+            "boundary_event": "scene_video_completed",
+            "gate_triggers": ["workflow_video_audio_delivery"],
+            "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
+            "reflection": {
+                "completion_state": "completed",
+                "reported_gaps": [],
+                "reported_hints": [],
+                "completed_scene_count": len(finals),
+                "failed_scene_count": len(failed),
+            },
+        }
         self.reset_iteration_memory_cache()
         return result
 
@@ -415,6 +504,19 @@ class VideoGeneratorAgent(ReActAgent):
         result["failed"] = failed
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
+        result["orchestration_report"] = {
+            "status": "partial",
+            "boundary_event": "scene_video_completed",
+            "gate_triggers": ["workflow_video_audio_delivery"],
+            "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
+            "reflection": {
+                "completion_state": str(result.get("subtask_state") or "partial"),
+                "reported_gaps": ["scene_video_generation_incomplete"],
+                "reported_hints": [],
+                "completed_scene_count": len(finals),
+                "failed_scene_count": len(failed),
+            },
+        }
         self.reset_iteration_memory_cache()
         return result
 

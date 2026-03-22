@@ -9,6 +9,11 @@
 - 单场景可用时长：{{ duration_capabilities | map('string') | join('、') }} 秒
 - 场景数量建议：{{ scene_count_min }} ~ {{ scene_count_max }} 幕（最优估计：{{ optimal_scene_count }} 幕）
 
+{% if review_guidance %}
+## 当前审阅反馈
+{{ review_guidance }}
+{% endif %}
+
 ## 输出要求
 仅输出一个 JSON 对象，结构如下：
 {

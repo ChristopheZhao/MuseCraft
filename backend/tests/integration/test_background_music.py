@@ -154,7 +154,7 @@ async def test_video_composer_integration():
             "style": "cinematic",
             "available": True,
         })
-        background_music = store.get(wf_id, "project.background_music", default={})
+        background_music = shared.get("project.background_music", {})
         print("✅ 背景音乐信息提取成功:")
         print(f"   是否可用: {background_music.get('available')}")
         print(f"   音乐标题: {background_music.get('title')}")
@@ -178,24 +178,42 @@ async def test_complete_workflow():
     try:
         from app.agents.orchestrator import OrchestratorAgent
         from app.models.agent import AgentType
+        from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         
         orchestrator = OrchestratorAgent()
         print("✅ OrchestratorAgent 创建成功")
-        
-        # 检查工作流顺序
-        workflow_order = [agent.value for agent in orchestrator.workflow_order]
-        print(f"📋 完整工作流顺序: {' → '.join(workflow_order)}")
-        
-        # 检查AudioGenerator位置
-        if 'audio_generator' in workflow_order:
-            audio_index = workflow_order.index('audio_generator')
-            video_index = workflow_order.index('video_generator')
-            composer_index = workflow_order.index('video_composer')
-            
-            if video_index < audio_index < composer_index:
-                print("✅ AudioGenerator 工作流位置正确")
-            else:
-                print("⚠️ AudioGenerator 工作流位置需要调整")
+
+        registered_agents = {agent_type.value for agent_type in orchestrator.agents.keys()}
+        print(f"📋 当前注册 Agent: {', '.join(sorted(registered_agents))}")
+
+        required_agents = {
+            AgentType.VIDEO_GENERATOR.value,
+            AgentType.AUDIO_GENERATOR.value,
+            AgentType.VIDEO_COMPOSER.value,
+        }
+        if required_agents.issubset(registered_agents):
+            print("✅ 背景音乐相关 Agent 已全部注册")
+        else:
+            print("⚠️ 背景音乐相关 Agent 注册不完整")
+
+        queue = OrchestrationStateAdapter.build_execution_queue(
+            task_specs={
+                AgentType.VIDEO_GENERATOR: {"run": True, "order": 1},
+                AgentType.AUDIO_GENERATOR: {"run": True, "order": 2},
+                AgentType.VIDEO_COMPOSER: {"run": True, "order": 3},
+            },
+            candidate_agents=[
+                AgentType.VIDEO_GENERATOR,
+                AgentType.AUDIO_GENERATOR,
+                AgentType.VIDEO_COMPOSER,
+            ],
+        )
+        queue_values = [agent.value for agent in queue]
+        print(f"🧭 task_specs 推导队列: {' → '.join(queue_values)}")
+        if queue_values == ["video_generator", "audio_generator", "video_composer"]:
+            print("✅ AudioGenerator 队列位置由 task_specs 正确驱动")
+        else:
+            print("⚠️ AudioGenerator task_specs 队列顺序异常")
         
         # 检查所有Agent是否可用
         for agent_type, agent in orchestrator.agents.items():

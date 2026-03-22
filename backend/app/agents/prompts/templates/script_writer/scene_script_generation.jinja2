@@ -11,6 +11,11 @@
 {% endif %}{% else %}- 无旁白需求
 {% endif %}
 
+{% if review_guidance %}
+当前审阅反馈：
+{{ review_guidance }}
+{% endif %}
+
 要求：
 1. 根据场景复杂度选择合适的时长（仅可从{{ duration_capabilities }}中选择）；
 2. 输出脚本文本与可选的叙事/音乐/音效字段；

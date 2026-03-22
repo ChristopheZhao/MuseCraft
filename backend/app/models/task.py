@@ -72,6 +72,7 @@ class Task(BaseModel):
     # Relationships
     scenes = relationship("Scene", back_populates="task", cascade="all, delete-orphan")
     resources = relationship("Resource", back_populates="task", cascade="all, delete-orphan")
+    runtime_sessions = relationship("WorkflowSession", back_populates="task", cascade="all, delete-orphan")
     # AgentExecution 已移除；如需审计请通过事件监听器落审计存储
     
     def __repr__(self):

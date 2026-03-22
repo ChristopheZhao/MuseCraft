@@ -993,24 +993,15 @@ class VideoGenerationTool(AsyncTool):
         result["all"] = [item for item in (result["style"] + result["negative"]) if item]
         return result
 
-    @staticmethod
-    def _normalize_audio_strategy(value: Any) -> str:
-        raw = str(value or "").strip().lower()
-        alias_map = {
-            "adaptive": "adaptive",
-            "auto": "adaptive",
-            "prefer_native": "adaptive",
-            "provider_only": "provider_only",
-            "native_only": "provider_only",
-            "mas_only": "mas_only",
-            "agent_only": "mas_only",
-        }
-        return alias_map.get(raw, "adaptive")
-
     def _resolve_native_audio_request(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve provider-native audio request from capability and orchestration policy."""
+        """Resolve provider-native audio request from explicit execution params.
+
+        Boundary:
+        - tool execution only; no cross-agent orchestration policy branching here.
+        """
         provider_cfg = self.video_config.get_current_provider_config()
         supports_native = bool(getattr(provider_cfg, "supports_native_audio", False))
+
         explicit_generate_audio = params.get("generate_audio")
         if isinstance(explicit_generate_audio, str):
             lowered = explicit_generate_audio.strip().lower()
@@ -1025,29 +1016,26 @@ class VideoGenerationTool(AsyncTool):
 
         if isinstance(explicit_generate_audio, bool):
             generate_audio = explicit_generate_audio and supports_native
-            return {
-                "strategy": "explicit",
-                "provider": provider_cfg.provider_name,
-                "supports_native_audio": supports_native,
-                "generate_audio": bool(generate_audio),
-            }
-
-        strategy_value = params.get("audio_strategy") or getattr(settings, "VIDEO_AUDIO_STRATEGY", "adaptive")
-        strategy = self._normalize_audio_strategy(strategy_value)
-
-        if strategy == "mas_only":
-            generate_audio = False
-        elif strategy == "provider_only":
-            generate_audio = True if supports_native else False
+            decision_source = "explicit_param"
+            strategy = "explicit"
         else:
-            # adaptive(default): enable provider-native audio only when provider supports it.
-            generate_audio = True if supports_native else False
+            native_default = getattr(provider_cfg, "native_audio_default_enabled", None)
+            if isinstance(native_default, bool):
+                generate_audio = native_default and supports_native
+                decision_source = "provider_default"
+                strategy = "provider_default"
+            else:
+                # Conservative fallback: do not force native audio when no explicit decision is provided.
+                generate_audio = False
+                decision_source = "implicit_disabled"
+                strategy = "implicit_disabled"
 
         return {
             "strategy": strategy,
             "provider": provider_cfg.provider_name,
             "supports_native_audio": supports_native,
             "generate_audio": bool(generate_audio),
+            "decision_source": decision_source,
         }
 
     async def _rewrite_prompt_for_safety(
@@ -1581,7 +1569,6 @@ class VideoGenerationTool(AsyncTool):
             "supports_native_audio": bool(getattr(provider_config, "supports_native_audio", False)),
             "native_audio_param_name": str(getattr(provider_config, "native_audio_param_name", "generate_audio") or "generate_audio"),
             "native_audio_default_enabled": getattr(provider_config, "native_audio_default_enabled", None),
-            "audio_strategy": self._normalize_audio_strategy(getattr(settings, "VIDEO_AUDIO_STRATEGY", "adaptive")),
         }
 
         return {

@@ -7,6 +7,7 @@ import type {
   OrchestrateProjectRequest,
   OrchestrateProjectResponse,
 } from '@/types/project';
+import type { TaskRuntimeView } from '@/types';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
@@ -39,6 +40,31 @@ export interface TaskResponse {
   updated_at: string;
   estimated_duration?: number;
   error_message?: string;
+}
+
+export interface TaskRuntimeDecisionRequest {
+  action: 'approve' | 'revise' | 'replan';
+  feedback_text?: string;
+  structured_constraints?: Record<string, any>;
+  actor_id?: string;
+}
+
+export interface QuickCurrentRunTask {
+  id: number;
+  task_id: string;
+  title: string;
+  description?: string;
+  status: string;
+  session_id?: string;
+  input_parameters: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+  error_message?: string;
+}
+
+export interface QuickCurrentRunResponse {
+  task: QuickCurrentRunTask | null;
+  workflow_status: TaskRuntimeView | null;
 }
 
 export class ApiClient {
@@ -83,7 +109,9 @@ export class ApiClient {
   }
 
   static async getTaskStatus(taskId: string): Promise<TaskResponse> {
-    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}`);
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}`, {
+      cache: 'no-store',
+    });
     
     if (!response.ok) {
       const error = await response.json();
@@ -94,11 +122,63 @@ export class ApiClient {
   }
 
   static async getTaskResult(taskId: string): Promise<any> {
-    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/result`);
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/result`, {
+      cache: 'no-store',
+    });
     
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.detail || 'Failed to get task result');
+    }
+
+    return response.json();
+  }
+
+  static async getTaskRuntime(taskId: string): Promise<TaskRuntimeView> {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/runtime`, {
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to get task runtime');
+    }
+
+    return response.json();
+  }
+
+  static async getCurrentQuickRun(sessionId: string): Promise<QuickCurrentRunResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/tasks/quick/current?session_id=${encodeURIComponent(sessionId)}`,
+      {
+        cache: 'no-store',
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to discover current quick run');
+    }
+
+    return response.json();
+  }
+
+  static async submitScriptGateDecision(
+    taskId: string,
+    payload: TaskRuntimeDecisionRequest,
+  ): Promise<{ message: string; task_id: string; workflow_status?: TaskRuntimeView }> {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/runtime/script/decision`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      mode: 'cors',
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to submit script gate decision');
     }
 
     return response.json();

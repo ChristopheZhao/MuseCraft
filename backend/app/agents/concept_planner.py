@@ -18,6 +18,7 @@ from .utils import SceneDurationCalculator,safe_json_loads
 from .adapters.video.models import SceneSnapshot
 from .utils.memory_helpers import read_shared_fact, write_shared_fact
 from ..events.publisher import publish_state_event
+from ..services.script_review_contract import format_script_review_guidance
 
 
 class ConceptPlannerAgent(BaseAgent):
@@ -48,6 +49,8 @@ class ConceptPlannerAgent(BaseAgent):
         style_preference = input_data.get("style_preference")
         style_taxonomy_summary = input_data.get("style_taxonomy_summary")
         predefined_style_profile = input_data.get("predefined_style_profile")
+        script_review_contract = input_data.get("script_review_contract") or {}
+        review_guidance = format_script_review_guidance(script_review_contract)
 
         from ..core.video_config_manager import get_video_config
 
@@ -117,11 +120,6 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception:
             total_timeout = 180
 
-        try:
-            fallback_request_timeout = int(getattr(settings, "LLM_FALLBACK_TIMEOUT_MAX", 60))
-        except Exception:
-            fallback_request_timeout = 60
-
         deadline_ts = time.monotonic() + total_timeout
 
         try:
@@ -162,11 +160,7 @@ class ConceptPlannerAgent(BaseAgent):
 
         await self._update_progress(20, "Drafting concept skeleton", db)
 
-        expected_calls = 1 + 2
-        if concept_mode != "project":
-            expected_calls += 1
-        skeleton_timeout = self._budgeted_timeout(deadline_ts, expected_calls)
-        skeleton_fallback_timeout = min(fallback_request_timeout, skeleton_timeout)
+        skeleton_timeout = self._resolve_stage_timeout("skeleton", deadline_ts)
 
         skeleton_payload, skeleton_usage = await self._generate_skeleton(
             system_prompt=system_prompt,
@@ -177,12 +171,13 @@ class ConceptPlannerAgent(BaseAgent):
             scene_count_min=scene_count_min,
             scene_count_max=scene_count_max,
             optimal_scene_count=optimal_scene_count,
+            review_guidance=review_guidance,
             model_name=concept_model,
             model_config=model_config,
             fallback_model=fallback_model,
             fallback_model_config=fallback_model_config,
             request_timeout=skeleton_timeout,
-            fallback_request_timeout=skeleton_fallback_timeout,
+            stage_deadline_ts=deadline_ts,
             max_tokens=skeleton_max_tokens,
             temperature=skeleton_temperature,
         )
@@ -193,11 +188,8 @@ class ConceptPlannerAgent(BaseAgent):
 
         await self._update_progress(40, "Designing style and voice plan", db)
 
-        pending_calls = 2 + (0 if concept_mode == "project" else 1)
-        style_timeout = self._budgeted_timeout(deadline_ts, pending_calls)
-        style_fallback_timeout = min(fallback_request_timeout, style_timeout)
-        voice_timeout = self._budgeted_timeout(deadline_ts, pending_calls)
-        voice_fallback_timeout = min(fallback_request_timeout, voice_timeout)
+        style_timeout = self._resolve_stage_timeout("style", deadline_ts)
+        voice_timeout = self._resolve_stage_timeout("voice", deadline_ts)
 
         style_task = asyncio.create_task(
             self._generate_style_bundle(
@@ -210,13 +202,14 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=style_timeout,
-                fallback_request_timeout=style_fallback_timeout,
+                stage_deadline_ts=deadline_ts,
                 max_tokens=style_max_tokens,
                 temperature=style_temperature,
                 concept_mode=concept_mode,
                 style_profile_override=predefined_style_profile,
                 taxonomy_summary=style_taxonomy_summary,
                 character_bible=project_character_bible,
+                review_guidance=review_guidance,
             )
         )
         voice_task = asyncio.create_task(
@@ -229,9 +222,10 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=voice_timeout,
-                fallback_request_timeout=voice_fallback_timeout,
+                stage_deadline_ts=deadline_ts,
                 max_tokens=voice_max_tokens,
                 temperature=voice_temperature,
+                review_guidance=review_guidance,
             )
         )
 
@@ -302,7 +296,6 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 deadline_ts=deadline_ts,
-                fallback_request_timeout=fallback_request_timeout,
                 max_tokens=scene_max_tokens,
                 temperature=scene_temperature,
             )
@@ -475,12 +468,13 @@ class ConceptPlannerAgent(BaseAgent):
         scene_count_min: int,
         scene_count_max: int,
         optimal_scene_count: int,
+        review_guidance: str,
         model_name: str,
         model_config: Any,
         fallback_model: Optional[str],
         fallback_model_config: Any,
         request_timeout: int,
-        fallback_request_timeout: int,
+        stage_deadline_ts: float,
         max_tokens: int,
         temperature: float,
     ) -> Tuple[Dict[str, Any], int]:
@@ -493,6 +487,7 @@ class ConceptPlannerAgent(BaseAgent):
             scene_count_min=scene_count_min,
             scene_count_max=scene_count_max,
             optimal_scene_count=optimal_scene_count,
+            review_guidance=review_guidance,
         )
         messages = self._compose_messages(system_prompt, prompt)
         response = await self._invoke_concept_model(
@@ -502,7 +497,7 @@ class ConceptPlannerAgent(BaseAgent):
             fallback_model=fallback_model,
             fallback_model_config=fallback_model_config,
             request_timeout=request_timeout,
-            fallback_request_timeout=fallback_request_timeout,
+            stage_deadline_ts=stage_deadline_ts,
             max_tokens=max_tokens,
             temperature=temperature,
             response_format={"type": "json_object"},
@@ -533,13 +528,14 @@ class ConceptPlannerAgent(BaseAgent):
         fallback_model: Optional[str],
         fallback_model_config: Any,
         request_timeout: int,
-        fallback_request_timeout: int,
+        stage_deadline_ts: float,
         max_tokens: int,
         temperature: float,
         concept_mode: str,
         style_profile_override: Optional[Dict[str, Any]],
         taxonomy_summary: Optional[str],
         character_bible: Optional[Dict[str, Any]],
+        review_guidance: str,
     ) -> Dict[str, Any]:
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
         override_json = (
@@ -562,6 +558,7 @@ class ConceptPlannerAgent(BaseAgent):
             predefined_style_profile=override_json,
             style_taxonomy_summary=taxonomy_summary or "",
             project_character_bible=character_bible_json,
+            review_guidance=review_guidance,
         )
         messages = self._compose_messages(system_prompt, prompt)
         response = await self._invoke_concept_model(
@@ -571,7 +568,7 @@ class ConceptPlannerAgent(BaseAgent):
             fallback_model=fallback_model,
             fallback_model_config=fallback_model_config,
             request_timeout=request_timeout,
-            fallback_request_timeout=fallback_request_timeout,
+            stage_deadline_ts=stage_deadline_ts,
             max_tokens=max_tokens,
             temperature=temperature,
             response_format={"type": "json_object"},
@@ -630,9 +627,10 @@ class ConceptPlannerAgent(BaseAgent):
         fallback_model: Optional[str],
         fallback_model_config: Any,
         request_timeout: int,
-        fallback_request_timeout: int,
+        stage_deadline_ts: float,
         max_tokens: int,
         temperature: float,
+        review_guidance: str,
     ) -> Dict[str, Any]:
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
         prompt = self.render_prompt(
@@ -640,6 +638,7 @@ class ConceptPlannerAgent(BaseAgent):
             user_prompt=user_prompt,
             skeleton_json=skeleton_json,
             user_prompt_brief=user_prompt_brief,
+            review_guidance=review_guidance,
         )
         messages = self._compose_messages(system_prompt, prompt)
         response = await self._invoke_concept_model(
@@ -649,7 +648,7 @@ class ConceptPlannerAgent(BaseAgent):
             fallback_model=fallback_model,
             fallback_model_config=fallback_model_config,
             request_timeout=request_timeout,
-            fallback_request_timeout=fallback_request_timeout,
+            stage_deadline_ts=stage_deadline_ts,
             max_tokens=max_tokens,
             temperature=temperature,
             response_format={"type": "json_object"},
@@ -680,7 +679,6 @@ class ConceptPlannerAgent(BaseAgent):
         fallback_model: Optional[str],
         fallback_model_config: Any,
         deadline_ts: float,
-        fallback_request_timeout: int,
         max_tokens: int,
         temperature: float,
     ) -> Dict[str, Any]:
@@ -700,9 +698,7 @@ class ConceptPlannerAgent(BaseAgent):
         total_usage = 0
 
         for batch_index, batch in enumerate(batches):
-            remaining_batches = len(batches) - batch_index
-            request_timeout = self._budgeted_timeout(deadline_ts, remaining_batches)
-            batch_fallback_timeout = min(fallback_request_timeout, request_timeout)
+            request_timeout = self._resolve_stage_timeout("scene_batch", deadline_ts)
             scene_batch_json = self._compact_json(batch)
             prompt = self.render_prompt(
                 "scene_detail_batch_generation",
@@ -722,7 +718,7 @@ class ConceptPlannerAgent(BaseAgent):
                 fallback_model=fallback_model,
                 fallback_model_config=fallback_model_config,
                 request_timeout=request_timeout,
-                fallback_request_timeout=batch_fallback_timeout,
+                stage_deadline_ts=deadline_ts,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 response_format={"type": "json_object"},
@@ -767,15 +763,51 @@ class ConceptPlannerAgent(BaseAgent):
             "total_duration": total_duration,
         }
 
-    def _budgeted_timeout(
+    def _remaining_budget(self, deadline_ts: float) -> float:
+        safety_margin = max(0.0, float(getattr(settings, "LLM_REQUEST_SAFETY_MARGIN", 5) or 5))
+        return max(0.0, deadline_ts - time.monotonic() - safety_margin)
+
+    def _resolve_stage_timeout(
         self,
+        stage_name: str,
         deadline_ts: float,
-        pending_calls: int,
-        min_timeout: int = 5,
+        min_floor: Optional[int] = None,
     ) -> int:
-        remaining = max(1.0, deadline_ts - time.monotonic())
-        per_call = remaining / max(1, pending_calls)
-        return max(min_timeout, int(per_call))
+        configured = {
+            "skeleton": int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_SKELETON", 60) or 60),
+            "style": int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_STYLE", 60) or 60),
+            "voice": int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_VOICE", 60) or 60),
+            "scene_batch": int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_SCENE_BATCH", 90) or 90),
+        }.get(stage_name, int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_MIN_FLOOR", 15) or 15))
+        floor = min_floor
+        if floor is None:
+            if stage_name == "scene_batch":
+                floor = int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_SCENE_BATCH_FLOOR", 45) or 45)
+            else:
+                floor = int(getattr(settings, "CONCEPT_STAGE_TIMEOUT_MIN_FLOOR", 15) or 15)
+
+        remaining = self._remaining_budget(deadline_ts)
+        if remaining < float(floor):
+            self.logger.error(
+                "TIME_BUDGET exhausted stage=%s remaining=%.1fs floor=%ss",
+                stage_name,
+                remaining,
+                floor,
+            )
+            raise AgentError(
+                f"timeout_budget_exhausted: stage={stage_name} remaining={remaining:.1f}s floor={floor}s"
+            )
+
+        allocated = max(int(floor), min(int(configured), int(remaining)))
+        self.logger.info(
+            "TIME_BUDGET stage=%s allocated=%ss configured=%ss remaining_total=%.1fs floor=%ss",
+            stage_name,
+            allocated,
+            configured,
+            remaining,
+            floor,
+        )
+        return allocated
 
     def _make_scene_batches(self, scene_slots: List[Dict[str, Any]], batch_size: int) -> List[List[Dict[str, Any]]]:
         batches: List[List[Dict[str, Any]]] = []
@@ -1030,7 +1062,7 @@ class ConceptPlannerAgent(BaseAgent):
         fallback_model: Optional[str],
         fallback_model_config: Any,
         request_timeout: int,
-        fallback_request_timeout: int,
+        stage_deadline_ts: float,
         max_tokens: int,
         temperature: float,
         response_format: Dict[str, Any],
@@ -1038,6 +1070,16 @@ class ConceptPlannerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         primary_err: Optional[Exception] = None
         response: Optional[Dict[str, Any]] = None
+        stage_remaining_before = self._remaining_budget(stage_deadline_ts)
+        primary_started_at = time.monotonic()
+
+        self.logger.info(
+            "CONCEPT_MODEL_CALL stage=%s allocated_timeout=%ss remaining_budget_before=%.1fs fallback_used=%s",
+            context_description,
+            request_timeout,
+            stage_remaining_before,
+            False,
+        )
 
         try:
             # JSON-only planning step: use chat_completion directly to avoid FC proxy overhead.
@@ -1050,6 +1092,13 @@ class ConceptPlannerAgent(BaseAgent):
                 request_timeout=request_timeout,
                 response_format=response_format,
                 thinking={"type": "disabled"},
+            )
+            self.logger.info(
+                "CONCEPT_MODEL_CALL_OK stage=%s elapsed=%.2fs remaining_budget_after=%.1fs fallback_used=%s",
+                context_description,
+                max(0.0, time.monotonic() - primary_started_at),
+                self._remaining_budget(stage_deadline_ts),
+                False,
             )
         except Exception as exc:
             primary_err = exc
@@ -1087,14 +1136,34 @@ class ConceptPlannerAgent(BaseAgent):
                     fallback_temperature = min(float(fallback_temperature), float(settings.LLM_JSON_TEMPERATURE_FALLBACK))
                 except Exception:
                     fallback_temperature = float(settings.LLM_JSON_TEMPERATURE_FALLBACK)
+            fallback_remaining = int(self._remaining_budget(stage_deadline_ts))
+            if fallback_remaining < 5:
+                raise AgentError(
+                    f"ConceptPlanner fallback budget exhausted during {context_description}"
+                ) from (primary_err or Exception("empty content"))
+            fallback_started_at = time.monotonic()
+            self.logger.info(
+                "CONCEPT_MODEL_CALL stage=%s allocated_timeout=%ss remaining_budget_before=%.1fs fallback_used=%s",
+                context_description,
+                fallback_remaining,
+                self._remaining_budget(stage_deadline_ts),
+                True,
+            )
             response = await llm.chat_completion(
                 messages=messages,
                 model=fallback_model,
                 temperature=fallback_temperature,
                 max_tokens=fallback_max_tokens,
-                request_timeout=fallback_request_timeout,
+                request_timeout=fallback_remaining,
                 response_format=response_format,
                 thinking={"type": "disabled"},
+            )
+            self.logger.info(
+                "CONCEPT_MODEL_CALL_OK stage=%s elapsed=%.2fs remaining_budget_after=%.1fs fallback_used=%s",
+                context_description,
+                max(0.0, time.monotonic() - fallback_started_at),
+                self._remaining_budget(stage_deadline_ts),
+                True,
             )
         if not response or not response.get("content"):
             self.logger.error(

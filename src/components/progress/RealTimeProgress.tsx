@@ -1,151 +1,131 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn, formatTime, getProgressColor } from '@/lib/utils';
-import { 
-  Clock, 
-  CheckCircle, 
-  AlertCircle, 
-  Zap,
-  TrendingUp,
+import {
   Activity,
-  Timer,
-  Cpu,
+  AlertCircle,
+  CheckCircle,
+  Clock,
+  Film,
   Image as ImageIcon,
-  Film
+  Loader2,
+  Timer,
+  Zap,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useI18n } from '@/i18n/I18nProvider';
 
 interface ProgressMetrics {
   overallProgress: number;
-  activeAgents: number;
-  completedTasks: number;
-  totalTasks: number;
-  estimatedTimeRemaining: number;
+  activeNodes: number;
+  completedNodes: number;
+  totalNodes: number;
+  waitingGate: boolean;
   currentPhase: string;
 }
 
-const RealTimeProgress: React.FC = () => {
-  const { agents, currentRequest, ui, scenesPlanned, imagesGenerated, videosGenerated } = useAppStore();
-  const { t } = useI18n();
-  const [metrics, setMetrics] = useState<ProgressMetrics>({
-    overallProgress: 0,
-    activeAgents: 0,
-    completedTasks: 0,
-    totalTasks: 0,
-    estimatedTimeRemaining: 0,
-    currentPhase: t('progress.phase.initializing'),
-  });
+const nodeLabelMap: Record<string, string> = {
+  concept: '概念规划',
+  script: '脚本创作',
+  image: '图像生成',
+  video: '视频生成',
+  voice: '语音合成',
+  compose: '视频合成',
+  audio: '音频处理',
+  quality: '质量检查',
+};
 
+const RealTimeProgress: React.FC = () => {
+  const { agents, currentRequest, quickRuntime, scenesPlanned, imagesGenerated, videosGenerated } = useAppStore();
+  const { t } = useI18n();
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
 
-  // Update elapsed time every second
   useEffect(() => {
     const interval = setInterval(() => {
       setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
     }, 1000);
-
     return () => clearInterval(interval);
   }, [startTime]);
 
-  // Calculate metrics based on agent states
-  useEffect(() => {
-    const activeAgents = agents.filter(a => a.status === 'working' || a.status === 'thinking').length;
-    const completedAgents = agents.filter(a => a.status === 'completed').length;
-    const totalAgents = agents.length;
-    
-    const overallProgress = Math.round((completedAgents / totalAgents) * 100);
-    const estimatedTimeRemaining = agents
-      .filter(a => a.estimatedTime && a.status !== 'completed')
-      .reduce((acc, a) => Math.max(acc, a.estimatedTime || 0), 0);
+  const nodes = quickRuntime?.nodes || [];
+  const activeGate = quickRuntime?.active_gate;
 
-    // Determine current phase
+  const metrics = useMemo<ProgressMetrics>(() => {
+    const totalNodes = nodes.length;
+    const completedStatuses = ['completed', 'skipped'];
+    const activeStatuses = ['running', 'pending_gate', 'approved', 'needs_revision'];
+    const completedNodes = nodes.filter((node) => completedStatuses.indexOf(node.status) >= 0).length;
+    const activeNodes = nodes.filter((node) => activeStatuses.indexOf(node.status) >= 0).length;
+    const waitingGate = activeGate?.status === 'awaiting_human';
+    const inFlightWeight = waitingGate || activeNodes > 0 ? 0.5 : 0;
+    const overallProgress = totalNodes > 0 ? Math.round(((completedNodes + inFlightWeight) / totalNodes) * 100) : 0;
+
     let currentPhase = t('progress.phase.initializing');
-    if (completedAgents === totalAgents) {
+    if (quickRuntime?.status === 'failed') {
+      currentPhase = '运行失败';
+    } else if (quickRuntime?.status === 'completed') {
       currentPhase = t('progress.phase.completed');
-    } else if (activeAgents > 0) {
-      const workingAgent = agents.find(a => a.status === 'working');
-      if (workingAgent) {
-        currentPhase = workingAgent.name.replace(' Agent', '');
-      }
+    } else if (waitingGate) {
+      currentPhase = '等待脚本审核';
+    } else if (quickRuntime?.current_node_key) {
+      currentPhase = nodeLabelMap[quickRuntime.current_node_key] || quickRuntime.current_node_key;
     }
 
-    setMetrics({
+    return {
       overallProgress,
-      activeAgents,
-      completedTasks: completedAgents,
-      totalTasks: totalAgents,
-      estimatedTimeRemaining,
+      activeNodes,
+      completedNodes,
+      totalNodes,
+      waitingGate,
       currentPhase,
-    });
-  }, [agents]);
+    };
+  }, [activeGate?.status, nodes, quickRuntime?.current_node_key, quickRuntime?.status, t]);
 
   if (!currentRequest) {
     return null;
   }
 
-  const progressSteps = [
-    { name: t('progress.step.concept'), agent: 'concept-generator', icon: Zap },
-    { name: t('progress.step.script'), agent: 'script-writer', icon: CheckCircle },
-    { name: t('progress.step.visual'), agent: 'image-generator', icon: CheckCircle },
-    { name: t('progress.step.video'), agent: 'video-generator', icon: CheckCircle },
-    { name: t('progress.step.voice'), agent: 'voice-synthesizer', icon: CheckCircle },
-    { name: t('progress.step.quality'), agent: 'quality-controller', icon: CheckCircle },
-  ];
+  const progressSteps = nodes.map((node) => {
+    const gateBound = activeGate?.node_id === node.id && activeGate?.status === 'awaiting_human';
+    const status = gateBound ? 'pending_gate' : node.status;
+    return {
+      key: node.node_key,
+      name: nodeLabelMap[node.node_key] || node.node_key,
+      status,
+      isCurrent: quickRuntime?.current_node_key === node.node_key,
+    };
+  });
 
-  const getStepStatus = (agentId: string) => {
-    const agent = agents.find(a => a.id === agentId);
-    return agent?.status || 'idle';
-  };
-
-  const getStepProgress = (agentId: string) => {
-    const agent = agents.find(a => a.id === agentId);
-    return agent?.progress || 0;
-  };
+  const telemetryAgents = agents.filter((agent) => agent.status === 'working' || agent.status === 'thinking');
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="-mx-6 px-6">
         <div className="pt-2 pb-3 border-b border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900">
-            {t('progress.title')}
-          </h3>
-          <p className="text-sm text-gray-600">
-            {t('progress.subtitle')}{currentRequest.title}
-          </p>
+          <h3 className="text-lg font-semibold text-gray-900">{t('progress.title')}</h3>
+          <p className="text-sm text-gray-600">{t('progress.subtitle')}{currentRequest.title}</p>
         </div>
       </div>
 
-      {/* Overall Progress */}
       <div className="bg-gradient-to-r from-primary-50 to-accent-50 rounded-xl p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h4 className="text-xl font-semibold text-gray-900">
-              总体完成度 {metrics.overallProgress}%
-            </h4>
-            <p className="text-gray-600">
-              {metrics.currentPhase}
-            </p>
-            {typeof scenesPlanned === 'number' && (
-              <p className="text-gray-600 mt-1">已规划场景：{scenesPlanned}</p>
-            )}
+            <h4 className="text-xl font-semibold text-gray-900">总体完成度 {metrics.overallProgress}%</h4>
+            <p className="text-gray-600">{metrics.currentPhase}</p>
+            {metrics.waitingGate && <p className="text-amber-700 mt-1">流程已暂停，等待脚本审核后继续。</p>}
+            {typeof scenesPlanned === 'number' && <p className="text-gray-600 mt-1">已规划场景：{scenesPlanned}</p>}
           </div>
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-4 flex-wrap justify-end">
             <div className="flex items-center space-x-2">
               <Activity className="w-5 h-5 text-green-500" />
-              <span className="text-sm font-medium text-gray-700">
-                活跃智能体 {metrics.activeAgents}
-              </span>
+              <span className="text-sm font-medium text-gray-700">活跃节点 {metrics.activeNodes}</span>
             </div>
             <div className="flex items-center space-x-2">
               <CheckCircle className="w-5 h-5 text-blue-500" />
-              <span className="text-sm font-medium text-gray-700">
-                {metrics.completedTasks}/{metrics.totalTasks} {t('progress.tasks_unit')}
-              </span>
+              <span className="text-sm font-medium text-gray-700">{metrics.completedNodes}/{metrics.totalNodes} 节点</span>
             </div>
             {typeof imagesGenerated === 'number' && (
               <div className="flex items-center space-x-2">
@@ -162,179 +142,102 @@ const RealTimeProgress: React.FC = () => {
           </div>
         </div>
 
-        {/* Progress Bar */}
         <div className="relative">
           <div className="w-full bg-white bg-opacity-50 rounded-full h-3 overflow-hidden">
             <motion.div
-              className={cn(
-                "h-full rounded-full transition-all duration-500",
-                getProgressColor(metrics.overallProgress)
-              )}
+              className={cn('h-full rounded-full transition-all duration-500', getProgressColor(metrics.overallProgress))}
               initial={{ width: 0 }}
               animate={{ width: `${metrics.overallProgress}%` }}
-              transition={{ duration: 1, ease: "easeOut" }}
+              transition={{ duration: 1, ease: 'easeOut' }}
             />
-          </div>
-          
-          {/* Progress Markers */}
-          <div className="absolute inset-0 flex justify-between items-center px-1">
-            {[0, 20, 40, 60, 80, 100].map((mark) => (
-              <div
-                key={mark}
-                className={cn(
-                  "w-1 h-3 rounded-full",
-                  metrics.overallProgress >= mark 
-                    ? "bg-white bg-opacity-80" 
-                    : "bg-gray-400 bg-opacity-30"
-                )}
-              />
-            ))}
           </div>
         </div>
       </div>
 
-      {/* Step Progress */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+            <Clock className="w-4 h-4" /> 当前 session
+          </div>
+          <div className="text-lg font-semibold text-gray-900">{quickRuntime?.status || 'queued'}</div>
+          {quickRuntime?.current_node_key && (
+            <div className="text-sm text-gray-600 mt-1">当前节点：{nodeLabelMap[quickRuntime.current_node_key] || quickRuntime.current_node_key}</div>
+          )}
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+            <Timer className="w-4 h-4" /> 已运行时长
+          </div>
+          <div className="text-lg font-semibold text-gray-900">{formatTime(elapsedTime)}</div>
+          {metrics.waitingGate && <div className="text-sm text-amber-700 mt-1">已进入人工审核等待</div>}
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+            <Zap className="w-4 h-4" /> 遥测
+          </div>
+          <div className="text-lg font-semibold text-gray-900">{telemetryAgents.length}</div>
+          <div className="text-sm text-gray-600 mt-1">WS 遥测仅作辅助，不再驱动主流程节点</div>
+        </div>
+      </div>
+
       <div className="space-y-3">
         <h4 className="font-medium text-gray-900">{t('progress.pipeline')}</h4>
         <div className="space-y-2">
-          {progressSteps.map((step, index) => {
-            const status = getStepStatus(step.agent);
-            const progress = getStepProgress(step.agent);
-            const Icon = step.icon;
-            
-            return (
-              <motion.div
-                key={step.agent}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: index * 0.05 }}
-                className={cn(
-                  "flex items-center space-x-4 p-4 rounded-lg border transition-all",
-                  {
-                    'bg-blue-50 border-blue-200': status === 'thinking',
-                    'bg-green-50 border-green-200': status === 'working',
-                    'bg-green-100 border-green-300': status === 'completed',
-                    'bg-red-50 border-red-200': status === 'error',
-                    'bg-gray-50 border-gray-200': status === 'idle' || status === 'waiting',
-                  }
+          {progressSteps.map((step, index) => (
+            <motion.div
+              key={step.key}
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: index * 0.05 }}
+              className={cn(
+                'flex items-center space-x-4 p-4 rounded-lg border transition-all',
+                {
+                  'bg-blue-50 border-blue-200': step.status === 'running',
+                  'bg-amber-50 border-amber-200': step.status === 'pending_gate',
+                  'bg-emerald-50 border-emerald-200': step.status === 'approved',
+                  'bg-orange-50 border-orange-200': step.status === 'needs_revision',
+                  'bg-green-100 border-green-300': step.status === 'completed',
+                  'bg-red-50 border-red-200': step.status === 'failed',
+                  'bg-zinc-50 border-zinc-200': step.status === 'queued' || step.status === 'skipped' || step.status === 'stale',
+                },
+                step.isCurrent && 'ring-2 ring-primary-300'
+              )}
+            >
+              <div className={cn(
+                'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center',
+                {
+                  'bg-blue-500': step.status === 'running',
+                  'bg-amber-500': step.status === 'pending_gate',
+                  'bg-emerald-500': step.status === 'approved',
+                  'bg-orange-500': step.status === 'needs_revision',
+                  'bg-green-600': step.status === 'completed',
+                  'bg-red-500': step.status === 'failed',
+                  'bg-gray-400': step.status === 'queued' || step.status === 'skipped' || step.status === 'stale',
+                }
+              )}>
+                {step.status === 'completed' || step.status === 'approved' ? (
+                  <CheckCircle className="w-5 h-5 text-white" />
+                ) : step.status === 'failed' ? (
+                  <AlertCircle className="w-5 h-5 text-white" />
+                ) : step.status === 'running' ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Clock className="w-5 h-5 text-white" />
                 )}
-              >
-                {/* Step Icon */}
-                <div className={cn(
-                  "flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center",
-                  {
-                    'bg-blue-500': status === 'thinking',
-                    'bg-green-500': status === 'working',
-                    'bg-green-600': status === 'completed',
-                    'bg-red-500': status === 'error',
-                    'bg-gray-400': status === 'idle' || status === 'waiting',
-                  }
-                )}>
-                  {status === 'completed' ? (
-                    <CheckCircle className="w-5 h-5 text-white" />
-                  ) : status === 'error' ? (
-                    <AlertCircle className="w-5 h-5 text-white" />
-                  ) : (
-                    <Icon className={cn(
-                      "w-5 h-5 text-white",
-                      (status === 'working' || status === 'thinking') && "animate-pulse"
-                    )} />
-                  )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between mb-1">
+                  <h5 className="font-medium text-gray-900">{step.name}</h5>
+                  <span className="text-xs font-medium capitalize px-2 py-1 rounded-full bg-white/70 text-gray-700">
+                    {step.status}
+                  </span>
                 </div>
-
-                {/* Step Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <h5 className="font-medium text-gray-900">
-                      {step.name}
-                    </h5>
-                    <span className={cn(
-                      "text-xs font-medium capitalize px-2 py-1 rounded-full",
-                      {
-                        'bg-blue-100 text-blue-700': status === 'thinking',
-                        'bg-green-100 text-green-700': status === 'working',
-                        'bg-green-200 text-green-800': status === 'completed',
-                        'bg-red-100 text-red-700': status === 'error',
-                        'bg-gray-100 text-gray-600': status === 'idle' || status === 'waiting',
-                      }
-                    )}>
-                      {t(`status.${status}`)}
-                    </span>
-                  </div>
-
-                  {/* Progress Bar for Active Steps */}
-                  {(status === 'working' || status === 'thinking') && progress > 0 && (
-                    <div className="w-full bg-gray-200 rounded-full h-1.5">
-                      <motion.div
-                        className="bg-primary-500 h-1.5 rounded-full"
-                        initial={{ width: 0 }}
-                        animate={{ width: `${progress}%` }}
-                        transition={{ duration: 0.5 }}
-                      />
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            );
-          })}
+                {step.isCurrent && <p className="text-sm text-gray-600">当前主线正在该节点运行或等待恢复。</p>}
+              </div>
+            </motion.div>
+          ))}
         </div>
-      </div>
-
-      {/* Performance Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="flex items-center space-x-2 mb-2">
-            <Cpu className="w-5 h-5 text-primary-500" />
-            <span className="text-sm font-medium text-gray-700">{t('metrics.cpu')}</span>
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {Math.round(metrics.activeAgents * 25)}%
-          </div>
-        </div>
-
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="flex items-center space-x-2 mb-2">
-            <TrendingUp className="w-5 h-5 text-green-500" />
-            <span className="text-sm font-medium text-gray-700">{t('metrics.efficiency')}</span>
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {Math.max(85, Math.round(100 - (elapsedTime / 10)))}%
-          </div>
-        </div>
-
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="flex items-center space-x-2 mb-2">
-            <Activity className="w-5 h-5 text-blue-500" />
-            <span className="text-sm font-medium text-gray-700">{t('metrics.throughput')}</span>
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {metrics.completedTasks * 2}/min
-          </div>
-        </div>
-
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="flex items-center space-x-2 mb-2">
-            <Zap className="w-5 h-5 text-yellow-500" />
-            <span className="text-sm font-medium text-gray-700">{t('metrics.queue')}</span>
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {Math.max(0, metrics.totalTasks - metrics.completedTasks - metrics.activeAgents)}
-          </div>
-        </div>
-      </div>
-
-      {/* Runtime footer */}
-      <div className="pt-4 border-t border-gray-100 text-sm text-gray-600 flex flex-wrap gap-4">
-        <div className="flex items-center space-x-2">
-          <Timer className="w-4 h-4" />
-          <span>{formatTime(elapsedTime)} {t('progress.elapsed')}</span>
-        </div>
-        {metrics.estimatedTimeRemaining > 0 && (
-          <div className="flex items-center space-x-2">
-            <Clock className="w-4 h-4" />
-            <span>~{formatTime(metrics.estimatedTimeRemaining)} {t('progress.remaining')}</span>
-          </div>
-        )}
       </div>
     </div>
   );

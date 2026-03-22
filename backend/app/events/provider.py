@@ -23,3 +23,11 @@ def set_event_bus(bus: EventBus) -> None:
     global _event_bus
     _event_bus = bus
     logger.info("Event bus overridden with custom implementation: %s", type(bus).__name__)
+
+
+def reset_event_bus() -> EventBus:
+    """Replace the process-local bus with a fresh in-memory instance."""
+    bus = InMemoryEventBus()
+    set_event_bus(bus)
+    logger.info("Event bus reset to a fresh InMemoryEventBus instance")
+    return bus

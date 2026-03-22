@@ -148,8 +148,8 @@ MINIMAX_API_KEY=your_minimax_key     # MiniMax abab-video
 STORAGE_TYPE=local
 MAX_FILE_SIZE=100  # MB
 
-# Audio mixing strategy (defaults shown)
-AUDIO_MIXING_MODE=composer   # composer | agent
+# Deprecated: kept only for backward env compatibility, no longer drives orchestrator decisions
+AUDIO_MIXING_MODE=composer   # deprecated
 AUDIO_FADE_IN_DURATION=1.0
 AUDIO_FADE_OUT_DURATION=1.0
 ```

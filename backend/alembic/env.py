@@ -7,7 +7,16 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 # Import your models here for autogenerate to work
-from app.models import Task, Scene, Resource
+from app.models import (
+    Task,
+    Scene,
+    Resource,
+    WorkflowSession,
+    WorkflowNodeState,
+    WorkflowNodeAttempt,
+    WorkflowGate,
+    WorkflowGateDecision,
+)
 from app.models.base import BaseModel
 
 # this is the Alembic Config object, which provides

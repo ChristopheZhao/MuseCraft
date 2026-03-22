@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     DEBUG: bool = config("DEBUG", default=False, cast=bool)
     SECRET_KEY: str = config("SECRET_KEY", default="your-secret-key-here")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = config("ACCESS_TOKEN_EXPIRE_MINUTES", default=30, cast=int)
+    TOOL_REGISTRY_LOG_LEVEL: str = config("TOOL_REGISTRY_LOG_LEVEL", default="WARNING")
+    HTTPX_LOG_LEVEL: str = config("HTTPX_LOG_LEVEL", default="WARNING")
+    SUPPRESS_UVICORN_RUNTIME_POLLING_ACCESS_LOGS: bool = config(
+        "SUPPRESS_UVICORN_RUNTIME_POLLING_ACCESS_LOGS",
+        default=True,
+        cast=bool,
+    )
 
     # API Server Configuration
     API_HOST: str = config("API_HOST", default="0.0.0.0")
@@ -316,6 +323,11 @@ class Settings(BaseSettings):
     # Celery Settings
     CELERY_BROKER_URL: str = config("CELERY_BROKER_URL", default="redis://localhost:6379/1")
     CELERY_RESULT_BACKEND: str = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379/2")
+    TASKS_API_ENABLE_IN_PROCESS_RUNNER: bool = config(
+        "TASKS_API_ENABLE_IN_PROCESS_RUNNER",
+        default=False,
+        cast=bool,
+    )
     
     # WebSocket Settings
     WEBSOCKET_PATH: str = config("WEBSOCKET_PATH", default="/ws")
@@ -365,22 +377,17 @@ class Settings(BaseSettings):
     # Global LLM token tiers (standard vs thinking)
     LLM_MAX_TOKENS_STANDARD: int = config("LLM_MAX_TOKENS_STANDARD", default=12800, cast=int)
     LLM_MAX_TOKENS_THINKING: int = config("LLM_MAX_TOKENS_THINKING", default=20000, cast=int)
-    # LLM回退超时策略（配置优先，避免代码常量）
-    LLM_PRIMARY_TIMEOUT_RATIO: float = config("LLM_PRIMARY_TIMEOUT_RATIO", default=0.5, cast=float)  # 主调占Agent超时比例
-    LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)
-    LLM_FALLBACK_TIMEOUT_MAX: int = config("LLM_FALLBACK_TIMEOUT_MAX", default=90, cast=int)
+    # LLM request budgeting / fallback guards
+    LLM_PRIMARY_TIMEOUT_RATIO: float = config("LLM_PRIMARY_TIMEOUT_RATIO", default=0.5, cast=float)  # 首次代理请求可消费的总预算比例
+    LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)  # 触发直连回退所需的最小剩余预算
     LLM_REQUEST_SAFETY_MARGIN: int = config("LLM_REQUEST_SAFETY_MARGIN", default=5, cast=int)
     # 结构化输出温度（response_format=json_object 等）：优先稳定性，避免格式漂移
     LLM_JSON_TEMPERATURE: float = config("LLM_JSON_TEMPERATURE", default=0.2, cast=float)
     LLM_JSON_TEMPERATURE_FALLBACK: float = config("LLM_JSON_TEMPERATURE_FALLBACK", default=0.2, cast=float)
 
-    # Audio mixing strategy
-    AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # composer | agent
-    # Video-audio orchestration strategy (capability-adaptive):
-    # - adaptive: provider supports native audio -> skip AUDIO_GENERATOR; otherwise run AUDIO_GENERATOR
-    # - mas_only: always run AUDIO_GENERATOR and disable provider native audio path
-    # - provider_only: prefer provider native audio; if provider doesn't support it, fallback to MAS audio agent
-    VIDEO_AUDIO_STRATEGY: str = config("VIDEO_AUDIO_STRATEGY", default="adaptive")
+    # Deprecated (no longer drives orchestrator decisions; kept only for backward env compatibility).
+    AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # deprecated
+    VIDEO_AUDIO_STRATEGY: str = config("VIDEO_AUDIO_STRATEGY", default="adaptive")  # deprecated
     AUDIO_FADE_IN_DURATION: float = config("AUDIO_FADE_IN_DURATION", default=1.0, cast=float)
     AUDIO_FADE_OUT_DURATION: float = config("AUDIO_FADE_OUT_DURATION", default=1.0, cast=float)
     # Image/Video analysis + prompt generation token budgets
@@ -438,6 +445,12 @@ class Settings(BaseSettings):
     ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
     # Concept Planner agent-level timeout（配置化，避免代码常量）
     CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=360, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SKELETON: int = config("CONCEPT_STAGE_TIMEOUT_SKELETON", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_STYLE: int = config("CONCEPT_STAGE_TIMEOUT_STYLE", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_VOICE: int = config("CONCEPT_STAGE_TIMEOUT_VOICE", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SCENE_BATCH: int = config("CONCEPT_STAGE_TIMEOUT_SCENE_BATCH", default=90, cast=int)
+    CONCEPT_STAGE_TIMEOUT_MIN_FLOOR: int = config("CONCEPT_STAGE_TIMEOUT_MIN_FLOOR", default=15, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SCENE_BATCH_FLOOR: int = config("CONCEPT_STAGE_TIMEOUT_SCENE_BATCH_FLOOR", default=45, cast=int)
     
     # Video continuity persistence (domain policy)
     VIDEO_PERSIST_LAST_FRAME: bool = config("VIDEO_PERSIST_LAST_FRAME", default=False, cast=bool)

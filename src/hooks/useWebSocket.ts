@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { WebSocketMessage, MessageType, Agent, GenerationResult, AgentStatus } from '@/types';
+import { ApiClient } from '@/lib/api';
 import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { generateId } from '@/lib/utils';
 
@@ -66,6 +67,8 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     addNotification,
     setCurrentStep,
     currentRequest,
+    setQuickRuntime,
+    setModal,
   } = useAppStore();
 
   const eventStateToAgentStatus: Record<string, AgentStatus> = {
@@ -98,6 +101,17 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     const key = (agentType || '').toLowerCase();
     return agentTypeMap[key] || agentType;
   };
+
+  const refreshRuntimeView = useCallback(async () => {
+    const taskId = currentRequest?.id;
+    if (!taskId) return;
+    try {
+      const runtime = await ApiClient.getTaskRuntime(taskId);
+      setQuickRuntime(runtime);
+    } catch {
+      // polling remains the fallback
+    }
+  }, [currentRequest?.id, setQuickRuntime]);
 
   const connect = useCallback(() => {
     try {
@@ -134,6 +148,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           ws.current?.send(
             JSON.stringify({ type: 'subscribe_task', task_id: currentRequest.id, timestamp: new Date() })
           );
+          void refreshRuntimeView();
         }
       };
 
@@ -190,7 +205,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       console.error('Failed to create WebSocket connection:', error);
       setWSConnected(false);
     }
-  }, [url, reconnectInterval, maxReconnectAttempts, onOpen, onClose, onError, setWSConnected, addNotification, currentRequest]);
+  }, [url, reconnectInterval, maxReconnectAttempts, onOpen, onClose, onError, setWSConnected, addNotification, currentRequest, refreshRuntimeView]);
 
   const disconnect = useCallback(() => {
     isManualClose.current = true;
@@ -368,8 +383,15 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       message: '多智能体协作已完成，进入结果预览',
       autoClose: 5000,
     });
-    setCurrentStep('review' as any);
-  }, [addNotification, setCurrentStep]);
+    setModal({
+      type: 'result-ready',
+      data: {},
+      onClose: () => {
+        setCurrentStep('review' as any);
+        setModal(null);
+      },
+    });
+  }, [addNotification, setCurrentStep, setModal]);
 
   const handleWorkflowFailed = useCallback((msg: any) => {
     addNotification({
@@ -418,7 +440,8 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     } catch (e) {
       console.warn('Failed to handle event.state:', e);
     }
-  }, [handleConceptPlanReady, handleImageAssetsReady, handleVideoAssetsReady, handleWorkflowCompleted, handleWorkflowFailed, updateAgent]);
+    void refreshRuntimeView();
+  }, [handleConceptPlanReady, handleImageAssetsReady, handleVideoAssetsReady, handleWorkflowCompleted, handleWorkflowFailed, updateAgent, refreshRuntimeView]);
 
   const handleConnectionEstablished = useCallback((msg: any) => {
     setWSConnected(true);
@@ -544,8 +567,9 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       ws.current?.send(
         JSON.stringify({ type: 'subscribe_task', task_id: currentRequest.id, timestamp: new Date() })
       );
+      void refreshRuntimeView();
     }
-  }, [currentRequest, sendMessage]);
+  }, [currentRequest, sendMessage, refreshRuntimeView]);
 
   return {
     sendMessage,

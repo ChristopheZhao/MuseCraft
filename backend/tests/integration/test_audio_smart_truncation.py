@@ -24,6 +24,7 @@ async def test_audio_smart_truncation(tmp_path):
         from app.core.workflow_state import workflow_manager, SceneData  # type: ignore
         from app.agents.audio_generator import AudioGeneratorAgent  # type: ignore
         from app.agents.video_composer import VideoComposerAgent  # type: ignore
+        from app.services.video_composer_execution_contract import build_video_composer_execution_contract  # type: ignore
         from app.agents.tools import register_default_tools  # type: ignore
         from app.agents.tools.tool_registry import get_tool_registry  # type: ignore
     except ModuleNotFoundError:
@@ -33,6 +34,7 @@ async def test_audio_smart_truncation(tmp_path):
         from backend.app.core.workflow_state import workflow_manager, SceneData
         from backend.app.agents.audio_generator import AudioGeneratorAgent
         from backend.app.agents.video_composer import VideoComposerAgent
+        from backend.app.services.video_composer_execution_contract import build_video_composer_execution_contract
         from backend.app.agents.tools import register_default_tools
         from backend.app.agents.tools.tool_registry import get_tool_registry
 
@@ -104,7 +106,18 @@ async def test_audio_smart_truncation(tmp_path):
 
         # Composer add_bgm
         comp = VideoComposerAgent()
-        comp_out = await comp.execute(task=task, input_data={"workflow_state_id": ws.task_id, "add_bgm": True}, db=db, execution_order=2)
+        comp_out = await comp.execute(
+            task=task,
+            input_data={
+                "workflow_state_id": ws.task_id,
+                "execution_contract": build_video_composer_execution_contract(
+                    workflow_state_id=ws.task_id,
+                    compose_mode="bgm",
+                ),
+            },
+            db=db,
+            execution_order=2,
+        )
 
         # Restore
         registry.get_tool = orig_get  # type: ignore

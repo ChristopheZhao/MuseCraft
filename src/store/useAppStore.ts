@@ -7,7 +7,8 @@ import {
   UIState, 
   Notification,
   ModalState,
-  GenerationStep 
+  GenerationStep,
+  TaskRuntimeView,
 } from '@/types';
 
 interface AppState {
@@ -22,6 +23,7 @@ interface AppState {
   
   // 生成结果
   results: GenerationResult[];
+  quickRuntime: TaskRuntimeView | null;
   
   // UI状态
   ui: UIState;
@@ -42,6 +44,7 @@ interface AppState {
   addResult: (result: GenerationResult) => void;
   updateResult: (resultId: string, updates: Partial<GenerationResult>) => void;
   setCurrentStep: (step: GenerationStep) => void;
+  setQuickRuntime: (runtime: TaskRuntimeView | null) => void;
   addNotification: (notification: Omit<Notification, 'id' | 'timestamp'>) => void;
   removeNotification: (id: string) => void;
   setModal: (modal: ModalState | null) => void;
@@ -140,6 +143,7 @@ export const useAppStore = create<AppState>()(
       mode: 'quick',
       agents: initialAgents,
       results: [],
+      quickRuntime: null,
       ui: initialUIState,
       scenesPlanned: null,
       imagesGenerated: null,
@@ -179,6 +183,9 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           ui: { ...state.ui, currentStep: step },
         }), false, 'setCurrentStep'),
+
+      setQuickRuntime: (runtime) =>
+        set({ quickRuntime: runtime }, false, 'setQuickRuntime'),
 
       addNotification: (notification) => {
         const newNotification: Notification = {
@@ -243,6 +250,7 @@ export const useAppStore = create<AppState>()(
           finalVideoUrl: undefined,
           agents: initialAgents,
           results: [],
+          quickRuntime: null,
           ui: initialUIState,
           wsConnected: false,
         }, false, 'reset'),

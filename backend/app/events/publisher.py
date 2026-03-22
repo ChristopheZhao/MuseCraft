@@ -17,6 +17,9 @@ async def publish_event(
     execution_order: Optional[int] = None,
     task_db_id: Optional[int] = None,
     execution_id: Optional[str] = None,
+    route_source: Optional[str] = None,
+    route_id: Optional[str] = None,
+    decision_reason: Optional[str] = None,
     extra_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     merged_payload = dict(payload or {})
@@ -26,6 +29,12 @@ async def publish_event(
         merged_payload["execution_order"] = execution_order
     if execution_id:
         merged_payload.setdefault("execution_id", execution_id)
+    if isinstance(route_source, str) and route_source.strip():
+        merged_payload.setdefault("route_source", route_source.strip())
+    if isinstance(route_id, str) and route_id.strip():
+        merged_payload.setdefault("route_id", route_id.strip())
+    if isinstance(decision_reason, str) and decision_reason.strip():
+        merged_payload.setdefault("decision_reason", decision_reason.strip())
     if extra_payload:
         merged_payload.update(extra_payload)
 

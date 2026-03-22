@@ -7,6 +7,7 @@ import sys
 import subprocess
 import signal
 import time
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -183,6 +184,58 @@ def run_migrations():
     
     return True
 
+
+def _start_long_lived_process(
+    cmd,
+    *,
+    cwd: Path,
+    env: dict,
+    label: str,
+    follow_logs_env_var: str,
+):
+    """Start a long-lived process without leaving stdout/stderr pipes undrained."""
+
+    follow_logs = os.getenv(follow_logs_env_var, "0") == "1"
+    popen_kwargs = {
+        "cwd": cwd,
+        "env": env,
+        "preexec_fn": os.setsid,
+    }
+
+    if follow_logs:
+        popen_kwargs.update(
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+        )
+
+    process = subprocess.Popen(cmd, **popen_kwargs)
+
+    time.sleep(2)
+
+    if process.poll() is None:
+        if follow_logs:
+            print(f"[dev] {label} logs forwarded to parent stdout ({follow_logs_env_var}=1)")
+
+            def _forward_stream():
+                assert process.stdout is not None
+                for line in process.stdout:
+                    print(line, end="")
+
+            threading.Thread(target=_forward_stream, daemon=True).start()
+        else:
+            print(f"[dev] {label} logs inherited by parent stdout/stderr")
+        return process
+
+    if follow_logs:
+        output, _ = process.communicate()
+        print(f"✗ {label} failed to start")
+        print("output:", output)
+    else:
+        print(f"✗ {label} failed to start; see console output above for details")
+    return None
+
 def start_celery_worker():
     """Start Celery worker in background"""
     
@@ -237,27 +290,17 @@ def start_celery_worker():
     
     try:
         env = _build_env_with_no_proxy()
-        process = subprocess.Popen(
+        process = _start_long_lived_process(
             celery_cmd,
             cwd=Path(__file__).parent.parent,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             env=env,
-            preexec_fn=os.setsid  # create new process group for clean shutdown
+            label="Celery worker",
+            follow_logs_env_var="FOLLOW_CELERY_LOGS",
         )
-        
-        # Give it a moment to start
-        time.sleep(2)
-        
-        if process.poll() is None:
+        if process is not None:
             print("✓ Celery worker started")
             return process
-        else:
-            stdout, stderr = process.communicate()
-            print(f"✗ Celery worker failed to start")
-            print("stdout:", stdout.decode())
-            print("stderr:", stderr.decode())
-            return None
+        return None
     except Exception as e:
         print(f"✗ Failed to start Celery worker: {e}")
         return None
@@ -277,27 +320,17 @@ def start_celery_beat():
     
     try:
         env = _build_env_with_no_proxy()
-        process = subprocess.Popen(
+        process = _start_long_lived_process(
             beat_cmd,
             cwd=Path(__file__).parent.parent,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             env=env,
-            preexec_fn=os.setsid
+            label="Celery beat",
+            follow_logs_env_var="FOLLOW_CELERY_LOGS",
         )
-        
-        # Give it a moment to start
-        time.sleep(2)
-        
-        if process.poll() is None:
+        if process is not None:
             print("✓ Celery beat started")
             return process
-        else:
-            stdout, stderr = process.communicate()
-            print(f"✗ Celery beat failed to start")
-            print("stdout:", stdout.decode())
-            print("stderr:", stderr.decode())
-            return None
+        return None
     except Exception as e:
         print(f"✗ Failed to start Celery beat: {e}")
         return None

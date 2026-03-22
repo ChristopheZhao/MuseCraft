@@ -435,6 +435,56 @@ class BaseAgent(ABC):
         except Exception as e:
             self.logger.error("Artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
             return None
+
+    @staticmethod
+    def _normalize_orchestration_completion_state(value: Any, *, success: bool) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"complete", "completed"}:
+            return "completed"
+        if raw in {"partial", "blocked", "error", "failed", "max_iter_reached"}:
+            return raw
+        return "completed" if success else "partial"
+
+    def _build_default_orchestration_report(
+        self,
+        output_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        success = bool(output_data.get("success", True))
+        completed_reason = str(
+            output_data.get("completed_reason")
+            or output_data.get("loop_end_reason")
+            or ""
+        ).strip()
+        reflection_summary = str(output_data.get("reflection_summary") or "").strip()
+        completion_state = self._normalize_orchestration_completion_state(
+            output_data.get("subtask_state"),
+            success=success,
+        )
+        reflection: Dict[str, Any] = {
+            "completion_state": completion_state,
+            "reported_gaps": [completed_reason] if completed_reason and not success else [],
+            "reported_hints": [],
+        }
+        if reflection_summary:
+            reflection["summary"] = reflection_summary
+        return {
+            "status": "completed" if success else "partial",
+            "boundary_event": "",
+            "gate_triggers": [],
+            "artifacts": [],
+            "reflection": reflection,
+        }
+
+    def _ensure_orchestration_report(self, output_data: Any) -> Any:
+        if self.agent_type == AgentType.ORCHESTRATOR or not isinstance(output_data, dict):
+            return output_data
+        if isinstance(output_data.get("orchestration_report"), dict):
+            return output_data
+        enriched_output = dict(output_data)
+        enriched_output["orchestration_report"] = self._build_default_orchestration_report(
+            enriched_output
+        )
+        return enriched_output
     
     async def execute(
         self,
@@ -525,6 +575,8 @@ class BaseAgent(ABC):
         try:
             # Start execution (in-memory)
             exec_state.status = "running"
+            if self.agent_type == AgentType.ORCHESTRATOR:
+                self.logger.info("EXEC_DIAG(orchestrator): before publish_state_event(started)")
             await publish_state_event(
                 status="running",
                 extra_payload={
@@ -540,7 +592,12 @@ class BaseAgent(ABC):
                 execution_order=exec_state.execution_order,
                 execution_id=exec_state.id,
             )
+            if self.agent_type == AgentType.ORCHESTRATOR:
+                self.logger.info("EXEC_DIAG(orchestrator): after publish_state_event(started)")
+                self.logger.info("EXEC_DIAG(orchestrator): before send_progress_update(started)")
             await self._send_progress_update("started")
+            if self.agent_type == AgentType.ORCHESTRATOR:
+                self.logger.info("EXEC_DIAG(orchestrator): after send_progress_update(started)")
             self.logger.info(f"Starting {self.agent_name} for task {task.task_id}")
 
             # Execute with timeout
@@ -548,6 +605,7 @@ class BaseAgent(ABC):
                 self._execute_impl(task, input_data, db),
                 timeout=self.timeout_seconds
             )
+            output_data = self._ensure_orchestration_report(output_data)
             sanitized_output = _to_jsonable(output_data)
 
             # Complete execution (in-memory)

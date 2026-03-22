@@ -2,7 +2,6 @@
 FastAPI main application
 """
 import logging
-import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,18 +11,14 @@ from fastapi.exceptions import RequestValidationError
 import os
 
 from .core.config import settings
-from .core.logging_utils import configure_mas_logging
+from .core.logging_config import configure_logging
 from .api.v1.api import api_router
 from .services.websocket import websocket_manager
 from .events.setup import setup_event_listeners
 
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-configure_mas_logging()
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -93,23 +88,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Request logging middleware for debugging (DISABLED - causing hanging)
-# @app.middleware("http")
-# async def log_requests(request: Request, call_next):
-#     """Log all requests for debugging"""
-#     if request.method == "POST":
-#         # Read body for POST requests (always log, not just in DEBUG)
-#         body = await request.body()
-#         logger.info(f"POST {request.url.path} - Request body: {body.decode('utf-8') if body else 'empty'}")
-#         # Recreate request with body
-#         import io
-#         request._body = body
-#         request._stream = io.BytesIO(body)
-#     
-#     response = await call_next(request)
-#     return response
-
 
 # Exception handlers
 @app.exception_handler(RequestValidationError)
@@ -204,35 +182,14 @@ async def periodic_websocket_cleanup():
             logger.error(f"WebSocket cleanup error: {str(e)}")
 
 
-# Middleware for request logging
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all HTTP requests"""
-    
-    start_time = time.time()
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Log request
-    process_time = time.time() - start_time
-    logger.info(
-        f"{request.method} {request.url.path} - "
-        f"Status: {response.status_code} - "
-        f"Time: {process_time:.3f}s"
-    )
-    
-    return response
-
-
 if __name__ == "__main__":
     import uvicorn
-    import time
     
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
         reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
+        log_level=settings.LOG_LEVEL.lower(),
+        log_config=None,
     )

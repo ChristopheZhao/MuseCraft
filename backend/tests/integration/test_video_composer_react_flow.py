@@ -31,6 +31,7 @@ from app.agents.utils.memory_helpers import (
 from app.agents.video_composer import VideoComposerAgent
 from app.models import Task, TaskType
 from app.services.memory_provider import build_memory_services
+from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
 def _run_cmd(cmd: list[str]) -> None:
@@ -164,7 +165,10 @@ async def test_video_composer_react_flow() -> None:
     input_data = {
         "workflow_state_id": wf_id,
         "user_prompt": "mix bgm",
-        "add_bgm": True,
+        "execution_contract": build_video_composer_execution_contract(
+            workflow_state_id=wf_id,
+            compose_mode="bgm",
+        ),
         "static_context": static_context,
     }
 

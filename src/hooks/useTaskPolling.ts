@@ -14,15 +14,16 @@ import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 export function useTaskPolling() {
   const {
     currentRequest,
-    wsConnected,
     setCurrentStep,
     setFinalVideoUrl,
+    setQuickRuntime,
     addNotification,
     setModal,
   } = useAppStore();
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastStatusRef = useRef<string | null>(null);
+  const lastGateIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     const intervalMs = Number(process.env.NEXT_PUBLIC_TASK_POLL_INTERVAL_MS || 3000);
@@ -34,8 +35,7 @@ export function useTaskPolling() {
       }
     };
 
-    // No task or WS active → no polling
-    if (!currentRequest || wsConnected) {
+    if (!currentRequest) {
       clear();
       return;
     }
@@ -44,6 +44,27 @@ export function useTaskPolling() {
       try {
         const taskId = currentRequest.id;
         if (!taskId) return;
+        try {
+          const runtime = await ApiClient.getTaskRuntime(taskId);
+          setQuickRuntime(runtime);
+          const activeGate = runtime?.active_gate;
+          const gateId = typeof activeGate?.id === 'number' ? activeGate.id : null;
+          if (gateId && activeGate?.status === 'awaiting_human' && gateId !== lastGateIdRef.current) {
+            lastGateIdRef.current = gateId;
+            addNotification({
+              type: 'info',
+              title: '等待人工确认',
+              message: activeGate.gate_name === 'script_review' ? '脚本已生成，请确认后继续。' : '有新的审核节点等待处理。',
+              autoClose: 4000,
+            });
+            setCurrentStep('processing');
+          } else if (!gateId) {
+            lastGateIdRef.current = null;
+          }
+        } catch {
+          // runtime endpoint may lag behind task creation; keep polling
+        }
+
         const status = await ApiClient.getTaskStatus(taskId);
 
         // De-dup notifications
@@ -51,6 +72,19 @@ export function useTaskPolling() {
         lastStatusRef.current = status.status;
 
         if (status.status === 'failed') {
+          try {
+            const runtime = await ApiClient.getTaskRuntime(taskId);
+            setQuickRuntime(runtime);
+          } catch {
+            const latestRuntime = useAppStore.getState().quickRuntime;
+            if (latestRuntime && latestRuntime.status !== 'failed') {
+              setQuickRuntime({
+                ...latestRuntime,
+                status: 'failed',
+                error_message: status.error_message || latestRuntime.error_message || '后端任务失败',
+              });
+            }
+          }
           if (prev !== 'failed') {
             addNotification({
               type: 'error',
@@ -118,5 +152,5 @@ export function useTaskPolling() {
     timerRef.current = setInterval(tick, intervalMs);
 
     return () => clear();
-  }, [currentRequest, wsConnected, setCurrentStep, setFinalVideoUrl, addNotification]);
+  }, [currentRequest, setCurrentStep, setFinalVideoUrl, setQuickRuntime, addNotification]);
 }

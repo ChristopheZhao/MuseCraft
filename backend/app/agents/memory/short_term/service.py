@@ -127,6 +127,10 @@ class WorkingMemoryService:
             wm = self._cache.pop(key, None)
         if wm is None:
             return
+        try:
+            self._assembler.invalidate(key[0], key[1])
+        except Exception:
+            self._logger.debug("WorkingMemoryService.invalidate failed for %s/%s", key[0], key[1], exc_info=True)
         self._logger.info("WM_DELETE workflow=%s scope=%s", key[0], key[1])
 
     def get_optional(self, scope: str, workflow_state_id: Optional[str]) -> Optional[WorkingMemory]:
@@ -148,21 +152,52 @@ class WorkingMemoryService:
         except Exception:
             self._logger.debug("WorkingMemoryService.invalidate failed for %s/%s", key[0], key[1], exc_info=True)
 
-    def reset_workflow(self, workflow_state_id: str) -> None:
-        """Invalidate all agent memories for a workflow."""
+    def _drop_workflow_scopes(
+        self,
+        workflow_state_id: str,
+        *,
+        predicate: Callable[[str], bool],
+        log_label: str,
+    ) -> int:
         wf_id = str(workflow_state_id)
         keys_to_drop = []
         with self._lock:
             for key in list(self._cache.keys()):
-                if key[0] == wf_id:
+                if key[0] == wf_id and predicate(key[1]):
                     keys_to_drop.append(key)
                     self._cache.pop(key, None)
-        self._logger.info("WM_CLEANUP workflow=%s scopes=%s", wf_id, len(keys_to_drop))
+        for workflow_id, scope in keys_to_drop:
+            try:
+                self._assembler.invalidate(workflow_id, scope)
+            except Exception:
+                self._logger.debug(
+                    "WorkingMemoryService.invalidate failed for %s/%s",
+                    workflow_id,
+                    scope,
+                    exc_info=True,
+                )
+        self._logger.info("WM_CLEANUP workflow=%s scope_filter=%s scopes=%s", wf_id, log_label, len(keys_to_drop))
+        return len(keys_to_drop)
 
-    # Backwards-compatible alias
+    def reset_agent_scopes(self, workflow_state_id: str) -> None:
+        """Invalidate only agent-scoped WorkingMemory instances for a workflow."""
+        self._drop_workflow_scopes(
+            workflow_state_id,
+            predicate=lambda scope: str(scope).startswith("agent:"),
+            log_label="agent",
+        )
+
+    def reset_workflow(self, workflow_state_id: str) -> None:
+        """Invalidate every WorkingMemory scope for a workflow."""
+        self._drop_workflow_scopes(
+            workflow_state_id,
+            predicate=lambda scope: True,
+            log_label="all",
+        )
+
     def cleanup_workflow(self, workflow_state_id: str) -> None:
-        """Alias for reset_workflow for orchestrator compatibility."""
-        self.reset_workflow(workflow_state_id)
+        """Cleanup per-agent iteration memories while preserving MAS shared WM."""
+        self.reset_agent_scopes(workflow_state_id)
 
 __all__ = [
     "WorkingMemoryService",

@@ -11,6 +11,7 @@ from ..models import Task, AgentType
 from .adapters.video.models import SceneSnapshot
 from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
+from ..services.script_review_contract import format_script_review_guidance
 from .utils.artifacts import extract_tool_payload
 from .adapters.memory_views import load_scene_overview, load_concept_plan
 from .utils.memory_helpers import read_shared_fact, write_shared_fact
@@ -92,6 +93,7 @@ class ScriptWriterAgent(BaseAgent):
             project_context = input_data.get("project_context")
             if project_context is None:
                 project_context = read_shared_fact(wf_id_str, "project_context", None, service=self.short_term_service)
+            script_review_contract = input_data.get("script_review_contract") or {}
             approved_script_text = ""
             if episode_context:
                 approved_script_text = str(episode_context.get("approved_script", "") or "").strip()
@@ -122,6 +124,7 @@ class ScriptWriterAgent(BaseAgent):
                 episode_context=episode_context,
                 project_context=project_context,
                 approved_script_text=approved_script_text,
+                script_review_contract=script_review_contract,
             )
 
         except AgentError:
@@ -140,6 +143,7 @@ class ScriptWriterAgent(BaseAgent):
         episode_context: Optional[Dict[str, Any]] = None,
         project_context: Optional[Dict[str, Any]] = None,
         approved_script_text: str = "",
+        script_review_contract: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """批量生成场景脚本"""
         # 从入参 episode_context 推导本集涉及的角色ID（若存在）
@@ -171,6 +175,7 @@ class ScriptWriterAgent(BaseAgent):
                 voice_plan_enabled = False
         else:
             voice_plan_enabled = True
+        review_guidance = format_script_review_guidance(script_review_contract)
 
         voice_guidance_map: Dict[int, Dict[str, Any]] = {}
         if isinstance(voice_plan, dict):
@@ -346,6 +351,8 @@ class ScriptWriterAgent(BaseAgent):
                         },
                         "intelligent_style_design": intelligent_style,
                         "context": context_payload,
+                        "script_review_contract": dict(script_review_contract or {}),
+                        "review_guidance": review_guidance,
                         # 让工具按配置使用模型和token预算，替代内部默认值
                         "model": script_model,
                         "max_tokens": max_tokens_budget,
