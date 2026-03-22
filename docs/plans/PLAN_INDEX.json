@@ -1,0 +1,625 @@
+{
+  "version": 1,
+  "plans": [
+        {
+            "id": "PLAN-20260306-001",
+      "title": "音频编排边界收敛与 Orchestrator 计划化修复",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260306-001.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-06T15:30:26Z",
+      "updated_at": "2026-03-07T13:38:07Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-06T15:48:13Z",
+          "text": "Started P0-A/P0-B: contract-first audio inputs and plan-first activation path"
+        },
+        {
+          "at": "2026-03-07T02:10:36Z",
+          "text": "Completed P0-A/P0-B: contract-first audio input + workflow.plan activation path; targeted tests passed (12+4+3)"
+        },
+        {
+          "at": "2026-03-07T04:16:13Z",
+          "text": "Refined execution plan to S1-S5 with Plan-and-Execute + adaptive replanning terminology"
+        },
+        {
+          "at": "2026-03-07T11:33:58Z",
+          "text": "Completed S3/S4 cleanup: removed strategy/mode-driven routing from orchestrator plan path and tool global policy reads; updated unit tests; full pytest blocked by missing sqlalchemy"
+        },
+        {
+          "at": "2026-03-07T11:40:53Z",
+          "text": "Validated S3/S4 changes with targeted regressions: 19 passed (audio orchestration + video audio route injection)"
+        },
+        {
+          "at": "2026-03-07T13:36:19Z",
+          "text": "Implemented S5 adaptive replanning loop (evaluate/decide/apply, standby activation, abort on budget exhaustion, trace persistence); targeted tests now 22 passed"
+        },
+        {
+          "at": "2026-03-07T13:37:59Z",
+          "text": "All planned work delivered and validated (22 passed); awaiting explicit user acceptance"
+        },
+        {
+          "at": "2026-03-07T13:38:07Z",
+          "text": "User confirmed acceptance; plan completed"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260307-002",
+      "title": "编排去规则化收口与边界清理",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260307-002.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-07T14:03:50Z",
+      "updated_at": "2026-03-08T04:23:59Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-08T01:31:20Z",
+          "text": "Start implementation: execute S1/S2 de-rule refactor in orchestrator"
+        },
+        {
+          "at": "2026-03-08T02:46:53Z",
+          "text": "Completed S1-S4 refactor in orchestrator; S5 pending full pytest due missing deps (sqlalchemy/pydantic)"
+        },
+        {
+          "at": "2026-03-08T02:59:24Z",
+          "text": "S1-S5 implemented and targeted verification passed (24 passed). Awaiting user confirmation before completion transition"
+        },
+        {
+          "at": "2026-03-08T03:54:33Z",
+          "text": "Cleanup pass done: removed unused legacy helper methods and deprecated legacy env vars docs; targeted tests still 24 passed"
+        },
+        {
+          "at": "2026-03-08T04:23:45Z",
+          "text": "Implementation and validation done; waiting for final user confirmation"
+        },
+        {
+          "at": "2026-03-08T04:23:59Z",
+          "text": "User confirmed completion; S1-S5 merged and targeted tests passed (24 passed)"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260308-003",
+      "title": "MAS 编排边界解耦与单 Episode Runtime Kernel 重构",
+      "kind": "fix",
+      "status": "blocked",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260308-003.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-08T14:56:45Z",
+      "updated_at": "2026-03-10T14:30:00Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-08T14:56:45Z",
+          "text": "Drafted overall refactor plan with phased roadmap: boundary freeze, runtime kernel, gate extraction, leaf-agent cleanup, quick HITL integration, and project reuse"
+        },
+        {
+          "at": "2026-03-08T14:56:45Z",
+          "text": "Started Phase 0: created audit checklist and froze banned-pattern review as the first implementation milestone"
+        },
+        {
+          "at": "2026-03-08T14:56:45Z",
+          "text": "Added an architecture review gate to reject faux de-ruling refactors that only move global switches into internal variables without changing ownership boundaries"
+        },
+        {
+          "at": "2026-03-08T14:56:45Z",
+          "text": "Completed P0-2 runtime/control-plane detailed design: clarified workflow_session, node, attempt, gate, decision models and the shared single-episode runtime kernel boundary"
+        },
+        {
+          "at": "2026-03-08T14:56:45Z",
+          "text": "Completed P0-4 contract design: defined ExecutionIntent, ExecutionContract, GateResult, and their ownership boundaries to replace implicit orchestration protocols"
+        },
+        {
+          "at": "2026-03-09T00:00:00Z",
+          "text": "Completed P0-5 initial Phase 1 cut: introduced workflow runtime ORM tables, runtime session service, runtime kernel skeleton, and rerouted task/task_queue ownership through the kernel boundary"
+        },
+        {
+          "at": "2026-03-09T00:00:00Z",
+          "text": "Focused runtime unit tests could not run locally because sqlalchemy is missing from the current environment; py_compile verification passed for changed files"
+        },
+        {
+          "at": "2026-03-09T03:28:18Z",
+          "text": "Completed P0-6 script gate minimal loop: runtime kernel now pauses at script review, records approve/revise/replan decisions, and resumes through the single-episode kernel"
+        },
+        {
+          "at": "2026-03-09T03:28:18Z",
+          "text": "Validated P0-6 in the backend uv environment after syncing the test extra: py_compile passed and targeted runtime tests passed (4 passed)"
+        },
+        {
+          "at": "2026-03-09T03:36:15Z",
+          "text": "Post-P0-6 architecture review found two remaining boundary drifts: revise/replan decisions do not yet materially affect the next script attempt, and the runtime kernel still calls orchestrator private helpers for stage execution"
+        },
+        {
+          "at": "2026-03-09T03:36:15Z",
+          "text": "Adjusted the next milestone ordering by inserting P1-0 before evaluator extraction to harden script gate decision contracts and shrink kernel-to-orchestrator private coupling"
+        },
+        {
+          "at": "2026-03-09T04:09:06Z",
+          "text": "Completed P1-0: script revise/replan now flow through explicit runtime contracts and a stage-level script runner instead of implicit episode_context coupling"
+        },
+        {
+          "at": "2026-03-09T04:09:06Z",
+          "text": "Validated P1-0 in the backend uv environment: py_compile passed for changed files and focused runtime tests passed again (4 passed)"
+        },
+        {
+          "at": "2026-03-09T07:05:14Z",
+          "text": "Started P1-1 with the first evaluator extraction slice: moved workflow-level video audio probing and normalized delivery-gate results into a dedicated audio delivery evaluator service"
+        },
+        {
+          "at": "2026-03-09T07:05:14Z",
+          "text": "Validated the first P1-1 slice in the backend uv environment: py_compile passed and targeted orchestrator/runtime tests passed (17 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-09T07:23:57Z",
+          "text": "Completed the core P1-2 slice: video_generator now consumes an explicit execution contract, no longer reads workflow.plan/audio_route, and no longer patches tool calls before execution"
+        },
+        {
+          "at": "2026-03-09T07:23:57Z",
+          "text": "Validated the P1-2 slice in the backend uv environment: py_compile passed and targeted video_generator/orchestrator/runtime tests passed (23 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-09T07:45:25Z",
+          "text": "Advanced P1-1b without creating a new rule center: audio agent participation now reads plan/policy state only, workflow-level audio gate observation is captured outside _should_run_agent, and BGM mix runtime checks moved behind evaluator outputs"
+        },
+        {
+          "at": "2026-03-09T07:45:25Z",
+          "text": "Validated the P1-1b slice in the backend uv environment: py_compile passed and targeted audio/orchestrator/video_generator/runtime tests passed (24 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-09T07:52:03Z",
+          "text": "Refined P1-1b after plan audit: no goal drift detected; narrowed the remaining work to orchestrator-heavy audio preflight/standby logic and added a guardrail that new route/contract seams must remain declarative-only"
+        },
+        {
+          "at": "2026-03-09T07:58:18Z",
+          "text": "Completed P1-1b by moving the remaining audio preflight and standby activation rules into a dedicated audio orchestration policy service so orchestrator now consumes policy outputs instead of hosting those rule branches directly"
+        },
+        {
+          "at": "2026-03-09T07:58:18Z",
+          "text": "Validated the completed P1-1b slice in the backend uv environment: py_compile passed and targeted audio/orchestrator/video_generator/runtime tests passed again (24 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-09T08:11:25Z",
+          "text": "Refined P1-3 before execution: clarified that video_composer must move to an explicit execution boundary, stop inferring mix mode from add_bgm/add_voiceover/static_context.requests on the live path, and treat those fields as compatibility-only inputs"
+        },
+        {
+          "at": "2026-03-09T08:52:09Z",
+          "text": "Synchronized downstream phases after terminology/boundary review: updated P1-4 and P2 to require explicit execution boundaries for compose and scene-level gates, clarified project reuse as the same hybrid subagents boundary model, and corrected the plan opening to reflect that video_generator was already fixed in P1-2"
+        },
+        {
+          "at": "2026-03-09T09:18:00Z",
+          "text": "Aligned the plan with the midpoint architecture minutes: kept hybrid subagents as the total architecture label, treated policy/gate orchestration and contract-bounded execution as implementation-boundary descriptions only, and tightened P1-3 wording accordingly"
+        },
+        {
+          "at": "2026-03-09T09:32:00Z",
+          "text": "Tightened the refactor plan so temporary compatibility paths must be retired in later phases; added explicit compatibility retirement work for composer legacy flags and runtime workflow.plan/audio_route seams"
+        },
+        {
+          "at": "2026-03-09T10:10:53Z",
+          "text": "Completed P1-3: video_composer now resolves primary mix mode from an explicit execution boundary, orchestrator injects and normalizes the composer execution boundary, and legacy flags are reduced to a single compatibility adapter with fail-fast conflict diagnostics"
+        },
+        {
+          "at": "2026-03-09T10:10:53Z",
+          "text": "Validated the P1-3 slice in the backend uv environment: py_compile passed and targeted composer/video_generator/orchestrator/runtime tests passed (31 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-09T10:25:00Z",
+          "text": "Progress audit confirmed no objective drift after P1-3: completed slices still match the hybrid-subagents target, and the main remaining transition seam is quick mode one-shot UI/runtime integration rather than backend architecture rollback"
+        },
+        {
+          "at": "2026-03-09T10:25:00Z",
+          "text": "Refined P1-4 into backend API, frontend state, workspace UI, transport integration, and focused validation slices to prevent quick mode work from reintroducing one-shot assumptions"
+        },
+        {
+          "at": "2026-03-09T10:40:58Z",
+          "text": "Completed P1-4a/P1-4b/P1-4c/P1-4d: quick mode now carries runtime session/gate state in the frontend store, exposes runtime and script-decision APIs through the client, renders a script-gate workspace instead of the old one-shot processing panel, and refreshes runtime state via polling plus websocket-triggered syncs"
+        },
+        {
+          "at": "2026-03-09T10:40:58Z",
+          "text": "Partial P1-4 validation completed: backend runtime py_compile passed and runtime session tests passed (4 passed); frontend full type-check remains blocked by repository-wide pre-existing issues in __tests__/utils/test-helpers.ts and tsconfig.tsbuildinfo writes, so P1-4e remains open"
+        },
+        {
+          "at": "2026-03-09T10:54:11Z",
+          "text": "Scope realignment discussion removed heavy HITL expansion from the current refactor scope: frontend work is capped at minimal quick-mode adaptation plus P1-4e verification, and compatibility retirement becomes the next mainline after P1-4e"
+        },
+        {
+          "at": "2026-03-09T10:54:11Z",
+          "text": "Reordered downstream planning: current scope continues with P2-4/P2-5 seam retirement, while storyboard/scene-video gates and project reuse move to next-scope items"
+        },
+        {
+          "at": "2026-03-09T13:25:32Z",
+          "text": "Completed the first compatibility-retirement slice: composer plan actions now emit explicit compose_mode, video_composer rejects legacy live inputs without an execution boundary, and runtime_kernel no longer injects workflow.plan/audio_route into orchestrator resume input"
+        },
+        {
+          "at": "2026-03-09T13:25:32Z",
+          "text": "Validated the compatibility-retirement slice in the backend uv environment: py_compile passed and targeted composer/audio/runtime tests passed (26 passed, 4 skipped); frontend P1-4e smoke remains open"
+        },
+        {
+          "at": "2026-03-09T13:33:54Z",
+          "text": "Completed P1-4e and closed the minimal frontend adaptation scope: websocket completion now follows the same result-overlay path as polling, and a no-incremental frontend type-check surfaced only the pre-existing __tests__/utils/test-helpers.ts errors"
+        },
+        {
+          "at": "2026-03-09T14:10:00Z",
+          "text": "Post-retirement architecture review found that the current scope cannot close yet: orchestrator still owns tail-stage runtime execution, live execution-boundary assembly, and audio-specific controller logic, so the plan was extended with an orchestrator ownership closure phase"
+        },
+        {
+          "at": "2026-03-09T14:10:00Z",
+          "text": "Frontend scope remains frozen at minimal adaptation; storyboard/scene-video gates and project reuse stay deferred until the new orchestrator ownership closure work is complete"
+        },
+        {
+          "at": "2026-03-09T14:18:00Z",
+          "text": "Refined the current-scope closure into an explicit _execute_impl ownership subplan covering tail-stage runtime ownership, execution-boundary live assembly, adaptive controller residuals, and _build_persistence_payload migration"
+        },
+        {
+          "at": "2026-03-09T14:22:00Z",
+          "text": "Tightened the current-scope acceptance to require migrating _build_workflow_plan, _build_activation_pool, _resolve_agent_runtime_overrides, and _build_audio_contract out of orchestrator instead of leaving them as transitional seams"
+        },
+        {
+          "at": "2026-03-09T14:28:00Z",
+          "text": "Added a current-scope completion gate: final closure now requires explicit review of delivery purpose, target design boundaries, and the migrated code itself instead of inferring completion from phase progress"
+        },
+        {
+          "at": "2026-03-09T14:56:04Z",
+          "text": "Completed the first P2-6a ownership slice: runtime kernel now executes storyboard/image and scene_video/video through a dedicated post-script stage runner, persists node attempts/status, and only the remaining compose/quality tail still falls through to orchestrator"
+        },
+        {
+          "at": "2026-03-09T14:56:04Z",
+          "text": "Validated the first P2-6a slice in the backend uv environment: py_compile passed and focused runtime tests passed again (4 passed)"
+        },
+        {
+          "at": "2026-03-09T15:30:16Z",
+          "text": "Completed the first P2-6b ownership slice: execution-boundary live assembly now resides in ExecutionBoundaryAssembler, and orchestrator no longer owns _build_agent_execution_contract, _apply_execution_boundary_to_agent_input, or _resolve_agent_runtime_overrides"
+        },
+        {
+          "at": "2026-03-09T15:30:16Z",
+          "text": "Validated the combined P2-6a/P2-6b slices in the backend uv environment: py_compile passed and focused runtime/video/composer/audio gate tests passed (32 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-10T00:00:00Z",
+          "text": "Tightened current-scope planning again after anti-llm-decision review: domain-specific strategy files must not directly generate active_pool/standby_pool/actions/decision_reason; build_audio_preflight_plan and apply_audio_standby_activation are now explicit removal-or-downgrade targets in the current scope"
+        },
+        {
+          "at": "2026-03-10T02:30:00Z",
+          "text": "Completed the P2-6f anti-llm-decision slice: live orchestration no longer imports or consumes audio_orchestration_policy plan builders, execution-boundary overrides now resolve from workflow.task_specs instead of workflow.plan.actions, and focused backend uv validation still passes (32 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-10T11:20:00Z",
+          "text": "Completed the remaining current-scope ownership closure: orchestration context persistence moved into OrchestrationStateAdapter, runtime replan switched from hard-coded audio rules to structured LLM decisions with gate facts, completion projection moved to WorkflowCompletionAdapter, and focused backend uv validation passed (30 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-10T12:40:00Z",
+          "text": "Architecture review reopened Phase 6: _execute_impl still keeps gate-inline-polling and inline runtime replan, and the orchestrator/subagent/control-plane master-worker protocol is not yet explicit"
+        },
+        {
+          "at": "2026-03-10T12:40:00Z",
+          "text": "Extended the current-scope plan with P2-11 through P2-15 to converge orchestration logic, gating logic, and the master-worker communication protocol before allowing closure"
+        },
+        {
+          "at": "2026-03-10T06:34:29Z",
+          "text": "Partially completed P2-11 through P2-14: introduced an OrchestrationProtocol host, switched runtime decisions to consume report plus gate_events, and removed the old inline audio gate->runtime_replan chain; remaining work is to move gate ownership and decision apply fully into control-plane and migrate decision_basis/route payload observability out of orchestration state"
+        },
+        {
+          "at": "2026-03-10T13:10:00Z",
+          "text": "Observability review confirmed the project already has monitoring, event, and websocket infrastructure; current-scope work should migrate orchestration trace out of orchestration state into a dedicated observation/trace adapter rather than expanding monitoring_service or websocket responsibilities"
+        },
+        {
+          "at": "2026-03-10T13:20:00Z",
+          "text": "Continued Phase 6 protocol/governance cleanup: OrchestrationProtocol now only owns master-worker message envelopes, OrchestrationRuntimeController triggers boundary gates from subagent reports, orchestration trace moved into OrchestrationObservationAdapter, and focused backend uv validation passed (36 passed, 4 skipped)"
+        },
+        {
+          "at": "2026-03-10T13:45:00Z",
+          "text": "Tightened the current-scope closure gate after QA review: if obvious policy-first orchestration or main-loop gate/replan pulling remains, Phase 6 cannot close and the plan cannot be archived; the next action is continued root-cause analysis rather than local seam acceptance"
+        },
+        {
+          "at": "2026-03-10T14:30:00Z",
+          "text": "Checkpointed the plan instead of forcing closure: current scope retains real progress but still has unresolved orchestrator main-loop ownership, runtime controller, protocol-boundary, and end-to-end coverage issues, so follow-up work moves to a narrower successor plan"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260310-004",
+      "title": "Orchestrator 主循环 Ownership 收口与协议硬边界化",
+      "kind": "fix",
+      "status": "blocked",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260310-004.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-10T14:30:00Z",
+      "updated_at": "2026-03-11T03:33:36Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-10T14:30:00Z",
+          "text": "Created a narrowed successor plan after checkpointing PLAN-20260308-003; focus is now limited to orchestrator main-loop ownership, runtime controller purity, protocol hard boundaries, and real end-to-end coverage"
+        },
+        {
+          "at": "2026-03-11T03:33:36Z",
+          "text": "Plan scope is complete on the MAS contract-hardening line, but final closeout is blocked by follow-up runtime-kernel regressions in task_queue/runtime_kernel/tasks API; the blocking work is tracked in PLAN-20260311-005"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260311-005",
+      "title": "Runtime Kernel Regression Closeout 与调度安全修复",
+      "kind": "fix",
+      "status": "blocked",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260311-005.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-11T03:33:36Z",
+      "updated_at": "2026-03-11T12:32:49Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-11T03:33:36Z",
+          "text": "Created a dedicated hotfix follow-up for runtime-kernel regressions: audio-capable task routing safety, stage-success completion semantics, and API in-process runner gating"
+        },
+        {
+          "at": "2026-03-11T12:32:49Z",
+          "text": "Hotfix implementation is no longer the main blocker; final closeout is blocked by single-episode mainline unification and runtime-kernel migration work tracked in PLAN-20260311-006"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260311-006",
+      "title": "Single-Episode 主线冻结与 Runtime Kernel 迁移收口",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260311-006.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-11T12:32:49Z",
+      "updated_at": "2026-03-18T09:15:28Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-11T12:32:49Z",
+          "text": "Created a new managed plan to freeze OrchestratorAgent as the single-episode MAS mainline, migrate EpisodeRuntimeKernel back into control-layer responsibilities, and freeze state/memory boundaries without expanding into a full memory-system refactor"
+        },
+        {
+          "at": "2026-03-11T13:14:15Z",
+          "text": "Started U0/U1: mainline governance is frozen to OrchestratorAgent and a code-backed keep/delete matrix now classifies which EpisodeRuntimeKernel responsibilities must be retained as control-layer substrate versus migrated out of the kernel"
+        },
+        {
+          "at": "2026-03-18T09:15:28Z",
+          "text": "Closed after Stage G retired workflow_order from production orchestration, externalized selection/decomposition prompts, removed stale test references, and added execute_impl-level wiring proof with focused verification passing"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260319-007",
+      "title": "Frontend Runtime/Gate 最小同步修复",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260319-007.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-19T00:00:00Z",
+      "updated_at": "2026-03-19T00:00:00Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-19T00:00:00Z",
+          "text": "Created minimal frontend repair plan to make quick-runtime nodes and script gate observable/actionable from quickRuntime without broad UI refactor"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260319-008",
+      "title": "API/Worker 日志治理统一与可观测性收口",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260319-008.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-19T03:43:22Z",
+      "updated_at": "2026-03-19T04:01:14Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-19T03:43:22Z",
+          "text": "Drafted logging governance plan: unify API/Celery logging ownership, remove duplicate access logging, and keep MAS logic isolated from observability changes"
+        },
+        {
+          "at": "2026-03-19T04:01:14Z",
+          "text": "Started implementation: introduced centralized dictConfig owner, removed main.py basicConfig and duplicate request access middleware, and switched Celery/task_queue off legacy configure_mas_logging wiring"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260319-009",
+      "title": "Concept Planner 超时治理与 Provider Deadline 收口",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260319-009.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-19T08:00:04Z",
+      "updated_at": "2026-03-19T08:00:04Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-19T08:00:04Z",
+          "text": "Drafted timeout-governance plan to replace concept_planner equal-split budgeting with stage budgets and shared-deadline provider fallback, based on proxy/direct latency probes and recent timeout logs"
+        },
+        {
+          "at": "2026-03-19T08:00:04Z",
+          "text": "Implemented the first timeout-governance slice: removed equal-split budgeting from concept_planner, introduced stage budgets/floors, switched Zhipu fallback to shared-deadline semantics, and passed focused unit tests (7 passed)"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260319-010",
+      "title": "Orchestrator Decomposition Boundary Refactor",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260319-010.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-19T10:17:39Z",
+      "updated_at": "2026-03-19T13:06:27Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-19T10:17:39Z",
+          "text": "Drafted decomposition-boundary refactor plan to preserve two-step llm-centric planning while separating selection rationale, assignment contract, and subagent local planning"
+        },
+        {
+          "at": "2026-03-19T10:46:21Z",
+          "text": "Implemented the first boundary-refactor slice: narrowed decomposition to assignment contract fields, exposed task_assignment in plan context, aligned runtime_hints consumption, and validated with focused tests plus a real planning probe where decomposition dropped from prior timeout behavior to a 13s successful response"
+        },
+        {
+          "at": "2026-03-19T13:06:27Z",
+          "text": "Completed broader regression for the first slice: full affected unit suites passed (58+6+9), planning probe remained successful, and production-code audit confirmed old decomposition fields no longer drive the live orchestration path"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260319-011",
+      "title": "Quick Mode HITL Run Ownership & Frontend Sync Fix",
+      "kind": "fix",
+      "status": "superseded",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260319-011.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-19T14:16:41Z",
+      "updated_at": "2026-03-22T01:45:30Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-19T14:16:41Z",
+          "text": "Created a focused plan to repair quick-mode frontend/backend sync after repeated task submissions caused the UI to watch a different task than the one actually executing"
+        },
+        {
+          "at": "2026-03-19T14:44:13Z",
+          "text": "Corrected the plan around HITL semantics: page entry should discover unfinished runs and let the user continue or create a new run, while submit should replace the old unfinished run instead of silently reusing it"
+        },
+        {
+          "at": "2026-03-19T15:50:00Z",
+          "text": "Implemented the first execution slice: quick workspace session identity, unfinished-run discovery API, frontend continue/new-run prompt, submit-time replace-old-run path, task execution metadata persistence for celery_task_id, and focused backend/frontend verification"
+        },
+        {
+          "at": "2026-03-20T01:48:41Z",
+          "text": "Extended the plan after diagnosing worker-side re-execution of terminal quick tasks from historical broker backlog; added a unified execution-eligibility policy and a consumer-side terminal short-circuit milestone"
+        },
+        {
+          "at": "2026-03-20T02:50:58Z",
+          "text": "Implemented the shared task execution policy, applied it in both queueing and worker consumption, and added focused tests proving that terminal and waiting-gate quick runs are no longer re-executed from historical broker backlog"
+        },
+        {
+          "at": "2026-03-20T03:10:44Z",
+          "text": "Extended the plan after diagnosing Celery backend crashes from malformed historical failure metadata; added a failure-result contract fix and stale-result cleanup milestone before the final quick HITL validation"
+        },
+        {
+          "at": "2026-03-20T03:34:42Z",
+          "text": "Fixed Celery failure reporting to raise standard exceptions instead of writing malformed FAILURE meta, added focused celery_app regression tests, and validated the wrapper with targeted compile and pytest checks"
+        },
+        {
+          "at": "2026-03-20T04:04:49Z",
+          "text": "Added a narrow dev-only helper script to reset the configured Celery broker/result Redis DBs; stale-result cleanup and post-reset HITL validation are still pending manual execution"
+        },
+        {
+          "at": "2026-03-20T04:19:44Z",
+          "text": "Executed the dev-only Celery cleanup flow by stopping local API/worker/beat processes, flushing Redis DB 1/2 through the cleanup helper, and confirming no residual uvicorn/celery/watchmedo processes remain"
+        },
+        {
+          "at": "2026-03-20T09:10:07Z",
+          "text": "Refined the plan after reproducing a frontend ownership bug: continue-existing-run itself does not create tasks, but the unfinished-run prompt is not a strong gate, so users can still fall through to form submit and unintentionally create a new run"
+        },
+        {
+          "at": "2026-03-20T09:10:07Z",
+          "text": "Implemented the unfinished-run hard gate in VideoRequestForm: the creation form now stays locked until the user explicitly chooses continue-existing-run or create-new-run, and handleSubmit short-circuits while that prompt remains unresolved"
+        },
+        {
+          "at": "2026-03-20T16:35:53Z",
+          "text": "Extended the plan after proving the current blocker is the dev harness rather than MAS mainline: resumed quick tasks are re-queued correctly, but Celery worker/beat were launched with undrained stdout/stderr pipes and the worker stalled in pipe_write, so the plan now includes a dedicated dev-runner output fix and resume-consumption verification milestone"
+        },
+        {
+          "at": "2026-03-21T02:05:27Z",
+          "text": "Implemented R12: start_dev_uv.py now launches long-lived Celery worker/beat processes with inherited stdout/stderr by default, adds opt-in log forwarding via FOLLOW_CELERY_LOGS=1, and includes a focused launcher regression test plus compile/plan-index validation"
+        },
+        {
+          "at": "2026-03-21T04:17:55Z",
+          "text": "Extended the plan after isolating a cross-run memory-boundary regression: cleanup_workflow() currently clears all workflow scopes including mas:<workflow_id>, so after script gate the shared MAS WM is rebuilt empty and image/video scene_info_ref payloads persist as empty objects; the next fix now targets shared-WM preservation across gate/resume boundaries"
+        },
+        {
+          "at": "2026-03-21T05:12:09Z",
+          "text": "Implemented the shared-WM boundary fix: cleanup_workflow() now clears only agent-scoped memories while reset_workflow() remains the full reset path, and focused regressions now prove shared MAS facts survive gate cleanup and keep image/video scene-info payloads non-empty across runs"
+        },
+        {
+          "at": "2026-03-22T01:45:30Z",
+          "text": "Superseded by PLAN-20260321-012 after the root cause was reclassified from tactical quick/HITL sync fixes to the broader queue-adapter vs runtime/control-plane boundary refactor; retained as historical evidence only"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260321-012",
+      "title": "Queue Adapter / MAS Runtime Boundary Refactor",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260321-012.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-21T15:12:38Z",
+      "updated_at": "2026-03-22T01:45:30Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-21T15:12:38Z",
+          "text": "Created successor plan from the newer boundary diagnosis in SHO-20260321-0001: preserve PLAN-20260319-011 as the tactical predecessor, and promote queue-adapter vs runtime/control-plane boundary repair to the current main task"
+        },
+        {
+          "at": "2026-03-21T15:17:12Z",
+          "text": "Clarified governance precedence: PLAN-20260319-011 is historical reference only; current task judgment follows SHO-20260321-0001 and the actual codebase state"
+        },
+        {
+          "at": "2026-03-21T15:28:00Z",
+          "text": "Added a validated state-boundary summary to the successor plan: queue infra handles transport/scheduler semantics only, runtime/control-plane owns MAS execution state, and frontend current-run must consume runtime read models instead of queue semantics"
+        },
+        {
+          "at": "2026-03-21T15:31:30Z",
+          "text": "Added explicit MAS/runtime vs backend queue decoupling guardrails to the successor plan so implementation and review reject any drift that reintroduces runtime semantics into queue or frontend layers"
+        },
+        {
+          "at": "2026-03-21T15:43:59Z",
+          "text": "Added a minimal resume-semantics guardrail: continuing an existing run, resuming after a gate decision, and historical broker re-consumption must remain separate behaviors"
+        },
+        {
+          "at": "2026-03-21T15:49:30Z",
+          "text": "Refined the successor plan into phased sub-tasks with explicit checkpoints so later slices cannot proceed before boundary freeze, backend extraction, frontend runtime-first convergence, and end-to-end validation pass"
+        },
+        {
+          "at": "2026-03-21T15:52:30Z",
+          "text": "Tightened the successor plan as a current-delivery-stage plan only and expanded validation into a concrete checklist with focused backend/frontend suites, suggested commands, and manual checkpoint gates"
+        },
+        {
+          "at": "2026-03-21T15:53:30Z",
+          "text": "Split the detailed delivery verification out of the main plan into a dedicated validation artifact so the plan stays focused on stage goals, checkpoints, and guardrails"
+        },
+        {
+          "at": "2026-03-22T01:45:30Z",
+          "text": "Aligned the successor governance with the latest user decision: PLAN-20260319-011 is treated as a superseded predecessor and no longer appears in the primary resume path except as optional historical evidence"
+        }
+      ]
+    }
+  ]
+}

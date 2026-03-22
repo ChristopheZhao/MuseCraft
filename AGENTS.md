@@ -12,6 +12,9 @@
 - Error Transparency: In agent flows, prefer surfacing explicit errors or prominent diagnostics over silent fallbacks—never mask unexpected states just to keep the run alive unless the product spec mandates a controlled downgrade.
 - Correct Proven-Erroneous Designs: Once a design is confirmed faulty, fix or replace it outright—do not preserve compatibility layers or silent fallbacks for incorrect behaviour.
 - Rework Over Residual Compatibility: During refactors, do not assume legacy implementations are valid when they conflict with new architecture. If an older approach is wrong, plan for the necessary breaking change, manage risk, and replace it instead of layering temporary shims.
+- External Scheduler Decoupling: Task queues, workers, and other external schedulers are transport/execution containers only. They must not own MAS runtime semantics, workflow node/gate meaning, or control-plane decisions.
+- Runtime SoT Ownership: Runtime/session/node/attempt/gate/decision state belongs to the MAS control plane only. Any code that advances or persists those live execution states must be treated as control-plane logic, not queue/transport logic.
+- Read-Model Separation: Frontends and external clients must consume explicit runtime/read-model projections rather than inferring MAS execution state from queue, worker, or broker signals. Queue health is diagnostics, not business-state truth.
 - ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; update workflow state and continuity memory each turn; stop on clear success criteria.
 - Content Safety: Prompts and templates must avoid explicit or sensitive body-part phrasing and NSFW content. Prefer neutral, professional descriptions of attire, posture, and composition.
 - Config over Constants: Enforce constraints via schemas driven by config (e.g., video durations from provider config) and environment (.env) for timeouts and limits.
