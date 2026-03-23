@@ -501,7 +501,7 @@
       "file_path": "docs/plans/active/PLAN-20260319-011.md",
       "confirmed_by_user": false,
       "created_at": "2026-03-19T14:16:41Z",
-      "updated_at": "2026-03-22T01:45:30Z",
+      "updated_at": "2026-03-22T01:48:14Z",
       "archived_at": null,
       "notes": [
         {
@@ -574,13 +574,13 @@
       "id": "PLAN-20260321-012",
       "title": "Queue Adapter / MAS Runtime Boundary Refactor",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260321-012.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-21T15:12:38Z",
-      "updated_at": "2026-03-22T01:45:30Z",
+      "updated_at": "2026-03-23T13:13:11Z",
       "archived_at": null,
       "notes": [
         {
@@ -618,6 +618,171 @@
         {
           "at": "2026-03-22T01:45:30Z",
           "text": "Aligned the successor governance with the latest user decision: PLAN-20260319-011 is treated as a superseded predecessor and no longer appears in the primary resume path except as optional historical evidence"
+        },
+        {
+          "at": "2026-03-22T01:48:14Z",
+          "text": "Completed Phase A planning artifacts: added the canonical boundary inventory, froze the runtime-first read-model priority and resume semantics separation, and marked Checkpoint A passed so Phase B may start from an explicit ownership baseline"
+        },
+        {
+          "at": "2026-03-22T02:25:47Z",
+          "text": "Cleaned up successor-plan bookkeeping after Phase A validation: removed duplicate checklist markup, advanced the handoff focus to Phase B / S3, and resynced plan metadata"
+        },
+        {
+          "at": "2026-03-22T02:39:37Z",
+          "text": "Completed Phase B / S3 minimal worker-host extraction: moved queued-run bootstrap and dispatch entry into a dedicated execution-host service, split lightweight mode resolution out of mode_router, and validated the slice with focused backend regressions (test_task_queue.py 6 passed, test_tasks_endpoint.py 5 passed)"
+        },
+        {
+          "at": "2026-03-22T03:14:43Z",
+          "text": "Completed Phase B / S4 runtime ownership extraction: RuntimeSessionService now owns quick dispatch payload recovery and runtime failure writeback, task_queue.py no longer directly gets/creates runtime sessions or marks runtime failure state, and focused backend regressions passed (18 passed total), so Checkpoint B is now passed"
+        },
+        {
+          "at": "2026-03-22T03:14:43Z",
+          "text": "Started Phase C validation closure: polling/websocket now preserve runtime-first failure/completion semantics, a focused step-0 failure integration case plus a narrow frontend runtime-check tsconfig were added, narrow tsc passed, and the remaining blocker is a targeted Jest runner timeout without assertion output"
+        },
+        {
+          "at": "2026-03-22T03:18:53Z",
+          "text": "Further narrowed the Phase C frontend test surface by aligning runtime-gate-sync mocks with the same alias imports used by QuickModeWorkspace and stubbing heavy child panels; narrow tsc still passes, but the targeted single-case Jest path continues to time out locally, so the open blocker remains a runner-level validation gap"
+        },
+        {
+          "at": "2026-03-22T06:34:57Z",
+          "text": "Field validation proved the queue/runtime fix now carries script approve->resume into media-agent entry; the newly exposed empty scene_info_ref/shared-WM continuity issue is explicitly treated as a separate external-window problem, so PLAN-20260321-012 remains focused on queue/runtime boundary closure and frontend runtime-first validation only"
+        },
+        {
+          "at": "2026-03-22T06:47:32Z",
+          "text": "Closed the remaining current-window validation gap by extracting a shared runtime read-model helper, adding a standalone TypeScript validation script that passed explicit step-0 failure/awaiting_human/resume/completed assertions, and marking Phase C plus boundary-scoped Phase D complete while leaving shared-WM continuity in the other window"
+        },
+        {
+          "at": "2026-03-23T13:13:11Z",
+          "text": "User confirmed formal closure: the original 012 scope is complete, all checkpoints remain passed, and later 013/014/015 work is treated as follow-on successor plans rather than unfinished 012 work"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260322-013",
+      "title": "Non-Artifact Stage Deliverables and Dispatch Convergence",
+      "kind": "fix",
+      "status": "superseded",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260322-013.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-22T15:34:55Z",
+      "updated_at": "2026-03-23T03:48:12Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-22T15:34:55Z",
+          "text": "Created successor plan after the architecture discussion converged on two linked follow-up tasks: non-artifact stage deliverables must be formalized before dispatch convergence can safely remove per-dispatch memory composition"
+        },
+        {
+          "at": "2026-03-22T15:34:55Z",
+          "text": "Froze the execution-order rule for the successor: analysis may proceed in parallel, but code changes are strictly serial with Task A (stage deliverables) required to pass before Task B (dispatch convergence) may enter implementation"
+        },
+        {
+          "at": "2026-03-22T15:34:55Z",
+          "text": "Froze the architecture guardrails for the successor: shared WM remains live iterate-facts SoT, published stage deliverables are boundary snapshots rather than a parallel SoT, and dispatch is treated as a suspect historical abstraction rather than a preserved layer by default"
+        },
+        {
+          "at": "2026-03-22T15:47:14Z",
+          "text": "Tightened the successor after plan review: froze the first implementation host decision as published deliverable record plus payload_ref, named the active-path memory-composition audit set explicitly, and added architecture-doc synchronization as part of dispatch-retirement acceptance"
+        },
+        {
+          "at": "2026-03-23T02:40:04Z",
+          "text": "Started Task A implementation: added workflow published deliverables, script-gate publication, approve-time ref updates, and media readers that prefer published script deliverables; py_compile and focused deliverable checks passed, while the broader runtime-session pytest file still needs follow-up due harness-level timeout"
+        },
+        {
+          "at": "2026-03-23T03:05:44Z",
+          "text": "Passed Task A checkpoint with focused backend pytest (11 passed) plus direct proofs for both with-HITL approve and wo-HITL published-deliverable reads; started Task B by removing mode_router memory composition, routing quick queued execution directly to OrchestratorAgent, and requiring explicit memory_services across active-path control-plane/helper adapters"
+        },
+        {
+          "at": "2026-03-23T03:09:42Z",
+          "text": "Further shrank dispatch during Task B: dispatch_generation is now project-only and explicitly rejects quick mode, while direct proofs confirm quick queued execution bypasses dispatch entirely and project mode still flows through the remaining project helper path"
+        },
+        {
+          "at": "2026-03-23T03:13:47Z",
+          "text": "Clarified the quick composition root during Task B: OrchestratorAgent no longer implicitly builds memory in __init__, quick live path now enters through explicit create_default(), and remaining script/post-script runner constructors were aligned to the same explicit-memory rule"
+        },
+        {
+          "at": "2026-03-23T03:15:39Z",
+          "text": "Passed Task B checkpoint: quick mainline no longer uses dispatch or per-dispatch memory composition, helper adapters reject implicit memory rebuilds, dispatch is reduced to a project-only helper, and the architecture mapping now reflects that shrinkage"
+        },
+        {
+          "at": "2026-03-23T03:48:12Z",
+          "text": "Superseded by PLAN-20260323-014 after post-implementation architecture review found residual drifts: published deliverable persistence still owned memory adapter/projection duties, media readers still fell back to live shared WM on missing deliverables, and project mode still retained implicit composition via mode_router.py plus EpisodeOrchestratorAgent"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260323-014",
+      "title": "Published Deliverable Boundary Correction and Dispatch Retirement",
+      "kind": "fix",
+      "status": "superseded",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260323-014.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-23T03:48:12Z",
+      "updated_at": "2026-03-23T07:50:41Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-23T03:48:12Z",
+          "text": "Created successor correction plan after the post-013 architecture review converged on two serial follow-up tasks: published-deliverable boundary correction first, then project explicit composition and dispatch retirement"
+        },
+        {
+          "at": "2026-03-23T03:48:12Z",
+          "text": "Froze the correction target state: shared WM remains the live iterate-facts SoT, published deliverables remain boundary outputs rather than a parallel SoT, and mode_router.py must be deleted rather than renamed or preserved as a thin wrapper"
+        },
+        {
+          "at": "2026-03-23T07:35:00Z",
+          "text": "Completed Task A: PublishedDeliverableService now owns persistence/ref construction only, script-stage payload build and WM projection moved into a dedicated adapter, and downstream media readers no longer silently fall back to live shared WM when the published deliverable is missing"
+        },
+        {
+          "at": "2026-03-23T07:35:00Z",
+          "text": "Completed Task B: project queued/direct paths now compose EpisodeOrchestratorAgent explicitly, AudioDeliveryGateEvaluator requires explicit memory_services, mode_router.py was deleted, and architecture docs were synchronized to the new no-dispatch project path"
+        },
+        {
+          "at": "2026-03-23T07:50:41Z",
+          "text": "Superseded by PLAN-20260323-015 after follow-up review found two residual drifts outside the accepted 014 slice: image path still mixed live-WM and published-deliverable script-stage inputs, and PublishedDeliverableService still mutated session.input_payload directly"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260323-015",
+      "title": "Image Boundary Purity and Deliverable Runtime Ownership Repatriation",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260323-015.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-23T07:50:41Z",
+      "updated_at": "2026-03-23T09:03:08Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-23T07:50:41Z",
+          "text": "Created successor correction plan after follow-up review confirmed two remaining drifts: image path still received live-WM and published-deliverable script-stage inputs in parallel, and PublishedDeliverableService still directly mutated runtime payload state"
+        },
+        {
+          "at": "2026-03-23T07:50:41Z",
+          "text": "Froze the execution order for the successor: image path boundary purity first, deliverable runtime ownership repatriation second"
+        },
+        {
+          "at": "2026-03-23T07:50:41Z",
+          "text": "Froze the target state: image path must consume a single script-stage truth source, and deliverable persistence must not own runtime/control-plane state mutation"
+        },
+        {
+          "at": "2026-03-23T08:23:26Z",
+          "text": "Implemented Task A/B: removed IMAGE_GENERATOR live-WM script-stage pre-merge, moved published deliverable payload writeback out of PublishedDeliverableService and into orchestrator/runtime control-plane callers, and added focused regressions"
+        },
+        {
+          "at": "2026-03-23T08:44:58Z",
+          "text": "Ran a broader backend regression on current-architecture-aligned unit/runtime suites (92 passed) and explicitly filtered out legacy singleton/WorkflowState/manual-harness integration tests from the acceptance slice"
+        },
+        {
+          "at": "2026-03-23T09:03:08Z",
+          "text": "User confirmed closure; plan marked completed with scope held to the 015 acceptance slice only"
         }
       ]
     }

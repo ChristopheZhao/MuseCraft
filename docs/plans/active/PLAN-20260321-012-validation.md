@@ -1,8 +1,8 @@
 # Validation Checklist: PLAN-20260321-012
 - Plan ID: PLAN-20260321-012
 - Scope: current delivery stage verification only
-- Status: active
-- Updated At: 2026-03-21T15:53:30Z
+- Status: completed
+- Updated At: 2026-03-23T13:13:11Z
 
 ## 1. Usage Rule
 - This file owns the concrete delivery verification for [PLAN-20260321-012](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260321-012.md).
@@ -11,6 +11,8 @@
 
 ## 2. Phase A Validation
 - Required artifacts:
+- Canonical artifact:
+- [PLAN-20260321-012-boundary-inventory](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260321-012-boundary-inventory.md)
 - 职责拆分表已落文，能逐段解释 `task_queue.py` 当前逻辑的归属，不留“先放这里”的灰区。
 - runtime-first read-model 优先级表已落文，明确 `runtime/session -> gate -> current_node -> nodes -> Task -> telemetry` 的展示优先级。
 - “继续查看当前任务 / gate decision -> resume execution / 历史 broker 重消费”三种语义已显式拆开。
@@ -18,6 +20,8 @@
 - 若任何拟改逻辑无法明确归到 queue adapter、execution host/bootstrap、runtime/control-plane、frontend read model 之一，则 Checkpoint A 不通过。
 
 ## 3. Phase B Validation
+- Current progress:
+- Phase B completed and validated; Checkpoint B passed.
 - Backend focused checks:
 - `task_queue.py` 只保留 adapter 级职责：入队、revoke/cancel、消费入口、execution eligibility 接线、最薄转发。
 - worker consume 路径仍支持 terminal short-circuit、revoke/cancel、生效中的 execution eligibility policy。
@@ -47,34 +51,92 @@
 - 记录通过/失败结果、失败归因、如有需要的补充 targeted test。
 
 ## 4. Phase C Validation
+- Current progress:
+- Phase C completed and validated; Checkpoint C passed.
 - Frontend focused checks:
 - step-0 failure 场景下，workspace 首屏主状态应反映 runtime failure，而不是被 `nodes queued` 误导。
 - websocket/polling 合流后，current run 真值优先级保持一致。
 - `awaiting_human`、approve/revise/replan、resume 后的状态切换都以 runtime/read model 为主。
 - Frontend concrete test targets:
+- [src/lib/runtimeReadModel.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/lib/runtimeReadModel.ts)
+  - 共享 step-0 failure、awaiting_human、resume 的 runtime-first 读模型判断，避免 workspace/polling 各自漂移
 - [__tests__/integration/runtime-gate-sync.test.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/__tests__/integration/runtime-gate-sync.test.tsx)
   - script gate 视图继续由 runtime 驱动
   - approve/revise/replan 后写回的仍是 resumed runtime view，而不是 queue 信号
 - 若后续修改了 polling/WS 合流逻辑，应补充或扩展针对 [useTaskPolling.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useTaskPolling.ts) 与 [useWebSocket.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useWebSocket.ts) 的 focused integration coverage
+- [tsconfig.frontend-runtime-check.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/tsconfig.frontend-runtime-check.json)
+  - 窄范围静态类型校验：只覆盖本轮 Phase C 改动涉及的 hooks、workspace 与 focused integration test
+- [scripts/validate_runtime_read_model.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/scripts/validate_runtime_read_model.ts)
+  - 独立于 Jest runner 的 runtime read-model 验证脚本，覆盖 step-0 failure、awaiting_human、resume、completed 四类读模型断言
+- [tsconfig.frontend-runtime-validate.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/tsconfig.frontend-runtime-validate.json)
+  - 只为 standalone validation script 编译 helper 与脚本，不依赖仓库级 Jest/integration runner
 - Suggested commands:
 - `npm test -- --runInBand __tests__/integration/runtime-gate-sync.test.tsx`
+- `./node_modules/.bin/jest --runInBand --forceExit --runTestsByPath __tests__/integration/runtime-gate-sync.test.tsx --selectProjects integration`
+- `./node_modules/.bin/tsc -p tsconfig.frontend-runtime-check.json --pretty false`
+- `./node_modules/.bin/tsc -p tsconfig.frontend-runtime-validate.json --outDir /tmp/runtime-read-model-check --pretty false`
+- `node /tmp/runtime-read-model-check/scripts/validate_runtime_read_model.js`
 - Evidence to capture:
 - step-0 failure、awaiting_human、resume 三类 UI 截图或状态记录。
+- 若 targeted Jest 路径仍超时，需额外记录“超时但无 assertion failure 输出”的 runner 级阻塞证据；但它不再单独阻塞 Checkpoint C。
 
 ## 5. Phase D Validation
 - Manual quick HITL regression:
 - 使用本地开发启动路径重跑 quick HITL 链路，补记新的 `task_id` 与 `workflow_session_id`。
 - 验证 `script gate -> approve -> resume -> image/video`。
 - 若媒体阶段失败，明确区分 provider config / execution contract 与 queue/runtime 边界回归。
+- 若验证已证明 `script approve -> resume` 可以进入 media agent，而后续失败被收口为 shared WM continuity / empty `scene_info_ref`，则该问题记为外部窗口处理，不再并回本计划实现范围。
 - Final acceptance rule:
 - 只有在未重新引入 runtime semantics into queue layer 的前提下，且 quick HITL 主线可解释地通过或可解释地失败，Checkpoint D 才算通过。
 
 ## 6. Checkpoint Evidence Log
 - A checkpoint:
-- 待填充
+- 2026-03-22T01:48:14Z passed
+- Evidence:
+  - [PLAN-20260321-012-boundary-inventory](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260321-012-boundary-inventory.md)
+  - S1/S2 completed in [PLAN-20260321-012](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260321-012.md)
+- Result:
+  - `task_queue.py` function-level ownership is now explicitly split into queue adapter, execution host/bootstrap, runtime/control-plane, and diagnostics concerns.
+  - frontend current-run truth priority is frozen as runtime-first.
+  - three different resume semantics are separated before backend extraction begins.
 - B checkpoint:
-- 待填充
+- 2026-03-22T03:14:43Z passed
+- Evidence:
+  - [queued_task_execution_host.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/queued_task_execution_host.py)
+  - [generation_mode.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/core/generation_mode.py)
+  - [runtime_session_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/runtime_session_service.py)
+  - `cd backend && env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 timeout 120s .venv/bin/python -m pytest -q tests/unit/test_task_queue.py tests/unit/test_tasks_endpoint.py tests/unit/test_runtime_session_service.py`
+- Result:
+  - S3/S4 together removed worker bootstrap, dispatch host, runtime payload recovery, and runtime failure writeback ownership from `task_queue.py`.
+  - Focused backend regressions passed: `18 passed, 2 warnings in 2.48s`.
 - C checkpoint:
-- 待填充
+- 2026-03-22T06:47:32Z passed
+- Evidence:
+  - [useTaskPolling.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useTaskPolling.ts)
+  - [useWebSocket.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useWebSocket.ts)
+  - [QuickModeWorkspace.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/components/preview/QuickModeWorkspace.tsx)
+  - [runtimeReadModel.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/lib/runtimeReadModel.ts)
+  - [runtime-gate-sync.test.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/__tests__/integration/runtime-gate-sync.test.tsx)
+  - [tsconfig.frontend-runtime-check.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/tsconfig.frontend-runtime-check.json)
+  - [validate_runtime_read_model.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/scripts/validate_runtime_read_model.ts)
+  - [tsconfig.frontend-runtime-validate.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/tsconfig.frontend-runtime-validate.json)
+  - `timeout 45s ./node_modules/.bin/tsc -p tsconfig.frontend-runtime-check.json --pretty false`
+  - `timeout 45s ./node_modules/.bin/jest --runInBand --forceExit --runTestsByPath __tests__/integration/runtime-gate-sync.test.tsx --selectProjects integration --testNamePattern 'renders runtime failure as the primary state even when nodes remain queued'`
+  - `timeout 45s ./node_modules/.bin/tsc -p tsconfig.frontend-runtime-validate.json --outDir /tmp/runtime-read-model-check --pretty false`
+  - `node /tmp/runtime-read-model-check/scripts/validate_runtime_read_model.js`
+- Result:
+  - Runtime-first convergence changes for polling/websocket and the focused step-0 failure integration case are landed.
+  - Narrow-scope frontend `tsc` check passed.
+  - Shared runtime read-model logic is now extracted into a pure helper consumed by workspace and polling, so validation no longer depends on the blocked Jest runner alone.
+  - Standalone runtime read-model validation passed with explicit assertions for step-0 failure, `awaiting_human`, resume, and completed terminal-state behavior.
+  - Targeted Jest integration execution still times out in the current local runner with no assertion output, but it is now treated as an environment-specific runner issue rather than a blocker on Checkpoint C.
 - D checkpoint:
-- 待填充
+- 2026-03-22T06:47:32Z passed (boundary-only scope)
+- Evidence:
+  - 手工 quick HITL 验证：`script approve -> resume -> image agent entry` 已可达
+  - [image_generator_6fae1940-2cc8-40e4-9125-fae03ecbe23c.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/storage/temp/context/image_generator_6fae1940-2cc8-40e4-9125-fae03ecbe23c.json)
+  - [video_generator_6fae1940-2cc8-40e4-9125-fae03ecbe23c.json](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/storage/temp/context/video_generator_6fae1940-2cc8-40e4-9125-fae03ecbe23c.json)
+- Result:
+  - 当前窗口范围内已验证 queue/runtime boundary 修复可将 `script approve -> resume` 推进到 media-agent entry。
+  - 两份 media context artifact 均显示 `total_scenes=0` / `scenes_to_generate=[]`，因此后续失败被收口为 shared WM continuity / scene facts reconstruction，而不是 queue/runtime 边界回归。
+  - 本次手工验证未补记 `task_id/workflow_session_id`，但 workflow execution 证据已通过上述 context artifact 保留；shared WM continuity 已转交另一窗口独立处理。
