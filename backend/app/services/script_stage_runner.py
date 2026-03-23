@@ -12,7 +12,7 @@ from ..agents import ConceptPlannerAgent, ScriptWriterAgent
 from ..agents.utils.llm_policy import LLMPolicyManager
 from ..agents.utils.memory_helpers import agent_scope, get_mas_working_memory, mas_scope
 from ..models import Task
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 from .script_review_contract import get_script_review_contract
 
 
@@ -20,7 +20,9 @@ class ScriptStageRunner:
     """Runs concept_planner/script_writer without depending on orchestrator private helpers."""
 
     def __init__(self, memory_services: MemoryServices | None = None):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for ScriptStageRunner")
+        self._memory_services = memory_services
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "llm_policies.yaml")
         self._llm_policy = LLMPolicyManager(policy_file)
         self._concept_planner = ConceptPlannerAgent(

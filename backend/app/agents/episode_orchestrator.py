@@ -30,6 +30,10 @@ from ..services.style_taxonomy import summarize_style_taxonomy
 class EpisodeOrchestratorAgent(BaseAgent):
     """Sequentially executes approved episodes while reusing the 1-minute MAS workflow."""
 
+    @classmethod
+    def create_default(cls) -> "EpisodeOrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
     def __init__(
         self,
         memory_services: Optional[MemoryServices] = None,
@@ -37,7 +41,9 @@ class EpisodeOrchestratorAgent(BaseAgent):
         orchestrator: Optional[OrchestratorAgent] = None,
         concept_planner: Optional[ConceptPlannerAgent] = None,
     ) -> None:
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for EpisodeOrchestratorAgent")
+        self._memory_services = memory_services
         super().__init__(
             agent_type=AgentType.EPISODE_ORCHESTRATOR,
             agent_name="episode_orchestrator",

@@ -19,10 +19,19 @@ from ...services.monitoring_service import MonitoringService, MetricType
 
 
 class MemoryTool(AsyncTool):
+    @classmethod
+    def create_default(cls) -> "MemoryTool":
+        return cls(memory_services=build_memory_services())
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         super().__init__()
-        # For tools构造场景，若未显式注入，则构造一份隔离的 MemoryServices（非全局单例）
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for MemoryTool")
+        self._memory_services = memory_services
+
+    @property
+    def long_term_service(self):
+        return self._long_term
 
     @classmethod
     def get_metadata(cls) -> ToolMetadata:

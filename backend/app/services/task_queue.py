@@ -1,7 +1,6 @@
 """
 Task Queue Service using Celery for background processing
 """
-import asyncio
 import logging
 import time
 from typing import Dict, Any
@@ -10,11 +9,10 @@ from sqlalchemy import create_engine
 
 from ..core.config import settings
 from ..core.constants import GenerationMode
-from ..core.database import get_sync_db
-from ..core.mode_router import dispatch_generation, resolve_generation_mode
+from ..core.generation_mode import resolve_generation_mode
 from ..models import Task, TaskStatus
-from ..events.provider import reset_event_bus
 from ..services.runtime_session_service import RuntimeSessionService
+from .queued_task_execution_host import run_generation_in_host
 from .task_execution_policy import get_queue_execution_block_reason
 
 
@@ -99,14 +97,6 @@ def sync_process_video_task(task_id: int):
     logger.info(f"=== 🔥 WORKER RESTART: sync_process_video_task called for task_id: {task_id} (v6.0 - MULTI-QUEUE WORKER!) ===")
     
     try:
-        # CRITICAL: Initialize tool registry for Celery worker
-        logger.info("Initializing tool registry for Celery worker...")
-        from ..agents.tools import register_default_tools
-        register_default_tools()
-        logger.info("✅ Tool registry initialized for Celery worker")
-        reset_event_bus()
-        logger.info("✅ Worker event bus reset for queued run")
-        
         logger.info("Creating database session...")
         # Get database session
         db = SyncSessionLocal()
@@ -172,56 +162,33 @@ def sync_process_video_task(task_id: int):
                 "mode": mode.value,
             }
 
-        logger.info("Setting up asyncio event loop...")
-        # Convert async execution to sync using asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        logger.info("Event loop created and set")
-
         try:
             logger.info("=== Starting multi-agent execution ===")
-            dispatch_payload = dict(task_payload)
-            if mode == GenerationMode.QUICK:
-                runtime_session = runtime_session or RuntimeSessionService.get_or_create_session_for_task_sync(
-                    db,
-                    task,
-                    mode="quick",
-                )
+            runtime_session, dispatch_payload = RuntimeSessionService.prepare_dispatch_payload_for_task_sync(
+                db,
+                task,
+                mode=mode,
+            )
+            if runtime_session is not None:
                 logger.info(f"Loaded runtime session {runtime_session.id} for task {task.id}")
-                if isinstance(runtime_session.input_payload, dict) and runtime_session.input_payload:
-                    dispatch_payload = dict(runtime_session.input_payload)
 
-            logger.info(
-                "Routing task %s through orchestrator mainline (reason=%s, mode=%s)",
-                task.id,
-                route,
-                mode.value,
+            result = run_generation_in_host(
+                mode,
+                task=task,
+                input_data=dispatch_payload,
+                db=db,
+                route=route,
+                execution_order=1,
             )
-            result = loop.run_until_complete(
-                dispatch_generation(
-                    mode,
-                    task=task,
-                    input_data=dispatch_payload,
-                    db=db,
-                    execution_order=1,
-                )
-            )
-            
             logger.info(f"=== Multi-agent execution completed ===")
             logger.info(f"Kernel result: {result}")
             
-            return {
-                "status": result.get("status") or result.get("workflow_status") or "completed",
-                "result": result,
-                "route": route,
-                "mode": mode.value,
-            }
+            return result
             
         finally:
-            logger.info("Closing event loop and database session...")
-            loop.close()
+            logger.info("Closing database session...")
             db.close()
-            logger.info("Resources cleaned up")
+            logger.info("Database session cleaned up")
     
     except Exception as e:
         logger.error(f"Error processing task {task_id}: {str(e)}", exc_info=True)
@@ -232,20 +199,13 @@ def sync_process_video_task(task_id: int):
             db = SyncSessionLocal()
             task = db.query(Task).filter(Task.id == task_id).first()
             if task:
-                mode = resolve_generation_mode((task.input_parameters or {}).get("mode"))
-                if mode == GenerationMode.QUICK:
-                    runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(db, task, mode="quick")
-                    RuntimeSessionService.mark_session_failed_sync(
-                        db,
-                        runtime_session,
-                        error_message=str(e),
-                        task=task,
-                    )
+                runtime_session = RuntimeSessionService.mark_task_execution_failed_sync(
+                    db,
+                    task,
+                    error_message=str(e),
+                )
+                if runtime_session is not None:
                     logger.info("Task marked as failed with runtime session error message")
-                else:
-                    task.status = TaskStatus.FAILED.value
-                    task.error_message = str(e)
-                    db.commit()
             db.close()
         except Exception as db_error:
             logger.error(f"Failed to update task with error: {str(db_error)}")

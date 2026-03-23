@@ -67,6 +67,11 @@ class WorkflowSession(BaseModel):
     attempts = relationship("WorkflowNodeAttempt", back_populates="session", cascade="all, delete-orphan")
     gates = relationship("WorkflowGate", back_populates="session", cascade="all, delete-orphan")
     decisions = relationship("WorkflowGateDecision", back_populates="session", cascade="all, delete-orphan")
+    published_deliverables = relationship(
+        "WorkflowPublishedDeliverable",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
 
 
 class WorkflowNodeState(BaseModel):
@@ -89,6 +94,11 @@ class WorkflowNodeState(BaseModel):
     attempts = relationship("WorkflowNodeAttempt", back_populates="node", cascade="all, delete-orphan")
     gates = relationship("WorkflowGate", back_populates="node", cascade="all, delete-orphan")
     decisions = relationship("WorkflowGateDecision", back_populates="node", cascade="all, delete-orphan")
+    published_deliverables = relationship(
+        "WorkflowPublishedDeliverable",
+        back_populates="node",
+        cascade="all, delete-orphan",
+    )
 
 
 class WorkflowNodeAttempt(BaseModel):
@@ -109,6 +119,11 @@ class WorkflowNodeAttempt(BaseModel):
     session = relationship("WorkflowSession", back_populates="attempts")
     node = relationship("WorkflowNodeState", back_populates="attempts")
     gates = relationship("WorkflowGate", back_populates="attempt", cascade="all, delete-orphan")
+    published_deliverables = relationship(
+        "WorkflowPublishedDeliverable",
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+    )
 
 
 class WorkflowGate(BaseModel):
@@ -150,3 +165,23 @@ class WorkflowGateDecision(BaseModel):
     gate = relationship("WorkflowGate", back_populates="decisions")
     session = relationship("WorkflowSession", back_populates="decisions")
     node = relationship("WorkflowNodeState", back_populates="decisions")
+
+
+class WorkflowPublishedDeliverable(BaseModel):
+    __tablename__ = "workflow_published_deliverables"
+
+    session_id = Column(Integer, ForeignKey("workflow_sessions.id"), nullable=False, index=True)
+    node_id = Column(Integer, ForeignKey("workflow_node_states.id"), nullable=False, index=True)
+    attempt_id = Column(Integer, ForeignKey("workflow_node_attempts.id"), nullable=False, index=True)
+    deliverable_type = Column(String(50), nullable=False, index=True)
+    scope_type = Column(String(30), nullable=False, default="episode")
+    scope_id = Column(String(100), nullable=True)
+    revision_no = Column(Integer, nullable=False, default=0)
+    payload_ref = Column(String(500), nullable=False)
+    summary = Column(JSON, default=dict)
+    is_candidate = Column(Boolean, nullable=False, default=True)
+    is_approved = Column(Boolean, nullable=False, default=False)
+
+    session = relationship("WorkflowSession", back_populates="published_deliverables")
+    node = relationship("WorkflowNodeState", back_populates="published_deliverables")
+    attempt = relationship("WorkflowNodeAttempt", back_populates="published_deliverables")

@@ -63,7 +63,7 @@ class TestErrorRecovery:
         mock_ai_services['openai'].chat.completions.create.side_effect = failing_ai_service
         
         # Execute orchestrator with error recovery
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure error recovery to retry
@@ -122,7 +122,7 @@ class TestErrorRecovery:
             assert response.status_code == 201
             task_ids.append(response.json()["task_id"])
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure circuit breaker to open after failures
@@ -191,7 +191,7 @@ class TestErrorRecovery:
         
         task_id = response.json()["task_id"]
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure error recovery to use fallback
@@ -257,7 +257,7 @@ class TestErrorRecovery:
         # Configure AI service to fail
         mock_ai_services['openai'].chat.completions.create.side_effect = Exception("Service failure")
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             mock_recovery.handle_error.return_value = {
@@ -323,7 +323,7 @@ class TestErrorRecovery:
         
         mock_ai_services['openai'].chat.completions.create.side_effect = selective_failure
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure recovery to retry failed step
@@ -387,7 +387,7 @@ class TestErrorRecovery:
         # Configure service to fail
         mock_ai_services['openai'].chat.completions.create.side_effect = Exception("Service failure")
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             mock_recovery.handle_error.return_value = {
@@ -450,7 +450,7 @@ class TestErrorRecovery:
         
         task_id = response.json()["task_id"]
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             mock_recovery.handle_error.return_value = {
@@ -529,7 +529,7 @@ class TestErrorRecovery:
         
         mock_ai_services['openai'].chat.completions.create.side_effect = selective_service_behavior
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure isolation - don't let one failure affect others
@@ -606,7 +606,7 @@ class TestErrorRecovery:
             choices=[MagicMock(message=MagicMock(content="Text generation works"))]
         )
         
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             # Configure graceful degradation

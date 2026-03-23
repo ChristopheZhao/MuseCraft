@@ -340,7 +340,7 @@ class TestSystemIntegrationValidation:
         
         # Execute orchestration
         from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         result = await orchestrator.execute(
             task_id=task.task_id,
@@ -378,7 +378,7 @@ class TestSystemIntegrationValidation:
         
         # Execute task (should handle error gracefully)
         from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         try:
             await orchestrator.execute(

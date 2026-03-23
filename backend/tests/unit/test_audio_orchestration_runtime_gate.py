@@ -502,6 +502,9 @@ def test_orchestration_state_adapter_rejects_forbidden_runtime_control_state_pro
 
 def test_build_execution_queue_and_standby_agents_follow_llm_task_specs():
     agent = object.__new__(OrchestratorAgent)
+    agent._orchestration_state = OrchestrationStateAdapter(
+        memory_services=SimpleNamespace(short_term=object())
+    )
     task_specs = {
         AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
         AgentType.VIDEO_GENERATOR: {"run": True, "order": 2},

@@ -36,9 +36,13 @@ class EnhancedOrchestratorAgent(BaseAgent):
     advanced error handling, and comprehensive monitoring
     """
     
+    @classmethod
+    def create_default(cls) -> "EnhancedOrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
-            memory_services = build_memory_services()
+            raise ValueError("memory_services is required for EnhancedOrchestratorAgent")
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="enhanced_orchestrator",

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2019"
+  },
+  "include": [
+    "src/lib/runtimeReadModel.ts",
+    "src/types/index.ts",
+    "scripts/validate_runtime_read_model.ts"
+  ]
+}

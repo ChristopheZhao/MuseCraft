@@ -1,6 +1,5 @@
 """
-Orchestrator Agent - Coordinates the entire video generation workflow
-基于 Shared Working Memory（共享黑板）作为唯一对外事实源；取消对 WorkflowState 的依赖。
+Orchestrator Agent - Coordinates the entire video generation workflow.
 """
 import asyncio
 import os
@@ -43,6 +42,16 @@ from ..services.orchestration_state_adapter import OrchestrationStateAdapter
 from ..services.scene_info_reference_service import persist_scene_info_ref
 from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
 from ..services.runtime_session_service import RuntimeSessionService
+from ..services.published_deliverable_service import (
+    PublishedDeliverableService,
+    build_deliverable_ref,
+    set_published_deliverable_ref,
+)
+from ..services.published_deliverable_adapter import (
+    build_script_deliverable_payload,
+    project_deliverable_ref_to_shared_wm,
+    project_payload_deliverables_to_shared_wm,
+)
 from ..services.script_review_contract import (
     build_script_preview_text,
     get_script_review_contract,
@@ -79,12 +88,18 @@ class OrchestratorAgent(BaseAgent):
     by coordinating all specialized agents in the correct order
     """
     
+    @classmethod
+    def create_default(cls) -> "OrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         import os
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         self._llm_policy = LLMPolicyManager(policy_file)
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestratorAgent")
+        self._memory_services = memory_services
         self._audio_delivery_gate = AudioDeliveryGateEvaluator(memory_services=self._memory_services)
         self._execution_boundary_assembler = ExecutionBoundaryAssembler(self._memory_services)
         self._orchestration_state = OrchestrationStateAdapter(self._memory_services)
@@ -283,14 +298,14 @@ class OrchestratorAgent(BaseAgent):
     def _get_orchestration_state_adapter(self) -> OrchestrationStateAdapter:
         adapter = getattr(self, "_orchestration_state", None)
         if adapter is None:
-            adapter = OrchestrationStateAdapter(getattr(self, "_memory_services", None))
+            adapter = OrchestrationStateAdapter(memory_services=self._memory_services)
             self._orchestration_state = adapter
         return adapter
 
     def _get_orchestration_observation_adapter(self) -> OrchestrationObservationAdapter:
         adapter = getattr(self, "_orchestration_observation", None)
         if adapter is None:
-            adapter = OrchestrationObservationAdapter(getattr(self, "_memory_services", None))
+            adapter = OrchestrationObservationAdapter(memory_services=self._memory_services)
             self._orchestration_observation = adapter
         return adapter
 
@@ -298,7 +313,7 @@ class OrchestratorAgent(BaseAgent):
         control_plane = getattr(self, "_orchestration_control_plane", None)
         if control_plane is None:
             control_plane = OrchestrationControlPlane(
-                memory_services=getattr(self, "_memory_services", None),
+                memory_services=self._memory_services,
                 protocol=getattr(self, "_orchestration_protocol", None),
                 orchestration_state=self._get_orchestration_state_adapter(),
                 audio_delivery_gate=getattr(self, "_audio_delivery_gate", None),
@@ -385,10 +400,33 @@ class OrchestratorAgent(BaseAgent):
             scene_scripts,
             script_output=script_output,
         )
-        artifact_refs = [
-            {"type": "shared_fact", "ref": "project.concept_plan"},
-            {"type": "shared_fact", "ref": "project.scene_scripts"},
-        ]
+        deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
+            db,
+            session=runtime_session,
+            workflow_id=workflow_id,
+            attempt_id=script_attempt_id,
+            payload=build_script_deliverable_payload(
+                workflow_id,
+                service=self.short_term_service,
+            ),
+            summary={
+                "script_preview_text": script_preview_text,
+                "scenes_generated": script_output.get("scenes_generated"),
+                "total_scenes": script_output.get("total_scenes"),
+            },
+        )
+        artifact_refs = [build_deliverable_ref(deliverable)]
+        runtime_session.input_payload = set_published_deliverable_ref(
+            runtime_session.input_payload,
+            node_key="script",
+            ref=artifact_refs[0],
+        )
+        project_deliverable_ref_to_shared_wm(
+            workflow_id,
+            node_key="script",
+            ref=artifact_refs[0],
+            service=self.short_term_service,
+        )
 
         RuntimeSessionService.complete_node_attempt_sync(
             db,
@@ -603,6 +641,11 @@ class OrchestratorAgent(BaseAgent):
             }
 
         runtime_input_payload = dict(getattr(runtime_session, "input_payload", {}) or {})
+        project_payload_deliverables_to_shared_wm(
+            wf_id,
+            runtime_input_payload,
+            service=self.short_term_service,
+        )
         workflow_data = runtime_input_payload.copy() if runtime_input_payload else input_data.copy()
         workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
         workflow_data.setdefault("target_resolution", workflow_data.get("resolution"))
@@ -1833,9 +1876,7 @@ class OrchestratorAgent(BaseAgent):
 
             # 统一静态上下文（静态背景 + 场景视图），传递给 ReAct 基类处理
             static_context: Dict[str, Any] = {}
-            if agent_type == AgentType.IMAGE_GENERATOR:
-                static_context.update(_merge_media_context(include_roles=True) or {})
-            elif agent_type == AgentType.AUDIO_GENERATOR:
+            if agent_type == AgentType.AUDIO_GENERATOR:
                 audio_req = workflow_data.get("audio_requirements") if isinstance(workflow_data, dict) else None
                 sfx_override = None
                 if isinstance(audio_req, dict) and audio_req.get("sfx_required") is not None:

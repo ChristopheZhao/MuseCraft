@@ -1,8 +1,10 @@
+from types import SimpleNamespace
+
 from app.services.workflow_completion_adapter import WorkflowCompletionAdapter
 
 
 def test_build_persistence_payload_projects_scene_and_final_resources(monkeypatch):
-    adapter = WorkflowCompletionAdapter()
+    adapter = WorkflowCompletionAdapter(memory_services=SimpleNamespace(short_term=object()))
 
     wm = {
         "scene_overview": {

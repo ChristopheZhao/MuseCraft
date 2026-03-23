@@ -6,6 +6,11 @@ import { AlertCircle, CheckCircle2, Loader2, MessageSquareText, RefreshCcw, Rota
 import AgentOrchestrator from '@/components/agents/AgentOrchestrator';
 import RealTimeProgress from '@/components/progress/RealTimeProgress';
 import { ApiClient } from '@/lib/api';
+import {
+  getRuntimeDisplayNodes,
+  getRuntimeFailureMessage,
+  isPreNodeFailure,
+} from '@/lib/runtimeReadModel';
 import { useAppStore } from '@/store/useAppStore';
 
 const statusClassMap: Record<string, string> = {
@@ -49,6 +54,14 @@ const QuickModeWorkspace: React.FC = () => {
     () => String(activeGate?.facts?.script_preview_text || '').trim(),
     [activeGate?.facts]
   );
+  const runtimeFailureMessage = useMemo(
+    () => getRuntimeFailureMessage(quickRuntime),
+    [quickRuntime]
+  );
+  const showPreNodeFailureHint = useMemo(
+    () => isPreNodeFailure(quickRuntime),
+    [quickRuntime]
+  );
 
   useEffect(() => {
     if (activeGate?.status === 'awaiting_human') {
@@ -90,15 +103,8 @@ const QuickModeWorkspace: React.FC = () => {
   };
 
   const runtimeNodes = useMemo(
-    () =>
-      (quickRuntime?.nodes || []).map((node) => {
-        const gateBound = activeGate?.node_id === node.id && activeGate?.status === 'awaiting_human';
-        return {
-          ...node,
-          displayStatus: gateBound ? 'pending_gate' : node.status,
-        };
-      }),
-    [quickRuntime?.nodes, activeGate?.node_id, activeGate?.status]
+    () => getRuntimeDisplayNodes(quickRuntime),
+    [quickRuntime]
   );
 
   return (
@@ -176,16 +182,16 @@ const QuickModeWorkspace: React.FC = () => {
         </section>
       )}
 
-      {quickRuntime?.status === 'failed' && (
+      {runtimeFailureMessage && (
         <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-red-200 p-6">
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-600 mt-0.5" />
             <div>
               <h3 className="text-lg font-semibold text-red-900">运行失败</h3>
               <p className="text-sm text-red-700 mt-1">
-                {quickRuntime.error_message || '当前 run 已失败。'}
+                {runtimeFailureMessage}
               </p>
-              {!quickRuntime.current_node_key && (
+              {showPreNodeFailureHint && (
                 <p className="text-xs text-red-600 mt-2">
                   失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。
                 </p>

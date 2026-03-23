@@ -52,9 +52,13 @@ class ReActOrchestratorAgent(BaseAgent):
     5. Reflect - Evaluate results and decide next iteration
     """
     
+    @classmethod
+    def create_default(cls) -> "ReActOrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
-            memory_services = build_memory_services()
+            raise ValueError("memory_services is required for ReActOrchestratorAgent")
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="react_orchestrator",

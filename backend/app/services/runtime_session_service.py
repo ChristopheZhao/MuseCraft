@@ -22,6 +22,13 @@ from ..models import (
     WorkflowGateStatus,
     WorkflowGateDecision,
 )
+from ..core.constants import GenerationMode
+from ..core.generation_mode import resolve_generation_mode
+from .published_deliverable_service import (
+    PublishedDeliverableService,
+    build_deliverable_ref,
+    set_published_deliverable_ref,
+)
 from .script_review_contract import build_script_review_contract, set_script_review_contract
 
 
@@ -387,6 +394,58 @@ class RuntimeSessionService:
         return session
 
     @staticmethod
+    def prepare_dispatch_payload_for_task_sync(
+        db: Session,
+        task: Task,
+        *,
+        mode: str | GenerationMode = "quick",
+        project_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> tuple[Optional[WorkflowSession], Dict[str, Any]]:
+        mode_value = getattr(mode, "value", mode)
+        dispatch_payload = dict(task.input_parameters or {})
+        if str(mode_value or "").strip().lower() != GenerationMode.QUICK.value:
+            return None, dispatch_payload
+
+        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
+            db,
+            task,
+            mode=GenerationMode.QUICK.value,
+            project_id=project_id,
+            episode_id=episode_id,
+        )
+        if isinstance(runtime_session.input_payload, dict) and runtime_session.input_payload:
+            dispatch_payload = dict(runtime_session.input_payload)
+        return runtime_session, dispatch_payload
+
+    @staticmethod
+    def mark_task_execution_failed_sync(
+        db: Session,
+        task: Task,
+        *,
+        error_message: str,
+    ) -> Optional[WorkflowSession]:
+        mode = resolve_generation_mode((task.input_parameters or {}).get("mode"))
+        if mode == GenerationMode.QUICK:
+            runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
+                db,
+                task,
+                mode=GenerationMode.QUICK.value,
+            )
+            RuntimeSessionService.mark_session_failed_sync(
+                db,
+                runtime_session,
+                error_message=error_message,
+                task=task,
+            )
+            return runtime_session
+
+        task.status = TaskStatus.FAILED.value
+        task.error_message = error_message
+        db.commit()
+        return None
+
+    @staticmethod
     def get_session_by_id_sync(db: Session, session_id: int) -> Optional[WorkflowSession]:
         return db.query(WorkflowSession).filter(WorkflowSession.id == session_id).first()
 
@@ -732,6 +791,18 @@ class RuntimeSessionService:
         session.error_message = None
 
         payload = dict(session.input_payload or {})
+        if normalized_action == "approve":
+            deliverable = PublishedDeliverableService.mark_node_deliverable_approved_sync(
+                db,
+                session=session,
+                node_key=node_key,
+                attempt_id=gate.attempt_id,
+            )
+            payload = set_published_deliverable_ref(
+                payload,
+                node_key=node_key,
+                ref=build_deliverable_ref(deliverable),
+            )
         if normalized_action in {"revise", "replan"}:
             payload = set_script_review_contract(
                 payload,

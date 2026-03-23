@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from ..models import AgentType
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 
 
 class OrchestrationStateAdapter:
@@ -21,7 +21,9 @@ class OrchestrationStateAdapter:
     )
 
     def __init__(self, memory_services: Optional[MemoryServices] = None):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestrationStateAdapter")
+        self._memory_services = memory_services
 
     def _write_workflow_projection(
         self,

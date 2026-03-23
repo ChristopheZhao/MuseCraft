@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 from ..models import Task, TaskStatus, TaskType, AgentType
 from ..agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-from .memory_provider import build_memory_services
 from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
 from .workflow_optimizer import workflow_optimizer, ExecutionStrategy, OptimizationLevel
 from .monitoring_service import monitoring_service
@@ -416,8 +415,7 @@ class TestingFramework:
         
         try:
             # Create orchestrator
-            memory_services = build_memory_services()
-            orchestrator = EnhancedOrchestratorAgent(memory_services=memory_services)
+            orchestrator = EnhancedOrchestratorAgent.create_default()
             
             # Execute workflow
             start_time = time.time()

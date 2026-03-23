@@ -6,14 +6,16 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from ..agents.utils.memory_helpers import write_shared_fact
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 
 
 class OrchestrationObservationAdapter:
     """Owns orchestration trace payloads and gate observation persistence."""
 
     def __init__(self, memory_services: Optional[MemoryServices] = None):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestrationObservationAdapter")
+        self._memory_services = memory_services
 
     @staticmethod
     def _normalize_audio_policy(value: Any) -> str:

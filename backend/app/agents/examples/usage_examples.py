@@ -7,8 +7,7 @@ import json
 from typing import Dict, Any
 
 from ..tools.tool_registry import get_tool_registry
-from ..memory.services.long_term import SimpleLongTermMemoryService
-from ..services.memory_provider import build_memory_services
+from ..agents.tools.memory_tool import MemoryTool
 from ..prompts.template_manager import get_template_manager
 from .enhanced_concept_planner import EnhancedConceptPlannerAgent
 
@@ -56,9 +55,10 @@ async def demonstrate_memory_usage():
     """Demonstrate memory management"""
     print("\n=== Memory Usage Example ===")
     
-    # Create long-term memory facade via injected services (no global singletons)
-    services = build_memory_services()
-    memory_service = services.long_term
+    # Create long-term memory facade through the default tool factory so examples
+    # follow the same explicit composition convention as production paths.
+    memory_tool = MemoryTool.create_default()
+    memory_service = memory_tool.long_term_service
     
     # Store some memories
     memory_id1 = await memory_service.store_memory(

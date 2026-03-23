@@ -454,7 +454,7 @@ class TestComprehensiveE2EWorkflow:
         """Execute workflow and monitor all stages."""
         
         workflow_stages = []
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         # Mock monitoring service to capture stages
         def capture_stage_update(stage_name, status, metadata=None):

@@ -78,7 +78,7 @@ class TestEndToEndWorkflow:
         assert task.user_prompt == request_data["user_prompt"]
         
         # Step 3: Simulate orchestrator execution
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.agents.enhanced_orchestrator.enhanced_ai_client') as mock_client:
             mock_client.chat_completion.return_value = {
@@ -153,7 +153,7 @@ class TestEndToEndWorkflow:
         task_id = task_data["task_id"]
         
         # Execute with error recovery
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service') as mock_recovery:
             mock_recovery.handle_error.return_value = {"retry": True, "delay": 0.1}
@@ -235,7 +235,7 @@ class TestEndToEndWorkflow:
         task_id = task_data["task_id"]
         
         # Simulate workflow execution with progress updates
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.monitoring_service.monitoring_service') as mock_monitor:
             await orchestrator.execute(
@@ -297,7 +297,7 @@ class TestEndToEndWorkflow:
         task_id = task_data["task_id"]
         
         # Execute workflow
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         await orchestrator.execute(
             task_id=task_id,
             input_data=request_data,
@@ -350,7 +350,7 @@ class TestEndToEndWorkflow:
         task_id = task_data["task_id"]
         
         # Execute workflow
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         await orchestrator.execute(
             task_id=task_id,
             input_data=request_data,
@@ -391,7 +391,7 @@ class TestEndToEndWorkflow:
             tasks.append(response.json())
         
         # Execute all tasks concurrently
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         async def execute_task(task_data):
             return await orchestrator.execute(

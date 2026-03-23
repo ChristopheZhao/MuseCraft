@@ -9,7 +9,7 @@ import os
 import subprocess
 from typing import Any, Dict, Optional
 
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 from ..agents.utils.memory_helpers import get_mas_working_memory
 from ..agents.adapters.state.agent_outputs import (
     assess_composer_bgm_prereq,
@@ -21,7 +21,9 @@ class AudioDeliveryGateEvaluator:
     """Evaluate runtime video-audio delivery facts outside the orchestrator."""
 
     def __init__(self, memory_services: Optional[MemoryServices] = None):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for AudioDeliveryGateEvaluator")
+        self._memory_services = memory_services
 
     def evaluate_workflow_video_audio(self, workflow_state_id: str) -> Dict[str, Any]:
         facts = self._collect_runtime_video_audio_facts(workflow_state_id)

@@ -3,14 +3,20 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import QuickModeWorkspace from '../../src/components/preview/QuickModeWorkspace';
-import { useAppStore } from '../../src/store/useAppStore';
-import { ApiClient } from '../../src/lib/api';
-import type { TaskRuntimeView } from '../../src/types';
-import { I18nProvider } from '../../src/i18n/I18nProvider';
+import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
+import { useAppStore } from '@/store/useAppStore';
+import { ApiClient } from '@/lib/api';
+import type { TaskRuntimeView } from '@/types';
+import { I18nProvider } from '@/i18n/I18nProvider';
 
-jest.mock('../../src/store/useAppStore');
-jest.mock('../../src/lib/api', () => ({
+jest.mock('@/store/useAppStore');
+jest.mock('@/components/agents/AgentOrchestrator', () => () => (
+  <div data-testid="agent-orchestrator-stub">agent-orchestrator</div>
+));
+jest.mock('@/components/progress/RealTimeProgress', () => () => (
+  <div data-testid="realtime-progress-stub">realtime-progress</div>
+));
+jest.mock('@/lib/api', () => ({
   ApiClient: {
     submitScriptGateDecision: jest.fn(),
   },
@@ -227,5 +233,21 @@ describe('runtime gate sync', () => {
       });
     });
     expect(screen.getByText('已提交要求重规划，等待主线恢复…')).toBeInTheDocument();
+  });
+
+  it('renders runtime failure as the primary state even when nodes remain queued', () => {
+    renderWorkspace({
+      quickRuntime: buildRuntime({
+        status: 'failed',
+        current_node_key: null,
+        active_gate: null,
+        error_message: 'step-0 failed before entering first node',
+        nodes: buildRuntime().nodes.map((node) => ({ ...node, status: 'queued' })),
+      }),
+    });
+
+    expect(screen.getByText('运行失败')).toBeInTheDocument();
+    expect(screen.getByText('step-0 failed before entering first node')).toBeInTheDocument();
+    expect(screen.getByText('失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。')).toBeInTheDocument();
   });
 });

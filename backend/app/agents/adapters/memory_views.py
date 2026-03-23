@@ -8,43 +8,104 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .video import VideoMemoryAdapter
 from ...core.config import settings
-from ..utils.memory_helpers import get_mas_working_memory
+from ...services.published_deliverable_adapter import (
+    load_published_deliverable_payload_from_shared_wm,
+)
 
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
 
 
+_MAS_SCOPE_PREFIX = "mas"
+
+
+def _get_mas_working_memory(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+):
+    return service.get(str(workflow_id), f"{_MAS_SCOPE_PREFIX}:{workflow_id}")
+
+
+def _load_published_script_stage_payload(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Optional[Dict[str, Any]]:
+    payload = load_published_deliverable_payload_from_shared_wm(
+        workflow_id,
+        node_key="script",
+        service=service,
+        prefer_approved=True,
+    )
+    return payload if isinstance(payload, dict) else None
+
+
+def _require_published_script_stage_payload(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    payload = _load_published_script_stage_payload(workflow_id, service=service)
+    if isinstance(payload, dict):
+        return payload
+    raise ValueError(
+        "Missing published script deliverable for downstream media context: "
+        f"workflow_id={workflow_id}"
+    )
+
+
+def _merge_image_bucket_into_overview(
+    overview: Dict[str, Any],
+    *,
+    workflow_id: str,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    if not isinstance(overview, dict) or not overview:
+        return {}
+    try:
+        wm = _get_mas_working_memory(str(workflow_id), service=service)
+    except Exception:
+        wm = None
+    if wm is None:
+        return overview
+    try:
+        scenes = overview.get("scenes") if isinstance(overview, dict) else None
+        image_bucket = wm.get("scene_outputs.image", {}) or {}
+        if not (isinstance(scenes, list) and scenes and isinstance(image_bucket, dict) and image_bucket):
+            return overview
+        updated_scenes: List[Dict[str, Any]] = []
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            sn = _coerce_int(scene.get("scene_number"))
+            if sn is not None and not (scene.get("image_url") or "").strip():
+                rec = image_bucket.get(sn) or image_bucket.get(str(sn))
+                if isinstance(rec, dict) and isinstance(rec.get("image_url"), str) and rec.get("image_url"):
+                    scene_copy = dict(scene)
+                    scene_copy["image_url"] = rec.get("image_url")
+                    updated_scenes.append(scene_copy)
+                    continue
+            updated_scenes.append(scene)
+        merged = dict(overview)
+        merged["scenes"] = updated_scenes
+        return merged
+    except Exception:
+        return overview
+
+
 def load_scene_overview(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Return MAS working-memory projection for scenes/state."""
-    wm = get_mas_working_memory(str(workflow_id), service=service)
+    wm = _get_mas_working_memory(str(workflow_id), service=service)
     if wm is None:
         return {}
     overview = wm.get("scene_overview", {})
     if isinstance(overview, dict) and overview:
-        # Normalize: merge generated asset URLs from scene_outputs.* into overview view (do not mutate WM in-place)
-        try:
-            scenes = overview.get("scenes") if isinstance(overview, dict) else None
-            if isinstance(scenes, list) and scenes:
-                image_bucket = wm.get("scene_outputs.image", {}) or {}
-                if isinstance(image_bucket, dict) and image_bucket:
-                    updated_scenes: List[Dict[str, Any]] = []
-                    for s in scenes:
-                        if not isinstance(s, dict):
-                            continue
-                        sn = _coerce_int(s.get("scene_number"))
-                        if sn is not None and not (s.get("image_url") or "").strip():
-                            rec = image_bucket.get(sn) or image_bucket.get(str(sn))
-                            if isinstance(rec, dict) and isinstance(rec.get("image_url"), str) and rec.get("image_url"):
-                                s2 = dict(s)
-                                s2["image_url"] = rec.get("image_url")
-                                updated_scenes.append(s2)
-                                continue
-                        updated_scenes.append(s)
-                    overview = dict(overview)
-                    overview["scenes"] = updated_scenes
-        except Exception:
-            pass
-        return overview
+        return _merge_image_bucket_into_overview(
+            overview,
+            workflow_id=workflow_id,
+            service=service,
+        )
     # legacy path: adapt VideoMemoryAdapter over WM if snapshot present
     try:
         adapter = VideoMemoryAdapter(wm)
@@ -56,7 +117,7 @@ def load_scene_overview(workflow_id: str, *, service: "WorkingMemoryService") ->
 def load_scene_scripts(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[int, Dict[str, Any]]:
     """Fetch per-scene script facts from the workflow fact store."""
     try:
-        wm = get_mas_working_memory(workflow_id, service=service)
+        wm = _get_mas_working_memory(workflow_id, service=service)
         payload = wm.get("project.scene_scripts", {})
         if isinstance(payload, dict):
             return _normalize_scene_dict(payload)
@@ -79,7 +140,7 @@ def load_roles_context(workflow_id: str, *, service: "WorkingMemoryService") -> 
 
 def load_concept_plan(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     try:
-        wm = get_mas_working_memory(workflow_id, service=service)
+        wm = _get_mas_working_memory(workflow_id, service=service)
         plan = wm.get("project.concept_plan", {}) or {}
         if isinstance(plan, dict):
             return plan
@@ -91,7 +152,7 @@ def load_concept_plan(workflow_id: str, *, service: "WorkingMemoryService") -> D
 def load_audio_requirements(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Return audio requirement facts, if available."""
     try:
-        wm = get_mas_working_memory(workflow_id, service=service)
+        wm = _get_mas_working_memory(workflow_id, service=service)
         payload = wm.get("project.audio_requirements", {}) if wm is not None else {}
         if isinstance(payload, dict):
             return payload
@@ -148,7 +209,7 @@ def build_video_composer_context(
     ctx: Dict[str, Any] = {}
     wm = None
     try:
-        wm = get_mas_working_memory(str(workflow_id), service=service)
+        wm = _get_mas_working_memory(str(workflow_id), service=service)
     except Exception:
         wm = None
 
@@ -364,9 +425,14 @@ def build_video_composer_context(
 
 def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for ImageGenerator."""
-    concept_plan = load_concept_plan(workflow_id, service=service)
-    overview = load_scene_overview(workflow_id, service=service)
-    scripts = load_scene_scripts(workflow_id, service=service)
+    published_payload = _require_published_script_stage_payload(workflow_id, service=service)
+    concept_plan = published_payload.get("concept_plan") or {}
+    overview = _merge_image_bucket_into_overview(
+        published_payload.get("scene_overview") or {},
+        workflow_id=workflow_id,
+        service=service,
+    )
+    scripts = _normalize_scene_dict(published_payload.get("scene_scripts") or {})
 
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
     target_map: Dict[int, str] = {}
@@ -445,11 +511,16 @@ def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryS
 
 def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for VideoGenerator."""
-    concept_plan = load_concept_plan(workflow_id, service=service)
-    overview = load_scene_overview(workflow_id, service=service)
-    scripts = load_scene_scripts(workflow_id, service=service)
+    published_payload = _require_published_script_stage_payload(workflow_id, service=service)
+    concept_plan = published_payload.get("concept_plan") or {}
+    overview = _merge_image_bucket_into_overview(
+        published_payload.get("scene_overview") or {},
+        workflow_id=workflow_id,
+        service=service,
+    )
+    scripts = _normalize_scene_dict(published_payload.get("scene_scripts") or {})
 
-    wm = get_mas_working_memory(workflow_id, service=service)
+    wm = _get_mas_working_memory(workflow_id, service=service)
     video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
 
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
@@ -626,7 +697,7 @@ def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemorySe
     scripts = load_scene_scripts(workflow_id, service=service)
     roles_ctx = load_roles_context(workflow_id, service=service)
 
-    wm = get_mas_working_memory(workflow_id, service=service)
+    wm = _get_mas_working_memory(workflow_id, service=service)
     voice_bucket = wm.get("scene_outputs.voice", {}) if wm is not None else {}
     video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
     voice_plan = wm.get("project.voice_plan", {}) if wm is not None else {}

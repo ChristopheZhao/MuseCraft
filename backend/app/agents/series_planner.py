@@ -25,7 +25,13 @@ from ..services.memory_provider import MemoryServices, build_memory_services
 class SeriesPlannerAgent(BaseAgent):
     """Generate an episode-level plan while keeping MAS internals untouched."""
 
+    @classmethod
+    def create_default(cls, *, llms=None) -> "SeriesPlannerAgent":
+        return cls(llms=llms, memory_services=build_memory_services())
+
     def __init__(self, llms=None, memory_services: Optional[MemoryServices] = None) -> None:
+        if memory_services is None:
+            raise ValueError("memory_services is required for SeriesPlannerAgent")
         super().__init__(
             agent_type=AgentType.SERIES_PLANNER,
             agent_name="series_planner",
@@ -33,7 +39,7 @@ class SeriesPlannerAgent(BaseAgent):
             max_retries=1,
             tools=[],
             llms=llms,
-            memory_services=memory_services or build_memory_services(),
+            memory_services=memory_services,
         )
 
     async def _execute_impl(

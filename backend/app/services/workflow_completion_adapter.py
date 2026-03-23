@@ -10,7 +10,7 @@ from ..agents.utils.memory_helpers import get_mas_working_memory
 from ..events.models import EventKind
 from ..events.publisher import publish_event
 from ..models import Task
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 
 
 class WorkflowCompletionAdapter:
@@ -22,7 +22,9 @@ class WorkflowCompletionAdapter:
         *,
         owner_agent_name: str = "workflow_completion",
     ):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for WorkflowCompletionAdapter")
+        self._memory_services = memory_services
         self._owner_agent_name = str(owner_agent_name or "workflow_completion")
 
     def build_persistence_payload(self, workflow_id: str) -> Dict[str, Any]:

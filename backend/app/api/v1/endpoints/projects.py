@@ -14,10 +14,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ....agents import SeriesPlannerAgent
+from ....agents.episode_orchestrator import EpisodeOrchestratorAgent
 from ....agents.base import AgentError
 from ....core.database import SessionLocal
 from ....core.constants import GenerationMode
-from ....core.mode_router import resolve_generation_mode, dispatch_generation
+from ....core.generation_mode import resolve_generation_mode
 from ....core.story_plan import (
     EpisodePlan,
     EpisodeStatus,
@@ -169,8 +170,7 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
         policy_manager = LLMPolicyManager(str(policy_path))
         planner_llms = policy_manager.build_llms_for_agent('series_planner')
 
-        memory_services = build_memory_services()
-        planner = SeriesPlannerAgent(llms=planner_llms, memory_services=memory_services)
+        planner = SeriesPlannerAgent.create_default(llms=planner_llms)
         await planner.execute(
             task=task,
             input_data=payload,
@@ -548,8 +548,14 @@ async def _run_episode_orchestration(task_db_id: int, payload: Dict[str, Any]) -
         session.commit()
 
         mode = resolve_generation_mode(payload.get("mode"), route_default=GenerationMode.PROJECT)
-        await dispatch_generation(
-            mode,
+        if mode != GenerationMode.PROJECT:
+            raise ValueError(
+                "project orchestration endpoint requires project mode; "
+                f"received unsupported mode={mode.value}"
+            )
+
+        orchestrator = EpisodeOrchestratorAgent.create_default()
+        await orchestrator.execute(
             task=task,
             input_data=payload,
             db=session,

@@ -22,7 +22,7 @@ from ..agents.adapters.memory_views import (
 from ..agents.utils.llm_policy import LLMPolicyManager
 from ..agents.utils.memory_helpers import agent_scope, get_mas_working_memory, mas_scope
 from ..models import AgentType, Task
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 from .scene_info_reference_service import persist_scene_info_ref
 from .video_composer_execution_contract import build_video_composer_execution_contract
 from .video_execution_contract import build_video_generation_execution_contract
@@ -37,7 +37,9 @@ class PostScriptStageRunner:
     _QUALITY_FAILED_STATUSES = {"needs_revision", "rejected"}
 
     def __init__(self, memory_services: MemoryServices | None = None):
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for PostScriptStageRunner")
+        self._memory_services = memory_services
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "llm_policies.yaml")
         self._llm_policy = LLMPolicyManager(policy_file)
         self._image_generator = ImageGeneratorAgent(

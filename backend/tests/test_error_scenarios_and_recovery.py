@@ -66,7 +66,7 @@ class TestErrorScenariosAndRecovery:
         task_id = task_data["task_id"]
         
         # Execute with timeout recovery
-        orchestrator = EnhancedOrchestratorAgent()
+        orchestrator = EnhancedOrchestratorAgent.create_default()
         
         with patch('app.services.error_recovery.error_recovery_service.handle_timeout') as mock_timeout_handler:
             mock_timeout_handler.return_value = {
@@ -139,7 +139,7 @@ class TestErrorScenariosAndRecovery:
                 }
                 
                 # Execute task
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 await orchestrator.execute(
                     task_id=task_id,
                     input_data=request_data,
@@ -200,7 +200,7 @@ class TestErrorScenariosAndRecovery:
                 with patch('app.agents.image_generator.ImageGeneratorAgent.execute',
                           side_effect=create_agent_mock("image_generator", agent_failures["image_generator"])):
                     
-                    orchestrator = EnhancedOrchestratorAgent()
+                    orchestrator = EnhancedOrchestratorAgent.create_default()
                     
                     # Execute with partial failure recovery
                     with patch('app.services.error_recovery.error_recovery_service.handle_agent_failure') as mock_agent_recovery:
@@ -254,7 +254,7 @@ class TestErrorScenariosAndRecovery:
                     "recommended_action": "queue_for_later"
                 }
                 
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 
                 # Should handle resource exhaustion gracefully
                 result = await orchestrator.execute(
@@ -309,7 +309,7 @@ class TestErrorScenariosAndRecovery:
                 "action": "use_fallback_services"
             }
             
-            orchestrator = EnhancedOrchestratorAgent()
+            orchestrator = EnhancedOrchestratorAgent.create_default()
             await orchestrator.execute(
                 task_id=task_id,
                 input_data=request_data,
@@ -377,7 +377,7 @@ class TestErrorScenariosAndRecovery:
                     "recovery_method": "file_restoration"
                 }
                 
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 
                 try:
                     await orchestrator.execute(
@@ -436,7 +436,7 @@ class TestErrorScenariosAndRecovery:
         
         # Execute all tasks concurrently
         async def execute_task(task_info):
-            orchestrator = EnhancedOrchestratorAgent()
+            orchestrator = EnhancedOrchestratorAgent.create_default()
             
             try:
                 result = await orchestrator.execute(
@@ -514,7 +514,7 @@ class TestErrorScenariosAndRecovery:
                 "action": "continue_with_available_features"
             }
             
-            orchestrator = EnhancedOrchestratorAgent()
+            orchestrator = EnhancedOrchestratorAgent.create_default()
             await orchestrator.execute(
                 task_id=task_id,
                 input_data=request_data,
@@ -582,7 +582,7 @@ class TestChaosEngineering:
             task_id = response.json()["task_id"]
             
             try:
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 start_time = time.time()
                 
                 await orchestrator.execute(
@@ -675,7 +675,7 @@ class TestChaosEngineering:
                     p.start()
                 
                 # Execute task during partition
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 start_time = time.time()
                 
                 await orchestrator.execute(

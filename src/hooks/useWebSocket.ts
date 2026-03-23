@@ -400,8 +400,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       message: msg.error || '多智能体协作执行失败',
       autoClose: 8000,
     });
-    setCurrentStep('input' as any);
-  }, [addNotification, setCurrentStep]);
+  }, [addNotification]);
 
   // Handle new event.state messages
   const handleEventState = useCallback((msg: any) => {

@@ -64,6 +64,11 @@ async def test_project_foundation_populates_style_and_character_bible():
     )
 
     agent = EpisodeOrchestratorAgent(
+        memory_services=SimpleNamespace(
+            short_term=object(),
+            global_service=object(),
+            long_term=object(),
+        ),
         orchestrator=SimpleNamespace(),
         concept_planner=_StubConceptPlanner(),
     )

@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/hooks/useTaskPolling.ts",
+    "src/hooks/useWebSocket.ts",
+    "src/components/preview/QuickModeWorkspace.tsx",
+    "src/lib/api.ts",
+    "src/i18n/I18nProvider.tsx",
+    "__tests__/integration/runtime-gate-sync.test.tsx"
+  ]
+}

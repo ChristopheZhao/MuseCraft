@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..models import AgentType
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 from .orchestration_state_adapter import OrchestrationStateAdapter
 
 
@@ -23,9 +23,11 @@ class OrchestrationRuntimeController:
         memory_services: Optional[MemoryServices] = None,
         orchestration_state: Optional[OrchestrationStateAdapter] = None,
     ) -> None:
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestrationRuntimeController")
+        self._memory_services = memory_services
         self._orchestration_state = orchestration_state or OrchestrationStateAdapter(
-            self._memory_services
+            memory_services=self._memory_services
         )
 
     def apply_runtime_decision(

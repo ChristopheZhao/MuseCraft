@@ -260,7 +260,7 @@ class TestPerformanceBenchmarks:
                 
                 # Execute workflow
                 from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-                orchestrator = EnhancedOrchestratorAgent()
+                orchestrator = EnhancedOrchestratorAgent.create_default()
                 
                 await orchestrator.execute(
                     task_id=task_id,

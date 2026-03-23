@@ -1,4 +1,5 @@
 import pytest
+import json
 
 from app.agents.adapters.memory_views import (
     build_image_generation_context,
@@ -16,6 +17,7 @@ from app.agents.utils.memory_helpers import (
     get_mas_working_memory,
     write_shared_fact,
 )
+from app.services.published_deliverable_adapter import project_payload_deliverables_to_shared_wm
 
 
 def _build_service() -> WorkingMemoryService:
@@ -113,7 +115,7 @@ def test_reset_workflow_still_clears_all_scopes():
         service.get(workflow_id, agent_scope(workflow_id, "concept_planner"))
 
 
-def test_media_context_builders_keep_shared_facts_after_agent_cleanup():
+def test_media_context_builders_require_published_script_deliverable_after_agent_cleanup():
     service = _build_service()
     workflow_id = "wf-media-context"
 
@@ -123,14 +125,106 @@ def test_media_context_builders_keep_shared_facts_after_agent_cleanup():
 
     service.cleanup_workflow(workflow_id)
 
+    with pytest.raises(ValueError, match="Missing published script deliverable"):
+        build_image_generation_context(workflow_id, service=service)
+    with pytest.raises(ValueError, match="Missing published script deliverable"):
+        build_video_generation_context(workflow_id, service=service)
+
+
+def test_media_context_builders_prefer_published_script_deliverable(monkeypatch, tmp_path):
+    service = _build_service()
+    workflow_id = "wf-published-script"
+
+    # Conflicting live WM facts should not become the downstream boundary input once a
+    # published deliverable is projected into the new execution segment.
+    write_shared_fact(
+        workflow_id,
+        "project.concept_plan",
+        {"overview": "stale overview", "scenes": [{"scene_number": 99, "title": "stale"}]},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 99, "visual_description": "stale scene"}]},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "project.scene_scripts",
+        {99: {"script_text": "stale script"}},
+        service=service,
+    )
+
+    payload_dir = tmp_path / "published_deliverables"
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = payload_dir / "script_resume.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "deliverable_type": "script",
+                "workflow_state_id": workflow_id,
+                "concept_plan": {
+                    "overview": "published overview",
+                    "scenes": [{"scene_number": 1, "title": "Immortal cave"}],
+                },
+                "scene_overview": {
+                    "scenes": [
+                        {
+                            "scene_number": 1,
+                            "visual_description": "published scene",
+                            "narrative_description": "published narrative",
+                            "duration": 6.0,
+                        }
+                    ]
+                },
+                "scene_scripts": {
+                    "1": {
+                        "script_text": "published script",
+                        "voice_over_text": "published voice",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "published_deliverables": {
+            "script": {
+                "type": "published_deliverable",
+                "deliverable_id": 7,
+                "deliverable_type": "script",
+                "scope_type": "episode",
+                "scope_id": "episode",
+                "attempt_id": 11,
+                "revision_no": 0,
+                "payload_ref": str(payload_path),
+                "summary": {"total_scenes": 1},
+                "is_candidate": False,
+                "is_approved": True,
+            }
+        }
+    }
+    project_payload_deliverables_to_shared_wm(workflow_id, payload, service=service)
+
     image_ctx = build_image_generation_context(workflow_id, service=service)
     assert image_ctx["scene_info_payload"]["total_scenes"] == 1
-    assert len(image_ctx["scene_info_payload"]["scenes_to_generate"]) == 1
     assert image_ctx["scene_info_payload"]["scene_overview"]["scenes"][0]["scene_number"] == 1
-    assert image_ctx["scene_info_payload"]["concept_plan"]["scenes"][0]["scene_number"] == 1
+    assert image_ctx["scene_info_payload"]["scenes_to_generate"][0]["script_text"] == "published script"
+
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.image",
+        {
+            1: {
+                "image_url": "https://example.com/published-1.png",
+            }
+        },
+        service=service,
+    )
 
     video_ctx = build_video_generation_context(workflow_id, service=service)
     assert video_ctx["scene_info_payload"]["total_scenes"] == 1
-    assert len(video_ctx["scene_info_payload"]["scenes_to_generate"]) == 1
     assert video_ctx["scene_info_payload"]["scenes_to_generate"][0]["scene_number"] == 1
     assert video_ctx["scene_info_payload"]["scene_overview"]["scenes"][0]["scene_number"] == 1

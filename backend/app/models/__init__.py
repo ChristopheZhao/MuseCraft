@@ -16,6 +16,7 @@ from .workflow_runtime import (
     WorkflowGate,
     WorkflowGateStatus,
     WorkflowGateDecision,
+    WorkflowPublishedDeliverable,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "WorkflowNodeAttempt", "WorkflowAttemptStatus",
     "WorkflowGate", "WorkflowGateStatus",
     "WorkflowGateDecision",
+    "WorkflowPublishedDeliverable",
 ]

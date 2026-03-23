@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from ..models import AgentType
 from .audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
-from .memory_provider import MemoryServices, build_memory_services
+from .memory_provider import MemoryServices
 from .orchestration_observation_adapter import OrchestrationObservationAdapter
 from .orchestration_protocol import OrchestrationProtocol
 from .orchestration_runtime_controller import OrchestrationRuntimeController
@@ -41,16 +41,18 @@ class OrchestrationControlPlane:
         observation_adapter: Optional[OrchestrationObservationAdapter] = None,
         runtime_controller: Optional[OrchestrationRuntimeController] = None,
     ) -> None:
-        self._memory_services = memory_services or build_memory_services()
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestrationControlPlane")
+        self._memory_services = memory_services
         self._protocol = protocol or OrchestrationProtocol()
         self._orchestration_state = orchestration_state or OrchestrationStateAdapter(
-            self._memory_services
+            memory_services=self._memory_services
         )
         self._audio_delivery_gate = audio_delivery_gate or AudioDeliveryGateEvaluator(
             memory_services=self._memory_services
         )
         self._observation_adapter = observation_adapter or OrchestrationObservationAdapter(
-            self._memory_services
+            memory_services=self._memory_services
         )
         self._runtime_controller = runtime_controller or OrchestrationRuntimeController(
             memory_services=self._memory_services,
