@@ -9,6 +9,8 @@
   - Agent基类设计、工具系统、内存管理、提示词模板等核心架构
 - **[multi-agent-system-analysis.md](architecture/multi-agent-system-analysis.md)** - 多智能体系统分析报告
   - 系统架构分析、Agent协作流程、技术实现细节
+- **[multi-agent-communication-architecture.md](architecture/multi-agent-communication-architecture.md)** - Multi-Agent通信技术文档
+  - 控制面/数据面/事件面/客户端面通信机制、时序、契约与容错策略
 - **[tools-configuration.md](architecture/tools-configuration.md)** - 工具系统配置指南
   - Tool Registry设计、工具插件开发、配置管理
 
@@ -80,4 +82,4 @@
 
 ---
 
-最后更新时间：2024-01-XX
+最后更新时间：2026-03-01
