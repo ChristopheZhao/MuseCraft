@@ -21,7 +21,9 @@ from ....core.constants import GenerationMode
 from ....core.generation_mode import resolve_generation_mode
 from ....core.story_plan import (
     EpisodePlan,
-    EpisodeStatus,
+    EpisodeEditorialStatus,
+    EpisodeExecutionStatus,
+    ProjectOperationState,
     ProjectState,
     StoryPlan,
     project_state_repository,
@@ -76,11 +78,25 @@ class EpisodeRuntimeModel(BaseModel):
     error: Optional[str] = None
 
 
+class ProjectOperationStatusModel(BaseModel):
+    status: str
+    task_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ProjectProgressModel(BaseModel):
+    planning: ProjectOperationStatusModel = Field(default_factory=lambda: ProjectOperationStatusModel(status="idle"))
+    character_references: ProjectOperationStatusModel = Field(
+        default_factory=lambda: ProjectOperationStatusModel(status="idle")
+    )
+
+
 class ProjectStateResponse(BaseModel):
     project_id: str
     mode: str
     story_plan: StoryPlanModel
     episodes_runtime: Dict[str, EpisodeRuntimeModel] = Field(default_factory=dict)
+    progress: ProjectProgressModel = Field(default_factory=ProjectProgressModel)
     global_settings: Dict[str, Any] = Field(default_factory=dict)
     cost_budget: Optional[float] = None
     total_cost: float = 0.0
@@ -160,8 +176,9 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
         if project_id:
             project_state = project_state_repository.get(project_id)
             if project_state:
-                project_state.global_settings["planning_status"] = "in_progress"
-                project_state.global_settings["planning_task_id"] = task.task_id
+                project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
+                project_state.progress.planning.task_id = str(task.task_id)
+                project_state.progress.planning.error = None
                 project_state_repository.save(project_state)
 
         from ....agents.utils.llm_policy import LLMPolicyManager
@@ -185,17 +202,23 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
             if project_id:
                 task.update_progress("Generating character references", 90)
                 session.commit()
-                await ensure_project_character_reference_images(
+                refs_started = await ensure_project_character_reference_images(
                     str(project_id),
                     enabled=bool(payload.get("generate_character_references", True)),
                     logger=getattr(planner, "logger", None),
                 )
+                project_state = project_state_repository.get(project_id)
+                if project_state and not refs_started:
+                    project_state.progress.character_references.status = ProjectOperationState.SKIPPED
+                    project_state.progress.character_references.error = None
+                    project_state_repository.save(project_state)
         except Exception as exc:  # noqa: BLE001
             # Keep planning successful even if refs fail; surface diagnostics in project_state.
             if project_id:
                 project_state = project_state_repository.get(project_id)
                 if project_state:
-                    project_state.global_settings["character_reference_error"] = str(exc)
+                    project_state.progress.character_references.status = ProjectOperationState.FAILED
+                    project_state.progress.character_references.error = str(exc)
                     project_state_repository.save(project_state)
 
         task.status = TaskStatus.COMPLETED.value
@@ -207,8 +230,9 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
         if project_id:
             project_state = project_state_repository.get(project_id)
             if project_state:
-                project_state.global_settings["planning_status"] = "completed"
-                project_state.global_settings["planning_task_id"] = task.task_id
+                project_state.progress.planning.status = ProjectOperationState.COMPLETED
+                project_state.progress.planning.task_id = str(task.task_id)
+                project_state.progress.planning.error = None
                 project_state_repository.save(project_state)
 
     except Exception as exc:  # noqa: BLE001
@@ -223,8 +247,8 @@ async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
         if project_id:
             project_state = project_state_repository.get(project_id)
             if project_state:
-                project_state.global_settings["planning_status"] = "failed"
-                project_state.global_settings["planning_error"] = str(exc)
+                project_state.progress.planning.status = ProjectOperationState.FAILED
+                project_state.progress.planning.error = str(exc)
                 project_state_repository.save(project_state)
     finally:
         session.close()
@@ -243,6 +267,9 @@ class EpisodeGenerationResponse(BaseModel):
 
 
 def _serialize_project_state(project_state: ProjectState) -> ProjectStateResponse:
+    for episode in project_state.story_plan.episodes:
+        project_state.ensure_runtime_state(episode.episode_id)
+
     payload = project_state.to_dict()
     runtime_payload = {
         ep_id: EpisodeRuntimeModel(**data)
@@ -263,6 +290,7 @@ def _serialize_project_state(project_state: ProjectState) -> ProjectStateRespons
         mode=payload["mode"],
         story_plan=story_model,
         episodes_runtime=runtime_payload,
+        progress=ProjectProgressModel(**(payload.get("progress") or {})),
         global_settings=payload.get("global_settings", {}),
         cost_budget=payload.get("cost_budget"),
         total_cost=payload.get("total_cost", 0.0),
@@ -364,10 +392,10 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             global_settings={
                 "resolution": request.resolution,
                 "style_preference": request.style_preference,
-                "planning_status": "queued",
-                "planning_task_id": task.task_id,
             },
         )
+        project_state.progress.planning.status = ProjectOperationState.QUEUED
+        project_state.progress.planning.task_id = str(task.task_id)
         project_state_repository.save(project_state)
 
         _schedule_project_plan(task.id, payload)
@@ -426,7 +454,7 @@ async def orchestrate_project(
     project_state = project_state_repository.get(project_id)
     if not project_state:
         raise HTTPException(status_code=404, detail="Project not found")
-    planning_status = (project_state.global_settings or {}).get("planning_status")
+    planning_status = (project_state.progress.planning.status.value if project_state.progress else None)
     if planning_status in {"queued", "in_progress"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -470,28 +498,31 @@ async def orchestrate_project(
         for ep in to_mark:
             runtime = project_state.ensure_runtime_state(ep.episode_id)
 
-            should_run = False
-            if force_rerun:
-                should_run = True
-            elif runtime.status in {
-                EpisodeStatus.APPROVED,
-                EpisodeStatus.NEEDS_REVISION,
-                EpisodeStatus.FAILED,
+            if auto_approve and ep.status in {
+                EpisodeEditorialStatus.DRAFT,
+                EpisodeEditorialStatus.PENDING_APPROVAL,
             }:
-                should_run = True
-            elif auto_approve and runtime.status in {
-                EpisodeStatus.DRAFT,
-                EpisodeStatus.PENDING_APPROVAL,
-            }:
-                runtime.status = EpisodeStatus.APPROVED
+                ep.status = EpisodeEditorialStatus.APPROVED
                 runtime.error = None
-                ep.status = EpisodeStatus.APPROVED
+
+            should_run = False
+            if ep.status == EpisodeEditorialStatus.APPROVED and force_rerun:
+                should_run = True
+            elif ep.status == EpisodeEditorialStatus.APPROVED and runtime.status in {
+                EpisodeExecutionStatus.IDLE,
+                EpisodeExecutionStatus.STALE,
+                EpisodeExecutionStatus.FAILED,
+                EpisodeExecutionStatus.COMPLETED,
+            }:
                 should_run = True
 
-            if should_run:
-                runtime.status = EpisodeStatus.GENERATING
+            if runtime.status == EpisodeExecutionStatus.GENERATING:
+                runtime.status = EpisodeExecutionStatus.STALE
                 runtime.error = None
-                ep.status = EpisodeStatus.GENERATING
+
+            if should_run:
+                runtime.status = EpisodeExecutionStatus.GENERATING
+                runtime.error = None
         project_state_repository.save(project_state)
 
     except Exception as exc:  # noqa: BLE001

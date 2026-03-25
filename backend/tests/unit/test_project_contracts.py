@@ -1,0 +1,220 @@
+import asyncio
+from types import SimpleNamespace
+
+from fastapi import BackgroundTasks
+
+from app.agents.episode_orchestrator import EpisodeOrchestratorAgent
+from app.api.v1.endpoints import projects as projects_endpoint
+from app.core.constants import GenerationMode
+from app.core.story_plan import (
+    EpisodeEditorialStatus,
+    EpisodeExecutionStatus,
+    ProjectOperationState,
+    ProjectState,
+    StoryPlan,
+    EpisodePlan,
+    project_state_repository,
+)
+from app.models import TaskStatus
+from app.api.v1.endpoints.projects import _serialize_project_state
+from app.services.project_service import update_episode_script
+
+
+def _build_project_state(project_id: str = "project-contracts") -> tuple[ProjectState, EpisodePlan]:
+    story_plan = StoryPlan(
+        project_id=project_id,
+        user_prompt="Test project",
+        target_duration_seconds=180,
+        aspect_ratio="16:9",
+    )
+    episode = EpisodePlan.create(
+        sequence_index=0,
+        title="Episode 1",
+        target_duration_seconds=60,
+        summary="Summary",
+    )
+    story_plan.add_episode(episode)
+
+    project_state = ProjectState(
+        project_id=project_id,
+        mode="project",
+        story_plan=story_plan,
+        global_settings={},
+    )
+    project_state_repository.save(project_state)
+    return project_state, episode
+
+
+def test_mark_episode_runtime_status_does_not_mutate_editorial_status():
+    project_state, episode = _build_project_state("project-contracts-separate")
+    episode.status = EpisodeEditorialStatus.APPROVED
+
+    project_state.mark_episode_runtime_status(
+        episode.episode_id,
+        EpisodeExecutionStatus.FAILED,
+        error="runtime failed",
+    )
+
+    assert project_state.story_plan.episodes[0].status == EpisodeEditorialStatus.APPROVED
+    assert project_state.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.FAILED
+    assert project_state.episodes_runtime[episode.episode_id].error == "runtime failed"
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_project_state_to_dict_exposes_typed_progress_projection():
+    project_state, episode = _build_project_state("project-contracts-progress")
+    project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
+    project_state.progress.planning.task_id = "task-plan-1"
+    project_state.progress.character_references.status = ProjectOperationState.SKIPPED
+    project_state.mark_episode_runtime_status(episode.episode_id, EpisodeExecutionStatus.COMPLETED)
+
+    payload = project_state.to_dict()
+
+    assert payload["progress"]["planning"]["status"] == ProjectOperationState.IN_PROGRESS.value
+    assert payload["progress"]["planning"]["task_id"] == "task-plan-1"
+    assert payload["progress"]["character_references"]["status"] == ProjectOperationState.SKIPPED.value
+    assert payload["episodes_runtime"][episode.episode_id]["status"] == EpisodeExecutionStatus.COMPLETED.value
+    assert payload["completed_episodes"] == 1
+
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_update_episode_script_keeps_approved_script_until_reapproved():
+    project_state, episode = _build_project_state("project-contracts-approved-script")
+    episode.status = EpisodeEditorialStatus.APPROVED
+    runtime = project_state.ensure_runtime_state(episode.episode_id)
+    runtime.status = EpisodeExecutionStatus.COMPLETED
+    runtime.approved_script = "approved v1"
+    project_state_repository.save(project_state)
+
+    updated = update_episode_script(
+        project_id=project_state.project_id,
+        episode_id=episode.episode_id,
+        script_text="draft v2",
+        approve=False,
+    )
+
+    refreshed_runtime = updated.episodes_runtime[episode.episode_id]
+    assert updated.story_plan.episodes[0].script_draft == "draft v2"
+    assert updated.story_plan.episodes[0].status == EpisodeEditorialStatus.NEEDS_REVISION
+    assert refreshed_runtime.approved_script == "approved v1"
+    assert refreshed_runtime.status == EpisodeExecutionStatus.STALE
+
+    updated = update_episode_script(
+        project_id=project_state.project_id,
+        episode_id=episode.episode_id,
+        script_text="draft v2",
+        approve=True,
+    )
+
+    refreshed_runtime = updated.episodes_runtime[episode.episode_id]
+    assert updated.story_plan.episodes[0].status == EpisodeEditorialStatus.APPROVED
+    assert refreshed_runtime.approved_script == "draft v2"
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_project_response_serialization_materializes_runtime_for_each_episode():
+    project_state, episode = _build_project_state("project-contracts-runtime-projection")
+
+    payload = _serialize_project_state(project_state)
+
+    assert episode.episode_id in payload.episodes_runtime
+    assert payload.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.IDLE.value
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_orchestrate_project_force_rerun_does_not_pre_mark_unapproved_episode(monkeypatch):
+    project_state, episode = _build_project_state("project-contracts-force-rerun-endpoint")
+    runtime = project_state.ensure_runtime_state(episode.episode_id)
+    runtime.status = EpisodeExecutionStatus.IDLE
+    episode.status = EpisodeEditorialStatus.DRAFT
+    project_state_repository.save(project_state)
+
+    fake_task = SimpleNamespace(id=101, task_id="task-force-rerun-endpoint", status="pending")
+
+    class _FakeSession:
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def add(self, _obj):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(projects_endpoint, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        projects_endpoint,
+        "_create_task",
+        lambda *args, **kwargs: fake_task,
+    )
+
+    response = asyncio.run(
+        projects_endpoint.orchestrate_project(
+            project_state.project_id,
+            projects_endpoint.EpisodeGenerationRequest(
+                episode_ids=[episode.episode_id],
+                force_rerun=True,
+            ),
+            BackgroundTasks(),
+        )
+    )
+
+    assert response.project.story_plan.episodes[0].status == EpisodeEditorialStatus.DRAFT.value
+    assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.IDLE.value
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
+    agent = object.__new__(EpisodeOrchestratorAgent)
+    agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
+    agent._validate_input = lambda _input, _required: None
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    async def _forbidden_run_single_episode(*args, **kwargs):
+        raise AssertionError("force_rerun must not execute unapproved episodes")
+
+    agent._ensure_project_foundation = _noop_async
+    agent._ensure_project_character_reference_images = _noop_async
+    agent._update_progress = _noop_async
+    agent._run_single_episode = _forbidden_run_single_episode
+
+    project_state, episode = _build_project_state("project-contracts-force-rerun-orchestrator")
+    runtime = project_state.ensure_runtime_state(episode.episode_id)
+    runtime.status = EpisodeExecutionStatus.COMPLETED
+    episode.status = EpisodeEditorialStatus.DRAFT
+    project_state_repository.save(project_state)
+
+    agent._resolve_episode_selection = lambda _project_state, _input: [_project_state.story_plan.episodes[0]]
+
+    task = SimpleNamespace(
+        status=TaskStatus.PENDING.value,
+        error_message=None,
+        session_id="session-force-rerun",
+        user_id=None,
+        update_progress=lambda *args, **kwargs: None,
+    )
+    db = SimpleNamespace(commit=lambda: None)
+
+    result = asyncio.run(
+        EpisodeOrchestratorAgent._execute_impl(
+            agent,
+            task,
+            {
+                "project_id": project_state.project_id,
+                "mode": GenerationMode.PROJECT.value,
+                "force_rerun": True,
+            },
+            db,
+        )
+    )
+
+    assert result["episodes"][0]["skipped"] is True
+    assert result["episodes"][0]["reason"] == "Episode script not approved for generation"
+    assert result["episodes"][0]["status"] == EpisodeExecutionStatus.COMPLETED.value
+    project_state_repository.remove(project_state.project_id)

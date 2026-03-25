@@ -60,7 +60,7 @@ const VideoRequestForm: React.FC = () => {
       try {
         const result = await ApiClient.getCurrentQuickRun(currentSessionId);
         if (!cancelled) {
-          setExistingRun(result.task && result.workflow_status ? result : null);
+          setExistingRun(result);
           setExistingRunDismissed(false);
         }
       } catch (error) {
@@ -127,7 +127,7 @@ const VideoRequestForm: React.FC = () => {
   };
 
   const handleContinueExistingRun = () => {
-    if (!existingRun?.task) return;
+    if (!existingRun) return;
 
     console.info('CONTINUE_EXISTING_RUN selected', { taskId: existingRun.task.task_id });
     const request = mapQuickRunToRequest(existingRun);
@@ -135,7 +135,7 @@ const VideoRequestForm: React.FC = () => {
 
     setExistingRunDismissed(true);
     setCurrentRequest(request);
-    setQuickRuntime(existingRun.workflow_status || null);
+    setQuickRuntime(existingRun.runtime);
     setCurrentStep('processing');
     addNotification({
       type: 'info',

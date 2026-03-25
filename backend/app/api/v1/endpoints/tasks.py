@@ -111,8 +111,14 @@ class QuickRunSummaryResponse(BaseModel):
 
 
 class QuickCurrentRunResponse(BaseModel):
-    task: Optional[QuickRunSummaryResponse]
-    workflow_status: Optional[Dict[str, Any]]
+    task: QuickRunSummaryResponse
+    runtime: Dict[str, Any]
+
+
+class TaskRuntimeDecisionResponse(BaseModel):
+    message: str
+    task_id: str
+    runtime: Dict[str, Any]
 
 
 class TaskDetailResponse(TaskResponse):
@@ -336,7 +342,7 @@ async def create_task(
         raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
 
 
-@router.get("/quick/current", response_model=QuickCurrentRunResponse)
+@router.get("/quick/current", response_model=Optional[QuickCurrentRunResponse])
 async def get_current_quick_run(
     session_id: str,
     db: AsyncSession = Depends(get_db),
@@ -345,7 +351,7 @@ async def get_current_quick_run(
 
     task, _runtime_session = await _find_unfinished_quick_task_for_session(db, session_id)
     if task is None:
-        return QuickCurrentRunResponse(task=None, workflow_status=None)
+        return None
 
     runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
     if runtime_view is None:
@@ -354,10 +360,10 @@ async def get_current_quick_run(
             getattr(task, "task_id", None),
             session_id,
         )
-        return QuickCurrentRunResponse(task=None, workflow_status=None)
+        return None
     return QuickCurrentRunResponse(
         task=_serialize_quick_run_summary(task),
-        workflow_status=runtime_view,
+        runtime=runtime_view,
     )
 
 
@@ -528,6 +534,7 @@ async def get_task_status(
 ):
     """Get a coarse task-level status projection.
 
+    Compatibility-only surface for legacy coarse-status consumers.
     For authoritative live runtime state, use `/{task_id}/runtime`.
     """
     
@@ -631,7 +638,7 @@ async def cancel_task(
     return {"message": "Task cancelled", "task_id": str(task.task_id)}
 
 
-@router.post("/{task_id}/runtime/script/decision")
+@router.post("/{task_id}/runtime/script/decision", response_model=TaskRuntimeDecisionResponse)
 async def submit_script_gate_decision(
     task_id: str,
     request: TaskRuntimeDecisionRequest,
@@ -668,8 +675,13 @@ async def submit_script_gate_decision(
 
     _schedule_task_execution(background_tasks, task.id)
     runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-    return {
-        "message": "Script gate decision accepted",
-        "task_id": str(task.task_id),
-        "workflow_status": runtime_view,
-    }
+    if runtime_view is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Authoritative runtime view missing after script gate decision",
+        )
+    return TaskRuntimeDecisionResponse(
+        message="Script gate decision accepted",
+        task_id=str(task.task_id),
+        runtime=runtime_view,
+    )

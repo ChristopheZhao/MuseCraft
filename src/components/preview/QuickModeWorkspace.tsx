@@ -77,9 +77,7 @@ const QuickModeWorkspace: React.FC = () => {
         action,
         feedback_text: feedbackText.trim() || undefined,
       });
-      if (result.workflow_status) {
-        setQuickRuntime(result.workflow_status);
-      }
+      setQuickRuntime(result.runtime);
       setResumeHint(`已提交${actionLabelMap[action]}，等待主线恢复…`);
       if (action !== 'approve') {
         setFeedbackText('');

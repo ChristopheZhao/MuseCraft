@@ -66,6 +66,26 @@ def test_get_or_create_session_initializes_default_nodes(sync_db):
     ]
 
 
+def test_build_runtime_view_sync_bootstraps_active_quick_task_without_session(sync_db):
+    task = _create_task(sync_db)
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert view is not None
+    assert view["status"] == WorkflowSessionStatus.QUEUED.value
+    assert view["task_db_id"] == task.id
+    assert [node["node_key"] for node in view["nodes"]] == [
+        "concept",
+        "script",
+        "image",
+        "video",
+        "voice",
+        "compose",
+        "audio",
+        "quality",
+    ]
+
+
 def test_mark_session_running_and_completed_updates_projection(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")

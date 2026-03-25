@@ -189,6 +189,9 @@ class WorkflowCompletionAdapter:
         payload: Dict[str, Any] = {
             "state": "workflow_completed",
             "status": "COMPLETED",
+            "projection_role": "bounded_terminal_summary",
+            "runtime_authoritative": False,
+            "refresh_required": True,
             "final_video_url": final_video_url,
             "facts_summary": facts_summary,
             "scenes": persistence_payload.get("scenes") or [],
@@ -225,6 +228,9 @@ class WorkflowCompletionAdapter:
             payload={
                 "state": "workflow_failed",
                 "status": "FAILED",
+                "projection_role": "bounded_terminal_summary",
+                "runtime_authoritative": False,
+                "refresh_required": True,
                 "error": str(error_message or ""),
             },
             task_id=str(task.task_id),

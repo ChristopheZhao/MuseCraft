@@ -83,8 +83,8 @@ export interface QuickCurrentRunTask {
 }
 
 export interface QuickCurrentRunResponse {
-  task: QuickCurrentRunTask | null;
-  workflow_status: TaskRuntimeView | null;
+  task: QuickCurrentRunTask;
+  runtime: TaskRuntimeView;
 }
 
 export class TaskRuntimeEndpointError extends Error {
@@ -154,6 +154,7 @@ export class ApiClient {
   }
 
   static async getTaskCoarseStatus(taskId: string): Promise<TaskCoarseStatusResponse> {
+    // Compatibility-only coarse projection. Mainline authority should use getTaskRuntime().
     const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/status`, {
       cache: 'no-store',
     });
@@ -195,7 +196,7 @@ export class ApiClient {
     return response.json();
   }
 
-  static async getCurrentQuickRun(sessionId: string): Promise<QuickCurrentRunResponse> {
+  static async getCurrentQuickRun(sessionId: string): Promise<QuickCurrentRunResponse | null> {
     const response = await fetch(
       `${API_BASE_URL}/tasks/quick/current?session_id=${encodeURIComponent(sessionId)}`,
       {
@@ -214,7 +215,7 @@ export class ApiClient {
   static async submitScriptGateDecision(
     taskId: string,
     payload: TaskRuntimeDecisionRequest,
-  ): Promise<{ message: string; task_id: string; workflow_status?: TaskRuntimeView }> {
+  ): Promise<{ message: string; task_id: string; runtime: TaskRuntimeView }> {
     const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/runtime/script/decision`, {
       method: 'POST',
       headers: {

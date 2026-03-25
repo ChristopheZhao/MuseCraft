@@ -7,7 +7,9 @@ import { useAppStore } from '@/store/useAppStore';
 import { useProjectStore } from '@/store/useProjectStore';
 import type {
   CreateProjectRequest,
+  EpisodeExecutionStatus,
   ProjectEpisodeView,
+  ProjectOperationState,
   ProjectStateResponse,
 } from '@/types/project';
 
@@ -27,7 +29,7 @@ const defaultFormState: ProjectFormState = {
   aspectRatio: '16:9',
 };
 
-type PlanningStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | string;
+const formatStatusLabel = (value?: string | null) => String(value || 'idle').replace(/_/g, ' ');
 
 interface CharacterAssetRef {
   url?: string;
@@ -79,8 +81,8 @@ const ProjectModeView: React.FC = () => {
       .filter((ep) => project.episodes_runtime?.[ep.episode_id]?.status === 'generating')
       .map((ep) => ep.episode_id);
 
-    const planningStatus = project.global_settings?.planning_status as PlanningStatus | undefined;
-    const refsStatus = project.global_settings?.character_references_status as string | undefined;
+    const planningStatus = project.progress?.planning?.status as ProjectOperationState | undefined;
+    const refsStatus = project.progress?.character_references?.status as ProjectOperationState | undefined;
     const planningInProgress = planningStatus === 'queued' || planningStatus === 'in_progress' || refsStatus === 'in_progress';
 
     if ((planningInProgress || generatingEpisodeIds.length > 0) && pollingProjectId !== project.project_id) {
@@ -92,14 +94,14 @@ const ProjectModeView: React.FC = () => {
     if (!project) return [];
 
     return project.story_plan.episodes.map((episode) => {
-      const runtime = project.episodes_runtime?.[episode.episode_id];
+      const runtime = project.episodes_runtime?.[episode.episode_id] || null;
       const videoUrl = runtime?.video_url || runtime?.output_assets?.final_video_url || runtime?.output_assets?.video_url;
       const runtimeWithExtras = runtime
         ? {
             ...runtime,
             video_url: videoUrl,
           }
-        : undefined;
+        : null;
 
       return {
         ...episode,
@@ -113,7 +115,7 @@ const ProjectModeView: React.FC = () => {
     const nextScripts: Record<string, string> = {};
     project.story_plan.episodes.forEach((episode) => {
       const runtime = project.episodes_runtime?.[episode.episode_id];
-      nextScripts[episode.episode_id] = runtime?.approved_script || episode.script_draft || '';
+      nextScripts[episode.episode_id] = episode.script_draft || runtime?.approved_script || '';
     });
     setScripts(nextScripts);
     if (!selectedEpisode && project.story_plan.episodes.length > 0) {
@@ -163,10 +165,10 @@ const ProjectModeView: React.FC = () => {
   };
 
   const renderPlanningStatus = (current: ProjectStateResponse) => {
-    const planningStatus = (current.global_settings?.planning_status as PlanningStatus | undefined) || 'unknown';
-    const refsStatus = (current.global_settings?.character_references_status as string | undefined) || 'unknown';
-    const planningError = current.global_settings?.planning_error as string | undefined;
-    const refsError = current.global_settings?.character_reference_error as string | undefined;
+    const planningStatus = current.progress?.planning?.status || 'idle';
+    const refsStatus = current.progress?.character_references?.status || 'idle';
+    const planningError = current.progress?.planning?.error || undefined;
+    const refsError = current.progress?.character_references?.error || undefined;
 
     const badge = (label: string, value: string, tone: 'gray' | 'blue' | 'green' | 'red' = 'gray') => {
       const toneClass =
@@ -206,7 +208,7 @@ const ProjectModeView: React.FC = () => {
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          {badge('planning_status', String(planningStatus), planningTone)}
+          {badge('planning', String(planningStatus), planningTone)}
           {badge('character_refs', String(refsStatus), refsTone)}
         </div>
 
@@ -230,8 +232,8 @@ const ProjectModeView: React.FC = () => {
 
   const renderCharacterLibrary = (current: ProjectStateResponse) => {
     const rawBible = (current.character_bible || current.story_plan.character_bible || {}) as Record<string, CharacterProfileView>;
-    const characters = Object.entries(rawBible)
-      .map(([key, value]) => ({ key, profile: value }))
+    const characters = Object.keys(rawBible)
+      .map((key) => ({ key, profile: rawBible[key] }))
       .filter((item) => item.profile && typeof item.profile === 'object');
 
     const getAssetUrl = (asset: CharacterAssetRef | string | undefined): string => {
@@ -393,8 +395,7 @@ const ProjectModeView: React.FC = () => {
       <div className="w-72 space-y-3 overflow-y-auto pr-2">
         {episodes.map((episode) => {
           const isActive = selectedEpisode === episode.episode_id;
-          const runtimeStatus = episode.runtime?.status || episode.status;
-          const statusLabel = runtimeStatus.replace(/_/g, ' ');
+          const runtimeStatus = episode.runtime?.status;
 
           return (
             <button
@@ -406,7 +407,17 @@ const ProjectModeView: React.FC = () => {
             >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-semibold text-gray-900">Episode {episode.sequence_index + 1}</span>
-                <span className="text-xs uppercase text-primary-600">{statusLabel}</span>
+                <span className="text-[11px] uppercase text-primary-600">
+                  {runtimeStatus ? formatStatusLabel(runtimeStatus) : 'runtime unavailable'}
+                </span>
+              </div>
+              <div className="mb-2 flex flex-wrap gap-1">
+                <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-700">
+                  editorial: {formatStatusLabel(episode.status)}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                  runtime: {runtimeStatus ? formatStatusLabel(runtimeStatus) : 'unavailable'}
+                </span>
               </div>
               <p className="text-sm text-gray-700 line-clamp-2">{episode.summary || '无摘要'}</p>
               <p className="mt-2 text-xs text-gray-500">目标时长：{episode.target_duration_seconds}s</p>
@@ -430,10 +441,24 @@ const ProjectModeView: React.FC = () => {
     if (!episode) return null;
 
     const runtime = episode.runtime;
-    const runtimeStatus = runtime?.status ?? '';
+    if (!runtime) {
+      return (
+        <div className="h-full flex flex-col bg-white border border-red-200 rounded-xl shadow-sm">
+          <div className="p-5 border-b border-red-100">
+            <h3 className="text-lg font-semibold text-red-900">Episode {episode.sequence_index + 1}</h3>
+            <p className="text-sm text-red-700 mt-1">后端未返回该分集的 runtime contract，当前无法推导执行状态。</p>
+          </div>
+          <div className="p-5 text-sm text-red-700">
+            请先刷新项目状态；如果问题持续，说明 backend contract 仍未为该 episode 提供权威 runtime surface。
+          </div>
+        </div>
+      );
+    }
+
+    const runtimeStatus: EpisodeExecutionStatus = runtime.status;
     const isGenerating = runtimeStatus === 'generating';
-    const runnableStatuses = new Set(['approved', 'completed', 'generating', 'failed', 'needs_revision']);
-    const canGenerateEpisode = runnableStatuses.has(runtimeStatus);
+    const runnableStatuses = new Set<EpisodeExecutionStatus>(['idle', 'stale', 'failed', 'completed']);
+    const canGenerateEpisode = episode.status === 'approved' && runnableStatuses.has(runtimeStatus);
 
     return (
       <div className="h-full flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm">
@@ -483,38 +508,49 @@ const ProjectModeView: React.FC = () => {
 
           <div className="mt-6 space-y-4">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-gray-700">生成状态</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-medium text-gray-700">状态</span>
+                <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-700">
+                  editorial: {formatStatusLabel(episode.status)}
+                </span>
                 <span
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                    runtime?.status === 'completed'
+                    runtimeStatus === 'completed'
                       ? 'bg-green-100 text-green-700'
-                      : runtime?.status === 'generating'
+                      : runtimeStatus === 'generating'
                       ? 'bg-blue-100 text-blue-700'
-                      : runtime?.status === 'failed'
+                      : runtimeStatus === 'failed'
                       ? 'bg-red-100 text-red-700'
+                      : runtimeStatus === 'stale'
+                      ? 'bg-amber-100 text-amber-700'
                       : 'bg-gray-100 text-gray-600'
                   }`}
                 >
-                  {(runtime?.status || episode.status).replace(/_/g, ' ')}
+                  runtime: {formatStatusLabel(runtimeStatus)}
                 </span>
               </div>
               <span className="text-xs text-gray-500">累计成本：¥{(runtime?.aggregated_cost ?? 0).toFixed(2)}</span>
             </div>
 
-            {runtime?.status === 'generating' && (
+            {runtimeStatus === 'generating' && (
               <div className="flex items-center gap-2 text-sm text-primary-600">
                 <Loader2 className="w-4 h-4 animate-spin" /> 正在生成，请稍候...
               </div>
             )}
 
-            {runtime?.status === 'failed' && runtime?.error && (
+            {runtimeStatus === 'stale' && (
+              <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                已有运行结果与当前脚本不再一致，需要重新生成。
+              </div>
+            )}
+
+            {runtimeStatus === 'failed' && runtime?.error && (
               <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3">
                 生成失败：{runtime.error}
               </div>
             )}
 
-            {runtime?.status === 'completed' && runtime?.video_url && (
+            {runtimeStatus === 'completed' && runtime?.video_url && (
               <div className="space-y-2">
                 <h4 className="text-sm font-medium text-gray-700">视频预览</h4>
                 <video
@@ -529,7 +565,7 @@ const ProjectModeView: React.FC = () => {
               </div>
             )}
 
-            {runtime?.status === 'completed' && !runtime?.video_url && (
+            {runtimeStatus === 'completed' && !runtime?.video_url && (
               <div className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg p-3">
                 本集已完成，但仍在获取视频链接，请稍候或手动刷新一次状态。
               </div>

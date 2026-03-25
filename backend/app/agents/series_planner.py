@@ -13,7 +13,7 @@ from ..models import Task, AgentType
 from ..core.story_plan import (
     CharacterProfile,
     EpisodePlan,
-    EpisodeStatus,
+    EpisodeEditorialStatus,
     ProjectState,
     StoryPlan,
     normalize_character_bible,
@@ -144,9 +144,8 @@ class SeriesPlannerAgent(BaseAgent):
 
         for episode in story_plan.episodes:
             runtime = project_state.ensure_runtime_state(episode.episode_id)
-            if runtime.status == EpisodeStatus.DRAFT:
-                runtime.status = EpisodeStatus.PENDING_APPROVAL
-            episode.status = runtime.status
+            if episode.status == EpisodeEditorialStatus.DRAFT:
+                episode.status = EpisodeEditorialStatus.PENDING_APPROVAL
 
         if input_data.get("auto_generate_scripts", True):
             await self._populate_episode_scripts(

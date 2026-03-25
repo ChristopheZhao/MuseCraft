@@ -140,7 +140,7 @@ def test_get_current_quick_run_returns_existing_task_and_runtime(monkeypatch):
 
     assert payload.task.task_id == "task-12"
     assert payload.task.session_id == "quick-session-1"
-    assert payload.workflow_status == runtime_view
+    assert payload.runtime == runtime_view
 
 
 def test_get_current_quick_run_suppresses_task_without_runtime_truth(monkeypatch):
@@ -171,8 +171,7 @@ def test_get_current_quick_run_suppresses_task_without_runtime_truth(monkeypatch
 
     payload = asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-2", db=object()))
 
-    assert payload.task is None
-    assert payload.workflow_status is None
+    assert payload is None
 
 
 def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { ApiClient, TaskRuntimeEndpointError } from '@/lib/api';
+import { ApiClient } from '@/lib/api';
 import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { getRuntimeFailureMessage, getRuntimeTerminalStatus } from '@/lib/runtimeReadModel';
 
@@ -22,7 +22,7 @@ export function useTaskPolling() {
     setModal,
   } = useAppStore();
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStatusRef = useRef<string | null>(null);
   const lastGateIdRef = useRef<number | null>(null);
   const lastRuntimeReadErrorRef = useRef<string | null>(null);
@@ -120,12 +120,8 @@ export function useTaskPolling() {
       try {
         const taskId = currentRequest.id;
         if (!taskId) return;
-        let runtime: any = null;
-        let runtimeAvailable = false;
-        let runtimeLagFallbackAllowed = false;
         try {
-          runtime = await ApiClient.getTaskRuntime(taskId);
-          runtimeAvailable = true;
+          const runtime = await ApiClient.getTaskRuntime(taskId);
           lastRuntimeReadErrorRef.current = null;
           setQuickRuntime(runtime);
           const activeGate = runtime?.active_gate;
@@ -154,38 +150,11 @@ export function useTaskPolling() {
             return;
           }
         } catch (error) {
-          if (
-            error instanceof TaskRuntimeEndpointError &&
-            error.status === 404 &&
-            error.detail === 'Runtime session not found'
-          ) {
-            runtimeLagFallbackAllowed = true;
-          } else {
-            notifyRuntimeReadError(
-              error instanceof Error ? error.message : 'Failed to get task runtime'
-            );
-            return;
-          }
-        }
-
-        if (runtimeAvailable) {
-          lastStatusRef.current = runtime?.status || lastStatusRef.current;
+          notifyRuntimeReadError(
+            error instanceof Error ? error.message : 'Failed to get task runtime'
+          );
           return;
         }
-
-        if (!runtimeLagFallbackAllowed) {
-          return;
-        }
-
-        const status = await ApiClient.getTaskCoarseStatus(taskId);
-
-        if (status.status === 'failed' || status.status === 'completed') {
-          // Keep polling until the authoritative runtime read-model becomes available.
-          lastStatusRef.current = status.status;
-          return;
-        }
-
-        lastStatusRef.current = status.status;
       } catch (e) {
         // Soft fail; keep polling
       }

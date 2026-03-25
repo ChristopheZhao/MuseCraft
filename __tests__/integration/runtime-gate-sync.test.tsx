@@ -178,7 +178,7 @@ describe('runtime gate sync', () => {
     mockSubmitScriptGateDecision.mockResolvedValue({
       message: 'ok',
       task_id: 'task-123',
-      workflow_status: resumedRuntime,
+      runtime: resumedRuntime,
     });
 
     const user = userEvent.setup();
@@ -200,7 +200,7 @@ describe('runtime gate sync', () => {
     mockSubmitScriptGateDecision.mockResolvedValue({
       message: 'ok',
       task_id: 'task-123',
-      workflow_status: buildRuntime({
+      runtime: buildRuntime({
         status: 'running',
         current_node_key: 'script',
         active_gate: null,

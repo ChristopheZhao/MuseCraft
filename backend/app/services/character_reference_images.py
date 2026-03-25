@@ -10,7 +10,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..core.config import settings
-from ..core.story_plan import CharacterProfile, ProjectState, project_state_repository
+from ..core.story_plan import (
+    CharacterProfile,
+    ProjectOperationState,
+    project_state_repository,
+)
 from ..agents.tools.tool_registry import get_tool_registry
 
 
@@ -95,20 +99,22 @@ async def ensure_project_character_reference_images(
 
     if enabled is None:
         enabled = bool(getattr(settings, "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", False))
-    if not enabled:
-        return False
-
     project_state = project_state_repository.get(project_id)
     if not project_state:
         return False
 
-    if project_state.global_settings is None:
-        project_state.global_settings = {}
-    project_state.global_settings["character_references_status"] = "in_progress"
+    if not enabled:
+        project_state.progress.character_references.status = ProjectOperationState.SKIPPED
+        project_state.progress.character_references.error = None
+        project_state_repository.save(project_state)
+        return False
+
+    project_state.progress.character_references.status = ProjectOperationState.IN_PROGRESS
+    project_state.progress.character_references.error = None
     project_state_repository.save(project_state)
 
     if not project_state.character_bible:
-        project_state.global_settings["character_references_status"] = "completed"
+        project_state.progress.character_references.status = ProjectOperationState.COMPLETED
         project_state_repository.save(project_state)
         return True
 
@@ -183,6 +189,6 @@ async def ensure_project_character_reference_images(
         project_state.story_plan.character_bible = project_state.character_bible
     except Exception:
         pass
-    project_state.global_settings["character_references_status"] = "completed"
+    project_state.progress.character_references.status = ProjectOperationState.COMPLETED
     project_state_repository.save(project_state)
     return True

@@ -24,6 +24,7 @@ from ..models import (
 )
 from ..core.constants import GenerationMode
 from ..core.generation_mode import resolve_generation_mode
+from .task_execution_policy import is_terminal_task_status
 from .published_deliverable_service import (
     PublishedDeliverableService,
     build_deliverable_ref,
@@ -198,6 +199,13 @@ class RuntimeSessionService:
     """Creates and manages workflow runtime sessions."""
 
     @staticmethod
+    def _should_bootstrap_authoritative_quick_runtime(task: Task) -> bool:
+        mode = resolve_generation_mode((task.input_parameters or {}).get("mode"))
+        if mode != GenerationMode.QUICK:
+            return False
+        return not is_terminal_task_status(task.status)
+
+    @staticmethod
     def mark_node_running_sync(
         db: Session,
         session: WorkflowSession,
@@ -326,8 +334,15 @@ class RuntimeSessionService:
     @staticmethod
     async def build_runtime_view_for_task(db: AsyncSession, task: Task) -> Optional[Dict[str, Any]]:
         session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
+        if session is None and RuntimeSessionService._should_bootstrap_authoritative_quick_runtime(task):
+            session = await RuntimeSessionService.create_session_for_task(
+                db,
+                task,
+                mode=GenerationMode.QUICK.value,
+            )
         if session is None:
             return None
+        await RuntimeSessionService._ensure_default_nodes_async(db, session)
         result = await db.execute(
             select(WorkflowNodeState)
             .where(WorkflowNodeState.session_id == session.id)
@@ -464,8 +479,15 @@ class RuntimeSessionService:
             .order_by(WorkflowSession.id.desc())
             .first()
         )
+        if session is None and RuntimeSessionService._should_bootstrap_authoritative_quick_runtime(task):
+            session = RuntimeSessionService.get_or_create_session_for_task_sync(
+                db,
+                task,
+                mode=GenerationMode.QUICK.value,
+            )
         if session is None:
             return None
+        RuntimeSessionService._ensure_default_nodes_sync(db, session)
         nodes = (
             db.query(WorkflowNodeState)
             .filter(WorkflowNodeState.session_id == session.id)

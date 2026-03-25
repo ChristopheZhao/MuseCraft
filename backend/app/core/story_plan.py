@@ -11,15 +11,12 @@ import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-class EpisodeStatus(str, Enum):
-    """Lifecycle states for an episode within a long-form project."""
+class EpisodeEditorialStatus(str, Enum):
+    """Editorial/script lifecycle states for an episode within a project."""
 
     DRAFT = "draft"
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
-    GENERATING = "generating"
-    COMPLETED = "completed"
-    FAILED = "failed"
     NEEDS_REVISION = "needs_revision"
 
 
@@ -36,7 +33,7 @@ class EpisodePlan:
     continuity_notes: Dict[str, Any] = field(default_factory=dict)
     required_assets: Dict[str, Any] = field(default_factory=dict)
     script_draft: str = ""
-    status: EpisodeStatus = EpisodeStatus.DRAFT
+    status: EpisodeEditorialStatus = EpisodeEditorialStatus.DRAFT
 
     @classmethod
     def create(
@@ -596,12 +593,63 @@ class StoryPlan:
         return list(self.character_bible.values())
 
 
+class EpisodeExecutionStatus(str, Enum):
+    """Execution/runtime lifecycle states for an episode run."""
+
+    IDLE = "idle"
+    GENERATING = "generating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+class ProjectOperationState(str, Enum):
+    """Status vocabulary for project-scoped async operations."""
+
+    IDLE = "idle"
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class ProjectOperationStatus:
+    """Typed progress state for a single project-scoped operation."""
+
+    status: ProjectOperationState = ProjectOperationState.IDLE
+    task_id: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "task_id": self.task_id,
+            "error": self.error,
+        }
+
+
+@dataclass
+class ProjectProgressState:
+    """Typed project-level planning/reference progress projection."""
+
+    planning: ProjectOperationStatus = field(default_factory=ProjectOperationStatus)
+    character_references: ProjectOperationStatus = field(default_factory=ProjectOperationStatus)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "planning": self.planning.to_dict(),
+            "character_references": self.character_references.to_dict(),
+        }
+
+
 @dataclass
 class EpisodeRuntimeState:
     """Runtime execution status for an episode during orchestration."""
 
     episode_id: str
-    status: EpisodeStatus = EpisodeStatus.DRAFT
+    status: EpisodeExecutionStatus = EpisodeExecutionStatus.IDLE
     approved_script: str = ""
     workflow_task_id: Optional[str] = None
     aggregated_cost: float = 0.0
@@ -630,6 +678,7 @@ class ProjectState:
     mode: str
     story_plan: StoryPlan
     episodes_runtime: Dict[str, EpisodeRuntimeState] = field(default_factory=dict)
+    progress: ProjectProgressState = field(default_factory=ProjectProgressState)
     global_settings: Dict[str, Any] = field(default_factory=dict)
     cost_budget: Optional[float] = None
     total_cost: float = 0.0
@@ -655,13 +704,26 @@ class ProjectState:
         self.total_cost += cost
         self.total_tokens += tokens
 
-    def mark_episode_status(self, episode_id: str, status: EpisodeStatus, error: Optional[str] = None) -> None:
+    def mark_episode_runtime_status(
+        self,
+        episode_id: str,
+        status: EpisodeExecutionStatus,
+        error: Optional[str] = None,
+    ) -> None:
         runtime = self.ensure_runtime_state(episode_id)
         runtime.status = status
         runtime.error = error
-        if status == EpisodeStatus.COMPLETED:
+        if status == EpisodeExecutionStatus.COMPLETED:
             self.completed_episodes = sum(
-                1 for state in self.episodes_runtime.values() if state.status == EpisodeStatus.COMPLETED
+                1
+                for state in self.episodes_runtime.values()
+                if state.status == EpisodeExecutionStatus.COMPLETED
+            )
+        else:
+            self.completed_episodes = sum(
+                1
+                for state in self.episodes_runtime.values()
+                if state.status == EpisodeExecutionStatus.COMPLETED
             )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -673,6 +735,7 @@ class ProjectState:
                 episode_id: runtime.to_dict()
                 for episode_id, runtime in self.episodes_runtime.items()
             },
+            "progress": self.progress.to_dict(),
             "global_settings": self.global_settings,
             "cost_budget": self.cost_budget,
             "total_cost": self.total_cost,

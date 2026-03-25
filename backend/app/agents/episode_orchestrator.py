@@ -16,7 +16,8 @@ from ..core.config import settings
 from ..core.workflow_state import workflow_manager
 from ..core.story_plan import (
     EpisodePlan,
-    EpisodeStatus,
+    EpisodeEditorialStatus,
+    EpisodeExecutionStatus,
     CharacterProfile,
     ProjectState,
     merge_character_bibles,
@@ -113,27 +114,38 @@ class EpisodeOrchestratorAgent(BaseAgent):
         for idx, episode in enumerate(episodes_to_run, start=1):
             runtime = project_state.ensure_runtime_state(episode.episode_id)
 
-            if auto_approve and runtime.status in {
-                EpisodeStatus.DRAFT,
-                EpisodeStatus.PENDING_APPROVAL,
+            if auto_approve and episode.status in {
+                EpisodeEditorialStatus.DRAFT,
+                EpisodeEditorialStatus.PENDING_APPROVAL,
             }:
-                runtime.status = EpisodeStatus.APPROVED
-                episode.status = EpisodeStatus.APPROVED
+                episode.status = EpisodeEditorialStatus.APPROVED
 
-            if runtime.status == EpisodeStatus.GENERATING:
-                runtime.status = EpisodeStatus.APPROVED
-                episode.status = EpisodeStatus.APPROVED
+            if runtime.status == EpisodeExecutionStatus.GENERATING:
+                runtime.status = EpisodeExecutionStatus.STALE
+
+            if episode.status != EpisodeEditorialStatus.APPROVED:
+                results.append(
+                    {
+                        "episode_id": episode.episode_id,
+                        "status": runtime.status.value,
+                        "skipped": True,
+                        "reason": "Episode script not approved for generation",
+                    }
+                )
+                continue
 
             if not force_rerun and runtime.status not in {
-                EpisodeStatus.APPROVED,
-                EpisodeStatus.NEEDS_REVISION,
+                EpisodeExecutionStatus.IDLE,
+                EpisodeExecutionStatus.STALE,
+                EpisodeExecutionStatus.FAILED,
+                EpisodeExecutionStatus.COMPLETED,
             }:
                 results.append(
                     {
                         "episode_id": episode.episode_id,
                         "status": runtime.status.value,
                         "skipped": True,
-                        "reason": "Episode not approved for generation",
+                        "reason": "Episode runtime is not ready for generation",
                     }
                 )
                 continue
@@ -161,7 +173,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
         await self._update_progress(100, "Episode orchestration finished", db)
         task.update_progress("Episode orchestration finished", 100)
 
-        if any(res.get("status") == EpisodeStatus.FAILED.value for res in results):
+        if any(res.get("status") == EpisodeExecutionStatus.FAILED.value for res in results):
             task.status = TaskStatus.FAILED.value
             task.error_message = "One or more episodes failed during orchestration"
         else:
@@ -491,9 +503,8 @@ class EpisodeOrchestratorAgent(BaseAgent):
         db: Session,
     ) -> Dict[str, Any]:
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
-        runtime_state.status = EpisodeStatus.GENERATING
+        runtime_state.status = EpisodeExecutionStatus.GENERATING
         runtime_state.error = None
-        episode.status = EpisodeStatus.GENERATING
 
         episode_payload = self._build_episode_payload(
             episode=episode,
@@ -524,32 +535,30 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 execution_order=1,
             )
         except Exception as exc:  # noqa: BLE001 - preserve MAS errors
-            runtime_state.status = EpisodeStatus.FAILED
+            runtime_state.status = EpisodeExecutionStatus.FAILED
             runtime_state.error = str(exc)
-            episode.status = EpisodeStatus.FAILED
             episode_task.status = TaskStatus.FAILED.value
             episode_task.error_message = str(exc)
             db.commit()
             project_state_repository.save(project_state)
             return {
                 "episode_id": episode.episode_id,
-                "status": EpisodeStatus.FAILED.value,
+                "status": EpisodeExecutionStatus.FAILED.value,
                 "error": str(exc),
             }
 
-        runtime_state.status = EpisodeStatus.COMPLETED
+        runtime_state.status = EpisodeExecutionStatus.COMPLETED
         runtime_state.workflow_task_id = orchestrator_result.get("workflow_state_id")
         runtime_state.output_assets = self._extract_episode_assets(orchestrator_result)
-        episode.status = EpisodeStatus.COMPLETED
         episode_task.status = TaskStatus.COMPLETED.value
         db.commit()
 
-        project_state.mark_episode_status(episode.episode_id, EpisodeStatus.COMPLETED)
+        project_state.mark_episode_runtime_status(episode.episode_id, EpisodeExecutionStatus.COMPLETED)
         project_state_repository.save(project_state)
 
         return {
             "episode_id": episode.episode_id,
-            "status": EpisodeStatus.COMPLETED.value,
+            "status": EpisodeExecutionStatus.COMPLETED.value,
             "assets": runtime_state.output_assets,
             "workflow_state_id": runtime_state.workflow_task_id,
             "task_id": episode_task.task_id,

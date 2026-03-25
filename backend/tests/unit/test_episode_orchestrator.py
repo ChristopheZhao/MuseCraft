@@ -10,7 +10,7 @@ from app.core.story_plan import (
     StoryPlan,
     ProjectState,
     project_state_repository,
-    EpisodeStatus,
+    EpisodeEditorialStatus,
     normalize_character_bible,
 )
 
@@ -59,7 +59,7 @@ def test_build_episode_payload_uses_episode_context(monkeypatch):
         global_settings={},
     )
     runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeStatus.APPROVED
+    episode.status = EpisodeEditorialStatus.APPROVED
     runtime.approved_script = "00:00-00:10 战况紧急，赵子龙回马。"
 
     project_state_repository.save(project_state)

@@ -1,11 +1,23 @@
-export type EpisodeStatus =
+export type EpisodeEditorialStatus =
   | 'draft'
   | 'pending_approval'
   | 'approved'
+  | 'needs_revision';
+
+export type EpisodeExecutionStatus =
+  | 'idle'
   | 'generating'
   | 'completed'
   | 'failed'
-  | 'needs_revision';
+  | 'stale';
+
+export type ProjectOperationState =
+  | 'idle'
+  | 'queued'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
 
 export interface EpisodePlan {
   episode_id: string;
@@ -17,12 +29,12 @@ export interface EpisodePlan {
   continuity_notes: Record<string, any>;
   required_assets: Record<string, any>;
   script_draft: string;
-  status: EpisodeStatus;
+  status: EpisodeEditorialStatus;
 }
 
 export interface EpisodeRuntimeState {
   episode_id: string;
-  status: EpisodeStatus;
+  status: EpisodeExecutionStatus;
   approved_script: string;
   workflow_task_id?: string | null;
   aggregated_cost: number;
@@ -30,6 +42,17 @@ export interface EpisodeRuntimeState {
   output_assets: Record<string, any>;
   error?: string | null;
   video_url?: string;
+}
+
+export interface ProjectOperationStatus {
+  status: ProjectOperationState;
+  task_id?: string | null;
+  error?: string | null;
+}
+
+export interface ProjectProgressState {
+  planning: ProjectOperationStatus;
+  character_references: ProjectOperationStatus;
 }
 
 export interface StoryPlan {
@@ -50,6 +73,7 @@ export interface ProjectStateResponse {
   mode: string;
   story_plan: StoryPlan;
   episodes_runtime: Record<string, EpisodeRuntimeState>;
+  progress: ProjectProgressState;
   global_settings: Record<string, any>;
   cost_budget?: number | null;
   total_cost: number;
@@ -99,5 +123,5 @@ export interface OrchestrateProjectResponse {
 }
 
 export interface ProjectEpisodeView extends EpisodePlan {
-  runtime?: EpisodeRuntimeState;
+  runtime: EpisodeRuntimeState | null;
 }

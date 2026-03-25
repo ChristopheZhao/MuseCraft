@@ -145,8 +145,8 @@ export const useProjectStore = create<ProjectStoreState>()(
             return status === 'generating';
           });
 
-          const planningStatus = project.global_settings?.planning_status;
-          const refsStatus = project.global_settings?.character_references_status;
+          const planningStatus = project.progress?.planning?.status;
+          const refsStatus = project.progress?.character_references?.status;
           const planningInProgress =
             planningStatus === 'queued' ||
             planningStatus === 'in_progress' ||

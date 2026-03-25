@@ -403,11 +403,11 @@
       "id": "PLAN-20260319-007",
       "title": "Frontend Runtime/Gate 最小同步修复",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260319-007.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-19T00:00:00Z",
       "updated_at": "2026-03-19T00:00:00Z",
       "archived_at": null,
@@ -951,13 +951,13 @@
       "id": "PLAN-20260324-019",
       "title": "前端消费权威边界审计与契约收口",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260324-019.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-24T08:34:36Z",
-      "updated_at": "2026-03-25T01:53:42Z",
+      "updated_at": "2026-03-25T06:15:26Z",
       "archived_at": null,
       "notes": [
         {
@@ -971,6 +971,34 @@
         {
           "at": "2026-03-25T01:53:42Z",
           "text": "结合 multi-agent discussion 细化计划：把 quick-mode 重新定性为 runtime endpoint 仍允许 non-authoritative absence state；补入 `/tasks/quick/current` 与 gate-decision response contract；拆分 project editorial/runtime 语义；把 same-object presentation mapping 明确列为非目标；并把执行顺序改成 backend-first contract 收口后再删除 frontend fallback"
+        },
+        {
+          "at": "2026-03-25T02:28:53Z",
+          "text": "开始本窗口实现前分析并切到 in_progress：冻结 authority matrix，明确 backend-contract gap / frontend authority-routing / same-object presentation mapping 的边界，并锁定 backend-first 顺序为 quick runtime -> quick current -> gate decision -> project mode status/progress -> websocket terminal semantics"
+        },
+        {
+          "at": "2026-03-25T02:58:18Z",
+          "text": "按冻结顺序完成 contract 收口与 frontend authority-routing 删除：quick runtime 改为 authoritative bootstrap/runtime 视图，quick current 收敛为 null|{task,runtime}，gate decision 必返 runtime，project mode 拆分 editorial/runtime 与 typed progress，websocket terminal 事件降级为 bounded summary + refresh trigger；验证记录见 PLAN-20260324-019-validation.md"
+        },
+        {
+          "at": "2026-03-25T03:42:28Z",
+          "text": "Review 纠偏后确认计划仍未到验收态：主线收口已完成，但还存在一个 backend contract leak（runtime.approved_script 在未批准时向下游暴露）和一个 residual frontend fallback（project mode 把缺席 runtime 映射成 idle）；先修剩余边界，再回原窗口验收"
+        },
+        {
+          "at": "2026-03-25T03:48:41Z",
+          "text": "完成 review 后补收口：runtime.approved_script 仅在 approve 路径写入，project response 为每个 episode 物化 runtime surface，project UI 不再把缺席 runtime 映射成 idle，并将 coarse /status 标注为 compatibility-only；现可回原窗口做 re-review"
+        },
+        {
+          "at": "2026-03-25T05:24:41Z",
+          "text": "原窗口 re-review 发现新的 backend contract blocker：force_rerun 在 endpoint 预标记和 orchestrator 执行两侧都能绕过 editorial approval gate。该行为未被现有产品/UI/architecture 文档声明为显式 override contract，因此 019 重新回到 blocker-fix 优先状态"
+        },
+        {
+          "at": "2026-03-25T05:34:36Z",
+          "text": "完成 force_rerun fail-close：endpoint 预标记现在先过 editorial approval gate，再决定是否 rerun；EpisodeOrchestrator 无条件跳过未批准 episode；新的 endpoint/orchestrator regressions 已写入 test_project_contracts.py 并通过"
+        },
+        {
+          "at": "2026-03-25T06:15:26Z",
+          "text": "原窗口 re-review 确认未发现新的 blocker；019 的 backend contract 收口与 frontend authority-routing 删除已满足验收口径，剩余 TS/Jest/tooling 噪音继续归属 018 / 环境问题；用户确认 closeout，计划 completed"
         }
       ]
     }

@@ -4,7 +4,6 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { WebSocketMessage, MessageType, Agent, GenerationResult, AgentStatus } from '@/types';
 import { ApiClient } from '@/lib/api';
-import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { generateId } from '@/lib/utils';
 
 interface UseWebSocketOptions {
@@ -55,7 +54,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
 
   const ws = useRef<WebSocket | null>(null);
   const reconnectAttempts = useRef(0);
-  const reconnectTimeoutId = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutId = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isManualClose = useRef(false);
   const isConnecting = useRef(false);
 
@@ -65,10 +64,8 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     addResult,
     updateResult,
     addNotification,
-    setCurrentStep,
     currentRequest,
     setQuickRuntime,
-    setModal,
   } = useAppStore();
 
   const eventStateToAgentStatus: Record<string, AgentStatus> = {
@@ -355,43 +352,13 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
   }, []);
 
   const handleWorkflowCompleted = useCallback((msg: any) => {
-    try {
-      const results = (msg && (msg.results || (msg.data && msg.data.results))) || {};
-      const composer = results.video_composer || results['video-composer'] || {};
-      const qc = results.quality_checker || results['quality-checker'] || {};
-      const candidates: Array<string | undefined> = [
-        composer.final_video_url,
-        composer.final_video_path,
-        qc.final_video_url,
-        qc.final_video_path,
-        results.final_video_url,
-      ];
-      const picked = candidates.find((c) => typeof c === 'string' && c.length > 0);
-      const publicUrl = resolvePublicMediaUrl(picked);
-      if (publicUrl) {
-        useAppStore.getState().setFinalVideoUrl(publicUrl);
-      } else if (picked) {
-        useAppStore.getState().setFinalVideoUrl(String(picked));
-      }
-    } catch (e) {
-      // non-fatal
-    }
-
     addNotification({
       type: 'success',
-      title: '生成完成',
-      message: '多智能体协作已完成，进入结果预览',
+      title: '生成完成通知',
+      message: '后端已发出完成事件，正在刷新权威运行时视图。',
       autoClose: 5000,
     });
-    setModal({
-      type: 'result-ready',
-      data: {},
-      onClose: () => {
-        setCurrentStep('review' as any);
-        setModal(null);
-      },
-    });
-  }, [addNotification, setCurrentStep, setModal]);
+  }, [addNotification]);
 
   const handleWorkflowFailed = useCallback((msg: any) => {
     addNotification({
