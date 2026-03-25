@@ -2,84 +2,131 @@
 
 日期：2026-03-23
 
-状态：working inventory
+状态：working inventory（2026-03-25 refreshed）
 
-用途：基于已对齐的 canonical vocabulary，汇总当前实现与 `single-episode harness` 四层 MAS 架构之间的主要偏差、越层点和过渡态残留，供后续讨论与治理使用。
+用途：基于已冻结的 canonical vocabulary，记录当前实现与 `single-episode harness` 四层 MAS 架构之间仍然存在的偏差、受控保留项与清理噪音。
 
 说明：
 
 - 本文不是新的架构定义。
-- 本文只使用已冻结的 canonical vocabulary 做差距评估。
-- 本文中的“偏差”既包括明确越层，也包括已知过渡态与语义噪音源。
+- 本文只使用已冻结的 `编排层 / 控制层 / 门控层 / 治理层` 口径做差距评估。
+- 本文重点区分：
+  - 当前主线是否已回正
+  - 哪些只是 compat debt
+  - 哪些仍会把系统拉回坏架构
 
 相关文档：
 
-- [mas_architecture_alignment_note_20260323.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/architecture/mas_architecture_alignment_note_20260323.md)
 - [single_episode_harness_architecture_20260311.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/architecture/single_episode_harness_architecture_20260311.md)
+- [mas_architecture_alignment_note_20260323.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/architecture/mas_architecture_alignment_note_20260323.md)
 - [mas_runtime_control_plane_detailed_design_20260308.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/architecture/mas_runtime_control_plane_detailed_design_20260308.md)
 - [mas_runtime_contracts_detailed_design_20260308.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/architecture/mas_runtime_contracts_detailed_design_20260308.md)
 
 ## 1. 判定口径
 
 - `aligned`
-  - 当前实现与 canonical 归属基本一致，没有发现同层级明显偏差。
+  - 当前实现与 canonical 归属一致，没有发现会误导后续治理的明显偏差。
 - `mostly-aligned`
-  - 主体归属已基本正确，但仍有局部实现形态容易引起误解，或边界尚未完全收口。
-- `explicit-cross-layer`
-  - 当前实现明确承担了不应由该层承担的职责，属于显式越层。
-- `transitional`
-  - 当前实现可解释为过渡态，不一定立即错误，但仍保留兼容桥接、旧宿主残留或第二套语义噪音。
+  - 主体归属已正确，但仍保留局部实现噪音或少量低风险 compat 形态。
+- `controlled-transition`
+  - 当前不属于 active mainline blocker，但仍保留 compat bridge、legacy vocabulary 或 future drift 入口。
+- `active-governance-risk`
+  - 当前已落在 active path 上，会削弱 contract-first normalization、single-mainline clarity 或 authority boundary。
+- `out-of-scope-retained`
+  - 当前被明确排除在 `single-episode harness` 治理闭环之外的保留项；不算主线 blocker，但必须被清楚标注，避免误判为已完成统一。
 
-## 2. 当前偏差清单
+## 2. 当前主线快照（2026-03-25）
 
-| 文件/位置 | 当前实际职责 | canonical 归属 | 判定 | 备注 |
+按当前代码宿主理解：
+
+- 编排层：
+  - `OrchestratorAgent`
+- 控制层：
+  - `RuntimeSessionService`
+  - `OrchestrationRuntimeController`
+  - `OrchestrationControlPlane`
+  - runtime substrate models
+- 门控层：
+  - system gate evaluators
+  - human review gates consumed by control-plane
+- 治理层：
+  - contract vocabulary
+  - diagnostics / quality / closeout rule set
+  - bounded terminal summary publication
+- project wrapper：
+  - `EpisodeOrchestratorAgent`
+  - `projects.py`
+  - project state / progress services
+- external scheduler：
+  - task queue / worker host / API enqueue entrypoints
+- supporting capabilities：
+  - `ContextContractAssembler`
+  - published deliverable projection / adapter
+  - observation / trace adapters
+  - read-only memory view builders
+- leaf agents：
+  - concept / script / voice / image / video / audio / composer / quality agents
+
+这个快照说明：当前主问题已不再是“四层没定义”，而是“少量 supporting capability 和 project wrapper 还没完全收干净”。
+
+## 3. 当前偏差清单
+
+| 文件/区域 | 当前实际职责 | canonical 归属 | 判定 | 影响 |
 |---|---|---|---|---|
-| [workflow_runtime.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/workflow_runtime.py) | runtime substrate models | 控制层底座 | `aligned` | 当前角色清晰。 |
-| [runtime_session_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/runtime_session_service.py) | 主写 `workflow_session / node / attempt / gate / decision`，处理 `approve / revise / replan / resume` 等状态推进 | 控制层 | `aligned` | 这条主线已基本立住。 |
-| [published_deliverable_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/published_deliverable_service.py) | deliverable payload 落盘、record/ref 持久化、payload 读取 | supporting capability：边界输出 / persistence | `aligned` | 已基本退回 persistence-only。 |
-| [orchestration_control_plane.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_control_plane.py) | boundary-triggered gate collection、decision request、apply payload assembly | 控制层中的具体组件 | `mostly-aligned` | 主体归属正确，但名字仍易被误读成“整个控制层”。 |
-| [orchestration_runtime_controller.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_runtime_controller.py) | 控制层 apply、runtime activation、standby 激活 | 控制层中的具体组件 | `mostly-aligned` | 归属正确，但仍与 activation policy 之间存在灰区。 |
-| [orchestration_state_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py) | 兼容投影写入、execution queue / standby 构造、activation_pool 投影 | supporting capability：兼容投影 / 过渡桥接 | `transitional` | 仍承载活语义，不只是纯诊断投影。 |
-| [orchestrator.py:379](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L379) `_open_script_review_gate(...)` | 同时做 deliverable publish、runtime payload 写回、shared WM 投影、gate open | 应拆到控制层 + supporting capability | `explicit-cross-layer` | 这是当前最清晰的编排层 residual ownership。 |
-| [orchestrator.py:1863](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L1863) | 编排层按 `AUDIO_GENERATOR` 直接挑 `build_media_agent_context(...)` | supporting capability：Context/Contract Assembler | `explicit-cross-layer` | 编排层仍直接做 stage-input builder routing。 |
-| [orchestrator.py:1935](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L1935) | 编排层按 `IMAGE_GENERATOR` 直接挑 `build_image_generation_context(...)` | supporting capability：Context/Contract Assembler | `explicit-cross-layer` | 虽然 image 已吃正式输入，但 builder 选择仍在编排层。 |
-| [orchestrator.py:1970](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L1970) | 编排层按 `VIDEO_GENERATOR` 直接挑 `build_video_generation_context(...)` | supporting capability：Context/Contract Assembler | `explicit-cross-layer` | 同上。 |
-| [orchestrator.py:2023](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L2023) | 编排层按 `VOICE_SYNTHESIZER` 直接挑 `build_voice_synthesis_context(...)` | supporting capability：Context/Contract Assembler | `explicit-cross-layer` | 同上。 |
-| [context_assembler.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/context_assembler.py) | 旧式 guidance / continuity assembler | supporting capability：Context/Contract Assembler | `transitional` | 当前宿主仍不是正式的 stage-input / execution-contract assembler。 |
-| [memory_views.py:164](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/memory_views.py#L164) `build_media_agent_context(...)` | live WM 驱动的 media context 组装 | supporting capability：projection / Context Assembler | `transitional` | 仍以 live WM 为主。 |
-| [memory_views.py:426](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/memory_views.py#L426) `build_image_generation_context(...)` | published-deliverable-backed image formal input projection | supporting capability：projection / Context Assembler | `mostly-aligned` | 已进入正式输入模型，但仍是 per-path builder。 |
-| [memory_views.py:512](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/memory_views.py#L512) `build_video_generation_context(...)` | published-deliverable-backed video formal input projection | supporting capability：projection / Context Assembler | `mostly-aligned` | 同上。 |
-| [memory_views.py:693](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/memory_views.py#L693) `build_voice_synthesis_context(...)` | voice synthesis context 仍主要读 live WM | supporting capability：projection / Context Assembler | `transitional` | 仍未与 image/video 收敛到同一 stage-boundary 模型。 |
-| [published_deliverable_adapter.py:96](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/published_deliverable_adapter.py#L96) | deliverable ref / payload 投影回 shared WM | supporting capability：边界输出投影 / bridge | `transitional` | 当前仍是 runtime binding 与 downstream consumption 之间的桥接层。 |
-| [orchestrator.py:643](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L643) | 从 runtime payload 取 ref，再投影回 shared WM，供 downstream 回读 | 控制层绑定 + supporting capability 投影的过渡实现 | `transitional` | stage-input resolution 仍未成为显式 harness 能力。 |
-| [orchestration_state_adapter.py:132](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L132) | 持续写 `workflow.plan`、`workflow.activation_pool` | supporting capability：兼容投影 / 诊断投影 | `transitional` | 兼容投影仍参与活跃状态链。 |
-| [orchestration_state_adapter.py:326](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L326) | 持续写 `workflow.audio_route` | supporting capability：兼容投影 / 诊断投影 | `transitional` | 兼容投影仍未完全退场。 |
-| [orchestrator.py:1401](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L1401) `get_workflow_status(...)` | 回读 `workflow.activation_pool` 组装步骤状态 | 应优先消费控制层 read model | `transitional` | 说明 compatibility seam 仍在 active status path 里。 |
-| [orchestration_state_adapter.py:171](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L171) / [orchestration_state_adapter.py:198](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L198) / [orchestration_state_adapter.py:214](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L214) | execution queue / standby / insertion policy 组装 | 编排层策略 + 控制层 apply 之间的边界灰区 | `transitional` | 不是已确认错误，但容易继续制造语义漂移。 |
-| human review path in [runtime_session_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/runtime_session_service.py) 与 boundary-triggered system gate path in [orchestration_control_plane.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_control_plane.py) | 两种 gate handling 风格并存 | 门控层产出、控制层消费 | `transitional` | 语义可解释，但实现形态还没完全统一。 |
-| `script_stage_runner.py` / `post_script_stage_runner.py`（已于 2026-03-25 从 `backend/app` / `backend/tests` 退役） | 旧备用 stage runner mainline 已退出活跃 app/test surface | 不应继续作为主线候选语义存在 | `mostly-aligned` | D2 第一刀已清除此类 dormant mainline 噪音。 |
-| [episode_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/episode_orchestrator.py) | 当前主要承担 project / multi-episode wrapper 协调 | 编排层外层包装 / project wrapper | `mostly-aligned` | D1 已移除 project-foundation mini-host 与旧宿主语义；剩余工作转入 Checkpoint D / final closeout audit。 |
-| `workflow_manager.create_workflow()` project-foundation path（已于 2026-03-25 从 `EpisodeOrchestratorAgent` 退役） | 旧 `WorkflowState` 宿主残留已退出活跃 wrapper 路径 | 历史 `WorkflowState` 宿主残留 | `mostly-aligned` | 当前 app mainline 不再通过该路径构造 project foundation workflow。 |
-| `react_orchestrator.py` / `enhanced_orchestrator.py` / `testing_framework.py`（已于 2026-03-25 从 `backend/app` / `backend/tests` 退役） | 并行 orchestrator 变体已退出活跃 app/test surface；仓库仅剩少量历史文档引用 | 历史实现 / 语义噪音源 | `mostly-aligned` | D2 第二刀已删除实现、绑定 prompt assets 与 legacy tests；剩余工作只是在 final closeout 中说明历史文档归档方式。 |
-
-## 3. 补充观察
-
-- 当前没有再看到 queue/worker 重新回流为 MAS runtime SoT owner 的新证据；`queue/runtime` 主边界仍保持在 `012/014/015` 之后的收口状态。
-- 当前也没有再看到 leaf agents 继续直接以 `workflow.plan / workflow.audio_route / workflow.activation_pool` 作为活跃输入真值的明确证据。
-- 当前偏差主要集中在：
-  - `OrchestratorAgent` 的 residual ownership
-  - `Context/Contract Assembler` 宿主缺位
-  - compatibility seam 仍在 active path 存活
-  - 少量历史文档仍保留已退役 orchestrator 名称，需要在 final closeout 中说明归档口径
+| [orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py) | single-episode 唯一 MAS mainline；负责编排、runtime decision、leaf activation | 编排层 | `aligned` | 当前主线已固定到 `OrchestratorAgent`。 |
+| [runtime_session_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/runtime_session_service.py) | 主写 `workflow_session / node / attempt / gate / decision`，生成 runtime read-model | 控制层 | `aligned` | runtime SoT 所有权已清晰。 |
+| [orchestration_control_plane.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_control_plane.py) | gate collection、decision request、apply payload assembly | 控制层中的具体组件 | `mostly-aligned` | 结构已收敛，主要问题是名字仍容易被误读成整个控制层。 |
+| [orchestration_runtime_controller.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_runtime_controller.py) | 应用 orchestrator runtime decision，承接 standby activation / abort / continue | 控制层中的具体组件 | `mostly-aligned` | 已承担显式 apply contract，不再像第二条编排器。 |
+| [audio_delivery_gate_evaluator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/audio_delivery_gate_evaluator.py) | 读取边界事实并产出 `GateResult` | 门控层 | `mostly-aligned` | gate 逻辑已从 orchestrator 主循环拆出。 |
+| [task_queue.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/task_queue.py)、[queued_task_execution_host.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/queued_task_execution_host.py)、[task_execution_policy.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/task_execution_policy.py) | enqueue、worker bootstrap、execution eligibility | external scheduler | `aligned` | queue/container 已与 single-episode runtime semantics 解耦。 |
+| [episode_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/episode_orchestrator.py) | project mode 下的 multi-episode wrapper 协调 | project wrapper | `mostly-aligned` | 当前不再是第二条 single-episode mainline。 |
+| [context_assembler.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/context_assembler.py) | canonical stage-input / execution-boundary assembler | supporting capability | `mostly-aligned` | 当前主路径已通过它组装 runtime carrier、`runtime_hints` 和 `ExecutionContract`，但仍保留少量 compat helper。 |
+| [memory_views.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/memory_views.py) | read-only context builder / legacy WM loader | supporting capability | `active-governance-risk` | active path 中仍存在 consumer-side fail-open，尤其 `video_composer` 上下文会在 project facts 缺席时回退读 legacy `scene_outputs` bundle。 |
+| [published_deliverable_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/published_deliverable_adapter.py) | shared-WM deliverable projection bridge | supporting capability | `controlled-transition` | 当前已不是 mainline truth path，但仍保留第二套 boundary protocol 的回退入口。 |
+| [execution_boundary_assembler.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/execution_boundary_assembler.py) | retired host name compatibility alias | supporting capability | `controlled-transition` | 不再承担主线职责，但保留了旧 vocabulary。 |
+| [orchestration_observation_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_observation_adapter.py) | orchestration trace / observation sink | supporting capability | `controlled-transition` | 当前未见 active authority reader，但 `workflow.gates.*` / `workflow.signals.*` 命名仍会模糊 diagnostics 与 gate truth。 |
+| [orchestration_state_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py) | orchestration context persistence、compat diagnostics projection | supporting capability | `mostly-aligned` | 当前已显式禁止写 runtime control prefixes，并把 `plan / activation_pool / audio_route` 压到 diagnostics-only key 下。 |
+| [workflow_completion_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/workflow_completion_adapter.py) | bounded terminal summary / result persistence helper | 治理层支撑能力 | `mostly-aligned` | 已明确 `runtime_authoritative=false`，但仍保留少量 legacy terminal vocabulary。 |
+| [tasks.py `/{task_id}/status`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/tasks.py) 和 [api.ts `getTaskCoarseStatus()`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/lib/api.ts) | coarse task projection | external compatibility surface | `controlled-transition` | 当前已明确标注 compatibility-only，但保留了 alternative authority surface 的制度性入口。 |
+| [useWebSocket.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useWebSocket.ts)、[types/index.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/types/index.ts) | websocket event handling / legacy direct message vocabulary | frontend read-model consumer | `controlled-transition` | 当前主线已走 `event.* + refresh runtime`，但 legacy vocabulary 仍保留 future drift 入口。 |
+| [useTaskPolling.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useTaskPolling.ts)、[ProjectModeView.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/components/project/ProjectModeView.tsx)、[useProjectStore.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/store/useProjectStore.ts) | authority read-model consumers | frontend read-model consumer | `aligned` | 前端主线已停止构建第二套业务状态机。 |
+| [projects.py `_schedule_project_plan(...)`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/projects.py) | project planning 的 endpoint-local thread host | project wrapper / product job host | `out-of-scope-retained` | 它不触碰 single-episode runtime SoT，但说明 whole-system host uniformity 仍未完成。 |
+| [mas_state.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/state/mas_state.py) | facts summary / completion summary helper | supporting capability | `controlled-transition` | 当前已退回 facts-summary vocabulary，但仍接受 legacy nested `scene_outputs` shape。 |
 
 ## 4. 当前总评
 
-按已对齐的 canonical vocabulary 评估，当前代码库的状态不是“整体违背 MAS 架构”，而是：
+当前代码库的状态不是“MAS 四层架构失败”，而是：
 
-- 控制层 runtime SoT 主写已经基本立住；
-- 边界输出 persistence 也已基本回到正确位置；
-- 但编排层 residual ownership 仍未清干净；
-- supporting capability，尤其 `Context/Contract Assembler`，还没有正式落位；
-- active path 的主要偏差已显著收敛；剩余噪音主要来自少量历史文档与 final closeout 尚未完成的说明工作。
+- `single-episode mainline` 已基本拉回正确位置。
+- runtime SoT ownership 已基本固定在控制层。
+- queue / worker / API 已基本退回 external scheduler。
+- 前端 authority consumer discipline 已明显改善。
 
-因此，当前的主问题已经从“术语没对齐”转成“术语已对齐，但实现仍保留若干过渡态与越层残余”。
+真正还没收干净的问题主要有 3 类：
+
+1. active-path fail-open
+   - supporting capability 仍在消费点补边界。
+   - 当前最值得优先清理的是 `memory_views.py` 中的 legacy fallback。
+
+2. project-level retained host
+   - `project planning` 仍保留单独宿主。
+   - 它不是 single-episode blocker，但会影响 whole-system host uniformity。
+
+3. compat authority surface / diagnostics vocabulary noise
+   - coarse `/status`
+   - legacy websocket vocabulary
+   - diagnostics key naming
+
+## 5. 后续梳理顺序
+
+后续若要继续把代码拉回更干净的 MAS 实现，建议按以下顺序：
+
+1. 先消 active-path fail-open。
+2. 再收 project wrapper / host uniformity。
+3. 再删 compat authority surface。
+4. 最后清 diagnostics vocabulary / alias noise。
+
+这个顺序的原因是：
+
+- 前两项直接影响架构边界。
+- 后两项更多是防 future drift 的治理清洁度工作。

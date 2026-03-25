@@ -2,7 +2,7 @@
 
 日期：2026-03-11
 
-状态：架构结论草案
+状态：架构基线说明（2026-03-25 术语刷新）
 
 用途：把 `single-episode` 的 agent harness architecture 提升为正式架构基线，明确全局约束、分层边界、组件归属与后续收口原则。
 
@@ -96,6 +96,36 @@
 `external scheduler` 指任务队列、worker、API 调度入口等外部调度层。  
 它只负责启动 single-episode engine，不参与单 `episode` 内部的编排、控制、门控、治理分层。
 
+### 3.8 Project Wrapper
+
+`project wrapper` 指围绕多个 `episode` 组织出来的外层产品包装，包括：
+
+- episode 选择
+- 共享设定注入
+- 批量调度
+- project 级进度汇总
+
+它不是 `single-episode harness` 四层本体的一部分。
+它只能复用单集引擎，不得自带另一套 per-episode runtime / control-plane / gate semantics。
+
+### 3.9 Supporting Capability
+
+`supporting capability` 指为 harness 提供上下文装配、contract 组装、diagnostics、projection、trace 等支撑能力的组件。
+
+典型对象包括：
+
+- `Context/Contract Assembler`
+- published deliverable projection / adapter
+- observation / trace adapter
+
+它们不是第五层架构，只是为四层服务的支撑能力。
+
+### 3.10 Leaf Agent
+
+`leaf agent` 指被编排层激活、基于 `ExecutionContract` 执行具体任务的 agent。
+
+它们是执行参与者，不是 harness 顶层层级。
+
 ## 4. 业务模式与作用域边界
 
 `quick` 与 `project` 不是两套生成架构，而是同一套 `single-episode engine` 的两种外层包装：
@@ -108,6 +138,13 @@
 - `project` 不得拥有另一套 per-episode runtime/control-plane
 - `project` 不得重写 gate contract
 - `project` 不得重写 episode 内部 revise/replan 语义
+- `project wrapper` 属于 harness 之外的产品包装层，不应被误记为第五层
+
+同时还应明确：
+
+- `external scheduler` 在 harness 之外
+- `supporting capability` 在 harness 之内、但不构成新的顶层层级
+- `leaf agents` 是执行参与者，不构成新的顶层层级
 
 ## 5. 架构目标
 

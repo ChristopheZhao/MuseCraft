@@ -2,7 +2,7 @@
 
 日期：2026-03-23
 
-状态：alignment note
+状态：alignment note（2026-03-25 宿主映射刷新）
 
 用途：收敛 `single-episode harness` 的顶层架构词汇，避免后续讨论继续把“层级术语”和“具体组件名”混用。
 
@@ -116,6 +116,64 @@
 - 执行参与者
 
 后续讨论中，不得把这些对象提升成与四层并列的“第五层/第六层”。
+
+## 4.1 Non-Layer Runtime-Adjacent Objects
+
+下列对象与 runtime/harness 强相关，但不属于四层本体：
+
+- `project wrapper`
+- `external scheduler`
+- `frontend read-model consumers`
+
+它们分别承担：
+
+- project 级 episode 组织与汇总
+- 启动/排队/worker bootstrap
+- 消费 authority read-model 与 bounded summary
+
+讨论这类对象时，不得把它们误升级成 `single-episode harness` 顶层层级。
+
+## 4.2 Current Host Mapping (2026-03-25)
+
+当前代码宿主应按以下口径理解：
+
+- 编排层：
+  - `OrchestratorAgent`
+- 控制层：
+  - `RuntimeSessionService`
+  - `OrchestrationRuntimeController`
+  - `OrchestrationControlPlane`
+  - runtime substrate models
+- 门控层：
+  - system gate evaluators
+  - human/system decision inputs consumed by control-plane
+- 治理层：
+  - contract vocabulary
+  - diagnostics / quality / closeout rule set
+  - bounded terminal summary publication
+- project wrapper：
+  - `EpisodeOrchestratorAgent`
+  - `projects.py`
+  - project state / progress services
+- external scheduler：
+  - task queue / worker host / API enqueue entrypoints
+- supporting capabilities：
+  - `ContextContractAssembler`
+  - published deliverable projection / adapter
+  - observation / trace adapter
+  - read-only memory view builders
+- leaf agents：
+  - `concept_planner`
+  - `script_writer`
+  - `voice_synthesizer`
+  - `image_generator`
+  - `video_generator`
+  - `audio_generator`
+  - `video_composer`
+  - `quality_checker`
+
+上面这份宿主映射用于解释当前实现，不改写四层正式定义。
+若某对象同时触达多个层级语义，应优先把它视为偏差候选，而不是新增层级。
 
 ## 5. Normative Document Set
 
