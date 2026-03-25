@@ -14,11 +14,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ....agents import SeriesPlannerAgent
-from ....agents.episode_orchestrator import EpisodeOrchestratorAgent
 from ....agents.base import AgentError
 from ....core.database import SessionLocal
 from ....core.constants import GenerationMode
-from ....core.generation_mode import resolve_generation_mode
 from ....core.story_plan import (
     EpisodePlan,
     EpisodeEditorialStatus,
@@ -29,8 +27,8 @@ from ....core.story_plan import (
     project_state_repository,
 )
 from ....models import Task, TaskStatus, TaskType
+from ....services.task_queue import TaskQueueService
 from ....services.project_service import update_episode_script
-from ....services.memory_provider import build_memory_services
 
 
 router = APIRouter()
@@ -540,7 +538,9 @@ async def orchestrate_project(
     finally:
         session.close()
 
-    background_tasks.add_task(_schedule_episode_orchestration, task.id if task else None, payload)
+    if task is not None:
+        task_queue = TaskQueueService()
+        background_tasks.add_task(task_queue.queue_task, task.id)
 
     status_value = task_status_value or TaskStatus.FAILED.value
     return EpisodeGenerationResponse(
@@ -549,57 +549,3 @@ async def orchestrate_project(
         result={},
         project=_serialize_project_state(project_state_repository.get(project_id) or project_state),
     )
-
-
-def _schedule_episode_orchestration(task_db_id: Optional[int], payload: Dict[str, Any]) -> None:
-    if task_db_id is None:
-        return
-    import asyncio
-    import threading
-
-    def runner() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(_run_episode_orchestration(task_db_id, payload))
-        finally:
-            loop.close()
-
-    threading.Thread(target=runner, name=f"episode-orch-{task_db_id}", daemon=True).start()
-
-
-async def _run_episode_orchestration(task_db_id: int, payload: Dict[str, Any]) -> None:
-    session = SessionLocal()
-    task: Optional[Task] = None
-    try:
-        task = session.get(Task, task_db_id)
-        if not task:
-            return
-        task.status = TaskStatus.IN_PROGRESS.value
-        session.commit()
-
-        mode = resolve_generation_mode(payload.get("mode"), route_default=GenerationMode.PROJECT)
-        if mode != GenerationMode.PROJECT:
-            raise ValueError(
-                "project orchestration endpoint requires project mode; "
-                f"received unsupported mode={mode.value}"
-            )
-
-        orchestrator = EpisodeOrchestratorAgent.create_default()
-        await orchestrator.execute(
-            task=task,
-            input_data=payload,
-            db=session,
-            execution_order=1,
-        )
-
-        session.commit()
-
-    except Exception as exc:  # noqa: BLE001
-        session.rollback()
-        if task:
-            task.status = TaskStatus.FAILED.value
-            task.error_message = str(exc)
-            session.commit()
-    finally:
-        session.close()

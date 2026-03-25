@@ -195,111 +195,6 @@ class TestPerformanceBenchmarks:
         
         return performance_results
     
-    async def test_workflow_execution_performance(
-        self,
-        test_client: AsyncClient,
-        test_db_session: AsyncSession,
-        mock_ai_services: Dict[str, AsyncMock],
-        performance_thresholds: Dict[str, float]
-    ):
-        """Test video generation workflow performance."""
-        
-        # Configure AI services for performance testing
-        self._setup_performance_ai_mocks(mock_ai_services)
-        
-        workflow_scenarios = [
-            {
-                "name": "simple_professional",
-                "request": {
-                    "user_prompt": "Create a simple professional video",
-                    "video_style": "professional",
-                    "duration": 30,
-                    "aspect_ratio": "16:9"
-                },
-                "expected_max_time": 60
-            },
-            {
-                "name": "complex_creative",
-                "request": {
-                    "user_prompt": "Create a complex creative video with multiple scenes",
-                    "video_style": "creative",
-                    "duration": 120,
-                    "aspect_ratio": "16:9",
-                    "scene_count": 5
-                },
-                "expected_max_time": 180
-            },
-            {
-                "name": "high_quality_cinematic",
-                "request": {
-                    "user_prompt": "Create a high-quality cinematic video",
-                    "video_style": "cinematic",
-                    "duration": 90,
-                    "quality_level": "high",
-                    "include_subtitles": True
-                },
-                "expected_max_time": 240
-            }
-        ]
-        
-        performance_results = {}
-        
-        for scenario in workflow_scenarios:
-            scenario_results = []
-            
-            # Run multiple iterations for statistical significance
-            for iteration in range(3):
-                start_time = time.time()
-                
-                # Submit task
-                response = await test_client.post("/api/v1/tasks/", json=scenario["request"])
-                assert response.status_code == 201
-                
-                task_data = response.json()
-                task_id = task_data["task_id"]
-                
-                # Execute workflow
-                from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-                orchestrator = EnhancedOrchestratorAgent.create_default()
-                
-                await orchestrator.execute(
-                    task_id=task_id,
-                    input_data=scenario["request"],
-                    db=test_db_session
-                )
-                
-                end_time = time.time()
-                execution_time = end_time - start_time
-                
-                scenario_results.append({
-                    "iteration": iteration,
-                    "execution_time": execution_time,
-                    "task_id": task_id
-                })
-                
-                # Verify task completed
-                stmt = select(Task).where(Task.task_id == task_id)
-                result = await test_db_session.execute(stmt)
-                task = result.scalar_one()
-                assert task.status == TaskStatus.COMPLETED
-            
-            # Calculate scenario statistics
-            execution_times = [r["execution_time"] for r in scenario_results]
-            
-            performance_results[scenario["name"]] = {
-                "mean_execution_time": statistics.mean(execution_times),
-                "min_execution_time": min(execution_times),
-                "max_execution_time": max(execution_times),
-                "std_dev": statistics.stdev(execution_times) if len(execution_times) > 1 else 0,
-                "expected_max_time": scenario["expected_max_time"],
-                "results": scenario_results
-            }
-            
-            # Verify against expected performance
-            assert max(execution_times) <= scenario["expected_max_time"], f"Scenario {scenario['name']} exceeded expected time"
-        
-        return performance_results
-    
     async def test_system_resource_utilization(
         self,
         test_client: AsyncClient,
@@ -506,27 +401,6 @@ class TestPerformanceBenchmarks:
             assert result["avg_time_per_message"] <= max_latency, f"WebSocket message latency exceeded threshold"
         
         return performance_results
-    
-    # Helper methods
-    
-    def _setup_performance_ai_mocks(self, mock_ai_services: Dict[str, AsyncMock]):
-        """Setup AI service mocks optimized for performance testing."""
-        
-        # Fast responses to simulate optimal AI service performance
-        mock_ai_services['openai'].chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content="Fast AI response"))
-        ]
-        
-        mock_ai_services['stability'].generate.return_value = MagicMock(
-            artifacts=[MagicMock(seed=123, binary=b"fast_generated_image")]
-        )
-        
-        # Add minimal delays to simulate realistic network latency
-        async def add_realistic_delay(*args, **kwargs):
-            await asyncio.sleep(0.1)  # 100ms simulated latency
-            return mock_ai_services['openai'].chat.completions.create.return_value
-        
-        mock_ai_services['openai'].chat.completions.create.side_effect = add_realistic_delay
     
     def _get_system_metrics(self) -> Dict[str, float]:
         """Get current system performance metrics."""

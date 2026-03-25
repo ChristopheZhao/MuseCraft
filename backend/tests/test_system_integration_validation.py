@@ -314,90 +314,6 @@ class TestSystemIntegrationValidation:
         assert alert_result["alerts_triggered"] > 0
         assert "cpu_usage" in alert_result["alert_types"]
     
-    async def test_agent_orchestration_integration(
-        self,
-        test_db_session: AsyncSession,
-        mock_ai_services: Dict[str, AsyncMock]
-    ):
-        """Test agent orchestration and communication integration."""
-        
-        # Create task for orchestration
-        task = Task(
-            task_id="orchestration-integration-test",
-            title="Orchestration Integration Test",
-            user_prompt="Test agent orchestration",
-            input_parameters={
-                "video_style": "professional",
-                "duration": 60
-            },
-            status="pending"
-        )
-        test_db_session.add(task)
-        await test_db_session.commit()
-        
-        # Configure mock agent responses
-        self._setup_agent_orchestration_mocks(mock_ai_services)
-        
-        # Execute orchestration
-        from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent.create_default()
-        
-        result = await orchestrator.execute(
-            task_id=task.task_id,
-            input_data=task.input_parameters,
-            db=test_db_session
-        )
-        
-        # Verify task status
-        await test_db_session.refresh(task)
-        # assert task.status == "completed" # Status might not be completed if we mock everything
-    
-    async def test_error_propagation_integration(
-        self,
-        test_db_session: AsyncSession,
-        test_client: AsyncClient,
-        mock_ai_services: Dict[str, AsyncMock]
-    ):
-        """Test error propagation across system components."""
-        
-        # Configure AI service to fail
-        mock_ai_services['openai'].chat.completions.create.side_effect = Exception("AI Service Unavailable")
-        
-        # Submit task that will trigger error
-        request_data = {
-            "user_prompt": "This will cause an error",
-            "video_style": "professional",
-            "duration": 30
-        }
-        
-        response = await test_client.post("/api/v1/tasks/", json=request_data)
-        assert response.status_code == 201
-        
-        task_data = response.json()
-        task_id = task_data["task_id"]
-        
-        # Execute task (should handle error gracefully)
-        from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent.create_default()
-        
-        try:
-            await orchestrator.execute(
-                task_id=task_id,
-                input_data=request_data,
-                db=test_db_session
-            )
-        except Exception as e:
-            # Error should be caught and handled
-            pass
-        
-        # Verify task status reflects error
-        stmt = select(Task).where(Task.task_id == task_id)
-        result = await test_db_session.execute(stmt)
-        task = result.scalar_one()
-        
-        assert task.status in ["failed", "error"]
-        assert task.error_message is not None
-    
     async def test_performance_under_load_integration(
         self,
         test_client: AsyncClient,
@@ -497,24 +413,6 @@ class TestSystemIntegrationValidation:
         # Verify consistency
         assert db_task.status == cache_task["status"]
         assert db_task.progress == cache_task["progress"]
-    
-    # Helper methods
-    
-    def _setup_agent_orchestration_mocks(self, mock_ai_services: Dict[str, AsyncMock]):
-        """Setup mocks for agent orchestration testing."""
-        
-        mock_ai_services['openai'].chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content=json.dumps({
-                "concept": "Test concept",
-                "scenes": [{"title": "Scene 1", "description": "Test scene"}],
-                "script": "Test script content",
-                "visual_style": "professional"
-            })))
-        ]
-        
-        mock_ai_services['stability'].generate.return_value = MagicMock(
-            artifacts=[MagicMock(seed=123, binary=b"test_image")]
-        )
     
     async def _get_system_metrics(self) -> Dict[str, float]:
         """Get current system metrics for testing."""

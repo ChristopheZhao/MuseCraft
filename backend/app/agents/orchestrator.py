@@ -1022,7 +1022,7 @@ class OrchestratorAgent(BaseAgent):
                     runtime_session,
                     task=task,
                     summary_output={
-                        "workflow_status": "completed",
+                        "status": "completed",
                         "final_video_url": completion_payload.get("final_video_url") or final_url,
                         "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
                     },
@@ -1031,7 +1031,7 @@ class OrchestratorAgent(BaseAgent):
             self.logger.info(f"🎉 工作流完成，任务ID: {task.task_id}")
             
             return {
-                "workflow_status": "completed",
+                "status": "completed",
                 "total_steps": total_steps,
                 "results": workflow_results,
                 "final_video_url": completion_payload.get("final_video_url") or final_url,
@@ -1217,111 +1217,6 @@ class OrchestratorAgent(BaseAgent):
             pass
         self.logger.warning("Video step not completed: no scene_outputs.video found in MAS WM")
         return False
-    
-    def get_workflow_status(self, task: Task, db: Session) -> Dict[str, Any]:
-        """Get current workflow status and progress"""
-        workflow_id = str(getattr(task, "task_id", "") or "")
-        task_specs_projection: Dict[str, Any] = {}
-        try:
-            if workflow_id:
-                task_specs_projection = read_shared_fact(
-                    workflow_id,
-                    "workflow.task_specs",
-                    {},
-                    service=self.short_term_service,
-                ) or {}
-        except Exception:
-            task_specs_projection = {}
-
-        projected_agents: List[AgentType] = []
-        if isinstance(task_specs_projection, dict) and task_specs_projection:
-            for agent_name in task_specs_projection.keys():
-                parsed = self._parse_agent_type(agent_name)
-                if parsed is not None and parsed not in projected_agents:
-                    projected_agents.append(parsed)
-
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(db, task)
-        runtime_nodes = (
-            list(runtime_view.get("nodes") or [])
-            if isinstance(runtime_view, dict)
-            else []
-        )
-        agents_for_status = projected_agents or self._registered_agents()
-        overall_status = (
-            runtime_view.get("status")
-            if isinstance(runtime_view, dict) and runtime_view.get("status")
-            else (task.status.value if hasattr(task.status, "value") else task.status)
-        )
-        workflow_status = {
-            "task_id": str(task.task_id),
-            "overall_status": overall_status,
-            "overall_progress": task.progress_percentage,
-            "current_step": task.current_step,
-            "total_steps": len(runtime_nodes) if runtime_nodes else len(agents_for_status),
-            "completed_steps": 0,
-            "failed_steps": 0,
-            "steps": []
-        }
-
-        completed_statuses = {
-            WorkflowNodeStatus.APPROVED.value,
-            WorkflowNodeStatus.COMPLETED.value,
-            WorkflowNodeStatus.SKIPPED.value,
-        }
-        failed_statuses = {WorkflowNodeStatus.FAILED.value}
-
-        if runtime_nodes:
-            current_node_key = ""
-            if isinstance(runtime_view, dict):
-                current_node_key = str(runtime_view.get("current_node_key") or "").strip().lower()
-            for node in runtime_nodes:
-                if not isinstance(node, dict):
-                    continue
-                node_key = str(node.get("node_key") or "").strip().lower()
-                agent_type = self._agent_type_for_runtime_node_key(node_key)
-                agent_name = agent_type.value if isinstance(agent_type, AgentType) else node_key
-                node_status = str(node.get("status") or "unknown").strip().lower() or "unknown"
-                if node_status in completed_statuses:
-                    workflow_status["completed_steps"] += 1
-                if node_status in failed_statuses:
-                    workflow_status["failed_steps"] += 1
-                progress = None
-                if node_status in completed_statuses:
-                    progress = 100
-                elif node_key and node_key == current_node_key:
-                    progress = task.progress_percentage
-                workflow_status["steps"].append(
-                    {
-                        "agent_type": agent_name,
-                        "node_key": node_key,
-                        "status": node_status,
-                        "progress": progress,
-                        "duration": None,
-                        "error": task.error_message if node_status in failed_statuses else None,
-                    }
-                )
-            workflow_status["runtime_session"] = {
-                "session_id": runtime_view.get("session_id") if isinstance(runtime_view, dict) else None,
-                "status": runtime_view.get("status") if isinstance(runtime_view, dict) else None,
-                "current_node_key": runtime_view.get("current_node_key") if isinstance(runtime_view, dict) else None,
-                "current_attempt_id": runtime_view.get("current_attempt_id") if isinstance(runtime_view, dict) else None,
-                "active_gate": runtime_view.get("active_gate") if isinstance(runtime_view, dict) else None,
-            }
-            return workflow_status
-
-        # 仅返回粗粒度状态；详细执行信息改为事件/缓存，不依赖 AgentExecution 表
-        for agent_type in agents_for_status:
-            workflow_status["steps"].append(
-                {
-                    "agent_type": agent_type.value,
-                    "status": "unknown",
-                    "progress": None,
-                    "duration": None,
-                    "error": None,
-                }
-            )
-        
-        return workflow_status
     
     async def _store_creative_guidance_from_output(self, agent_output: Dict[str, Any]):
         """从ConceptPlanner输出中存储创意指导到全局记忆"""

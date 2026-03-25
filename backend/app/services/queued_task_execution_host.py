@@ -91,7 +91,7 @@ def run_generation_in_host(
             raise ValueError(f"Unsupported generation mode for queued execution host: {mode.value}")
         logger.info("Queued execution host completed with result: %s", result)
         return {
-            "status": result.get("status") or result.get("workflow_status") or "completed",
+            "status": result.get("status") or "completed",
             "result": result,
             "route": route,
             "mode": mode.value,

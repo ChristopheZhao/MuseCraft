@@ -2,30 +2,24 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from .concept_planner import ConceptPlannerAgent
 from .orchestrator import OrchestratorAgent
-from .utils.llm_policy import LLMPolicyManager
 from ..models import Task, AgentType, TaskStatus, TaskType
 from ..core.config import settings
-from ..core.workflow_state import workflow_manager
 from ..core.story_plan import (
     EpisodePlan,
     EpisodeEditorialStatus,
     EpisodeExecutionStatus,
-    CharacterProfile,
     ProjectState,
     merge_character_bibles,
-    normalize_character_elements,
     project_state_repository,
 )
+from ..services.character_reference_images import ensure_project_character_reference_images
 from ..services.memory_provider import MemoryServices, build_memory_services
-from ..services.style_taxonomy import summarize_style_taxonomy
 
 
 class EpisodeOrchestratorAgent(BaseAgent):
@@ -40,7 +34,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         memory_services: Optional[MemoryServices] = None,
         llms=None,
         orchestrator: Optional[OrchestratorAgent] = None,
-        concept_planner: Optional[ConceptPlannerAgent] = None,
     ) -> None:
         if memory_services is None:
             raise ValueError("memory_services is required for EpisodeOrchestratorAgent")
@@ -55,30 +48,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
             memory_services=self._memory_services,
         )
         self._base_orchestrator = orchestrator or OrchestratorAgent(memory_services=self._memory_services)
-        base_policy = getattr(self._base_orchestrator, "_llm_policy", None)
-        if base_policy is None:
-            policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
-            base_policy = LLMPolicyManager(policy_file)
-        self._llm_policy = base_policy
-
-        if concept_planner is not None:
-            self._concept_agent = concept_planner
-        else:
-            llms = None
-            try:
-                llms = self._llm_policy.build_llms_for_agent("concept_planner")
-            except Exception:
-                llms = None
-            self._concept_agent = ConceptPlannerAgent(llms=llms, memory_services=self._memory_services)
-
-        try:
-            concept_llms = self._llm_policy.build_llms_for_agent("concept_planner")
-            existing_llms = getattr(self._concept_agent, "_llms", {}) or {}
-            merged = dict(concept_llms)
-            merged.update(existing_llms)
-            self._concept_agent._llms = merged
-        except Exception:
-            pass
 
     async def _execute_impl(
         self,
@@ -98,7 +67,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
         task.update_progress("Episode orchestration started", 0)
         db.commit()
 
-        await self._ensure_project_foundation(task, project_state, db)
+        self._sync_project_foundation(project_state)
         await self._ensure_project_character_reference_images(project_state, input_data)
 
         episodes_to_run = self._resolve_episode_selection(project_state, input_data)
@@ -182,6 +151,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
         db.commit()
 
         return {
+            "status": task.status,
             "project_id": project_id,
             "episodes": results,
             "total_completed": project_state.completed_episodes,
@@ -209,104 +179,47 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 selected.append(episode)
         return selected
 
-    async def _ensure_project_foundation(
-        self,
-        base_task: Task,
-        project_state: ProjectState,
-        db: Session,
-    ) -> None:
-        """Run a project-level concept pass to lock style and character bible."""
-
-        if project_state.style_profile and project_state.character_bible:
-            return
+    def _sync_project_foundation(self, project_state: ProjectState) -> None:
+        """Keep project-level foundation aligned with the canonical story-plan surface."""
 
         story_plan = project_state.story_plan
-        taxonomy_summary = summarize_style_taxonomy()
-        style_preference = project_state.global_settings.get("style_preference")
+        changed = False
 
-        workflow_state = workflow_manager.create_workflow(
-            user_prompt=story_plan.user_prompt,
-            style_preference=style_preference,
-            duration=story_plan.target_duration_seconds,
-            aspect_ratio=story_plan.aspect_ratio,
-            resolution=project_state.global_settings.get("resolution")
-            or settings.DEFAULT_VIDEO_RESOLUTION,
+        merged_characters = merge_character_bibles(
+            story_plan.character_bible or {},
+            project_state.character_bible or {},
         )
+        if (
+            merged_characters != (project_state.character_bible or {})
+            or project_state.character_bible is not merged_characters
+        ):
+            project_state.character_bible = merged_characters
+            changed = True
+        if (
+            merged_characters != (story_plan.character_bible or {})
+            or story_plan.character_bible is not merged_characters
+        ):
+            story_plan.character_bible = merged_characters
+            changed = True
 
-        concept_payload = {
-            "user_prompt": story_plan.user_prompt,
-            "duration": story_plan.target_duration_seconds,
-            "aspect_ratio": story_plan.aspect_ratio,
-            "workflow_state_id": workflow_state.task_id,
-            "style_preference": style_preference,
-            "concept_mode": "project",
-            "style_taxonomy_summary": taxonomy_summary,
-        }
+        style_profile = dict(project_state.style_profile or {})
+        story_style = dict(story_plan.visual_style or {})
+        if not style_profile and story_style:
+            project_state.style_profile = dict(story_style)
+            changed = True
+        elif style_profile and style_profile != story_style:
+            story_plan.visual_style = dict(style_profile)
+            changed = True
 
-        concept_task = Task(
-            title=f"Project concept foundation {project_state.project_id}",
-            description=story_plan.user_prompt,
-            # 使用现有类型以避免数据库 ENUM 迁移需求
-            task_type=TaskType.SCRIPT_WRITING,
-            status=TaskStatus.PENDING.value,
-            session_id=base_task.session_id,
-            user_id=base_task.user_id,
-            input_parameters=concept_payload.copy(),
-        )
-        db.add(concept_task)
-        db.commit()
-        db.refresh(concept_task)
-
-        try:
-            result = await self._concept_agent.execute(
-                task=concept_task,
-                input_data=concept_payload,
-                db=db,
-            )
-            concept_task.status = TaskStatus.COMPLETED.value
-            concept_task.error_message = None
-            db.commit()
-        except Exception as concept_exc:
-            concept_task.status = TaskStatus.FAILED.value
-            concept_task.error_message = str(concept_exc)
-            db.commit()
-            workflow_manager.remove_workflow(workflow_state.task_id)
-            raise
-        else:
-            workflow_manager.remove_workflow(workflow_state.task_id)
-
-        concept_plan = result.get("concept_plan", {}) or {}
-        style_profile = concept_plan.get("intelligent_style_design") or {}
-        if style_profile:
-            project_state.style_profile = style_profile
-            project_state.story_plan.visual_style = dict(style_profile)
-
-        content_elements = concept_plan.get("content_elements")
-        characters_payload = None
-        if isinstance(content_elements, dict):
-            characters_payload = content_elements.get("characters")
-
-        sanitized_characters, normalized_characters = normalize_character_elements(characters_payload)
-
-        if isinstance(content_elements, dict) and characters_payload is not None:
-            content_elements["characters"] = sanitized_characters
-
-        if normalized_characters:
-            project_state.character_bible = merge_character_bibles(
-                project_state.character_bible,
-                normalized_characters,
-            )
-            project_state.story_plan.merge_character_profiles(normalized_characters)
-
-        project_state_repository.save(project_state)
-
+        if changed:
+            project_state_repository.save(project_state)
 
     async def _ensure_project_character_reference_images(
         self,
         project_state: ProjectState,
         input_data: Dict[str, Any],
     ) -> None:
-        """Generate avatar/full-body reference images for project characters (optional)."""
+        """Delegate optional character-reference generation to the project service."""
 
         requested = input_data.get("project_character_reference_images_enabled")
         if requested is None:
@@ -318,180 +231,11 @@ class EpisodeOrchestratorAgent(BaseAgent):
             if requested is not None
             else bool(getattr(settings, "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", False))
         )
-        if not enabled:
-            return
-
-        if not project_state.character_bible:
-            return
-
-        avatar_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE", "1024x1024")
-        full_body_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE", "1024x1792")
-        style_profile = project_state.style_profile or {}
-        style_name = str(style_profile.get("style_name") or style_profile.get("style") or "").strip()
-        style_description = str(style_profile.get("style_description") or "").strip()
-        visual_approach = str(style_profile.get("visual_approach") or "").strip()
-
-        def _ensure_assets_container(profile_obj: Any) -> Dict[str, Any]:
-            if isinstance(profile_obj, CharacterProfile):
-                if profile_obj.reference_assets is None:
-                    profile_obj.reference_assets = {}
-                return profile_obj.reference_assets
-            if isinstance(profile_obj, dict):
-                assets = profile_obj.get("reference_assets")
-                if not isinstance(assets, dict):
-                    assets = {}
-                    profile_obj["reference_assets"] = assets
-                return assets
-            return {}
-
-        def _has_kind(assets: Dict[str, Any], kind: str) -> bool:
-            direct = assets.get(kind)
-            if isinstance(direct, dict) and str(direct.get("url") or "").strip():
-                return True
-            if isinstance(direct, str) and direct.strip():
-                return True
-            return False
-
-        def _upsert_kind(assets: Dict[str, Any], kind: str, payload: Dict[str, Any]) -> None:
-            assets[kind] = payload
-
-        def _flatten_keywords(value: Any) -> List[str]:
-            if not value:
-                return []
-            if isinstance(value, list):
-                return [str(v).strip() for v in value if str(v).strip()]
-            if isinstance(value, dict):
-                keywords = value.get("keywords")
-                if isinstance(keywords, list):
-                    return [str(v).strip() for v in keywords if str(v).strip()]
-                if isinstance(keywords, dict):
-                    return [str(k).strip() for k, v in keywords.items() if v]
-            if isinstance(value, str):
-                return [value.strip()] if value.strip() else []
-            return [str(value).strip()]
-
-        def _build_prompt(profile_obj: Any, kind: str) -> str:
-            if isinstance(profile_obj, CharacterProfile):
-                display_name = profile_obj.display_name
-                description = profile_obj.description
-                narrative_role = profile_obj.narrative_role
-                personality = list(profile_obj.personality_traits or [])
-                visual_traits = profile_obj.visual_traits or {}
-                style_prefs = profile_obj.style_preferences or {}
-            elif isinstance(profile_obj, dict):
-                display_name = str(profile_obj.get("display_name") or profile_obj.get("name") or "").strip()
-                description = str(profile_obj.get("description") or "").strip()
-                narrative_role = str(profile_obj.get("narrative_role") or profile_obj.get("role") or "").strip()
-                personality = profile_obj.get("personality_traits") or []
-                if not isinstance(personality, list):
-                    personality = [str(personality)]
-                visual_traits = profile_obj.get("visual_traits") or {}
-                style_prefs = profile_obj.get("style_preferences") or {}
-            else:
-                display_name = ""
-                description = ""
-                narrative_role = ""
-                personality = []
-                visual_traits = {}
-                style_prefs = {}
-
-            identity_tags = _flatten_keywords(visual_traits.get("identity_tags") if isinstance(visual_traits, dict) else None)
-            signature_props = _flatten_keywords(visual_traits.get("signature_props") if isinstance(visual_traits, dict) else None)
-            style_keywords = _flatten_keywords(style_prefs)
-
-            parts: List[str] = []
-            if style_name:
-                parts.append(f"风格：{style_name}")
-            if style_description:
-                parts.append(f"风格描述：{style_description}")
-            if visual_approach:
-                parts.append(f"表现形式：{visual_approach}")
-            if display_name:
-                parts.append(f"角色：{display_name}")
-            if narrative_role:
-                parts.append(f"角色定位：{narrative_role}")
-            if description:
-                parts.append(f"角色描述：{description}")
-            if identity_tags:
-                parts.append("外观特征：" + "、".join(identity_tags[:8]))
-            if signature_props:
-                parts.append("标志性道具/服饰：" + "、".join(signature_props[:8]))
-            if personality:
-                parts.append("性格关键词：" + "、".join([str(x).strip() for x in personality[:8] if str(x).strip()]))
-            if style_keywords:
-                parts.append("风格偏好：" + "、".join(style_keywords[:10]))
-
-            if kind == "avatar":
-                parts.append("画面要求：角色头像参考图，正面，居中构图，背景干净，风格统一，无文字无水印。")
-            else:
-                parts.append("画面要求：角色全身立绘参考图，正面站立，包含标志性服饰与道具，背景干净，风格统一，无文字无水印。")
-
-            return "\n".join([p for p in parts if p])
-
-        for canonical_id, profile in (project_state.character_bible or {}).items():
-            assets = _ensure_assets_container(profile)
-            for kind, size in (("avatar", avatar_size), ("full_body", full_body_size)):
-                if _has_kind(assets, kind):
-                    continue
-
-                prompt = _build_prompt(profile, kind)
-                scene_number = f"character:{canonical_id}:{kind}"
-                dest_key = f"projects/{project_state.project_id}/character_refs/{canonical_id}/{kind}.png"
-                agent_timeout = int(getattr(self, "timeout_seconds", 3600) or 3600)
-
-                try:
-                    image_tool = self.tool_registry.get_tool("image_generation")
-                except Exception as exc:
-                    raise AgentError(f"image_generation tool not available: {exc}") from exc
-
-                gen_out = await image_tool.execute(
-                    {
-                        "action": "generate_image",
-                        "parameters": {
-                            "scene_number": scene_number,
-                            "prompt": prompt,
-                            "size": size,
-                        },
-                        "context": {"agent_timeout_seconds": agent_timeout},
-                    }
-                )
-                if not getattr(gen_out, "success", False):
-                    self.logger.warning(
-                        "Character reference generation failed: cid=%s kind=%s err=%s",
-                        canonical_id,
-                        kind,
-                        getattr(gen_out, "error", None),
-                    )
-                    continue
-
-                gen_payload = getattr(gen_out, "result", None)
-                if not isinstance(gen_payload, dict):
-                    self.logger.warning(
-                        "Character reference generation returned non-dict: cid=%s kind=%s",
-                        canonical_id,
-                        kind,
-                    )
-                    continue
-
-                image_url = str(gen_payload.get("image_url") or "").strip()
-                if not image_url:
-                    self.logger.warning("Character reference generation missing image_url: cid=%s kind=%s", canonical_id, kind)
-                    continue
-
-                asset_payload = {
-                    "kind": kind,
-                    "url": image_url,
-                    "size": size,
-                    "generated_prompt": gen_payload.get("generated_prompt") or prompt,
-                }
-                _upsert_kind(assets, kind, asset_payload)
-
-        # Keep StoryPlan view in sync with the project-level canonical bible
-        try:
-            project_state.story_plan.character_bible = project_state.character_bible
-        except Exception:
-            pass
-        project_state_repository.save(project_state)
+        await ensure_project_character_reference_images(
+            project_state.project_id,
+            enabled=enabled,
+            logger=self.logger,
+        )
 
 
     async def _run_single_episode(

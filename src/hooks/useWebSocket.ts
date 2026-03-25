@@ -387,11 +387,9 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           handleVideoAssetsReady({ ...msg, ...payload });
           break;
         case 'workflow_completed':
-        case 'enhanced_workflow_completed':
           handleWorkflowCompleted({ ...msg, results: payload.results, ...payload });
           break;
         case 'workflow_failed':
-        case 'enhanced_workflow_failed':
           handleWorkflowFailed({ ...msg, error: payload.error, ...payload });
           break;
         default:

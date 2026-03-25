@@ -453,7 +453,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
-        assert second["workflow_status"] == "completed"
+        assert second["status"] == "completed"
         assert runtime_view["status"] == WorkflowSessionStatus.COMPLETED.value
         assert task.status == TaskStatus.COMPLETED.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
@@ -757,62 +757,6 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert call_log["image_generator"] == []
-    finally:
-        sync_db.close()
-        Base.metadata.drop_all(bind=engine)
-        engine.dispose()
-
-
-def test_get_workflow_status_prefers_runtime_view_over_activation_pool_projection(monkeypatch):
-    engine, SessionLocal = _build_sync_db()
-    sync_db = SessionLocal()
-    try:
-        task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-        concept_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
-        script_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "script")
-        image_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "image")
-        assert concept_node is not None
-        assert script_node is not None
-        assert image_node is not None
-
-        concept_node.status = WorkflowNodeStatus.COMPLETED.value
-        script_node.status = WorkflowNodeStatus.RUNNING.value
-        image_node.status = WorkflowNodeStatus.QUEUED.value
-        session.status = WorkflowSessionStatus.RUNNING.value
-        session.current_node_key = "script"
-        task.status = TaskStatus.IN_PROGRESS.value
-        task.progress_percentage = 35
-        task.current_step = "Executing script_writer"
-        sync_db.commit()
-
-        def _status_read_guard(workflow_id, key, default=None, service=None):
-            if key == "workflow.activation_pool":
-                raise AssertionError("workflow.activation_pool should not be read by get_workflow_status")
-            if key == "workflow.task_specs":
-                return {}
-            return default
-
-        monkeypatch.setattr(orchestrator_module, "read_shared_fact", _status_read_guard)
-
-        agent = object.__new__(OrchestratorAgent)
-        agent.logger = logging.getLogger("test.orchestrator.runtime_status")
-        agent._memory_services = SimpleNamespace(short_term=object())
-
-        workflow_status = agent.get_workflow_status(task, sync_db)
-        steps = {item["node_key"]: item for item in workflow_status["steps"]}
-
-        assert workflow_status["overall_status"] == WorkflowSessionStatus.RUNNING.value
-        assert workflow_status["total_steps"] == 8
-        assert workflow_status["completed_steps"] == 1
-        assert workflow_status["failed_steps"] == 0
-        assert steps["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
-        assert steps["concept"]["progress"] == 100
-        assert steps["script"]["status"] == WorkflowNodeStatus.RUNNING.value
-        assert steps["script"]["progress"] == 35
-        assert steps["image"]["status"] == WorkflowNodeStatus.QUEUED.value
-        assert workflow_status["runtime_session"]["current_node_key"] == "script"
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

@@ -168,6 +168,63 @@ def test_orchestrate_project_force_rerun_does_not_pre_mark_unapproved_episode(mo
     project_state_repository.remove(project_state.project_id)
 
 
+def test_orchestrate_project_queues_episode_generation_through_task_queue(monkeypatch):
+    project_state, episode = _build_project_state("project-contracts-queue-host")
+    runtime = project_state.ensure_runtime_state(episode.episode_id)
+    runtime.status = EpisodeExecutionStatus.IDLE
+    episode.status = EpisodeEditorialStatus.APPROVED
+    project_state_repository.save(project_state)
+
+    fake_task = SimpleNamespace(id=202, task_id="task-project-queue", status=TaskStatus.QUEUED.value)
+    queue_events = {}
+
+    class _FakeSession:
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def add(self, _obj):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeQueueService:
+        def __init__(self):
+            queue_events["created"] = queue_events.get("created", 0) + 1
+
+        async def queue_task(self, task_id):
+            queue_events["task_id"] = task_id
+
+    monkeypatch.setattr(projects_endpoint, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(projects_endpoint, "TaskQueueService", _FakeQueueService)
+    monkeypatch.setattr(
+        projects_endpoint,
+        "_create_task",
+        lambda *args, **kwargs: fake_task,
+    )
+
+    background_tasks = BackgroundTasks()
+    response = asyncio.run(
+        projects_endpoint.orchestrate_project(
+            project_state.project_id,
+            projects_endpoint.EpisodeGenerationRequest(
+                episode_ids=[episode.episode_id],
+            ),
+            background_tasks,
+        )
+    )
+
+    assert queue_events["created"] == 1
+    assert len(background_tasks.tasks) == 1
+    scheduled = background_tasks.tasks[0]
+    assert scheduled.args == (fake_task.id,)
+    assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.GENERATING.value
+    project_state_repository.remove(project_state.project_id)
+
+
 def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
     agent = object.__new__(EpisodeOrchestratorAgent)
     agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
@@ -179,7 +236,7 @@ def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
     async def _forbidden_run_single_episode(*args, **kwargs):
         raise AssertionError("force_rerun must not execute unapproved episodes")
 
-    agent._ensure_project_foundation = _noop_async
+    agent._sync_project_foundation = lambda _project_state: None
     agent._ensure_project_character_reference_images = _noop_async
     agent._update_progress = _noop_async
     agent._run_single_episode = _forbidden_run_single_episode

@@ -391,7 +391,6 @@ class MultiAgentSystemChecker:
                 "has_websocket_manager": hasattr(orchestrator, 'websocket_manager'),
                 "has_progress_update": hasattr(orchestrator, '_update_progress'),
                 "has_send_progress": hasattr(orchestrator, '_send_progress_update'),
-                "has_workflow_status": hasattr(orchestrator, 'get_workflow_status')
             }
             
             return {

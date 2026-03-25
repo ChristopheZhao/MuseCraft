@@ -61,7 +61,7 @@ def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orch
             orchestrator_calls["execution_order"] = execution_order
             task.status = TaskStatus.COMPLETED.value
             db.commit()
-            return {"workflow_status": "completed", "final_video_url": "https://example.com/final.mp4"}
+            return {"status": "completed", "final_video_url": "https://example.com/final.mp4"}
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
@@ -105,7 +105,7 @@ def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monk
             orchestrator_calls["task_id"] = task.id
             orchestrator_calls["input_data"] = dict(input_data)
             orchestrator_calls["execution_order"] = execution_order
-            return {"workflow_status": "completed", "final_video_url": "https://example.com/project.mp4"}
+            return {"status": "completed", "final_video_url": "https://example.com/project.mp4"}
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
@@ -159,7 +159,7 @@ def test_sync_process_video_task_routes_silent_quick_payload_to_orchestrator_mai
         )
         or {
             "status": "completed",
-            "result": {"workflow_status": "completed", "final_video_url": "https://example.com/final.mp4"},
+            "result": {"status": "completed", "final_video_url": "https://example.com/final.mp4"},
             "route": route,
             "mode": mode.value,
         },
@@ -190,7 +190,7 @@ def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispa
         )
         or {
             "status": "completed",
-            "result": {"workflow_status": "completed"},
+            "result": {"status": "completed"},
             "route": route,
             "mode": mode.value,
         },
@@ -278,7 +278,7 @@ def test_sync_process_video_task_skips_terminal_quick_runtime(monkeypatch, sessi
 
     def _fake_host(mode, *, task, input_data, db, route, execution_order=1):
         dispatch_calls["called"] = True
-        return {"status": "completed", "result": {"workflow_status": "completed"}, "route": route, "mode": mode.value}
+        return {"status": "completed", "result": {"status": "completed"}, "route": route, "mode": mode.value}
 
     monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
     monkeypatch.setattr(task_queue, "run_generation_in_host", _fake_host)

@@ -125,8 +125,6 @@ export type MessageType =
   | 'agent_progress'
   | 'workflow_completed'
   | 'workflow_failed'
-  | 'enhanced_workflow_completed'
-  | 'enhanced_workflow_failed'
   | 'task_notification'
   | 'system_notification'
   | 'connection_established'

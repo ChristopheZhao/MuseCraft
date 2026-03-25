@@ -921,7 +921,7 @@ def test_orchestrator_main_loop_runs_runtime_true_chain_via_control_plane(monkey
         )
     )
 
-    assert result["workflow_status"] == "completed"
+    assert result["status"] == "completed"
     assert len(runtime_calls["open"]) == 2
     assert len(runtime_calls["llm"]) == 1
     assert len(runtime_calls["apply"]) == 1
@@ -944,7 +944,7 @@ def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch
         )
     )
 
-    assert result["workflow_status"] == "completed"
+    assert result["status"] == "completed"
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
