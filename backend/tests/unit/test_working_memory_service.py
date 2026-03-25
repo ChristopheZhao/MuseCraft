@@ -2,9 +2,11 @@ import pytest
 import json
 
 from app.agents.adapters.memory_views import (
+    build_video_composer_context,
     build_image_generation_context,
     build_video_generation_context,
 )
+from app.agents.adapters.state.mas_state import build_mas_state_view
 from app.agents.memory.short_term.service import (
     MemoryNotInitializedError,
     WorkingMemoryService,
@@ -17,7 +19,6 @@ from app.agents.utils.memory_helpers import (
     get_mas_working_memory,
     write_shared_fact,
 )
-from app.services.published_deliverable_adapter import project_payload_deliverables_to_shared_wm
 
 
 def _build_service() -> WorkingMemoryService:
@@ -115,7 +116,7 @@ def test_reset_workflow_still_clears_all_scopes():
         service.get(workflow_id, agent_scope(workflow_id, "concept_planner"))
 
 
-def test_media_context_builders_require_published_script_deliverable_after_agent_cleanup():
+def test_media_context_builders_require_explicit_published_script_payload_after_agent_cleanup():
     service = _build_service()
     workflow_id = "wf-media-context"
 
@@ -125,13 +126,13 @@ def test_media_context_builders_require_published_script_deliverable_after_agent
 
     service.cleanup_workflow(workflow_id)
 
-    with pytest.raises(ValueError, match="Missing published script deliverable"):
+    with pytest.raises(ValueError, match="published_payload is required"):
         build_image_generation_context(workflow_id, service=service)
-    with pytest.raises(ValueError, match="Missing published script deliverable"):
+    with pytest.raises(ValueError, match="published_payload is required"):
         build_video_generation_context(workflow_id, service=service)
 
 
-def test_media_context_builders_prefer_published_script_deliverable(monkeypatch, tmp_path):
+def test_media_context_builders_use_explicit_published_script_payload(monkeypatch, tmp_path):
     service = _build_service()
     workflow_id = "wf-published-script"
 
@@ -189,26 +190,13 @@ def test_media_context_builders_prefer_published_script_deliverable(monkeypatch,
         ),
         encoding="utf-8",
     )
-    payload = {
-        "published_deliverables": {
-            "script": {
-                "type": "published_deliverable",
-                "deliverable_id": 7,
-                "deliverable_type": "script",
-                "scope_type": "episode",
-                "scope_id": "episode",
-                "attempt_id": 11,
-                "revision_no": 0,
-                "payload_ref": str(payload_path),
-                "summary": {"total_scenes": 1},
-                "is_candidate": False,
-                "is_approved": True,
-            }
-        }
-    }
-    project_payload_deliverables_to_shared_wm(workflow_id, payload, service=service)
+    published_payload = json.loads(payload_path.read_text(encoding="utf-8"))
 
-    image_ctx = build_image_generation_context(workflow_id, service=service)
+    image_ctx = build_image_generation_context(
+        workflow_id,
+        service=service,
+        published_payload=published_payload,
+    )
     assert image_ctx["scene_info_payload"]["total_scenes"] == 1
     assert image_ctx["scene_info_payload"]["scene_overview"]["scenes"][0]["scene_number"] == 1
     assert image_ctx["scene_info_payload"]["scenes_to_generate"][0]["script_text"] == "published script"
@@ -224,7 +212,82 @@ def test_media_context_builders_prefer_published_script_deliverable(monkeypatch,
         service=service,
     )
 
-    video_ctx = build_video_generation_context(workflow_id, service=service)
+    video_ctx = build_video_generation_context(
+        workflow_id,
+        service=service,
+        published_payload=published_payload,
+    )
     assert video_ctx["scene_info_payload"]["total_scenes"] == 1
     assert video_ctx["scene_info_payload"]["scenes_to_generate"][0]["scene_number"] == 1
     assert video_ctx["scene_info_payload"]["scene_overview"]["scenes"][0]["scene_number"] == 1
+
+
+def test_video_composer_context_does_not_promote_legacy_nested_scene_outputs():
+    service = _build_service()
+    workflow_id = "wf-composer-legacy-nested"
+
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs",
+        {
+            "scene_outputs.video": {
+                1: {
+                    "file_path": "/tmp/legacy-video.mp4",
+                    "url": "https://example.com/legacy-video.mp4",
+                    "ts": 10,
+                }
+            },
+            "scene_outputs.audio": {
+                1: {
+                    "file_path": "/tmp/legacy-bgm.mp3",
+                    "url": "https://example.com/legacy-bgm.mp3",
+                    "duration_sec": 8.0,
+                    "ts": 11,
+                }
+            },
+        },
+        service=service,
+    )
+
+    composer_ctx = build_video_composer_context(workflow_id, service=service)
+
+    assert composer_ctx["final_video"] == {"path": "", "url": ""}
+    assert composer_ctx["background_music"] == {
+        "path": "",
+        "url": "",
+        "duration": 0.0,
+        "style": "",
+    }
+
+
+def test_mas_state_view_ignores_legacy_nested_scene_outputs():
+    service = _build_service()
+    workflow_id = "wf-mas-state-legacy-nested"
+
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {
+            "scenes": [
+                {"scene_number": 1},
+                {"scene_number": 2},
+            ]
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs",
+        {
+            "scene_outputs.video": {
+                1: {"file_path": "/tmp/legacy.mp4"},
+            }
+        },
+        service=service,
+    )
+
+    state = build_mas_state_view(workflow_id, service=service)
+
+    assert state["completed_scenes"] == 0
+    assert state["pending_scenes"] == 2
+    assert state["outputs_count"] == {}

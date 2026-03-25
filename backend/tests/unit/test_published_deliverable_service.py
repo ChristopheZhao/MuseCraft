@@ -21,8 +21,6 @@ from app.services.published_deliverable_service import (
 )
 from app.services.published_deliverable_adapter import (
     build_script_deliverable_payload,
-    get_projected_deliverable_ref_from_shared_wm,
-    project_deliverable_ref_to_shared_wm,
 )
 from app.services.runtime_session_service import RuntimeSessionService
 from app.agents.memory.short_term.service import WorkingMemoryService
@@ -135,29 +133,8 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
     assert payload["concept_plan"]["overview"] == "Han Li teaser"
     assert payload["scene_scripts"]["1"]["script_text"] == "Han Li gathers spiritual energy in silence."
 
-    projected_ref = get_projected_deliverable_ref_from_shared_wm(
-        workflow_id,
-        node_key="script",
-        service=service,
-    )
-    assert projected_ref is None
-
     payload_ref = get_published_deliverable_ref(session.input_payload, node_key="script")
     assert payload_ref is None
-
-    project_deliverable_ref_to_shared_wm(
-        workflow_id,
-        node_key="script",
-        ref=build_deliverable_ref(deliverable),
-        service=service,
-    )
-    projected_ref = get_projected_deliverable_ref_from_shared_wm(
-        workflow_id,
-        node_key="script",
-        service=service,
-    )
-    assert projected_ref is not None
-    assert projected_ref["deliverable_id"] == deliverable.id
 
 
 def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_path, monkeypatch):

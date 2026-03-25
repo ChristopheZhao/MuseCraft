@@ -36,7 +36,7 @@ def sync_db():
 
 def _create_task(db):
     task = Task(
-        title="ExecutionBoundaryAssembler Test",
+        title="ContextContractAssembler Test",
         description="test",
         task_type=TaskType.VIDEO_GENERATION,
         status=TaskStatus.PENDING.value,
@@ -103,51 +103,6 @@ def test_publish_script_review_boundary_publishes_deliverable_without_shared_wm_
     assert persisted_payload["scene_scripts"]["1"]["script_text"] == "scene 1 script"
 
 
-def test_project_runtime_payload_deliverables_projects_refs_to_shared_wm():
-    service = _build_service()
-    workflow_id = "wf-runtime-payload-projection"
-    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
-    runtime_input_payload = {
-        "published_deliverables": {
-            "script": {
-                "type": "published_deliverable",
-                "deliverable_id": 12,
-                "deliverable_type": "script",
-                "scope_type": "episode",
-                "scope_id": "episode",
-                "attempt_id": 3,
-                "revision_no": 0,
-                "payload_ref": "tmp/script_payload.json",
-                "summary": {"total_scenes": 1},
-                "is_candidate": False,
-                "is_approved": True,
-            }
-        }
-    }
-
-    receipt = assembler.project_runtime_payload_deliverables(
-        workflow_state_id=workflow_id,
-        runtime_input_payload=runtime_input_payload,
-    )
-
-    latest_ref = read_shared_fact(
-        workflow_id,
-        "published_deliverables.script.latest",
-        None,
-        service=service,
-    )
-    approved_ref = read_shared_fact(
-        workflow_id,
-        "published_deliverables.script.approved",
-        None,
-        service=service,
-    )
-
-    assert receipt == {"projected_count": 1, "projected_nodes": ["script"]}
-    assert latest_ref["deliverable_id"] == 12
-    assert approved_ref["deliverable_id"] == 12
-
-
 def test_resolve_published_stage_payload_returns_explicit_receipt_and_payload(tmp_path):
     service = _build_service()
     workflow_id = "wf-stage-payload-resolved"
@@ -194,91 +149,6 @@ def test_resolve_published_stage_payload_returns_explicit_receipt_and_payload(tm
     assert receipt["status"] == "resolved"
     assert receipt["ref"]["deliverable_id"] == 13
     assert receipt["payload"]["concept_plan"]["overview"] == "resolved overview"
-
-
-def test_resolve_published_stage_payload_prefers_runtime_input_over_projection(tmp_path):
-    service = _build_service()
-    workflow_id = "wf-stage-payload-runtime-input"
-    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
-
-    runtime_payload_path = Path(tmp_path) / "script_runtime_payload.json"
-    runtime_payload_path.write_text(
-        json.dumps(
-            {
-                "deliverable_type": "script",
-                "workflow_state_id": workflow_id,
-                "concept_plan": {"overview": "runtime-input overview"},
-                "scene_overview": {"scenes": [{"scene_number": 1}]},
-                "scene_scripts": {"1": {"script_text": "runtime-input script"}},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    projected_payload_path = Path(tmp_path) / "script_projected_payload.json"
-    projected_payload_path.write_text(
-        json.dumps(
-            {
-                "deliverable_type": "script",
-                "workflow_state_id": workflow_id,
-                "concept_plan": {"overview": "projected overview"},
-                "scene_overview": {"scenes": [{"scene_number": 2}]},
-                "scene_scripts": {"2": {"script_text": "projected script"}},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    assembler.project_runtime_payload_deliverables(
-        workflow_state_id=workflow_id,
-        runtime_input_payload={
-            "published_deliverables": {
-                "script": {
-                    "type": "published_deliverable",
-                    "deliverable_id": 17,
-                    "deliverable_type": "script",
-                    "scope_type": "episode",
-                    "scope_id": "episode",
-                    "attempt_id": 6,
-                    "revision_no": 0,
-                    "payload_ref": str(projected_payload_path),
-                    "summary": {"total_scenes": 1},
-                    "is_candidate": False,
-                    "is_approved": True,
-                }
-            }
-        },
-    )
-
-    receipt = assembler.resolve_published_stage_payload(
-        workflow_state_id=workflow_id,
-        node_key="script",
-        prefer_approved=True,
-        required=True,
-        runtime_input_payload={
-            "published_deliverables": {
-                "script": {
-                    "type": "published_deliverable",
-                    "deliverable_id": 23,
-                    "deliverable_type": "script",
-                    "scope_type": "episode",
-                    "scope_id": "episode",
-                    "attempt_id": 8,
-                    "revision_no": 1,
-                    "payload_ref": str(runtime_payload_path),
-                    "summary": {"total_scenes": 1},
-                    "is_candidate": False,
-                    "is_approved": True,
-                }
-            }
-        },
-    )
-
-    assert receipt["status"] == "resolved"
-    assert receipt["source"] == "runtime_input"
-    assert receipt["ref"]["deliverable_id"] == 23
-    assert receipt["payload"]["concept_plan"]["overview"] == "runtime-input overview"
 
 
 def test_assemble_agent_context_requires_no_projection_when_runtime_input_carries_script_ref(tmp_path):

@@ -121,17 +121,12 @@ export type MessageType =
   // Backend Event Bus types
   | 'event.state'
   | 'event.progress'
-  // Legacy/Direct types (for backward compatibility)
-  | 'agent_progress'
-  | 'workflow_completed'
-  | 'workflow_failed'
+  // Direct transport/system types still consumed by the first-party client
   | 'task_notification'
   | 'system_notification'
   | 'connection_established'
   | 'subscription_confirmed'
-  | 'concept_plan_ready'
-  | 'image_assets_ready'
-  | 'video_assets_ready';
+  ;
 
 // UI状态类型
 export interface UIState {

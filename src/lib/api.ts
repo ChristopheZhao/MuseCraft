@@ -51,17 +51,6 @@ export interface TaskDetailResponse extends TaskResponse {
   agent_executions_count: number;
 }
 
-export interface TaskCoarseStatusResponse {
-  task_id: string;
-  status: string;
-  progress_percentage: number;
-  current_step?: string;
-  error_message?: string;
-  projection_role: string;
-  runtime_authoritative: boolean;
-  agent_executions: Array<Record<string, any>>;
-}
-
 export interface TaskRuntimeDecisionRequest {
   action: 'approve' | 'revise' | 'replan';
   feedback_text?: string;
@@ -148,20 +137,6 @@ export class ApiClient {
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.detail || 'Failed to get task status');
-    }
-
-    return response.json();
-  }
-
-  static async getTaskCoarseStatus(taskId: string): Promise<TaskCoarseStatusResponse> {
-    // Compatibility-only coarse projection. Mainline authority should use getTaskRuntime().
-    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/status`, {
-      cache: 'no-store',
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.detail || 'Failed to get coarse task status');
     }
 
     return response.json();

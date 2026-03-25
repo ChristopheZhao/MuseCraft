@@ -107,7 +107,15 @@ def _build_context_from_local_videos(video_dir: Path) -> Dict[str, object]:
     write_shared_fact(workflow_id, "project.scene_scripts", scene_scripts, service=service)
     write_shared_fact(workflow_id, "scene_outputs.video", scene_outputs, service=service)
 
-    return build_voice_synthesis_context(workflow_id, service=service)
+    return build_voice_synthesis_context(
+        workflow_id,
+        service=service,
+        script_stage_views={
+            "concept_plan": {},
+            "scene_overview": {"scenes": scene_overview_scenes},
+            "scene_scripts": scene_scripts,
+        },
+    )
 
 
 def _assert_duration_mapping(context: Dict[str, object]) -> None:

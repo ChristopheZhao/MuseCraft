@@ -52,9 +52,8 @@ def build_mas_state_view(workflow_id: str, *, service: WorkingMemoryService) -> 
 def _collect_scene_output_buckets(wm: Any) -> Dict[str, Any]:
     """Collect scene_outputs buckets keyed by kind from WorkingMemory.
 
-    Supports both shapes:
-    - Preferred: separate facts under keys like `scene_outputs.image`
-    - Legacy: a nested dict stored under `scene_outputs`
+    Canonical shape:
+    - separate facts under keys like `scene_outputs.image`
     """
     buckets: Dict[str, Any] = {}
     if wm is None:
@@ -76,21 +75,6 @@ def _collect_scene_output_buckets(wm: Any) -> Dict[str, Any]:
             value = {}
         if isinstance(value, dict):
             buckets[kind] = value
-    # Legacy: nested dict at `scene_outputs`
-    try:
-        legacy = wm.get("scene_outputs", {})
-    except Exception:
-        legacy = {}
-    if isinstance(legacy, dict):
-        for legacy_key, legacy_val in legacy.items():
-            if not isinstance(legacy_val, dict):
-                continue
-            if isinstance(legacy_key, str) and legacy_key.startswith("scene_outputs."):
-                kind = legacy_key.split(".", 1)[1] if "." in legacy_key else ""
-            else:
-                kind = str(legacy_key)
-            if kind and kind not in buckets:
-                buckets[kind] = legacy_val
     return buckets
 
 

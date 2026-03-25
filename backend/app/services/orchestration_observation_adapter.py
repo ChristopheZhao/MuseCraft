@@ -12,6 +12,9 @@ from .memory_provider import MemoryServices
 class OrchestrationObservationAdapter:
     """Owns orchestration trace payloads and gate observation persistence."""
 
+    AUDIO_GATE_DIAGNOSTIC_KEY = "workflow.diagnostics.audio_delivery_gate"
+    AUDIO_ROUTE_DIAGNOSTIC_KEY = "workflow.diagnostics.audio_route"
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
             raise ValueError("memory_services is required for OrchestrationObservationAdapter")
@@ -70,13 +73,13 @@ class OrchestrationObservationAdapter:
     ) -> None:
         write_shared_fact(
             str(workflow_state_id),
-            "workflow.gates.audio_delivery",
+            self.AUDIO_GATE_DIAGNOSTIC_KEY,
             gate_result,
             service=self._memory_services.short_term,
         )
         write_shared_fact(
             str(workflow_state_id),
-            "workflow.signals.audio",
+            self.AUDIO_ROUTE_DIAGNOSTIC_KEY,
             {
                 "workflow_state_id": str(workflow_state_id or ""),
                 "route_payload": dict(route_payload or {}),

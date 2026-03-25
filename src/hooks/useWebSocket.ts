@@ -289,34 +289,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     }
   }, [updateAgent]);
 
-  // Map backend agent_progress to frontend update
-  const handleBackendAgentProgress = useCallback((msg: any) => {
-    try {
-      const typeToId: Record<string, string> = {
-        concept_planner: 'concept-generator',
-        script_writer: 'script-writer',
-        image_generator: 'image-generator',
-        video_generator: 'video-generator',
-        audio_generator: 'voice-synthesizer',
-        video_composer: 'video-composer',
-        quality_checker: 'quality-controller',
-      };
-      const agentType = String((msg as any).agent_type || '').toLowerCase();
-      const agentId = typeToId[agentType] || (msg as any).agent_name || agentType || 'unknown-agent';
-      const progress = (msg as any).progress ?? 0;
-      const rawStatus = String((msg as any).status || '').toLowerCase();
-      const status = eventStateToAgentStatus[rawStatus] || 'working';
-      const current_step = (msg as any).current_step || '';
-      updateAgent(agentId, {
-        status,
-        progress,
-        currentTask: current_step,
-      });
-    } catch (e) {
-      console.warn('Failed to handle agent_progress:', e);
-    }
-  }, [updateAgent]);
-
   // Concept plan ready → update scenesPlanned
   const handleConceptPlanReady = useCallback((msg: any) => {
     try {
@@ -503,7 +475,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     handleProgressUpdate,
     handleEventProgress,
     handleEventState,
-    handleBackendAgentProgress,
     handleWorkflowCompleted,
     handleWorkflowFailed,
     handleSystemMessage,

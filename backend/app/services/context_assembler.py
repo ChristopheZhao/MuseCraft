@@ -22,7 +22,6 @@ from ..models import AgentType
 from .memory_provider import MemoryServices
 from .published_deliverable_adapter import (
     build_script_deliverable_payload,
-    project_payload_deliverables_to_shared_wm,
 )
 from .published_deliverable_service import (
     PublishedDeliverableService,
@@ -462,31 +461,6 @@ class ContextContractAssembler:
             "artifact_refs": [artifact_ref],
             "script_preview_text": script_preview_text,
         }
-
-    def project_runtime_payload_deliverables(
-        self,
-        *,
-        workflow_state_id: str,
-        runtime_input_payload: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Compatibility-only bridge for explicitly projecting runtime carrier refs to shared WM."""
-        payload = dict(runtime_input_payload or {})
-        deliverables = get_published_deliverables(payload)
-        if not deliverables:
-            return {
-                "projected_count": 0,
-                "projected_nodes": [],
-            }
-        project_payload_deliverables_to_shared_wm(
-            workflow_state_id,
-            payload,
-            service=self._memory_services.short_term,
-        )
-        return {
-            "projected_count": len(deliverables),
-            "projected_nodes": sorted(deliverables.keys()),
-        }
-
 
 context_assembler: Optional[ContextContractAssembler] = None
 

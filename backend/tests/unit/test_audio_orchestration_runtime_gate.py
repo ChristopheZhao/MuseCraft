@@ -1852,10 +1852,10 @@ def test_observation_adapter_persists_audio_gate_observation(monkeypatch):
     )
 
     assert route_payload["policy"] == "adaptive"
-    assert writes["workflow.gates.audio_delivery"]["reason_code"] == "audio_missing_or_unknown"
-    assert writes["workflow.signals.audio"]["route_payload"]["route_source"] == "control_plane.boundary_trigger"
-    assert "decision_basis" not in writes["workflow.signals.audio"]["route_payload"]
-    assert "decision_reason" not in writes["workflow.signals.audio"]["route_payload"]
+    assert writes["workflow.diagnostics.audio_delivery_gate"]["reason_code"] == "audio_missing_or_unknown"
+    assert writes["workflow.diagnostics.audio_route"]["route_payload"]["route_source"] == "control_plane.boundary_trigger"
+    assert "decision_basis" not in writes["workflow.diagnostics.audio_route"]["route_payload"]
+    assert "decision_reason" not in writes["workflow.diagnostics.audio_route"]["route_payload"]
 
 
 def test_runtime_controller_applies_activation_outside_orchestrator():
