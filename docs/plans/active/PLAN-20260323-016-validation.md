@@ -1,0 +1,70 @@
+# Validation Checklist: PLAN-20260323-016
+- Plan ID: PLAN-20260323-016
+- Type: validation
+- Status: in_progress
+- Owner: codex
+- Created At: 2026-03-23T14:09:47Z
+- Updated At: 2026-03-24T03:07:58Z
+
+## 1. Purpose
+- This file owns the concrete verification for [PLAN-20260323-016](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260323-016.md).
+- Focus:
+- prove canonical MAS architecture conformance in the active path before and after each phase checkpoint.
+
+## 2. Architecture Conformance Audit
+- A1. Orchestrator no longer directly performs mixed publish / runtime payload writeback / WM projection / gate open in the script review path.
+- A2. Orchestrator no longer directly chooses `build_*context(...)` per agent in the active mainline.
+- A3. A single formal `Context/Contract Assembler` host exists and owns stage-input / execution-contract assembly.
+- A4. Missing published-deliverable-backed boundary inputs fail loudly with explicit diagnostics instead of hidden fallback.
+- A5. `ExecutionIntent` / `ExecutionContract` do not reintroduce `activation_pool` / `standby_pool` / `route_source` / `decision_reason` or other sibling-aware compatibility semantics.
+
+## 3. Runtime Truth and Read-Model Audit
+- B1. `workflow_session / node / attempt / gate / decision` remain control-plane owned.
+- B2. `get_workflow_status(...)` and related read paths consume control-plane runtime read models rather than `workflow.activation_pool` compatibility projections.
+- B3. `workflow.plan` / `workflow.activation_pool` / `workflow.audio_route` are absent from active truth paths or are explicitly diagnostics-only.
+
+## 4. Compatibility Seam Retirement Audit
+- C1. No active-path bootstrap depends on `project_payload_deliverables_to_shared_wm(...)` as a hidden bridge.
+- C2. `published_deliverable_adapter.py` responsibilities are explicit, bounded, and non-authoritative.
+- C3. execution queue / standby / insertion ownership is explicitly documented and implemented at the correct layer.
+- C4. human-review gate and boundary-triggered system gate paths share canonical contract vocabulary.
+
+## 5. Secondary Mainline Noise Audit
+- D1. `EpisodeOrchestratorAgent` is visibly a project wrapper rather than a sibling single-episode engine.
+- D2. dormant stage runners are either retired or clearly isolated from production semantics.
+- D3. parallel orchestrator variants do not appear as canonical runtime options in active imports, APIs, or default testing surfaces.
+
+## 6. Regression Coverage Expectations
+- Unit tests:
+- focused backend tests for orchestrator, runtime session service, orchestration control plane, assembler host, and read-model status path.
+- Integration tests:
+- quick path with script gate approve / revise / replan.
+- project path bootstrap proving wrapper-only semantics.
+- Manual validation:
+- code-path inventory and grep-based proof that explicit cross-layer call sites and compatibility truth reads were removed from the mainline.
+
+## 7. Evidence Log
+- 2026-03-23T14:09:47Z validation draft created together with the successor conformance plan; concrete test commands will be filled when implementation phases begin.
+- 2026-03-23T14:31:57Z tightened validation guardrails to explicitly reject compatibility-seam semantics from re-entering leaf-facing contracts during Phase A/B execution.
+- 2026-03-23T15:15:21Z validated the first Phase A extraction slice with `PYTHONDONTWRITEBYTECODE=1 timeout 180s .venv/bin/python -m pytest -q tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_image_context_boundary.py` (`15 passed`).
+- 2026-03-23T15:15:21Z ran the adjacent audio regression after updating boundary stubs: `PYTHONDONTWRITEBYTECODE=1 timeout 180s .venv/bin/python -m pytest -q tests/unit/test_audio_orchestration_runtime_gate.py` (`58 passed`).
+- 2026-03-23T15:50:58Z validated the formal host-freeze slice after moving active paths to `ContextContractAssembler`: `PYTHONDONTWRITEBYTECODE=1 timeout 240s .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py` (`87 passed`).
+- 2026-03-23T15:50:58Z confirmed changed backend modules still compile after the host freeze: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/orchestrator.py app/services/context_assembler.py app/services/execution_boundary_assembler.py app/services/runtime_session_service.py`.
+- 2026-03-23T22:36:37Z validated the first media/voice builder-convergence slice after preferring published script payloads in downstream builders: `PYTHONDONTWRITEBYTECODE=1 timeout 240s .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py` (`89 passed`).
+- 2026-03-23T22:36:37Z refreshed compile checks after the media/voice convergence slice: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/adapters/memory_views.py app/agents/orchestrator.py app/services/context_assembler.py app/services/execution_boundary_assembler.py app/services/runtime_session_service.py`.
+- 2026-03-23T22:41:42Z validated the explicit projection-capability slice after moving runtime deliverable projection behind `ContextContractAssembler.project_runtime_payload_deliverables(...)`: `PYTHONDONTWRITEBYTECODE=1 timeout 240s .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py` (`90 passed`).
+- 2026-03-23T22:41:42Z refreshed compile checks after the explicit projection-capability slice: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/adapters/memory_views.py app/agents/orchestrator.py app/services/context_assembler.py app/services/execution_boundary_assembler.py app/services/runtime_session_service.py`.
+- 2026-03-24T01:38:32Z closed Checkpoint A after a direct code audit against the phase criteria in `PLAN-20260323-016`: orchestrator no longer contains direct script-review boundary mutation/publish mixing or per-agent `build_*context(...)` routing, and the latest focused regression baseline (`90 passed`) remains the closure evidence.
+- 2026-03-24T01:47:32Z validated the explicit published-deliverable resolution slice after moving active-path resolution into `ContextContractAssembler.resolve_published_stage_payload(...)` with required-vs-optional receipts: `PYTHONDONTWRITEBYTECODE=1 timeout 300s .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`98 passed`).
+- 2026-03-24T01:47:32Z refreshed compile checks after the explicit published-deliverable resolution slice: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/adapters/memory_views.py app/agents/orchestrator.py app/services/context_assembler.py app/services/execution_boundary_assembler.py app/services/runtime_session_service.py app/services/published_deliverable_adapter.py`.
+- 2026-03-24T02:01:51Z validated the runtime-input-first boundary slice after making `ContextContractAssembler.resolve_published_stage_payload(...)` prefer `workflow_data/session.input_payload` refs over shared-WM projection and keeping projection only as explicit compatibility fallback: `cd backend && PYTHONDONTWRITEBYTECODE=1 uv run pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`101 passed, 2 warnings`).
+- 2026-03-24T02:01:51Z refreshed compile checks after the runtime-input-first slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile app/services/context_assembler.py tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py`.
+- 2026-03-24T02:26:29Z validated the runtime-view status slice after removing `workflow.activation_pool` from `get_workflow_status(...)` and rebuilding workflow status from `RuntimeSessionService.build_runtime_view_for_task_sync(...)`: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`102 passed, 2 warnings`).
+- 2026-03-24T02:26:29Z refreshed compile checks after the runtime-view status slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/orchestrator.py tests/unit/test_orchestrator_runtime_mainline.py`.
+- 2026-03-24T02:53:41Z validated the writer-side diagnostics quarantine after moving `OrchestrationStateAdapter` off legacy `workflow.plan / workflow.activation_pool / workflow.audio_route` writes and into explicit `workflow.diagnostics.compat.*_snapshot` projections: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`102 passed, 2 warnings`).
+- 2026-03-24T02:53:41Z refreshed compile checks after the diagnostics-namespace writer slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/services/orchestration_state_adapter.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_orchestrator_runtime_mainline.py`.
+- 2026-03-24T03:01:09Z validated the queue-policy ownership relocation after extracting execution queue / standby / insertion helpers out of `OrchestrationStateAdapter` and into `OrchestrationQueuePolicy`: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`102 passed, 2 warnings`).
+- 2026-03-24T03:01:09Z refreshed compile checks after the queue-policy ownership slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/services/orchestration_queue_policy.py app/services/orchestration_state_adapter.py app/services/orchestration_control_plane.py app/agents/orchestrator.py tests/unit/test_audio_orchestration_runtime_gate.py`.
+- 2026-03-24T03:07:58Z validated the gate-contract convergence slice after enriching human-review gate open/read-model fields with canonical `result` / `reason_code` / `scope` / `diagnostics`: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`102 passed, 2 warnings`).
+- 2026-03-24T03:07:58Z refreshed compile checks after the gate-contract slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/models/workflow_runtime.py app/services/runtime_session_service.py tests/unit/test_runtime_session_service.py`.
+- 2026-03-24T03:07:58Z closed Checkpoint C after audit proof that `backend/app` no longer contains `workflow.plan / workflow.activation_pool / workflow.audio_route` references, active status still reads runtime view, queue/standby/insertion helpers live in `orchestration_queue_policy.py`, and compatibility projections remain diagnostics-only under `workflow.diagnostics.compat.*`.

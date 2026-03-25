@@ -785,6 +785,194 @@
           "text": "User confirmed closure; plan marked completed with scope held to the 015 acceptance slice only"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260323-016",
+      "title": "Canonical MAS Architecture Conformance and Compatibility Seam Retirement",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260323-016.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-23T14:09:47Z",
+      "updated_at": "2026-03-24T03:07:58Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-23T14:09:47Z",
+          "text": "Created the true successor plan after 015 closure and canonical-alignment review confirmed the remaining work is no longer a narrow correction slice but a broader canonical MAS architecture conformance problem"
+        },
+        {
+          "at": "2026-03-23T14:09:47Z",
+          "text": "Froze the residual grouping into four classes: explicit orchestrator cross-layer ownership, Context/Contract Assembler host absence, active compatibility seams, and secondary mainline/project semantic noise"
+        },
+        {
+          "at": "2026-03-23T14:09:47Z",
+          "text": "Froze the serial execution order A -> B -> C -> D: clear explicit overreach first, then assembler convergence, then compatibility seam retirement, then secondary noise cleanup"
+        },
+        {
+          "at": "2026-03-23T14:31:57Z",
+          "text": "Tightened harness-alignment guardrails: queue/standby/insertion artifacts must remain internal orchestrator-control-plane collaboration objects rather than leaf-facing contracts, and Phase A is limited to host/interface freeze plus explicit-overreach extraction while Phase B owns builder and contract convergence"
+        },
+        {
+          "at": "2026-03-23T15:15:21Z",
+          "text": "Started Phase A implementation: extracted script-review boundary publish/projection out of OrchestratorAgent into ExecutionBoundaryAssembler plus RuntimeSessionService, relocated per-agent stage-input routing behind the assembler capability, and validated the slice with focused backend regressions (15 passed + 58 passed)"
+        },
+        {
+          "at": "2026-03-23T15:50:58Z",
+          "text": "Froze the formal supporting-capability host to ContextContractAssembler in context_assembler.py, moved active orchestrator paths onto the new host/interface, demoted execution_boundary_assembler.py to a compatibility wrapper, and validated the host-freeze slice with focused regressions (87 passed) plus py_compile"
+        },
+        {
+          "at": "2026-03-23T22:36:37Z",
+          "text": "Started the first Phase B builder-convergence slice by making downstream media and voice assembly prefer published script deliverable payloads over stale live WM facts, and validated the slice with focused regressions (89 passed) plus refreshed py_compile"
+        },
+        {
+          "at": "2026-03-23T22:41:42Z",
+          "text": "Made runtime deliverable projection an explicit ContextContractAssembler capability so orchestrator startup no longer directly calls the projection adapter, and validated the slice with focused regressions (90 passed) plus refreshed py_compile"
+        },
+        {
+          "at": "2026-03-24T01:38:32Z",
+          "text": "Formally closed Checkpoint A after re-auditing the active mainline: explicit orchestrator overreach for script-review boundary mixing and per-agent builder routing is gone, and the latest focused regression baseline (90 passed) remains the closure evidence"
+        },
+        {
+          "at": "2026-03-24T01:47:32Z",
+          "text": "Advanced Phase B by moving published-deliverable resolution into explicit ContextContractAssembler receipts with required-vs-optional diagnostics, routing active media/image/video/voice builder assembly through assembler-supplied payload/views, and validating the slice with expanded focused regressions (98 passed)"
+        },
+        {
+          "at": "2026-03-24T02:01:51Z",
+          "text": "Advanced the next Phase B/B3 ownership-correction slice by making ContextContractAssembler resolve published stage payloads from the canonical runtime carrier before shared-WM projection, preserving projection only as an explicit compatibility fallback, and validated the slice with focused regressions (101 passed) plus py_compile"
+        },
+        {
+          "at": "2026-03-24T02:26:29Z",
+          "text": "Advanced the first Phase C read-side slice by rebuilding get_workflow_status from RuntimeSessionService runtime view instead of workflow.activation_pool compatibility data, and validated the slice with focused regressions (102 passed) plus py_compile"
+        },
+        {
+          "at": "2026-03-24T02:53:41Z",
+          "text": "Advanced the next Phase C writer-side slice by moving OrchestrationStateAdapter compatibility writes off legacy workflow.plan / workflow.activation_pool / workflow.audio_route keys and into explicit workflow.diagnostics.compat snapshots, then validated the diagnostics quarantine with focused regressions (102 passed, 2 warnings) plus py_compile"
+        },
+        {
+          "at": "2026-03-24T03:01:09Z",
+          "text": "Advanced the Phase C/C3 ownership slice by extracting execution queue / standby / insertion helpers out of OrchestrationStateAdapter into explicit OrchestrationQueuePolicy, then validated the ownership relocation with focused regressions (102 passed, 2 warnings) plus py_compile"
+        },
+        {
+          "at": "2026-03-24T03:07:58Z",
+          "text": "Completed the Phase C mainline by converging human/system gate contract vocabulary in the runtime read model and closing Checkpoint C: legacy workflow.plan / workflow.activation_pool / workflow.audio_route keys are absent from app code, compatibility seams are diagnostics-only, and focused regressions still pass (102 passed, 2 warnings)"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260324-017",
+      "title": "SoT Clarity Audit and Projection Convergence",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260324-017.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-24T03:34:45Z",
+      "updated_at": "2026-03-24T07:12:35Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-24T03:34:45Z",
+          "text": "Created a dedicated successor plan for the SoT clarity window after 016 Checkpoint C, explicitly separating facts SoT, runtime SoT, stage-boundary carrier, and agent-local trajectory instead of collapsing them into a single memory truth"
+        },
+        {
+          "at": "2026-03-24T03:34:45Z",
+          "text": "Completed the first SoT/projection inventory and froze the business-question matrix plus residual ambiguity classes: wrong-object reads, transition bridges with boundary overreach, and summary surfaces mistaken for truth"
+        },
+        {
+          "at": "2026-03-24T04:03:35Z",
+          "text": "Completed the convergence slice by retiring workflow_overview from active app code, constraining quick-mode reads to runtime-first plus coarse-task fallback, and renaming MAS summary/event payloads to facts-summary vocabulary"
+        },
+        {
+          "at": "2026-03-24T04:03:35Z",
+          "text": "Retired active runtime-to-shared-WM boundary bridges: orchestrator no longer projects runtime carrier deliverables on startup, script-review boundary publish no longer writes shared-WM projected refs, and ContextContractAssembler now requires runtime-input published_deliverables instead of silently reading shared-WM projection"
+        },
+        {
+          "at": "2026-03-24T04:03:35Z",
+          "text": "Validated the SoT convergence with backend py_compile, focused backend regressions (11 passed plus 24 passed), and a targeted frontend TypeScript check; the plan is now awaiting user confirmation"
+        },
+        {
+          "at": "2026-03-24T06:52:16Z",
+          "text": "Reopened the plan after subagent QA found four blocking gaps: orchestrator boundary fail-open, mutable workflow_data boundary reads, quick-run discovery without runtime truth, and polling that could hide runtime-read failures behind coarse task status"
+        },
+        {
+          "at": "2026-03-24T06:52:16Z",
+          "text": "Closed the blocking implementation round by making context assembly fail closed, pinning boundary reads to explicit runtime_input_payload, suppressing quick-run resume without runtime view, and restricting coarse polling fallback to explicit runtime-session bootstrap lag"
+        },
+        {
+          "at": "2026-03-24T06:52:16Z",
+          "text": "Revalidated the blocking round with backend py_compile, focused backend regressions (84 passed, 2 warnings), and the targeted frontend TypeScript check; a new frontend integration regression test was added, but current Jest integration project config still fails before executing it because __tests__/setup.ts is not transformed as TypeScript"
+        },
+        {
+          "at": "2026-03-24T07:12:35Z",
+          "text": "User confirmed closure; plan marked completed with SoT convergence accepted as done, while the remaining Jest integration-project configuration failure stays out of scope as a separate tooling follow-up"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260324-018",
+      "title": "Jest Integration Project Configuration Repair",
+      "kind": "fix",
+      "status": "blocked",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260324-018.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-24T07:14:24Z",
+      "updated_at": "2026-03-25T02:07:31Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-24T07:14:24Z",
+          "text": "Created a separate small tooling follow-up after closing 017 so the Jest integration-project configuration failure can be repaired without reopening the SoT convergence scope"
+        },
+        {
+          "at": "2026-03-24T07:14:24Z",
+          "text": "Execution started with a narrow acceptance boundary: repair only the integration-project boot/transform path enough to run the targeted runtime-authority regression, without broad frontend test-harness refactoring"
+        },
+        {
+          "at": "2026-03-24T08:10:58Z",
+          "text": "Clarified that frontend does not own SoT/projection judgment; this plan only enforces consumer discipline against backend-declared authority boundaries, with any coarse fallback treated as controlled transitional behavior rather than frontend truth inference"
+        },
+        {
+          "at": "2026-03-25T02:02:03Z",
+          "text": "Reclassified the plan to blocked after the initial syntax/config repair pass: the remaining targeted Jest failure is now attributed to the current WSL /mnt/d runner/filesystem environment rather than SoT-convergence or 019 contract work"
+        },
+        {
+          "at": "2026-03-25T02:07:31Z",
+          "text": "Recorded the blocker semantics explicitly: blocked removes 018 from the main implementation critical path while keeping the tooling debt tracked; completion still requires the targeted Jest command to pass in a runnable environment, while future abandonment would require a superseded closeout rather than completed"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260324-019",
+      "title": "前端消费权威边界审计与契约收口",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260324-019.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-24T08:34:36Z",
+      "updated_at": "2026-03-25T01:53:42Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-24T08:34:36Z",
+          "text": "在聚焦 inventory 之后创建独立 successor plan，因为问题已不再只是 Jest 或单一 quick hook，而是后端 contract 边界不够单一/显式，导致 frontend consumer 仍保留 fallback 和状态路由逻辑"
+        },
+        {
+          "at": "2026-03-24T08:34:36Z",
+          "text": "明确与 017 和 018 分离：017 继续保持 SoT convergence 已关闭，018 继续保持 Jest/tooling 范围，019 专注 backend contract 收口和 frontend authority-routing 删除"
+        },
+        {
+          "at": "2026-03-25T01:53:42Z",
+          "text": "结合 multi-agent discussion 细化计划：把 quick-mode 重新定性为 runtime endpoint 仍允许 non-authoritative absence state；补入 `/tasks/quick/current` 与 gate-decision response contract；拆分 project editorial/runtime 语义；把 same-object presentation mapping 明确列为非目标；并把执行顺序改成 backend-first contract 收口后再删除 frontend fallback"
+        }
+      ]
     }
   ]
 }
