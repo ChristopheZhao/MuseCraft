@@ -1088,6 +1088,49 @@
           "text": "User accepted closeout: PLAN-20260325-020 is completed with the single-episode residual cleanup finished; `SeriesPlannerAgent` and `_schedule_project_plan(...)` remain explicitly retained as project-level exclusions rather than unresolved single-episode architecture drift"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260325-021",
+      "title": "runtime_hints 收口与 runtime_overrides 残余兼容债务清理",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260325-021.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-25T12:07:56Z",
+      "updated_at": "2026-03-25T12:57:56Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-25T12:07:56Z",
+          "text": "Created a dedicated successor plan after 010 closeout to clean up runtime_overrides as project-led but not project-only contract debt, without expanding 020 host/island cleanup scope"
+        },
+        {
+          "at": "2026-03-25T12:07:56Z",
+          "text": "Froze the MAS-aligned migration direction: generic execution hints complete into runtime_hints, leaf agents stay on ExecutionContract, project-only options become typed wrapper-scoped inputs, and any compatibility path is limited to a single entry-boundary translator"
+        },
+        {
+          "at": "2026-03-25T12:07:56Z",
+          "text": "Started execution by freezing the active inventory and implementation order: project request ingress, episode-wrapper passthrough/scatter injection, and generic assembler/orchestrator fallback are the remaining live runtime_overrides surfaces to remove in sequence"
+        },
+        {
+          "at": "2026-03-25T12:28:34Z",
+          "text": "Completed the no-translator cleanup path: project entry now forbids the legacy runtime_overrides open bag in favor of typed wrapper options, wrapper passthrough/scatter injection is removed, and assembler/orchestrator canonical flow now terminates at runtime_hints -> ExecutionContract without reinjection"
+        },
+        {
+          "at": "2026-03-25T12:28:34Z",
+          "text": "Focused validation passed for backend contract surfaces (24 passed + 65 passed); repo grep shows no runtime_overrides hits in backend/app or src, while full repo TypeScript still times out at 45s and remains non-blocking tooling noise"
+        },
+        {
+          "at": "2026-03-25T12:33:43Z",
+          "text": "Follow-up cleanup switched the project endpoint to model_dump() and reran test_project_contracts.py successfully (8 passed), so the final typed-entry contract remains verified after the serializer modernization"
+        },
+        {
+          "at": "2026-03-25T12:57:56Z",
+          "text": "User confirmed closeout; PLAN-20260325-021 is completed with canonical flow converged to typed project entry -> runtime_hints -> ExecutionContract -> leaf-agent, while the remaining apply_execution_boundary legacy-flag strip stays recorded as low-level compatibility debt rather than a blocker"
+        }
+      ]
     }
   ]
 }

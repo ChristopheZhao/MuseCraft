@@ -127,7 +127,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 base_task=task,
                 episode=episode,
                 project_state=project_state,
-                runtime_overrides=input_data.get("runtime_overrides", {}),
                 db=db,
             )
             results.append(episode_result)
@@ -222,10 +221,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         """Delegate optional character-reference generation to the project service."""
 
         requested = input_data.get("project_character_reference_images_enabled")
-        if requested is None:
-            runtime_overrides = input_data.get("runtime_overrides") or {}
-            if isinstance(runtime_overrides, dict):
-                requested = runtime_overrides.get("project_character_reference_images_enabled")
         enabled = (
             bool(requested)
             if requested is not None
@@ -243,7 +238,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         base_task: Task,
         episode: EpisodePlan,
         project_state: ProjectState,
-        runtime_overrides: Dict[str, Any],
         db: Session,
     ) -> Dict[str, Any]:
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
@@ -253,7 +247,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         episode_payload = self._build_episode_payload(
             episode=episode,
             project_state=project_state,
-            runtime_overrides=runtime_overrides,
         )
 
         episode_task = Task(
@@ -312,7 +305,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         self,
         episode: EpisodePlan,
         project_state: ProjectState,
-        runtime_overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
         story_plan = project_state.story_plan
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
@@ -399,7 +391,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         payload["project_context"] = project_context
 
         payload.setdefault("concept_mode", "episode")
-        payload.update(runtime_overrides or {})
         return payload
 
     def _extract_episode_characters(

@@ -10,7 +10,7 @@ import asyncio
 import threading
 
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.orm import Session
 
 from ....agents import SeriesPlannerAgent
@@ -136,11 +136,13 @@ class EpisodeScriptRequest(BaseModel):
 
 
 class EpisodeGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     episode_ids: List[str] = Field(default_factory=list)
     episode_indices: List[int] = Field(default_factory=list)
     auto_approve: bool = False
     force_rerun: bool = False
-    runtime_overrides: Dict[str, Any] = Field(default_factory=dict)
+    project_character_reference_images_enabled: Optional[bool] = None
 
 
 def _schedule_project_plan(task_db_id: Optional[int], payload: Dict[str, Any]) -> None:
@@ -464,7 +466,7 @@ async def orchestrate_project(
     task_identifier: str = ""
     task_status_value: Optional[str] = None
     try:
-        payload = request.dict()
+        payload = request.model_dump()
         payload["project_id"] = project_id
         payload["mode"] = GenerationMode.PROJECT.value
         auto_approve = bool(payload.get("auto_approve", False))

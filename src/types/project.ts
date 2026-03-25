@@ -112,7 +112,7 @@ export interface OrchestrateProjectRequest {
   episode_indices?: number[];
   auto_approve?: boolean;
   force_rerun?: boolean;
-  runtime_overrides?: Record<string, any>;
+  project_character_reference_images_enabled?: boolean;
 }
 
 export interface OrchestrateProjectResponse {

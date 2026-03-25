@@ -339,7 +339,7 @@ class ContextContractAssembler:
             assembled["_assembler_diagnostics"] = assembler_diagnostics
         return assembled
 
-    def resolve_runtime_overrides(
+    def resolve_runtime_hints(
         self,
         *,
         workflow_state_id: str,
@@ -357,8 +357,6 @@ class ContextContractAssembler:
         if not isinstance(spec, dict):
             return {}
         params = spec.get("runtime_hints")
-        if not isinstance(params, dict):
-            params = spec.get("runtime_overrides")
         return dict(params) if isinstance(params, dict) else {}
 
     def build_execution_contract(
@@ -366,12 +364,12 @@ class ContextContractAssembler:
         *,
         agent_type: AgentType,
         workflow_state_id: str,
-        runtime_overrides: Optional[Dict[str, Any]] = None,
+        runtime_hints: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if agent_type == AgentType.VIDEO_GENERATOR:
             generate_audio = None
-            if isinstance(runtime_overrides, dict):
-                candidate = runtime_overrides.get("generate_audio")
+            if isinstance(runtime_hints, dict):
+                candidate = runtime_hints.get("generate_audio")
                 if isinstance(candidate, bool):
                     generate_audio = bool(candidate)
             return build_video_generation_execution_contract(
@@ -381,10 +379,10 @@ class ContextContractAssembler:
 
         if agent_type == AgentType.VIDEO_COMPOSER:
             try:
-                if isinstance(runtime_overrides, dict):
+                if isinstance(runtime_hints, dict):
                     legacy_keys = [
                         key for key in ("add_bgm", "add_voiceover", "compose_requested")
-                        if runtime_overrides.get(key) is not None
+                        if runtime_hints.get(key) is not None
                     ]
                     if legacy_keys:
                         raise AgentError(
@@ -392,8 +390,8 @@ class ContextContractAssembler:
                             f"use compose_mode instead (got: {', '.join(legacy_keys)})"
                         )
                 compose_mode = "compose"
-                if isinstance(runtime_overrides, dict) and runtime_overrides.get("compose_mode") is not None:
-                    compose_mode = str(runtime_overrides.get("compose_mode"))
+                if isinstance(runtime_hints, dict) and runtime_hints.get("compose_mode") is not None:
+                    compose_mode = str(runtime_hints.get("compose_mode"))
                 return build_video_composer_execution_contract(
                     workflow_state_id=workflow_state_id,
                     compose_mode=compose_mode,

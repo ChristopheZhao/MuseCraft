@@ -80,13 +80,13 @@ def test_build_mix_receipt_uses_contract_mode_not_legacy_flags():
     assert "background_music" not in receipt["inputs"]
 
 
-def test_execution_boundary_assembler_builds_video_composer_execution_contract_from_runtime_overrides():
+def test_execution_boundary_assembler_builds_video_composer_execution_contract_from_runtime_hints():
     assembler = ContextContractAssembler(memory_services=type("MS", (), {"short_term": object()})())
 
     contract = assembler.build_execution_contract(
         agent_type=AgentType.VIDEO_COMPOSER,
         workflow_state_id="wf-bgm",
-        runtime_overrides={"compose_mode": "bgm"},
+        runtime_hints={"compose_mode": "bgm"},
     )
 
     assert contract["agent"] == AgentType.VIDEO_COMPOSER.value
@@ -94,14 +94,14 @@ def test_execution_boundary_assembler_builds_video_composer_execution_contract_f
     assert contract["constraints"]["compose_mode"] == "bgm"
 
 
-def test_execution_boundary_assembler_rejects_legacy_video_composer_runtime_overrides():
+def test_execution_boundary_assembler_rejects_legacy_video_composer_runtime_hints():
     assembler = ContextContractAssembler(memory_services=type("MS", (), {"short_term": object()})())
 
     with pytest.raises(AgentError):
         assembler.build_execution_contract(
             agent_type=AgentType.VIDEO_COMPOSER,
             workflow_state_id="wf-legacy",
-            runtime_overrides={"add_bgm": True},
+            runtime_hints={"add_bgm": True},
         )
 
 

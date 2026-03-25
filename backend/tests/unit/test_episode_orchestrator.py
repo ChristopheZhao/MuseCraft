@@ -65,7 +65,7 @@ def test_build_episode_payload_uses_episode_context(monkeypatch):
 
     project_state_repository.save(project_state)
 
-    payload = EpisodeOrchestratorAgent._build_episode_payload(agent, episode, project_state, runtime_overrides={})
+    payload = EpisodeOrchestratorAgent._build_episode_payload(agent, episode, project_state)
 
     prompt_text = payload["user_prompt"]
     assert "00:00-00:10" not in prompt_text
@@ -143,7 +143,7 @@ async def test_project_character_reference_images_generated_and_idempotent():
         await EpisodeOrchestratorAgent._ensure_project_character_reference_images(
             agent,
             project_state,
-            {"runtime_overrides": {"project_character_reference_images_enabled": True}},
+            {"project_character_reference_images_enabled": True},
         )
 
         assets = project_state.character_bible["little_bunny"].reference_assets

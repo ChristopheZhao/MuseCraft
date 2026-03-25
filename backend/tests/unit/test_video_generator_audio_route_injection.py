@@ -117,13 +117,13 @@ def test_resolve_execution_contract_uses_explicit_contract_without_plan_or_route
     assert resolved["constraints"]["generate_audio"] is False
 
 
-def test_execution_boundary_assembler_builds_video_execution_contract_from_runtime_overrides():
+def test_execution_boundary_assembler_builds_video_execution_contract_from_runtime_hints():
     assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
 
     contract = assembler.build_execution_contract(
         agent_type=AgentType.VIDEO_GENERATOR,
         workflow_state_id="wf-9",
-        runtime_overrides={"generate_audio": True},
+        runtime_hints={"generate_audio": True},
     )
 
     assert contract["agent"] == AgentType.VIDEO_GENERATOR.value

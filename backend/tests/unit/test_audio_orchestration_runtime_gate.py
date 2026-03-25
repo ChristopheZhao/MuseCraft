@@ -261,7 +261,7 @@ def _build_main_loop_runtime_harness(
     agent._orchestration_protocol = OrchestrationProtocol()
     agent._orchestration_control_plane = control_plane
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_overrides=lambda **kwargs: {},
+        resolve_runtime_hints=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
@@ -594,23 +594,23 @@ def test_audio_agent_gate_is_no_longer_driven_by_workflow_plan(monkeypatch):
     assert agent._last_audio_route_payload == {}
 
 
-def test_resolve_agent_runtime_overrides_uses_enabled_plan_action(monkeypatch):
+def test_resolve_agent_runtime_hints_uses_enabled_plan_action(monkeypatch):
     assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
 
     monkeypatch.setattr(
         "app.services.context_assembler.read_shared_fact",
         lambda workflow_id, key, default=None, service=None: {
             AgentType.VIDEO_COMPOSER.value: {
-                "runtime_overrides": {"compose_mode": "bgm"},
+                "runtime_hints": {"compose_mode": "bgm"},
             }
         },
     )
 
-    overrides = assembler.resolve_runtime_overrides(
+    runtime_hints = assembler.resolve_runtime_hints(
         workflow_state_id="wf-override-1",
         agent_type=AgentType.VIDEO_COMPOSER,
     )
-    assert overrides == {"compose_mode": "bgm"}
+    assert runtime_hints == {"compose_mode": "bgm"}
 
 
 def test_audio_agent_gate_no_longer_emits_llm_task_spec_route_payload(monkeypatch):
@@ -1550,7 +1550,7 @@ def test_llm_task_decomposition_rejects_non_candidate_agent_spec(monkeypatch):
 def test_llm_task_decomposition_preserves_runtime_hints(monkeypatch):
     agent = object.__new__(OrchestratorAgent)
     agent._memory_services = SimpleNamespace(short_term=object())
-    agent.logger = logging.getLogger("test.orchestrator.decompose.runtime_overrides")
+    agent.logger = logging.getLogger("test.orchestrator.decompose.runtime_hints")
     agent.prompt_manager = get_prompt_manager()
     agent.get_system_instructions = lambda: {"primary_role": "工作流编排器"}
     agent.get_llm = lambda role: SimpleNamespace(

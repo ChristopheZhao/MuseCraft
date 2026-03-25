@@ -187,7 +187,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         persist_task_specs=lambda **kwargs: None,
     )
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_overrides=lambda **kwargs: {},
+        resolve_runtime_hints=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
@@ -304,7 +304,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_overrides=lambda **kwargs: {},
+        resolve_runtime_hints=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},

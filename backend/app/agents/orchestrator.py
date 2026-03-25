@@ -667,14 +667,14 @@ class OrchestratorAgent(BaseAgent):
                         runtime_input_payload=runtime_input_payload,
                     )
                     boundary_assembler = self._get_context_contract_assembler()
-                    runtime_overrides = boundary_assembler.resolve_runtime_overrides(
+                    runtime_hints = boundary_assembler.resolve_runtime_hints(
                         workflow_state_id=wf_id,
                         agent_type=agent_type,
                     )
                     execution_contract = boundary_assembler.build_execution_contract(
                         agent_type=agent_type,
                         workflow_state_id=wf_id,
-                        runtime_overrides=runtime_overrides,
+                        runtime_hints=runtime_hints,
                     )
                     if isinstance(execution_contract, dict) and execution_contract:
                         agent_input["execution_contract"] = execution_contract
@@ -683,10 +683,6 @@ class OrchestratorAgent(BaseAgent):
                             agent_input=agent_input,
                             execution_contract=execution_contract,
                         )
-                    elif isinstance(runtime_overrides, dict) and runtime_overrides:
-                        for key, value in runtime_overrides.items():
-                            if key not in agent_input or agent_input.get(key) is None:
-                                agent_input[key] = value
                     # 注入 task 指令（LLM 分解或回退），与 static_context 并行
                     try:
                         task_spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None

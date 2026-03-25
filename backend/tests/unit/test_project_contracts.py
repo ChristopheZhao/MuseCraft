@@ -1,7 +1,9 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from fastapi import BackgroundTasks
+from pydantic import ValidationError
 
 from app.agents.episode_orchestrator import EpisodeOrchestratorAgent
 from app.api.v1.endpoints import projects as projects_endpoint
@@ -223,6 +225,14 @@ def test_orchestrate_project_queues_episode_generation_through_task_queue(monkey
     assert scheduled.args == (fake_task.id,)
     assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.GENERATING.value
     project_state_repository.remove(project_state.project_id)
+
+
+def test_episode_generation_request_rejects_legacy_runtime_overrides_bag():
+    with pytest.raises(ValidationError):
+        projects_endpoint.EpisodeGenerationRequest(
+            episode_ids=["episode-1"],
+            runtime_overrides={"generate_audio": True},
+        )
 
 
 def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
