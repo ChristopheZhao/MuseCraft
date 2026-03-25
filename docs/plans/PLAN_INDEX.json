@@ -422,11 +422,11 @@
       "id": "PLAN-20260319-008",
       "title": "API/Worker 日志治理统一与可观测性收口",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260319-008.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-19T03:43:22Z",
       "updated_at": "2026-03-19T04:01:14Z",
       "archived_at": null,
@@ -445,11 +445,11 @@
       "id": "PLAN-20260319-009",
       "title": "Concept Planner 超时治理与 Provider Deadline 收口",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260319-009.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-19T08:00:04Z",
       "updated_at": "2026-03-19T08:00:04Z",
       "archived_at": null,
@@ -468,13 +468,13 @@
       "id": "PLAN-20260319-010",
       "title": "Orchestrator Decomposition Boundary Refactor",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260319-010.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-19T10:17:39Z",
-      "updated_at": "2026-03-19T13:06:27Z",
+      "updated_at": "2026-03-25T11:42:27Z",
       "archived_at": null,
       "notes": [
         {
@@ -488,6 +488,18 @@
         {
           "at": "2026-03-19T13:06:27Z",
           "text": "Completed broader regression for the first slice: full affected unit suites passed (58+6+9), planning probe remained successful, and production-code audit confirmed old decomposition fields no longer drive the live orchestration path"
+        },
+        {
+          "at": "2026-03-25T09:32:30Z",
+          "text": "Refreshed closeout governance after 016/017/019 convergence: conditional_tasks is now documented as a bounded runtime-activation appendix rather than part of the core per-agent contract, ContextContractAssembler is recorded as the canonical host, and residual project-side runtime_overrides remains compatibility debt rather than a repo-wide closeout blocker"
+        },
+        {
+          "at": "2026-03-25T10:08:04Z",
+          "text": "Synchronized the closeout governance state: 010 is now acceptance-ready from an architecture-review perspective with no further implementation round required, while _schedule_project_plan(...) remains a separate project-level retained-scope question rather than being pulled back into this plan"
+        },
+        {
+          "at": "2026-03-25T11:42:27Z",
+          "text": "User confirmed closeout; plan completed. Final judgment keeps conditional_tasks as a bounded activation appendix, records runtime_overrides as post-010 residual compatibility debt, and leaves _schedule_project_plan(...) outside the decomposition-boundary scope"
         }
       ]
     },
@@ -790,13 +802,13 @@
       "id": "PLAN-20260323-016",
       "title": "Canonical MAS Architecture Conformance and Compatibility Seam Retirement",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260323-016.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-23T14:09:47Z",
-      "updated_at": "2026-03-24T03:07:58Z",
+      "updated_at": "2026-03-25T09:09:07Z",
       "archived_at": null,
       "notes": [
         {
@@ -858,6 +870,34 @@
         {
           "at": "2026-03-24T03:07:58Z",
           "text": "Completed the Phase C mainline by converging human/system gate contract vocabulary in the runtime read model and closing Checkpoint C: legacy workflow.plan / workflow.activation_pool / workflow.audio_route keys are absent from app code, compatibility seams are diagnostics-only, and focused regressions still pass (102 passed, 2 warnings)"
+        },
+        {
+          "at": "2026-03-25T07:03:02Z",
+          "text": "Refreshed the Phase D re-entry baseline: 017 is now the inherited SoT/projection guardrail, 019 is now the inherited authority-contract guardrail, 018 remains an independent blocked tooling plan, and the remaining active scope is Phase D secondary-mainline cleanup plus final closeout"
+        },
+        {
+          "at": "2026-03-25T07:32:48Z",
+          "text": "Completed the first Phase D / D1 wrapper-thinning slice by removing the EpisodeOrchestrator project-foundation mini-host and delegating character-reference generation to the project service, then validated the slice with focused backend regressions (9 passed, 4 warnings); the remaining D2 inventory is now mainly dormant runners plus legacy orchestrator variants surviving in tests/testing_framework rather than active mainline callers"
+        },
+        {
+          "at": "2026-03-25T07:37:00Z",
+          "text": "Completed the first D2 retirement slice by deleting the uncalled script_stage_runner.py and post_script_stage_runner.py modules after repo-wide inventory confirmed they no longer participate in backend/app or backend/tests; the remaining secondary-mainline noise is now concentrated in enhanced_orchestrator.py, react_orchestrator.py, and testing_framework.py"
+        },
+        {
+          "at": "2026-03-25T07:57:52Z",
+          "text": "Froze the remaining D2 disposition before implementation: react_orchestrator.py, enhanced_orchestrator.py, and testing_framework.py will be retired from backend/app rather than isolated, because active app callers are absent and the surviving references are legacy tests/harness surfaces rather than canonical runtime paths"
+        },
+        {
+          "at": "2026-03-25T08:08:08Z",
+          "text": "Completed the second D2 retirement slice by deleting react_orchestrator.py, enhanced_orchestrator.py, testing_framework.py, the leftover react_orchestrator prompt assets, and the legacy tests that only validated those alternate orchestrator semantics; backend/app and backend/tests now expose only the canonical orchestrator surface, while remaining mentions are limited to historical docs/plan records"
+        },
+        {
+          "at": "2026-03-25T08:30:50Z",
+          "text": "Completed the Checkpoint D / final closeout audit: focused backend regressions protecting the inherited 017/019 guardrails passed (31 passed, 4 warnings), backend/app and backend/tests expose only the canonical mainline plus thin project wrapper, and the remaining legacy orchestrator mentions are confined to historical docs or explicitly annotated non-SoT references; 016 is now ready for acceptance discussion pending user confirmation"
+        },
+        {
+          "at": "2026-03-25T09:09:07Z",
+          "text": "User confirmed the final closeout after the Checkpoint D audit and final regression evidence review; PLAN-20260323-016 is now formally completed, while PLAN-20260324-018 remains a separate blocked tooling plan outside this lifecycle"
         }
       ]
     },
@@ -999,6 +1039,53 @@
         {
           "at": "2026-03-25T06:15:26Z",
           "text": "原窗口 re-review 确认未发现新的 blocker；019 的 backend contract 收口与 frontend authority-routing 删除已满足验收口径，剩余 TS/Jest/tooling 噪音继续归属 018 / 环境问题；用户确认 closeout，计划 completed"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260325-020",
+      "title": "single-episode 残余宿主统一与 legacy island 退役",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260325-020.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-25T09:44:54Z",
+      "updated_at": "2026-03-25T11:42:11Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-25T09:44:54Z",
+          "text": "Created a managed successor plan after 016/017/019 closure to track the remaining single-episode residual cleanup: second execution host removal, legacy orchestration island retirement, and non-necessary residual helper/alias deletion"
+        },
+        {
+          "at": "2026-03-25T09:44:54Z",
+          "text": "Froze the scope exclusion that keeps SeriesPlannerAgent and _schedule_project_plan(...) out of delete scope for now because they currently belong to project-level planning rather than single-episode runtime governance"
+        },
+        {
+          "at": "2026-03-25T10:12:44Z",
+          "text": "Started implementation and completed the first retirement slice: removed backend/app/core/mas_* plus workflow_optimizer.py and the dedicated legacy MAS integration test after inventory confirmed they were no longer part of active app code"
+        },
+        {
+          "at": "2026-03-25T10:12:44Z",
+          "text": "Completed the first project host-unification slice by routing project per-episode generation through TaskQueueService.queue_task instead of endpoint-local thread runners; project planning host remains explicitly retained outside this plan's delete scope"
+        },
+        {
+          "at": "2026-03-25T10:17:21Z",
+          "text": "Completed the first residual-noise cleanup slice by deleting OrchestratorAgent.get_workflow_status() and its self-hosting test after grep proved no remaining callers; full-file pytest for test_orchestrator_runtime_mainline.py still timed out in the current environment, so acceptance relies on compile+grep evidence for this dead-code retirement"
+        },
+        {
+          "at": "2026-03-25T10:27:52Z",
+          "text": "Completed the second residual-noise cleanup slice: queued host/orchestrator completion payloads now normalize on `status`, the worker-side `workflow_status` alias read is gone, frontend `enhanced_workflow_completed` / `enhanced_workflow_failed` aliases are removed, and the stale diagnostic script check for get_workflow_status() was deleted"
+        },
+        {
+          "at": "2026-03-25T10:27:52Z",
+          "text": "Implementation and focused validation for the in-scope single-episode cleanup are complete; the plan now waits only for user confirmation while `_schedule_project_plan(...)` and SeriesPlannerAgent remain explicitly retained as project-level exclusions"
+        },
+        {
+          "at": "2026-03-25T11:42:11Z",
+          "text": "User accepted closeout: PLAN-20260325-020 is completed with the single-episode residual cleanup finished; `SeriesPlannerAgent` and `_schedule_project_plan(...)` remain explicitly retained as project-level exclusions rather than unresolved single-episode architecture drift"
         }
       ]
     }

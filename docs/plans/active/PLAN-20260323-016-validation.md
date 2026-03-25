@@ -1,15 +1,19 @@
 # Validation Checklist: PLAN-20260323-016
 - Plan ID: PLAN-20260323-016
 - Type: validation
-- Status: in_progress
+- Status: completed
 - Owner: codex
 - Created At: 2026-03-23T14:09:47Z
-- Updated At: 2026-03-24T03:07:58Z
+- Updated At: 2026-03-25T09:09:07Z
 
 ## 1. Purpose
 - This file owns the concrete verification for [PLAN-20260323-016](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260323-016.md).
 - Focus:
 - prove canonical MAS architecture conformance in the active path before and after each phase checkpoint.
+- Phase D re-entry baseline:
+- `PLAN-20260324-017` 已 completed；SoT / projection / compatibility-only matrix 现在是 `016` 的继承 guardrail，而不是待讨论问题。
+- `PLAN-20260324-019` 已 completed；backend authority contract 与 frontend consumer discipline 已收口，Phase D 必须在不回归这些 closure 的前提下推进。
+- `PLAN-20260324-018` 继续 blocked 且独立拥有 Jest/tooling 噪音；它不再构成 `016` Phase D 或 closeout 的架构前置。
 
 ## 2. Architecture Conformance Audit
 - A1. Orchestrator no longer directly performs mixed publish / runtime payload writeback / WM projection / gate open in the script review path.
@@ -33,15 +37,24 @@
 - D1. `EpisodeOrchestratorAgent` is visibly a project wrapper rather than a sibling single-episode engine.
 - D2. dormant stage runners are either retired or clearly isolated from production semantics.
 - D3. parallel orchestrator variants do not appear as canonical runtime options in active imports, APIs, or default testing surfaces.
+- D3a. `react_orchestrator.py` / `enhanced_orchestrator.py` / `testing_framework.py` are retired from `backend/app` rather than preserved as isolated-but-supported alternatives.
+- D4. Phase D cleanup does not regress the inherited `017/019` boundaries:
+  - no `approved_script` semantic leak returns,
+  - `force_rerun` does not bypass editorial approval,
+  - project response continues to materialize per-episode runtime plus typed `progress.*`,
+  - compatibility-only coarse `/status` does not re-enter mainline authority paths,
+  - websocket terminal summaries remain non-authoritative refresh triggers.
 
 ## 6. Regression Coverage Expectations
 - Unit tests:
 - focused backend tests for orchestrator, runtime session service, orchestration control plane, assembler host, and read-model status path.
+- focused backend tests for project-wrapper thinning and dormant-mainline retirement, with explicit negative proof that `017/019` contract closures stay intact.
 - Integration tests:
 - quick path with script gate approve / revise / replan.
 - project path bootstrap proving wrapper-only semantics.
 - Manual validation:
 - code-path inventory and grep-based proof that explicit cross-layer call sites and compatibility truth reads were removed from the mainline.
+- grep/code audit proof that Phase D did not reintroduce authority-routing, approval override, or compatibility truth surfaces while thinning wrappers / retiring dormant runners.
 
 ## 7. Evidence Log
 - 2026-03-23T14:09:47Z validation draft created together with the successor conformance plan; concrete test commands will be filled when implementation phases begin.
@@ -68,3 +81,14 @@
 - 2026-03-24T03:07:58Z validated the gate-contract convergence slice after enriching human-review gate open/read-model fields with canonical `result` / `reason_code` / `scope` / `diagnostics`: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_execution_boundary_assembler_contexts.py tests/unit/test_orchestrator_image_context_boundary.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py tests/unit/test_audio_orchestration_runtime_gate.py tests/unit/test_video_generator_audio_route_injection.py tests/unit/test_video_composer_execution_boundary.py tests/unit/test_published_deliverable_service.py tests/unit/test_working_memory_service.py` (`102 passed, 2 warnings`).
 - 2026-03-24T03:07:58Z refreshed compile checks after the gate-contract slice: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/models/workflow_runtime.py app/services/runtime_session_service.py tests/unit/test_runtime_session_service.py`.
 - 2026-03-24T03:07:58Z closed Checkpoint C after audit proof that `backend/app` no longer contains `workflow.plan / workflow.activation_pool / workflow.audio_route` references, active status still reads runtime view, queue/standby/insertion helpers live in `orchestration_queue_policy.py`, and compatibility projections remain diagnostics-only under `workflow.diagnostics.compat.*`.
+- 2026-03-25T07:03:02Z refreshed validation ownership before Phase D re-entry: `017` is now treated as the inherited SoT/projection boundary baseline, `019` is now treated as the inherited authority-contract / consumer-discipline baseline, and `018` remains explicit non-`016` tooling noise.
+- 2026-03-25T07:03:02Z extended the D-phase validation gate so wrapper thinning / dormant-mainline retirement must prove they do not regress `approved_script`, `force_rerun`, per-episode runtime projection, typed `progress.*`, websocket terminal bounded-summary semantics, or the compatibility-only status boundary.
+- 2026-03-25T07:32:48Z validated the first Phase D / D1 wrapper-thinning slice after removing the project-foundation mini-host from `EpisodeOrchestratorAgent`: `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/episode_orchestrator.py tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py` (passed) plus `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py` (`9 passed, 4 warnings`).
+- 2026-03-25T07:32:48Z re-audited the remaining Phase D / D2 inventory after the wrapper slice: `script_stage_runner.py` and `post_script_stage_runner.py` have no active caller under `backend/app`, while `enhanced_orchestrator.py` / `react_orchestrator.py` survive mainly in tests plus `testing_framework.py`, so the next cleanup target is quarantine/retirement rather than live-mainline contract repair.
+- 2026-03-25T07:37:00Z completed the first D2 retirement slice by deleting `backend/app/services/script_stage_runner.py` and `backend/app/services/post_script_stage_runner.py`; grep evidence `rg -n "ScriptStageRunner|PostScriptStageRunner|script_stage_runner|post_script_stage_runner" backend/app backend/tests` now returns no matches, confirming the dormant runner pair no longer exists in app/test surfaces.
+- 2026-03-25T07:57:52Z froze the remaining D2 decision before implementation: `react_orchestrator.py` / `enhanced_orchestrator.py` / `testing_framework.py` are to be retired from `backend/app`, not merely isolated, because active app callers are absent and the remaining references are legacy tests / harness code rather than canonical runtime paths.
+- 2026-03-25T08:08:08Z completed the second D2 retirement slice by deleting `backend/app/agents/react_orchestrator.py`, `backend/app/agents/enhanced_orchestrator.py`, `backend/app/services/testing_framework.py`, the bound `react_orchestrator` prompt assets, and the legacy tests that existed only to validate those alternate orchestrator semantics; `rg -n "enhanced_orchestrator|react_orchestrator|testing_framework|EnhancedOrchestratorAgent|ReActOrchestratorAgent|TestingFramework" backend/app backend/tests` now returns only the explanatory `backend/app/agents/README.md` retirement note.
+- 2026-03-25T08:08:08Z revalidated the retained D-phase regression baseline after the retirement slice with `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile tests/test_system_integration_validation.py tests/test_performance_benchmarks.py tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py` (passed) plus `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py` (`9 passed, 4 warnings`).
+- 2026-03-25T08:30:50Z closed the Checkpoint D inventory audit after repo-wide grep confirmed `backend/app` / `backend/tests` no longer contain `workflow.plan`, `workflow.activation_pool`, `workflow.audio_route`, dormant runner symbols, or active legacy orchestrator/testing-framework symbols; the only residual mentions now live in plan/history docs and in explicitly annotated non-SoT historical documents.
+- 2026-03-25T08:30:50Z validated the final closeout regression pack with `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile app/agents/episode_orchestrator.py app/api/v1/endpoints/tasks.py app/services/runtime_session_service.py app/agents/orchestrator.py tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py tests/unit/test_tasks_endpoint.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py` (passed) plus `cd backend && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/unit/test_episode_orchestrator.py tests/unit/test_episode_orchestrator_style.py tests/unit/test_project_contracts.py tests/unit/test_tasks_endpoint.py tests/unit/test_runtime_session_service.py tests/unit/test_orchestrator_runtime_mainline.py` (`31 passed, 4 warnings`).
+- 2026-03-25T09:09:07Z user confirmed the final closeout after the closeout audit evidence was reviewed; validation ownership for `016` is therefore complete and the checklist status now matches the completed plan lifecycle.
