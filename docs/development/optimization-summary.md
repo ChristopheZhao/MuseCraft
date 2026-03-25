@@ -1,5 +1,11 @@
 # AI Service Integration and Multi-Agent Workflow Optimization
 
+> Historical note
+>
+> This document summarizes an older optimization branch and is not the current app-surface architecture source of truth.
+> `enhanced_orchestrator.py` and `testing_framework.py` were retired from `backend/app` on 2026-03-25 during `PLAN-20260323-016` Phase D.
+> Read current architecture and runtime-contract decisions from the canonical MAS architecture docs instead of treating this file as an active implementation guide.
+
 ## Overview
 
 This document summarizes the comprehensive optimizations and enhancements implemented for the short video maker's AI service integration and multi-agent coordination workflow. The improvements focus on reliability, performance, cost optimization, and quality control.

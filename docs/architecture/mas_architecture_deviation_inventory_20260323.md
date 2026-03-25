@@ -57,10 +57,10 @@
 | [orchestrator.py:1401](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/orchestrator.py#L1401) `get_workflow_status(...)` | 回读 `workflow.activation_pool` 组装步骤状态 | 应优先消费控制层 read model | `transitional` | 说明 compatibility seam 仍在 active status path 里。 |
 | [orchestration_state_adapter.py:171](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L171) / [orchestration_state_adapter.py:198](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L198) / [orchestration_state_adapter.py:214](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py#L214) | execution queue / standby / insertion policy 组装 | 编排层策略 + 控制层 apply 之间的边界灰区 | `transitional` | 不是已确认错误，但容易继续制造语义漂移。 |
 | human review path in [runtime_session_service.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/runtime_session_service.py) 与 boundary-triggered system gate path in [orchestration_control_plane.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_control_plane.py) | 两种 gate handling 风格并存 | 门控层产出、控制层消费 | `transitional` | 语义可解释，但实现形态还没完全统一。 |
-| [script_stage_runner.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/script_stage_runner.py) / [post_script_stage_runner.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/post_script_stage_runner.py) | 未接线的备用 stage runner mainline | 不应继续作为主线候选语义存在 | `transitional` | 即使 dormant，也会制造“还有第二条主线”的噪音。 |
-| [episode_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/episode_orchestrator.py) | 不止做外层协调，还维护 `EpisodeStatus`、project foundation、批量 episode 协调 | 编排层外层包装 / project wrapper | `transitional` | `project` path 仍比“薄包装”更厚。 |
-| [episode_orchestrator.py:215](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/episode_orchestrator.py#L215) | 通过 `workflow_manager.create_workflow()` 建 project foundation workflow | 历史 `WorkflowState` 宿主残留 | `transitional` | 不是当前主线 runtime SoT，但仍保留旧宿主味道。 |
-| [react_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/react_orchestrator.py) / [enhanced_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/enhanced_orchestrator.py) / [testing_framework.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/testing_framework.py) | 并行 orchestrator 变体仍存活于仓库与测试工具链 | 历史实现 / 语义噪音源 | `transitional` | 即使不在生产主线，也会持续制造“还有别的 orchestrator 语义”的干扰。 |
+| `script_stage_runner.py` / `post_script_stage_runner.py`（已于 2026-03-25 从 `backend/app` / `backend/tests` 退役） | 旧备用 stage runner mainline 已退出活跃 app/test surface | 不应继续作为主线候选语义存在 | `mostly-aligned` | D2 第一刀已清除此类 dormant mainline 噪音。 |
+| [episode_orchestrator.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/episode_orchestrator.py) | 当前主要承担 project / multi-episode wrapper 协调 | 编排层外层包装 / project wrapper | `mostly-aligned` | D1 已移除 project-foundation mini-host 与旧宿主语义；剩余工作转入 Checkpoint D / final closeout audit。 |
+| `workflow_manager.create_workflow()` project-foundation path（已于 2026-03-25 从 `EpisodeOrchestratorAgent` 退役） | 旧 `WorkflowState` 宿主残留已退出活跃 wrapper 路径 | 历史 `WorkflowState` 宿主残留 | `mostly-aligned` | 当前 app mainline 不再通过该路径构造 project foundation workflow。 |
+| `react_orchestrator.py` / `enhanced_orchestrator.py` / `testing_framework.py`（已于 2026-03-25 从 `backend/app` / `backend/tests` 退役） | 并行 orchestrator 变体已退出活跃 app/test surface；仓库仅剩少量历史文档引用 | 历史实现 / 语义噪音源 | `mostly-aligned` | D2 第二刀已删除实现、绑定 prompt assets 与 legacy tests；剩余工作只是在 final closeout 中说明历史文档归档方式。 |
 
 ## 3. 补充观察
 
@@ -70,7 +70,7 @@
   - `OrchestratorAgent` 的 residual ownership
   - `Context/Contract Assembler` 宿主缺位
   - compatibility seam 仍在 active path 存活
-  - project / dormant path 持续制造第二套语义噪音
+  - 少量历史文档仍保留已退役 orchestrator 名称，需要在 final closeout 中说明归档口径
 
 ## 4. 当前总评
 
@@ -80,6 +80,6 @@
 - 边界输出 persistence 也已基本回到正确位置；
 - 但编排层 residual ownership 仍未清干净；
 - supporting capability，尤其 `Context/Contract Assembler`，还没有正式落位；
-- 一部分 compatibility seam、project path 和 dormant runner 仍在制造语义噪音。
+- active path 的主要偏差已显著收敛；剩余噪音主要来自少量历史文档与 final closeout 尚未完成的说明工作。
 
 因此，当前的主问题已经从“术语没对齐”转成“术语已对齐，但实现仍保留若干过渡态与越层残余”。
