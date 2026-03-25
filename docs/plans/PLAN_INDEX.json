@@ -1131,6 +1131,80 @@
           "text": "User confirmed closeout; PLAN-20260325-021 is completed with canonical flow converged to typed project entry -> runtime_hints -> ExecutionContract -> leaf-agent, while the remaining apply_execution_boundary legacy-flag strip stays recorded as low-level compatibility debt rather than a blocker"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260325-022",
+      "title": "MAS canonical harness 回正与残余旁路清理总计划",
+      "kind": "fix",
+      "status": "awaiting_user_confirmation",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260325-022.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-25T13:55:00Z",
+      "updated_at": "2026-03-25T14:33:03Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-25T13:55:00Z",
+          "text": "Created a managed successor plan to turn the current MAS architecture audit into a staged cleanup roadmap: active-path fail-close, bridge retirement, frontend authority cleanup, diagnostics hygiene, and a separate project-wrapper host decision"
+        },
+        {
+          "at": "2026-03-25T13:55:00Z",
+          "text": "Froze the hard execution order and phase gates so this repo-level convergence can be advanced in verified slices without mixing single-episode harness cleanup, frontend authority work, and project-level wrapper host decisions"
+        },
+        {
+          "at": "2026-03-25T14:01:49Z",
+          "text": "Tightened the managed plan against the current architecture baseline: supporting capability may still read canonical facts but may not self-heal missing boundary inputs, and project-wrapper host uniformity is now treated as a non-blocking tail decision rather than a blocker for single-episode harness convergence"
+        },
+        {
+          "at": "2026-03-25T14:13:17Z",
+          "text": "Started execution after the plan-alignment pass: 022 is now in progress with the first Phase 1 slice landed, removing builder-side published-script self-resolution and the composer nested scene_outputs fallback; changed-file py_compile and focused boundary regressions passed (11 passed)"
+        },
+        {
+          "at": "2026-03-25T14:16:41Z",
+          "text": "Completed the Phase 1 builder strictification slice: remaining direct integration callers now pass explicit script_stage_views, the integration probe passed (1 passed), and the next planned work moves to Phase 2 boundary-bridge and legacy-grammar retirement"
+        },
+        {
+          "at": "2026-03-25T14:23:44Z",
+          "text": "Completed the Phase 2 bridge-retirement slice: removed ContextContractAssembler.project_runtime_payload_deliverables(...), deleted the retired ExecutionBoundaryAssembler alias, reduced published_deliverable_adapter.py to canonical payload building only, and validated the cleanup with changed-file py_compile, focused regressions (12 passed), and grep proving the bridge/alias symbols are gone"
+        },
+        {
+          "at": "2026-03-25T14:27:46Z",
+          "text": "Completed the Phase 3 first-party authority cleanup slice: removed the frontend coarse /status binding and coarse response type, deleted the unused agent_progress direct handler/type path, and validated the changed runtime consumer files with a focused frontend type-check while the full repo tsc remains blocked only by the pre-existing __tests__/utils/test-helpers.ts syntax issue"
+        },
+        {
+          "at": "2026-03-25T14:32:11Z",
+          "text": "Completed the Phase 4 diagnostics hygiene slice: moved audio observation writes into workflow.diagnostics.* keys, added focused workflow-completion tests that lock bounded_terminal_summary payloads to summary/refresh semantics, and validated the change with py_compile, focused regressions (3 passed, 58 deselected), and grep proving the old audio gate/signal keys are gone"
+        },
+        {
+          "at": "2026-03-25T14:33:03Z",
+          "text": "Closed the Phase 5 tail decision without code changes: _schedule_project_plan(...) remains an explicit project-wrapper/product-job retained scope item, host uniformity is deferred rather than forced into single-episode harness cleanup, and the plan now waits for user confirmation after Phases 1-4 completed with focused validation"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260325-023",
+      "title": "MAS residual tail cleanup 与 product-wrapper host 后续治理",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260325-023.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-25T15:12:14Z",
+      "updated_at": "2026-03-25T15:12:14Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-25T15:12:14Z",
+          "text": "Created a managed successor after the post-022 audit showed the remaining issues are now repo-level residual tails rather than blockers for single-episode canonical harness convergence: first-party WS-derived telemetry state, coarse compatibility surface governance, and the product-wrapper host decision"
+        },
+        {
+          "at": "2026-03-25T15:12:14Z",
+          "text": "Froze the successor scope so 023 does not reopen 022: blocker cleanup stays acceptance-ready in the earlier plan while residual cleanup proceeds as a separate governance stream with its own validation ledger"
+        }
+      ]
     }
   ]
 }
