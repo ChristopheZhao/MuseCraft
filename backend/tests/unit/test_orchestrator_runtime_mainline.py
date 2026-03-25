@@ -3,11 +3,13 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents import orchestrator as orchestrator_module
+from app.agents.base import AgentError
 from app.core.prompt_manager import get_prompt_manager
 from app.core.database import Base
 from app.models import (
@@ -19,6 +21,11 @@ from app.models import (
     WorkflowNodeStatus,
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.services.context_assembler import ContextContractAssembler
+from app.services.published_deliverable_service import (
+    PublishedDeliverableService,
+    build_deliverable_ref,
+)
 from app.services.runtime_session_service import RuntimeSessionService
 
 
@@ -32,6 +39,9 @@ class _FakeShortTermService:
         self._shared_store = shared_store
 
     def create_or_get(self, *args, **kwargs):
+        return self._shared_store
+
+    def get(self, *args, **kwargs):
         return self._shared_store
 
     def reset(self, *args, **kwargs):
@@ -91,6 +101,29 @@ class _QueuedPlanLLM:
         if not self._responses:
             raise AssertionError("plan llm called more times than expected")
         return self._responses.pop(0)
+
+
+def _fake_script_review_boundary(**kwargs):
+    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
+        kwargs["db"],
+        session=kwargs["session"],
+        workflow_id=str(kwargs.get("workflow_state_id") or ""),
+        attempt_id=int(kwargs.get("attempt_id") or 0),
+        payload={
+            "concept_plan": {"scenes": [{"scene_number": 1}]},
+            "scene_overview": {
+                "scenes": [{"scene_number": 1, "visual_description": "stub scene"}]
+            },
+            "scene_scripts": {"1": {"script_text": "Scene 1 approved script"}},
+        },
+        summary={"total_scenes": 1},
+    )
+    artifact_ref = build_deliverable_ref(deliverable)
+    return {
+        "artifact_ref": artifact_ref,
+        "artifact_refs": [artifact_ref],
+        "script_preview_text": "preview",
+    }
 
 
 def _build_sync_db():
@@ -153,10 +186,16 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         persist_llm_planning_context=lambda **kwargs: None,
         persist_task_specs=lambda **kwargs: None,
     )
-    agent._execution_boundary_assembler = SimpleNamespace(
+    agent._context_contract_assembler = SimpleNamespace(
         resolve_runtime_overrides=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
+        assemble_agent_context=lambda **kwargs: {},
+        publish_script_review_boundary_sync=_fake_script_review_boundary,
+        project_runtime_payload_deliverables=lambda **kwargs: {
+            "projected_count": 0,
+            "projected_nodes": [],
+        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
@@ -264,10 +303,16 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
-    agent._execution_boundary_assembler = SimpleNamespace(
+    agent._context_contract_assembler = SimpleNamespace(
         resolve_runtime_overrides=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
+        assemble_agent_context=lambda **kwargs: {},
+        publish_script_review_boundary_sync=_fake_script_review_boundary,
+        project_runtime_payload_deliverables=lambda **kwargs: {
+            "projected_count": 0,
+            "projected_nodes": [],
+        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
@@ -417,6 +462,55 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert len(call_log["image_generator"]) == 1
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent._prepare_agent_context = OrchestratorAgent._prepare_agent_context.__get__(agent, OrchestratorAgent)
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        first = asyncio.run(
+            agent._execute_impl(
+                task=task,
+                input_data={"user_prompt": "test prompt"},
+                db=sync_db,
+            )
+        )
+        assert first["status"] == "waiting_gate"
+
+        real_assembler = ContextContractAssembler(agent._memory_services)
+        agent._context_contract_assembler.assemble_agent_context = real_assembler.assemble_agent_context
+        RuntimeSessionService.submit_gate_decision_sync(
+            sync_db,
+            session.id,
+            node_key="script",
+            action="approve",
+            feedback_text="looks good",
+        )
+        session.input_payload = {}
+        sync_db.commit()
+
+        with pytest.raises(AgentError, match="missing_runtime_input_ref"):
+            asyncio.run(
+                agent._execute_impl(
+                    task=task,
+                    input_data={"user_prompt": "test prompt"},
+                    db=sync_db,
+                )
+            )
+
+        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
+        assert len(call_log["image_generator"]) == 0
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -636,8 +730,8 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
             )
         )
 
-        workflow_plan = shared_store.get("workflow.plan", {})
-        activation_pool = shared_store.get("workflow.activation_pool", {})
+        workflow_plan = shared_store.get("workflow.diagnostics.compat.plan_snapshot", {})
+        activation_pool = shared_store.get("workflow.diagnostics.compat.activation_pool_snapshot", {})
         task_specs_projection = shared_store.get("workflow.task_specs", {})
 
         assert result["status"] == "waiting_gate"
@@ -647,11 +741,15 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
             AgentType.VIDEO_GENERATOR.value,
         ]
         assert workflow_plan["selection_rationale"] == selection_payload["selection_rationale"]
+        assert workflow_plan["projection_role"] == "diagnostics_only"
         assert activation_pool["active_agents"] == [
             AgentType.CONCEPT_PLANNER.value,
             AgentType.SCRIPT_WRITER.value,
         ]
         assert activation_pool["standby_agents"] == [AgentType.VIDEO_GENERATOR.value]
+        assert activation_pool["projection_role"] == "diagnostics_only"
+        assert shared_store.get("workflow.plan") is None
+        assert shared_store.get("workflow.activation_pool") is None
         assert task_specs_projection[AgentType.VIDEO_GENERATOR.value]["run"] is False
         assert task_specs_projection[AgentType.VIDEO_GENERATOR.value]["runtime_hints"] == {
             "generate_audio": True
@@ -659,6 +757,62 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert call_log["image_generator"] == []
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_get_workflow_status_prefers_runtime_view_over_activation_pool_projection(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        concept_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
+        script_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "script")
+        image_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "image")
+        assert concept_node is not None
+        assert script_node is not None
+        assert image_node is not None
+
+        concept_node.status = WorkflowNodeStatus.COMPLETED.value
+        script_node.status = WorkflowNodeStatus.RUNNING.value
+        image_node.status = WorkflowNodeStatus.QUEUED.value
+        session.status = WorkflowSessionStatus.RUNNING.value
+        session.current_node_key = "script"
+        task.status = TaskStatus.IN_PROGRESS.value
+        task.progress_percentage = 35
+        task.current_step = "Executing script_writer"
+        sync_db.commit()
+
+        def _status_read_guard(workflow_id, key, default=None, service=None):
+            if key == "workflow.activation_pool":
+                raise AssertionError("workflow.activation_pool should not be read by get_workflow_status")
+            if key == "workflow.task_specs":
+                return {}
+            return default
+
+        monkeypatch.setattr(orchestrator_module, "read_shared_fact", _status_read_guard)
+
+        agent = object.__new__(OrchestratorAgent)
+        agent.logger = logging.getLogger("test.orchestrator.runtime_status")
+        agent._memory_services = SimpleNamespace(short_term=object())
+
+        workflow_status = agent.get_workflow_status(task, sync_db)
+        steps = {item["node_key"]: item for item in workflow_status["steps"]}
+
+        assert workflow_status["overall_status"] == WorkflowSessionStatus.RUNNING.value
+        assert workflow_status["total_steps"] == 8
+        assert workflow_status["completed_steps"] == 1
+        assert workflow_status["failed_steps"] == 0
+        assert steps["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
+        assert steps["concept"]["progress"] == 100
+        assert steps["script"]["status"] == WorkflowNodeStatus.RUNNING.value
+        assert steps["script"]["progress"] == 35
+        assert steps["image"]["status"] == WorkflowNodeStatus.QUEUED.value
+        assert workflow_status["runtime_session"]["current_node_key"] == "script"
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

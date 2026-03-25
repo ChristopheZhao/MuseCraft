@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { ApiClient } from '@/lib/api';
+import { ApiClient, TaskRuntimeEndpointError } from '@/lib/api';
 import { resolvePublicMediaUrl } from '@/lib/mediaPaths';
 import { getRuntimeFailureMessage, getRuntimeTerminalStatus } from '@/lib/runtimeReadModel';
 
@@ -25,6 +25,7 @@ export function useTaskPolling() {
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastStatusRef = useRef<string | null>(null);
   const lastGateIdRef = useRef<number | null>(null);
+  const lastRuntimeReadErrorRef = useRef<string | null>(null);
 
   useEffect(() => {
     const intervalMs = Number(process.env.NEXT_PUBLIC_TASK_POLL_INTERVAL_MS || 3000);
@@ -54,15 +55,27 @@ export function useTaskPolling() {
       }
     };
 
+    const notifyRuntimeReadError = (message: string) => {
+      if (lastRuntimeReadErrorRef.current === message) {
+        return;
+      }
+      lastRuntimeReadErrorRef.current = message;
+      addNotification({
+        type: 'error',
+        title: '运行时状态不可用',
+        message,
+        autoClose: 6000,
+      });
+    };
+
     const openCompletedResult = async (taskId: string) => {
       const candidates: Array<string | undefined> = [];
       try {
-        const status = await ApiClient.getTaskStatus(taskId);
+        const detail = await ApiClient.getTaskDetail(taskId);
         lastStatusRef.current = 'completed';
         candidates.push(
-          (status as any)?.final_video_url,
-          (status as any)?.result?.final_video_url,
-          (status as any)?.output_metadata?.final_video_url,
+          detail?.output_metadata?.final_video_url,
+          detail?.output_metadata?.final_video_path,
         );
       } catch {
         // keep trying other result sources
@@ -109,9 +122,11 @@ export function useTaskPolling() {
         if (!taskId) return;
         let runtime: any = null;
         let runtimeAvailable = false;
+        let runtimeLagFallbackAllowed = false;
         try {
           runtime = await ApiClient.getTaskRuntime(taskId);
           runtimeAvailable = true;
+          lastRuntimeReadErrorRef.current = null;
           setQuickRuntime(runtime);
           const activeGate = runtime?.active_gate;
           const gateId = typeof activeGate?.id === 'number' ? activeGate.id : null;
@@ -138,8 +153,19 @@ export function useTaskPolling() {
             await openCompletedResult(taskId);
             return;
           }
-        } catch {
-          // runtime endpoint may lag behind task creation; keep polling
+        } catch (error) {
+          if (
+            error instanceof TaskRuntimeEndpointError &&
+            error.status === 404 &&
+            error.detail === 'Runtime session not found'
+          ) {
+            runtimeLagFallbackAllowed = true;
+          } else {
+            notifyRuntimeReadError(
+              error instanceof Error ? error.message : 'Failed to get task runtime'
+            );
+            return;
+          }
         }
 
         if (runtimeAvailable) {
@@ -147,33 +173,15 @@ export function useTaskPolling() {
           return;
         }
 
-        const status = await ApiClient.getTaskStatus(taskId);
-
-        if (status.status === 'failed') {
-          try {
-            runtime = await ApiClient.getTaskRuntime(taskId);
-            setQuickRuntime(runtime);
-            notifyFailure(
-              getRuntimeFailureMessage(runtime, status.error_message || '后端任务失败') ||
-                status.error_message ||
-                '后端任务失败'
-            );
-          } catch {
-            const latestRuntime = useAppStore.getState().quickRuntime;
-            if (latestRuntime && latestRuntime.status !== 'failed') {
-              setQuickRuntime({
-                ...latestRuntime,
-                status: 'failed',
-                error_message: status.error_message || latestRuntime.error_message || '后端任务失败',
-              });
-            }
-            notifyFailure(status.error_message || '后端任务失败');
-          }
+        if (!runtimeLagFallbackAllowed) {
           return;
         }
 
-        if (status.status === 'completed') {
-          await openCompletedResult(taskId);
+        const status = await ApiClient.getTaskCoarseStatus(taskId);
+
+        if (status.status === 'failed' || status.status === 'completed') {
+          // Keep polling until the authoritative runtime read-model becomes available.
+          lastStatusRef.current = status.status;
           return;
         }
 

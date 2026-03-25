@@ -10,6 +10,7 @@ from .audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from .memory_provider import MemoryServices
 from .orchestration_observation_adapter import OrchestrationObservationAdapter
 from .orchestration_protocol import OrchestrationProtocol
+from .orchestration_queue_policy import OrchestrationQueuePolicy
 from .orchestration_runtime_controller import OrchestrationRuntimeController
 from .orchestration_state_adapter import OrchestrationStateAdapter
 
@@ -233,7 +234,7 @@ class OrchestrationControlPlane:
             )
 
         updated_queue = list(execution_queue or [])
-        queue_changed = self._orchestration_state.insert_agent_into_execution_queue(
+        queue_changed = OrchestrationQueuePolicy.insert_agent_into_execution_queue(
             updated_queue,
             current_index=current_index,
             agent_type=target_agent,

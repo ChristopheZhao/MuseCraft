@@ -1,5 +1,8 @@
 """
-Adapter/builder helpers for bridging published deliverables with shared WM.
+Compatibility bridge helpers for explicitly projecting published deliverables into shared WM.
+
+These projections are not authoritative boundary truth. Active runtime paths should read
+published-deliverable refs from the runtime carrier (`session.input_payload`) instead.
 """
 from __future__ import annotations
 

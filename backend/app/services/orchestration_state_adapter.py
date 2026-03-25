@@ -3,11 +3,12 @@ Control-plane state adapter for orchestration context and runtime traces.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from ..models import AgentType
 from .memory_provider import MemoryServices
+from .orchestration_queue_policy import OrchestrationQueuePolicy
 
 
 class OrchestrationStateAdapter:
@@ -19,6 +20,11 @@ class OrchestrationStateAdapter:
         "workflow.attempt.",
         "workflow.gate_decision.",
     )
+    _COMPAT_DIAGNOSTICS_KEYS = {
+        "plan": "workflow.diagnostics.compat.plan_snapshot",
+        "activation_pool": "workflow.diagnostics.compat.activation_pool_snapshot",
+        "audio_route": "workflow.diagnostics.compat.audio_route_snapshot",
+    }
 
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
@@ -45,6 +51,13 @@ class OrchestrationStateAdapter:
             value,
             service=self._memory_services.short_term,
         )
+
+    @classmethod
+    def _compat_diagnostics_key(cls, projection_name: str) -> str:
+        key = cls._COMPAT_DIAGNOSTICS_KEYS.get(str(projection_name or ""))
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"Unsupported compatibility diagnostics projection: {projection_name}")
+        return key
 
     @staticmethod
     def normalize_audio_policy(value: Any) -> str:
@@ -122,137 +135,24 @@ class OrchestrationStateAdapter:
         }
         if isinstance(selection_rationale, str) and selection_rationale.strip():
             plan["selection_rationale"] = selection_rationale.strip()
+        plan["projection_role"] = "diagnostics_only"
         activation_payload = {
             "route_source": "orchestrator.llm_task_spec",
             "workflow_state_id": str(workflow_state_id or ""),
             "available_agents": available_agents,
+            "projection_role": "diagnostics_only",
         }
         self._write_workflow_projection(
             str(workflow_state_id),
-            "workflow.plan",
+            self._compat_diagnostics_key("plan"),
             dict(plan),
         )
         self._write_workflow_projection(
             str(workflow_state_id),
-            "workflow.activation_pool",
+            self._compat_diagnostics_key("activation_pool"),
             activation_payload,
         )
         return plan
-
-    @staticmethod
-    def _agent_pool_order(
-        *,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        candidate_agents: Optional[List[AgentType]] = None,
-    ) -> List[AgentType]:
-        if isinstance(candidate_agents, list) and candidate_agents:
-            return [agent for agent in candidate_agents if isinstance(agent, AgentType)]
-        return [
-            agent_type
-            for agent_type in (task_specs or {}).keys()
-            if isinstance(agent_type, AgentType)
-        ]
-
-    @staticmethod
-    def _rank_agent_spec(
-        *,
-        agent_type: AgentType,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        fallback_index: int,
-    ) -> Tuple[int, int]:
-        spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
-        raw_order = spec.get("order") if isinstance(spec, dict) else None
-        try:
-            return int(raw_order), fallback_index
-        except Exception:
-            return fallback_index, fallback_index
-
-    @staticmethod
-    def build_execution_queue(
-        *,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        candidate_agents: Optional[List[AgentType]] = None,
-    ) -> List[AgentType]:
-        ranked: List[Tuple[int, int, AgentType]] = []
-        for index, agent_type in enumerate(
-            OrchestrationStateAdapter._agent_pool_order(
-                task_specs=task_specs,
-                candidate_agents=candidate_agents,
-            )
-        ):
-            spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
-            if not isinstance(spec, dict):
-                continue
-            if isinstance(spec, dict) and spec.get("run") is False:
-                continue
-            order, fallback_index = OrchestrationStateAdapter._rank_agent_spec(
-                agent_type=agent_type,
-                task_specs=task_specs,
-                fallback_index=index,
-            )
-            ranked.append((order, fallback_index, agent_type))
-        ranked.sort(key=lambda item: (item[0], item[1]))
-        return [agent_type for _, _, agent_type in ranked]
-
-    @staticmethod
-    def build_standby_agents(
-        *,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        candidate_agents: Optional[List[AgentType]] = None,
-    ) -> List[AgentType]:
-        standby: List[AgentType] = []
-        for agent_type in OrchestrationStateAdapter._agent_pool_order(
-            task_specs=task_specs,
-            candidate_agents=candidate_agents,
-        ):
-            spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
-            if isinstance(spec, dict) and spec.get("run") is False:
-                standby.append(agent_type)
-        return standby
-
-    @staticmethod
-    def insert_agent_into_execution_queue(
-        execution_queue: List[AgentType],
-        *,
-        current_index: int,
-        agent_type: AgentType,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        candidate_agents: Optional[List[AgentType]] = None,
-    ) -> bool:
-        updated_queue = list(execution_queue or [])
-        for pending in updated_queue[max(0, int(current_index)) + 1:]:
-            if pending == agent_type:
-                execution_queue[:] = updated_queue
-                return False
-
-        order_index = {
-            atype: idx
-            for idx, atype in enumerate(
-                OrchestrationStateAdapter._agent_pool_order(
-                    task_specs=task_specs,
-                    candidate_agents=candidate_agents,
-                )
-            )
-        }
-        target_order, target_fallback = OrchestrationStateAdapter._rank_agent_spec(
-            agent_type=agent_type,
-            task_specs=task_specs,
-            fallback_index=order_index.get(agent_type, len(order_index) + 100),
-        )
-        insert_at = len(updated_queue)
-        for idx in range(max(0, int(current_index)) + 1, len(updated_queue)):
-            pending_agent = updated_queue[idx]
-            pending_order, pending_fallback = OrchestrationStateAdapter._rank_agent_spec(
-                agent_type=pending_agent,
-                task_specs=task_specs,
-                fallback_index=order_index.get(pending_agent, len(order_index) + 100),
-            )
-            if (pending_order, pending_fallback) > (target_order, target_fallback):
-                insert_at = idx
-                break
-        updated_queue.insert(insert_at, agent_type)
-        execution_queue[:] = updated_queue
-        return True
 
     def persist_task_specs(
         self,
@@ -279,23 +179,24 @@ class OrchestrationStateAdapter:
         )
         self._write_workflow_projection(
             str(workflow_state_id),
-            "workflow.activation_pool",
+            self._compat_diagnostics_key("activation_pool"),
             {
                 "route_source": "orchestrator.llm_task_spec",
                 "active_agents": [
                     atype.value
-                    for atype in self.build_execution_queue(
+                    for atype in OrchestrationQueuePolicy.build_execution_queue(
                         task_specs=task_specs,
                         candidate_agents=candidate_agents,
                     )
                 ],
                 "standby_agents": [
                     atype.value
-                    for atype in self.build_standby_agents(
+                    for atype in OrchestrationQueuePolicy.build_standby_agents(
                         task_specs=task_specs,
                         candidate_agents=candidate_agents,
                     )
                 ],
+                "projection_role": "diagnostics_only",
             },
         )
 
@@ -313,6 +214,7 @@ class OrchestrationStateAdapter:
             "workflow_state_id": str(workflow_state_id or ""),
             "decision_reason": str(reason or "adaptive_replan"),
             "activated_agent": agent_type.value,
+            "projection_role": "diagnostics_only",
         }
         activation_payload = {
             "route_source": "control_plane.runtime_activation",
@@ -320,15 +222,16 @@ class OrchestrationStateAdapter:
             "decision_reason": str(reason or "adaptive_replan"),
             "active_agents": [agent.value for agent in (active_agents or [])],
             "standby_agents": [agent.value for agent in (standby_agents or [])],
+            "projection_role": "diagnostics_only",
         }
         self._write_workflow_projection(
             str(workflow_state_id),
-            "workflow.audio_route",
+            self._compat_diagnostics_key("audio_route"),
             dict(route),
         )
         self._write_workflow_projection(
             str(workflow_state_id),
-            "workflow.activation_pool",
+            self._compat_diagnostics_key("activation_pool"),
             activation_payload,
         )
         return {

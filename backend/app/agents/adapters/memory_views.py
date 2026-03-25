@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-"""Shared memory view helpers for orchestrator → agent context construction."""
+"""Shared memory view helpers for orchestrator → agent context construction.
+
+Active mainline paths should inject published stage payloads/views via
+`ContextContractAssembler`. The shared-WM published-deliverable bridge below remains a
+compatibility path for direct legacy/dormant callers only.
+"""
 
 import json
 from pathlib import Path
@@ -32,6 +37,7 @@ def _load_published_script_stage_payload(
     *,
     service: "WorkingMemoryService",
 ) -> Optional[Dict[str, Any]]:
+    """Compatibility-only bridge for callers without an injected boundary payload."""
     payload = load_published_deliverable_payload_from_shared_wm(
         workflow_id,
         node_key="script",
@@ -161,6 +167,43 @@ def load_audio_requirements(workflow_id: str, *, service: "WorkingMemoryService"
     return {}
 
 
+def _load_downstream_script_stage_views(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    payload = _load_published_script_stage_payload(workflow_id, service=service)
+    return build_script_stage_views(
+        workflow_id,
+        service=service,
+        published_payload=payload,
+    )
+
+
+def build_script_stage_views(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+    published_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = published_payload if isinstance(published_payload, dict) else None
+    if not isinstance(payload, dict):
+        return {}
+
+    concept_plan = payload.get("concept_plan") or {}
+    scene_overview = _merge_image_bucket_into_overview(
+        payload.get("scene_overview") or {},
+        workflow_id=workflow_id,
+        service=service,
+    )
+    scene_scripts = _normalize_scene_dict(payload.get("scene_scripts") or {})
+    return {
+        "concept_plan": concept_plan if isinstance(concept_plan, dict) else {},
+        "scene_overview": scene_overview if isinstance(scene_overview, dict) else {},
+        "scene_scripts": scene_scripts if isinstance(scene_scripts, dict) else {},
+    }
+
+
 def build_media_agent_context(
     workflow_id: str,
     *,
@@ -170,18 +213,34 @@ def build_media_agent_context(
     include_audio_requirements: bool = False,
     sfx_required_default: Optional[bool] = None,
     sfx_required_override: Optional[bool] = None,
+    script_stage_views: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Convenience helper for orchestrator when preparing agent inputs."""
     context: Dict[str, Any] = {}
-    overview = load_scene_overview(workflow_id, service=service)
+    boundary_views = (
+        dict(script_stage_views)
+        if isinstance(script_stage_views, dict)
+        else _load_downstream_script_stage_views(workflow_id, service=service)
+    )
+    overview = boundary_views.get("scene_overview") or load_scene_overview(workflow_id, service=service)
     if overview:
         context["scene_overview"] = overview
     if include_scripts:
-        scripts = load_scene_scripts(workflow_id, service=service)
+        scripts = boundary_views.get("scene_scripts") or load_scene_scripts(workflow_id, service=service)
         if scripts:
             context["scene_scripts"] = scripts
     if include_roles:
-        roles_ctx = load_roles_context(workflow_id, service=service)
+        concept_plan = boundary_views.get("concept_plan") or load_concept_plan(workflow_id, service=service)
+        roles = concept_plan.get("roles") if isinstance(concept_plan, dict) else []
+        roles_ctx = {
+            "concept_overview": (
+                concept_plan.get("overview") or concept_plan.get("story_overview") or ""
+            ) if isinstance(concept_plan, dict) else "",
+            "style": (
+                concept_plan.get("intelligent_style_design") or {}
+            ) if isinstance(concept_plan, dict) else {},
+            "roles": roles if isinstance(roles, list) else [],
+        }
         if roles_ctx:
             context["roles_context"] = roles_ctx
     if include_audio_requirements:
@@ -423,9 +482,18 @@ def build_video_composer_context(
     return ctx
 
 
-def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
+def build_image_generation_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+    published_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for ImageGenerator."""
-    published_payload = _require_published_script_stage_payload(workflow_id, service=service)
+    published_payload = (
+        published_payload
+        if isinstance(published_payload, dict)
+        else _require_published_script_stage_payload(workflow_id, service=service)
+    )
     concept_plan = published_payload.get("concept_plan") or {}
     overview = _merge_image_bucket_into_overview(
         published_payload.get("scene_overview") or {},
@@ -509,9 +577,18 @@ def build_image_generation_context(workflow_id: str, *, service: "WorkingMemoryS
     }
 
 
-def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
+def build_video_generation_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+    published_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for VideoGenerator."""
-    published_payload = _require_published_script_stage_payload(workflow_id, service=service)
+    published_payload = (
+        published_payload
+        if isinstance(published_payload, dict)
+        else _require_published_script_stage_payload(workflow_id, service=service)
+    )
     concept_plan = published_payload.get("concept_plan") or {}
     overview = _merge_image_bucket_into_overview(
         published_payload.get("scene_overview") or {},
@@ -690,12 +767,31 @@ def build_video_generation_context(workflow_id: str, *, service: "WorkingMemoryS
     }
 
 
-def build_voice_synthesis_context(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[str, Any]:
+def build_voice_synthesis_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+    script_stage_views: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Aggregates concept/scene/script facts for VoiceSynthesizer."""
-    concept_plan = load_concept_plan(workflow_id, service=service)
-    overview = load_scene_overview(workflow_id, service=service)
-    scripts = load_scene_scripts(workflow_id, service=service)
-    roles_ctx = load_roles_context(workflow_id, service=service)
+    boundary_views = (
+        dict(script_stage_views)
+        if isinstance(script_stage_views, dict)
+        else _load_downstream_script_stage_views(workflow_id, service=service)
+    )
+    concept_plan = boundary_views.get("concept_plan") or load_concept_plan(workflow_id, service=service)
+    overview = boundary_views.get("scene_overview") or load_scene_overview(workflow_id, service=service)
+    scripts = boundary_views.get("scene_scripts") or load_scene_scripts(workflow_id, service=service)
+    roles = concept_plan.get("roles") if isinstance(concept_plan, dict) else []
+    roles_ctx = {
+        "concept_overview": (
+            concept_plan.get("overview") or concept_plan.get("story_overview") or ""
+        ) if isinstance(concept_plan, dict) else "",
+        "style": (
+            concept_plan.get("intelligent_style_design") or {}
+        ) if isinstance(concept_plan, dict) else {},
+        "roles": roles if isinstance(roles, list) else [],
+    }
 
     wm = _get_mas_working_memory(workflow_id, service=service)
     voice_bucket = wm.get("scene_outputs.voice", {}) if wm is not None else {}
@@ -944,6 +1040,7 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 __all__ = [
+    "build_script_stage_views",
     "load_scene_overview",
     "load_scene_scripts",
     "load_roles_context",

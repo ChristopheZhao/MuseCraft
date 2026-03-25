@@ -4,7 +4,7 @@ from app.agents.base import AgentError
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.video_composer import VideoComposerAgent
 from app.models import AgentType
-from app.services.execution_boundary_assembler import ExecutionBoundaryAssembler
+from app.services.context_assembler import ContextContractAssembler
 from app.services.video_composer_execution_contract import (
     build_video_composer_execution_contract,
     get_video_composer_compose_mode,
@@ -81,7 +81,7 @@ def test_build_mix_receipt_uses_contract_mode_not_legacy_flags():
 
 
 def test_execution_boundary_assembler_builds_video_composer_execution_contract_from_runtime_overrides():
-    assembler = ExecutionBoundaryAssembler(memory_services=type("MS", (), {"short_term": object()})())
+    assembler = ContextContractAssembler(memory_services=type("MS", (), {"short_term": object()})())
 
     contract = assembler.build_execution_contract(
         agent_type=AgentType.VIDEO_COMPOSER,
@@ -95,7 +95,7 @@ def test_execution_boundary_assembler_builds_video_composer_execution_contract_f
 
 
 def test_execution_boundary_assembler_rejects_legacy_video_composer_runtime_overrides():
-    assembler = ExecutionBoundaryAssembler(memory_services=type("MS", (), {"short_term": object()})())
+    assembler = ContextContractAssembler(memory_services=type("MS", (), {"short_term": object()})())
 
     with pytest.raises(AgentError):
         assembler.build_execution_contract(
@@ -106,7 +106,7 @@ def test_execution_boundary_assembler_rejects_legacy_video_composer_runtime_over
 
 
 def test_execution_boundary_assembler_applies_video_composer_input_and_strips_legacy_flags():
-    assembler = ExecutionBoundaryAssembler(memory_services=type("MS", (), {"short_term": object()})())
+    assembler = ContextContractAssembler(memory_services=type("MS", (), {"short_term": object()})())
     contract = build_video_composer_execution_contract(
         workflow_state_id="wf-voice",
         compose_mode="voiceover",

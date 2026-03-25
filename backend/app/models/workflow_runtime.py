@@ -136,10 +136,12 @@ class WorkflowGate(BaseModel):
     gate_type = Column(String(30), nullable=False)
     status = Column(String(30), nullable=False, default=WorkflowGateStatus.PENDING.value)
     contract_version = Column(String(20), nullable=False, default="v1")
+    scope = Column(JSON, default=dict)
     artifact_refs = Column(JSON, default=list)
     facts = Column(JSON, default=dict)
     result_code = Column(String(30), nullable=True)
     reason_code = Column(String(100), nullable=True)
+    diagnostics = Column(JSON, default=list)
     allowed_actions = Column(JSON, default=list)
     recommended_action = Column(String(30), nullable=True)
 

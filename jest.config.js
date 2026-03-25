@@ -5,19 +5,50 @@ const createJestConfig = nextJest({
   dir: './',
 })
 
+const moduleNameMapper = {
+  '^@/(.*)$': '<rootDir>/src/$1',
+  '^@/components/(.*)$': '<rootDir>/src/components/$1',
+  '^@/pages/(.*)$': '<rootDir>/src/pages/$1',
+  '^@/lib/(.*)$': '<rootDir>/src/lib/$1',
+  '^@/store/(.*)$': '<rootDir>/src/store/$1',
+  '^@/types/(.*)$': '<rootDir>/src/types/$1',
+  '^@/hooks/(.*)$': '<rootDir>/src/hooks/$1',
+}
+
+const transform = {
+  '^.+\\.(js|jsx|ts|tsx)$': ['babel-jest', { presets: ['next/babel'] }],
+}
+
+const transformIgnorePatterns = [
+  '/node_modules/',
+  '^.+\\.module\\.(css|sass|scss)$',
+]
+
+const moduleFileExtensions = ['ts', 'tsx', 'js', 'jsx', 'json', 'node']
+
+const testPathIgnorePatterns = [
+  '<rootDir>/.next/',
+  '<rootDir>/node_modules/',
+  '<rootDir>/coverage/',
+  '<rootDir>/dist/',
+]
+
+const roots = ['<rootDir>/src', '<rootDir>/__tests__']
+
+const sharedProjectConfig = {
+  moduleNameMapper,
+  transform,
+  transformIgnorePatterns,
+  moduleFileExtensions,
+  testPathIgnorePatterns,
+  roots,
+}
+
 // Add any custom config to be passed to Jest
 const customJestConfig = {
   setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
-  moduleNameMapper: {
-    // Handle module aliases (this will be automatically configured for you based on your tsconfig.json paths)
-    '^@/(.*)$': '<rootDir>/src/$1',
-    '^@/components/(.*)$': '<rootDir>/src/components/$1',
-    '^@/pages/(.*)$': '<rootDir>/src/pages/$1',
-    '^@/lib/(.*)$': '<rootDir>/src/lib/$1',
-    '^@/store/(.*)$': '<rootDir>/src/store/$1',
-    '^@/types/(.*)$': '<rootDir>/src/types/$1',
-    '^@/hooks/(.*)$': '<rootDir>/src/hooks/$1',
-  },
+  moduleNameMapper,
+  roots,
   testEnvironment: 'jest-environment-jsdom',
   collectCoverageFrom: [
     'src/**/*.{js,jsx,ts,tsx}',
@@ -39,19 +70,12 @@ const customJestConfig = {
     '**/*.(test|spec).{js,jsx,ts,tsx}',
   ],
   testPathIgnorePatterns: [
-    '<rootDir>/.next/',
-    '<rootDir>/node_modules/',
-    '<rootDir>/coverage/',
-    '<rootDir>/dist/',
+    ...testPathIgnorePatterns,
   ],
-  transform: {
-    '^.+\\.(js|jsx|ts|tsx)$': ['babel-jest', { presets: ['next/babel'] }],
-  },
-  transformIgnorePatterns: [
-    '/node_modules/',
-    '^.+\\.module\\.(css|sass|scss)$',
-  ],
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  transform,
+  transformIgnorePatterns,
+  moduleFileExtensions,
+  watchman: false,
   globals: {
     'ts-jest': {
       tsconfig: 'tsconfig.json',
@@ -65,24 +89,28 @@ const customJestConfig = {
   projects: [
     {
       displayName: 'integration',
+      ...sharedProjectConfig,
       testMatch: ['<rootDir>/__tests__/integration/**/*.test.{js,jsx,ts,tsx}'],
       testEnvironment: 'jest-environment-jsdom',
       setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
     },
     {
       displayName: 'e2e',
+      ...sharedProjectConfig,
       testMatch: ['<rootDir>/__tests__/e2e/**/*.test.{js,jsx,ts,tsx}'],
       testEnvironment: 'node',
       setupFilesAfterEnv: ['<rootDir>/__tests__/setup-e2e.ts'],
     },
     {
       displayName: 'performance',
+      ...sharedProjectConfig,
       testMatch: ['<rootDir>/__tests__/performance/**/*.test.{js,jsx,ts,tsx}'],
       testEnvironment: 'jest-environment-jsdom',
       setupFilesAfterEnv: ['<rootDir>/__tests__/setup-performance.ts'],
     },
     {
       displayName: 'accessibility',
+      ...sharedProjectConfig,
       testMatch: ['<rootDir>/__tests__/accessibility/**/*.test.{js,jsx,ts,tsx}'],
       testEnvironment: 'jest-environment-jsdom',
       setupFilesAfterEnv: ['<rootDir>/__tests__/setup-a11y.ts'],

@@ -124,6 +124,17 @@ class TaskDetailResponse(TaskResponse):
     agent_executions_count: int = 0
 
 
+class TaskCoarseStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    progress_percentage: int
+    current_step: Optional[str]
+    error_message: Optional[str]
+    projection_role: str
+    runtime_authoritative: bool = False
+    agent_executions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class SceneResponse(BaseModel):
     id: int
     scene_number: int
@@ -191,6 +202,7 @@ async def _find_unfinished_quick_task_for_session(
     db: AsyncSession,
     session_id: str,
 ) -> Tuple[Optional[Task], Optional[WorkflowSession]]:
+    logger = logging.getLogger("tasks_api")
     result = await db.execute(
         select(Task)
         .where(Task.session_id == session_id)
@@ -209,7 +221,12 @@ async def _find_unfinished_quick_task_for_session(
             continue
 
         if not is_terminal_task_status(task.status):
-            return task, None
+            logger.warning(
+                "Ignoring quick task without runtime session when discovering current run: task_id=%s session_id=%s status=%s",
+                getattr(task, "task_id", None),
+                session_id,
+                _val(task.status),
+            )
 
     return None, None
 
@@ -331,6 +348,13 @@ async def get_current_quick_run(
         return QuickCurrentRunResponse(task=None, workflow_status=None)
 
     runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    if runtime_view is None:
+        logging.getLogger("tasks_api").warning(
+            "Suppressing quick current task without runtime view: task_id=%s session_id=%s",
+            getattr(task, "task_id", None),
+            session_id,
+        )
+        return QuickCurrentRunResponse(task=None, workflow_status=None)
     return QuickCurrentRunResponse(
         task=_serialize_quick_run_summary(task),
         workflow_status=runtime_view,
@@ -497,12 +521,15 @@ async def get_task_resources(
     ]
 
 
-@router.get("/{task_id}/status")
+@router.get("/{task_id}/status", response_model=TaskCoarseStatusResponse)
 async def get_task_status(
     task_id: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get current status and progress of a task"""
+    """Get a coarse task-level status projection.
+
+    For authoritative live runtime state, use `/{task_id}/runtime`.
+    """
     
     # Get task
     query = select(Task).where(Task.task_id == task_id)
@@ -512,25 +539,14 @@ async def get_task_status(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-    workflow_status = runtime_view or {
-        "task_id": str(task.task_id),
-        "overall_status": _val(task.status),
-        "overall_progress": task.progress_percentage,
-        "current_step": task.current_step,
-        "total_steps": task.total_steps,
-        "completed_steps": 0,
-        "failed_steps": 0,
-        "steps": [],
-    }
-
     return {
         "task_id": str(task.task_id),
         "status": _val(task.status),
         "progress_percentage": task.progress_percentage,
         "current_step": task.current_step,
         "error_message": task.error_message,
-        "workflow_status": workflow_status,
+        "projection_role": "compatibility_coarse_task_status",
+        "runtime_authoritative": False,
         "agent_executions": []
     }
 

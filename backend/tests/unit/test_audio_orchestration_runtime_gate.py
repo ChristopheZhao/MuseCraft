@@ -13,13 +13,14 @@ from app.core.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.services import audio_delivery_gate_evaluator as audio_gate_module
 from app.services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
-from app.services.execution_boundary_assembler import ExecutionBoundaryAssembler
+from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_control_plane import (
     OrchestrationControlPlane,
     OrchestrationControlPlaneError,
 )
 from app.services.orchestration_observation_adapter import OrchestrationObservationAdapter
 from app.services.orchestration_protocol import OrchestrationProtocol, OrchestrationProtocolError
+from app.services.orchestration_queue_policy import OrchestrationQueuePolicy
 from app.services.orchestration_runtime_controller import (
     OrchestrationRuntimeController,
     OrchestrationRuntimeControllerError,
@@ -199,7 +200,6 @@ def _build_main_loop_runtime_harness(
     state_adapter = SimpleNamespace(
         build_audio_contract=lambda **kwargs: {"policy": "adaptive", "need_global_bgm": False},
         persist_llm_planning_context=lambda **kwargs: {},
-        insert_agent_into_execution_queue=OrchestrationStateAdapter.insert_agent_into_execution_queue,
         persist_task_specs=lambda **kwargs: state_calls["task_specs"].append(kwargs),
         persist_runtime_activation=lambda **kwargs: state_calls["activation"].append(kwargs) or {
             "route_payload": {"route_source": "control_plane.runtime_activation"},
@@ -260,10 +260,16 @@ def _build_main_loop_runtime_harness(
     agent._runtime_controller = runtime_controller
     agent._orchestration_protocol = OrchestrationProtocol()
     agent._orchestration_control_plane = control_plane
-    agent._execution_boundary_assembler = SimpleNamespace(
+    agent._context_contract_assembler = SimpleNamespace(
         resolve_runtime_overrides=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
+        assemble_agent_context=lambda **kwargs: {},
+        publish_script_review_boundary_sync=lambda **kwargs: {},
+        project_runtime_payload_deliverables=lambda **kwargs: {
+            "projected_count": 0,
+            "projected_nodes": [],
+        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return_json({"final_video_url": ""}),
@@ -302,7 +308,7 @@ def _build_main_loop_runtime_harness(
     async def _update_progress(*args, **kwargs):
         return None
 
-    async def _prepare_agent_context(workflow_data, agent_type, workflow_id):
+    async def _prepare_agent_context(workflow_data, agent_type, workflow_id, runtime_input_payload=None):
         return dict(workflow_data)
 
     async def _llm_select_candidate_agents(*args, **kwargs):
@@ -481,12 +487,16 @@ def test_orchestration_state_adapter_persists_llm_planning_context(monkeypatch):
 
     assert audio_contract["policy"] == "adaptive"
     assert writes["workflow.contract.audio"]["policy"] == "adaptive"
-    assert writes["workflow.plan"]["contract"]["audio"]["policy"] == "adaptive"
-    assert writes["workflow.plan"]["registered_agents"] == [item.value for item in registered_agents]
-    assert writes["workflow.plan"]["available_agents"] == [item.value for item in candidate_agents]
-    assert "actions" not in writes["workflow.plan"]
-    assert "decision_basis" not in writes["workflow.plan"]
-    assert "decision_basis" not in writes["workflow.activation_pool"]
+    assert writes["workflow.diagnostics.compat.plan_snapshot"]["contract"]["audio"]["policy"] == "adaptive"
+    assert writes["workflow.diagnostics.compat.plan_snapshot"]["registered_agents"] == [item.value for item in registered_agents]
+    assert writes["workflow.diagnostics.compat.plan_snapshot"]["available_agents"] == [item.value for item in candidate_agents]
+    assert writes["workflow.diagnostics.compat.plan_snapshot"]["projection_role"] == "diagnostics_only"
+    assert "actions" not in writes["workflow.diagnostics.compat.plan_snapshot"]
+    assert "decision_basis" not in writes["workflow.diagnostics.compat.plan_snapshot"]
+    assert "decision_basis" not in writes["workflow.diagnostics.compat.activation_pool_snapshot"]
+    assert writes["workflow.diagnostics.compat.activation_pool_snapshot"]["projection_role"] == "diagnostics_only"
+    assert "workflow.plan" not in writes
+    assert "workflow.activation_pool" not in writes
 
 
 def test_orchestration_state_adapter_rejects_forbidden_runtime_control_state_projection():
@@ -544,7 +554,7 @@ def test_build_execution_queue_and_standby_agents_follow_llm_task_specs():
 
 
 def test_build_execution_queue_falls_back_to_candidate_order_when_order_missing():
-    queue = OrchestrationStateAdapter.build_execution_queue(
+    queue = OrchestrationQueuePolicy.build_execution_queue(
         candidate_agents=[
             AgentType.VIDEO_GENERATOR,
             AgentType.VIDEO_COMPOSER,
@@ -585,10 +595,10 @@ def test_audio_agent_gate_is_no_longer_driven_by_workflow_plan(monkeypatch):
 
 
 def test_resolve_agent_runtime_overrides_uses_enabled_plan_action(monkeypatch):
-    assembler = ExecutionBoundaryAssembler(SimpleNamespace(short_term=object()))
+    assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
 
     monkeypatch.setattr(
-        "app.services.execution_boundary_assembler.read_shared_fact",
+        "app.services.context_assembler.read_shared_fact",
         lambda workflow_id, key, default=None, service=None: {
             AgentType.VIDEO_COMPOSER.value: {
                 "runtime_overrides": {"compose_mode": "bgm"},
@@ -1749,14 +1759,18 @@ def test_state_adapter_persists_runtime_activation_state(monkeypatch):
 
     assert payload["route_payload"]["decision_reason"] == "contract_disallow_silence_runtime_gap"
     assert payload["route_payload"]["route_source"] == "control_plane.runtime_activation"
-    assert writes["workflow.audio_route"]["decision_reason"] == "contract_disallow_silence_runtime_gap"
-    assert AgentType.AUDIO_GENERATOR.value in writes["workflow.activation_pool"]["active_agents"]
+    assert writes["workflow.diagnostics.compat.audio_route_snapshot"]["decision_reason"] == "contract_disallow_silence_runtime_gap"
+    assert writes["workflow.diagnostics.compat.audio_route_snapshot"]["projection_role"] == "diagnostics_only"
+    assert AgentType.AUDIO_GENERATOR.value in writes["workflow.diagnostics.compat.activation_pool_snapshot"]["active_agents"]
     assert "decision_basis" not in payload["route_payload"]
-    assert "decision_basis" not in writes["workflow.activation_pool"]
+    assert "decision_basis" not in writes["workflow.diagnostics.compat.activation_pool_snapshot"]
+    assert writes["workflow.diagnostics.compat.activation_pool_snapshot"]["projection_role"] == "diagnostics_only"
+    assert "workflow.audio_route" not in writes
+    assert "workflow.activation_pool" not in writes
 
 
-def test_state_adapter_build_execution_queue_requires_explicit_task_spec():
-    queue = OrchestrationStateAdapter.build_execution_queue(
+def test_queue_policy_build_execution_queue_requires_explicit_task_spec():
+    queue = OrchestrationQueuePolicy.build_execution_queue(
         candidate_agents=[
             AgentType.VIDEO_GENERATOR,
             AgentType.AUDIO_GENERATOR,
@@ -1767,7 +1781,7 @@ def test_state_adapter_build_execution_queue_requires_explicit_task_spec():
             AgentType.AUDIO_GENERATOR: {"run": False, "order": 1},
         },
     )
-    standby = OrchestrationStateAdapter.build_standby_agents(
+    standby = OrchestrationQueuePolicy.build_standby_agents(
         candidate_agents=[
             AgentType.VIDEO_GENERATOR,
             AgentType.AUDIO_GENERATOR,
@@ -1783,7 +1797,7 @@ def test_state_adapter_build_execution_queue_requires_explicit_task_spec():
     assert standby == [AgentType.AUDIO_GENERATOR]
 
 
-def test_state_adapter_insert_agent_into_execution_queue_respects_task_spec_order():
+def test_queue_policy_insert_agent_into_execution_queue_respects_task_spec_order():
     execution_queue = [
         AgentType.CONCEPT_PLANNER,
         AgentType.VIDEO_GENERATOR,
@@ -1796,7 +1810,7 @@ def test_state_adapter_insert_agent_into_execution_queue_respects_task_spec_orde
         AgentType.QUALITY_CHECKER: {"run": True, "order": 3},
     }
 
-    changed = OrchestrationStateAdapter.insert_agent_into_execution_queue(
+    changed = OrchestrationQueuePolicy.insert_agent_into_execution_queue(
         execution_queue,
         current_index=1,
         agent_type=AgentType.AUDIO_GENERATOR,

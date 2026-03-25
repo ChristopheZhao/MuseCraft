@@ -5,7 +5,7 @@ import pytest
 
 from app.agents.video_generator import VideoGeneratorAgent
 from app.models import AgentType
-from app.services.execution_boundary_assembler import ExecutionBoundaryAssembler
+from app.services.context_assembler import ContextContractAssembler
 from app.services.video_execution_contract import build_video_generation_execution_contract
 
 
@@ -118,7 +118,7 @@ def test_resolve_execution_contract_uses_explicit_contract_without_plan_or_route
 
 
 def test_execution_boundary_assembler_builds_video_execution_contract_from_runtime_overrides():
-    assembler = ExecutionBoundaryAssembler(SimpleNamespace(short_term=object()))
+    assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
 
     contract = assembler.build_execution_contract(
         agent_type=AgentType.VIDEO_GENERATOR,

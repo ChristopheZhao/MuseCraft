@@ -181,16 +181,16 @@ class WorkflowCompletionAdapter:
     ) -> Dict[str, Any]:
         persistence_payload = self.build_persistence_payload(workflow_id)
         try:
-            mas_state = build_mas_state_view(str(workflow_id), service=self._memory_services.short_term)
+            facts_summary = build_mas_state_view(str(workflow_id), service=self._memory_services.short_term)
         except Exception:
-            mas_state = {}
+            facts_summary = {}
 
         final_video_url = self.resolve_final_video_url(workflow_id)
         payload: Dict[str, Any] = {
             "state": "workflow_completed",
             "status": "COMPLETED",
             "final_video_url": final_video_url,
-            "mas_state": mas_state,
+            "facts_summary": facts_summary,
             "scenes": persistence_payload.get("scenes") or [],
             "resources": persistence_payload.get("resources") or [],
         }

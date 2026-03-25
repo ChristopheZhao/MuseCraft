@@ -7,7 +7,6 @@ import logging
 import json
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
@@ -19,43 +18,25 @@ from ..models import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from .adapters.memory_views import (
-    build_media_agent_context,
-    build_image_generation_context,
-    build_video_generation_context,
-    build_voice_synthesis_context,
-)
 from ..services.memory_provider import build_memory_services, MemoryServices
 from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
-from ..services.execution_boundary_assembler import ExecutionBoundaryAssembler
+from ..services.context_assembler import ContextContractAssembler
 from ..services.orchestration_observation_adapter import OrchestrationObservationAdapter
 from ..services.orchestration_control_plane import (
     OrchestrationControlPlane,
     OrchestrationControlPlaneError,
 )
 from ..services.orchestration_protocol import OrchestrationProtocol, OrchestrationProtocolError
+from ..services.orchestration_queue_policy import OrchestrationQueuePolicy
 from ..services.orchestration_runtime_controller import (
     OrchestrationRuntimeController,
     OrchestrationRuntimeControllerError,
 )
 from ..services.orchestration_state_adapter import OrchestrationStateAdapter
-from ..services.scene_info_reference_service import persist_scene_info_ref
 from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
 from ..services.runtime_session_service import RuntimeSessionService
-from ..services.published_deliverable_service import (
-    PublishedDeliverableService,
-    build_deliverable_ref,
-    set_published_deliverable_ref,
-)
-from ..services.published_deliverable_adapter import (
-    build_script_deliverable_payload,
-    project_deliverable_ref_to_shared_wm,
-    project_payload_deliverables_to_shared_wm,
-)
 from ..services.script_review_contract import (
-    build_script_preview_text,
     get_script_review_contract,
-    set_script_review_contract,
 )
 # legacy WM singleton removed - use injected self._memory_services.short_term
 from .utils.memory_helpers import (
@@ -101,7 +82,7 @@ class OrchestratorAgent(BaseAgent):
             raise ValueError("memory_services is required for OrchestratorAgent")
         self._memory_services = memory_services
         self._audio_delivery_gate = AudioDeliveryGateEvaluator(memory_services=self._memory_services)
-        self._execution_boundary_assembler = ExecutionBoundaryAssembler(self._memory_services)
+        self._context_contract_assembler = ContextContractAssembler(self._memory_services)
         self._orchestration_state = OrchestrationStateAdapter(self._memory_services)
         self._orchestration_observation = OrchestrationObservationAdapter(self._memory_services)
         self._orchestration_protocol = OrchestrationProtocol()
@@ -187,27 +168,6 @@ class OrchestratorAgent(BaseAgent):
         except Exception:
             pass
 
-    def _persist_scene_info_ref(
-        self,
-        *,
-        workflow_id: str,
-        agent_type: AgentType,
-        payload: Dict[str, Any],
-    ) -> Optional[str]:
-        """Persist scene info payload as JSON and return a local ref path."""
-        ref = persist_scene_info_ref(
-            workflow_id=workflow_id,
-            agent_type=agent_type,
-            payload=payload,
-        )
-        if ref:
-            return ref
-        try:
-            self.logger.warning("scene_info_ref persist failed for %s", agent_type.value)
-        except Exception:
-            pass
-        return None
-
     def reset_repeat_counters(self) -> None:
         """Clear per-step repeat counters so retries start fresh."""
         self._step_repeat_counts = {}
@@ -225,6 +185,16 @@ class OrchestratorAgent(BaseAgent):
             AgentType.QUALITY_CHECKER: "quality",
         }
         return mapping.get(agent_type)
+
+    @staticmethod
+    def _agent_type_for_runtime_node_key(node_key: str) -> Optional[AgentType]:
+        normalized = str(node_key or "").strip().lower()
+        if not normalized:
+            return None
+        for agent_type in AgentType:
+            if OrchestratorAgent._runtime_node_key_for_agent(agent_type) == normalized:
+                return agent_type
+        return None
 
     @staticmethod
     def _parse_agent_type(value: Any) -> Optional[AgentType]:
@@ -302,6 +272,13 @@ class OrchestratorAgent(BaseAgent):
             self._orchestration_state = adapter
         return adapter
 
+    def _get_context_contract_assembler(self) -> ContextContractAssembler:
+        assembler = getattr(self, "_context_contract_assembler", None)
+        if assembler is None:
+            assembler = ContextContractAssembler(self._memory_services)
+            self._context_contract_assembler = assembler
+        return assembler
+
     def _get_orchestration_observation_adapter(self) -> OrchestrationObservationAdapter:
         adapter = getattr(self, "_orchestration_observation", None)
         if adapter is None:
@@ -322,29 +299,6 @@ class OrchestratorAgent(BaseAgent):
             )
             self._orchestration_control_plane = control_plane
         return control_plane
-
-    def _load_workflow_overview(self, workflow_id: str) -> Dict[str, Any]:
-        try:
-            value = read_shared_fact(workflow_id, "workflow_overview", {}, service=self.short_term_service)
-        except Exception as exc:
-            raise AgentError(f"Failed to read workflow_overview from MAS WM: {exc}") from exc
-        return dict(value) if isinstance(value, dict) else {}
-
-    def _store_workflow_overview(self, workflow_id: str, payload: Dict[str, Any]) -> None:
-        try:
-            write_shared_fact(workflow_id, "workflow_overview", payload or {}, service=self.short_term_service)
-        except Exception as exc:
-            raise AgentError(f"Failed to write workflow_overview to MAS WM: {exc}") from exc
-
-    def _update_workflow_overview(self, workflow_id: str, updates: Dict[str, Any], *, raise_error: bool = True) -> None:
-        try:
-            current = self._load_workflow_overview(workflow_id)
-            current.update(updates)
-            self._store_workflow_overview(workflow_id, current)
-        except AgentError as exc:
-            if raise_error:
-                raise
-            self.logger.warning("Workflow overview update skipped: %s", exc)
 
     @staticmethod
     def _resolve_runtime_script_state(
@@ -387,96 +341,23 @@ class OrchestratorAgent(BaseAgent):
         trigger_reason: str,
         script_output: Dict[str, Any],
     ) -> Dict[str, Any]:
-        runtime_session.input_payload = set_script_review_contract(runtime_session.input_payload, None)
-        db.commit()
-
-        scene_scripts = read_shared_fact(
-            workflow_id,
-            "project.scene_scripts",
-            {},
-            service=self.short_term_service,
-        ) or {}
-        script_preview_text = build_script_preview_text(
-            scene_scripts,
+        boundary = self._get_context_contract_assembler().publish_script_review_boundary_sync(
+            db=db,
+            session=runtime_session,
+            workflow_state_id=workflow_id,
+            attempt_id=script_attempt_id,
             script_output=script_output,
         )
-        deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-            db,
-            session=runtime_session,
-            workflow_id=workflow_id,
-            attempt_id=script_attempt_id,
-            payload=build_script_deliverable_payload(
-                workflow_id,
-                service=self.short_term_service,
-            ),
-            summary={
-                "script_preview_text": script_preview_text,
-                "scenes_generated": script_output.get("scenes_generated"),
-                "total_scenes": script_output.get("total_scenes"),
-            },
-        )
-        artifact_refs = [build_deliverable_ref(deliverable)]
-        runtime_session.input_payload = set_published_deliverable_ref(
-            runtime_session.input_payload,
-            node_key="script",
-            ref=artifact_refs[0],
-        )
-        project_deliverable_ref_to_shared_wm(
-            workflow_id,
-            node_key="script",
-            ref=artifact_refs[0],
-            service=self.short_term_service,
-        )
-
-        RuntimeSessionService.complete_node_attempt_sync(
+        gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
             db,
             runtime_session,
-            node_key="script",
-            attempt_id=script_attempt_id,
-            output_artifacts=artifact_refs,
-            metrics={
-                "trigger_reason": trigger_reason,
-                "scenes_generated": script_output.get("scenes_generated"),
-                "total_scenes": script_output.get("total_scenes"),
-                "review_contract_action": (
-                    get_script_review_contract(runtime_session.input_payload) or {}
-                ).get("action"),
-            },
-            artifact_refs=artifact_refs,
-            diagnostics=[],
-            node_status=WorkflowNodeStatus.RUNNING.value,
-        )
-
-        gate = RuntimeSessionService.open_human_gate_sync(
-            db,
-            runtime_session,
-            node_key="script",
-            gate_name="script_review",
-            gate_type="human_review",
-            attempt_id=script_attempt_id,
-            artifact_refs=artifact_refs,
-            facts={
-                "workflow_state_id": workflow_id,
-                "scenes_generated": script_output.get("scenes_generated"),
-                "total_scenes": script_output.get("total_scenes"),
-                "script_preview_text": script_preview_text,
-                "trigger_reason": trigger_reason,
-            },
-            allowed_actions=["approve", "revise", "replan"],
-            recommended_action="approve",
             task=task,
-            progress_step="Waiting for script approval",
-            progress_percentage=35,
-        )
-        self._update_workflow_overview(
-            workflow_id,
-            {
-                "status": "WAITING_GATE",
-                "progress": 35,
-                "current_step": "Waiting for script approval",
-                "waiting_gate": "script_review",
-            },
-            raise_error=True,
+            workflow_state_id=workflow_id,
+            attempt_id=script_attempt_id,
+            trigger_reason=trigger_reason,
+            script_output=script_output,
+            artifact_ref=dict(boundary.get("artifact_ref") or {}),
+            script_preview_text=str(boundary.get("script_preview_text") or ""),
         )
         return {
             "status": "waiting_gate",
@@ -613,22 +494,6 @@ class OrchestratorAgent(BaseAgent):
         except Exception as route_err:
             raise AgentError(f"Failed to initialize orchestration context: {route_err}") from route_err
 
-        try:
-            write_shared_fact(
-                wf_id,
-                "workflow_overview",
-                {
-                    "status": "INITIALIZING",
-                    "progress": 0,
-                    "current_step": "Starting workflow",
-                    "step_index": 0,
-                    "total_steps": 0,
-                },
-                service=self.short_term_service,
-            )
-        except Exception as wm_err:
-            raise AgentError(f"Failed to initialize workflow_overview in shared memory: {wm_err}") from wm_err
-        
         runtime_session, script_gate, latest_script_decision, script_resume_action = (
             self._resolve_runtime_script_state(db, task)
         )
@@ -641,11 +506,6 @@ class OrchestratorAgent(BaseAgent):
             }
 
         runtime_input_payload = dict(getattr(runtime_session, "input_payload", {}) or {})
-        project_payload_deliverables_to_shared_wm(
-            wf_id,
-            runtime_input_payload,
-            service=self.short_term_service,
-        )
         workflow_data = runtime_input_payload.copy() if runtime_input_payload else input_data.copy()
         workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
         workflow_data.setdefault("target_resolution", workflow_data.get("resolution"))
@@ -793,43 +653,32 @@ class OrchestratorAgent(BaseAgent):
                     db
                 )
                 
-                # Update task progress + 共享黑板概览
+                # Update task progress
                 task.update_progress(current_step, progress_percentage)
-                try:
-                    self._update_workflow_overview(
-                        wf_id,
-                        {
-                            "status": "RUNNING",
-                            "progress": progress_percentage,
-                            "current_step": current_step,
-                            "step_index": step_index + 1,
-                            "total_steps": total_steps,
-                            "current_agent": agent.agent_name,
-                        },
-                        raise_error=True,
-                    )
-                except AgentError as wm_err:
-                    raise AgentError(
-                        f"Failed to update workflow_overview in shared memory (step {step_index + 1}): {wm_err}"
-                    ) from wm_err
                 self.logger.info(f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
                 
                 try:
                     # Prepare agent input with creative context (if available)
                     self.logger.info(f"🧠 DEBUG: Preparing context for {agent_type.value}")
-                    agent_input = await self._prepare_agent_context(workflow_data, agent_type, wf_id)
-                    runtime_overrides = self._execution_boundary_assembler.resolve_runtime_overrides(
+                    agent_input = await self._prepare_agent_context(
+                        workflow_data,
+                        agent_type,
+                        wf_id,
+                        runtime_input_payload=runtime_input_payload,
+                    )
+                    boundary_assembler = self._get_context_contract_assembler()
+                    runtime_overrides = boundary_assembler.resolve_runtime_overrides(
                         workflow_state_id=wf_id,
                         agent_type=agent_type,
                     )
-                    execution_contract = self._execution_boundary_assembler.build_execution_contract(
+                    execution_contract = boundary_assembler.build_execution_contract(
                         agent_type=agent_type,
                         workflow_state_id=wf_id,
                         runtime_overrides=runtime_overrides,
                     )
                     if isinstance(execution_contract, dict) and execution_contract:
                         agent_input["execution_contract"] = execution_contract
-                        agent_input = self._execution_boundary_assembler.apply_execution_boundary(
+                        agent_input = boundary_assembler.apply_execution_boundary(
                             agent_type=agent_type,
                             agent_input=agent_input,
                             execution_contract=execution_contract,
@@ -1017,14 +866,14 @@ class OrchestratorAgent(BaseAgent):
                         from .adapters.state.mas_state import build_mas_state_view
                         shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
                         wm_state = build_memory_state(shared)
-                        mas_state = build_mas_state_view(str(wf_id), service=self.short_term_service)
+                        facts_summary = build_mas_state_view(str(wf_id), service=self.short_term_service)
                         if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id):
                             await publish_event(
                                 kind=EventKind.STATE,
                                 payload={
                                     "state": "image_assets_ready",
                                     "images_count": int(wm_state.get("outputs", {}).get("image", 0)),
-                                    "mas_state": mas_state,
+                                    "facts_summary": facts_summary,
                                 },
                                 task_id=str(task.task_id),
                                 task_db_id=self._task_db_id,
@@ -1038,7 +887,7 @@ class OrchestratorAgent(BaseAgent):
                                 payload={
                                     "state": "video_assets_ready",
                                     "videos_count": int(wm_state.get("outputs", {}).get("video", 0)),
-                                    "mas_state": mas_state,
+                                    "facts_summary": facts_summary,
                                 },
                                 task_id=str(task.task_id),
                                 task_db_id=self._task_db_id,
@@ -1098,7 +947,12 @@ class OrchestratorAgent(BaseAgent):
                                 progress_percentage=15,
                             )
                             script_attempt_id = retry_attempt.id
-                        agent_input = await self._prepare_agent_context(workflow_data, agent_type, wf_id)
+                        agent_input = await self._prepare_agent_context(
+                            workflow_data,
+                            agent_type,
+                            wf_id,
+                            runtime_input_payload=runtime_input_payload,
+                        )
                         agent_output = await agent.execute(
                             task=task,
                             input_data=agent_input,
@@ -1139,18 +993,6 @@ class OrchestratorAgent(BaseAgent):
             
             # Workflow completed successfully
             await self._update_progress(90, "Workflow completed, dispatching completion event", db)
-            try:
-                self._update_workflow_overview(
-                    wf_id,
-                    {
-                        "status": "PERSISTING",  # 保持概要一致，后续事件化由监听器处理
-                        "progress": 90,
-                        "current_step": "Dispatching completion event",
-                    },
-                    raise_error=True,
-                )
-            except AgentError as wm_err:
-                raise AgentError(f"Failed to mark workflow_overview as PERSISTING: {wm_err}") from wm_err
             
             # 发布完成事件（监听器异步落库），不再同步持久化
             shared_final = None
@@ -1167,19 +1009,6 @@ class OrchestratorAgent(BaseAgent):
 
             task.status = TaskStatus.COMPLETED
             task.update_progress("Completed", 100)
-            try:
-                ov = self._load_workflow_overview(wf_id)
-                ov.update(
-                    {
-                        "status": "COMPLETED",
-                        "progress": 100,
-                        "current_step": "Workflow completed",
-                        "outputs": {"final_video_url": final_url},
-                    }
-                )
-                self._store_workflow_overview(wf_id, ov)
-            except AgentError as wm_err:
-                raise AgentError(f"Failed to update workflow_overview on completion: {wm_err}") from wm_err
 
             completion_payload = await self._workflow_completion_adapter.publish_completed(
                 task=task,
@@ -1214,16 +1043,7 @@ class OrchestratorAgent(BaseAgent):
         except Exception as e:
             # Workflow failed
             error_msg = f"Workflow failed: {str(e)}"
-            
-            # 记录错误到共享黑板概览
-            try:
-                ov = self._load_workflow_overview(wf_id)
-                prog = int(ov.get("progress") or 0)
-                ov.update({"status": "FAILED", "progress": prog, "last_error": error_msg})
-                self._store_workflow_overview(wf_id, ov)
-            except AgentError as wm_err:
-                raise AgentError(f"Failed to record workflow failure in shared memory: {wm_err}") from wm_err
-            
+
             try:
                 await self._workflow_completion_adapter.publish_failed(
                     task=task,
@@ -1261,12 +1081,12 @@ class OrchestratorAgent(BaseAgent):
             from .adapters.state.mas_state import build_mas_state_view
 
             delivery = assess_agent_delivery(str(workflow_id), current_agent, service=self.short_term_service)
-            mas_state = build_mas_state_view(str(workflow_id), service=self.short_term_service)
+            facts_summary = build_mas_state_view(str(workflow_id), service=self.short_term_service)
         except Exception:
             delivery = {}
-            mas_state = {}
+            facts_summary = {}
 
-        meta = {"workflow_id": str(workflow_id), "mas_state": mas_state}
+        meta = {"workflow_id": str(workflow_id), "facts_summary": facts_summary}
         summary = {"delivery": delivery}
         try:
             success_count = int((delivery or {}).get("completed") or 0)
@@ -1353,7 +1173,7 @@ class OrchestratorAgent(BaseAgent):
         # Default fallback: proceed
         return "proceed_next"
     
-    # WorkflowStatus 已移除；概览在共享黑板 facts.workflow_overview 中维护
+    # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
     
     async def _should_retry_step(
         self,
@@ -1402,7 +1222,6 @@ class OrchestratorAgent(BaseAgent):
         """Get current workflow status and progress"""
         workflow_id = str(getattr(task, "task_id", "") or "")
         task_specs_projection: Dict[str, Any] = {}
-        activation_pool_projection: Dict[str, Any] = {}
         try:
             if workflow_id:
                 task_specs_projection = read_shared_fact(
@@ -1411,15 +1230,8 @@ class OrchestratorAgent(BaseAgent):
                     {},
                     service=self.short_term_service,
                 ) or {}
-                activation_pool_projection = read_shared_fact(
-                    workflow_id,
-                    "workflow.activation_pool",
-                    {},
-                    service=self.short_term_service,
-                ) or {}
         except Exception:
             task_specs_projection = {}
-            activation_pool_projection = {}
 
         projected_agents: List[AgentType] = []
         if isinstance(task_specs_projection, dict) and task_specs_projection:
@@ -1428,45 +1240,81 @@ class OrchestratorAgent(BaseAgent):
                 if parsed is not None and parsed not in projected_agents:
                     projected_agents.append(parsed)
 
+        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(db, task)
+        runtime_nodes = (
+            list(runtime_view.get("nodes") or [])
+            if isinstance(runtime_view, dict)
+            else []
+        )
         agents_for_status = projected_agents or self._registered_agents()
-        overall_status = task.status.value if hasattr(task.status, "value") else task.status
+        overall_status = (
+            runtime_view.get("status")
+            if isinstance(runtime_view, dict) and runtime_view.get("status")
+            else (task.status.value if hasattr(task.status, "value") else task.status)
+        )
         workflow_status = {
             "task_id": str(task.task_id),
             "overall_status": overall_status,
             "overall_progress": task.progress_percentage,
             "current_step": task.current_step,
-            "total_steps": len(agents_for_status),
+            "total_steps": len(runtime_nodes) if runtime_nodes else len(agents_for_status),
             "completed_steps": 0,
             "failed_steps": 0,
             "steps": []
         }
 
-        active_agents = set()
-        standby_agents = set()
-        if isinstance(activation_pool_projection, dict):
-            active_agents = {
-                str(item).strip().lower()
-                for item in (activation_pool_projection.get("active_agents") or [])
-                if str(item).strip()
+        completed_statuses = {
+            WorkflowNodeStatus.APPROVED.value,
+            WorkflowNodeStatus.COMPLETED.value,
+            WorkflowNodeStatus.SKIPPED.value,
+        }
+        failed_statuses = {WorkflowNodeStatus.FAILED.value}
+
+        if runtime_nodes:
+            current_node_key = ""
+            if isinstance(runtime_view, dict):
+                current_node_key = str(runtime_view.get("current_node_key") or "").strip().lower()
+            for node in runtime_nodes:
+                if not isinstance(node, dict):
+                    continue
+                node_key = str(node.get("node_key") or "").strip().lower()
+                agent_type = self._agent_type_for_runtime_node_key(node_key)
+                agent_name = agent_type.value if isinstance(agent_type, AgentType) else node_key
+                node_status = str(node.get("status") or "unknown").strip().lower() or "unknown"
+                if node_status in completed_statuses:
+                    workflow_status["completed_steps"] += 1
+                if node_status in failed_statuses:
+                    workflow_status["failed_steps"] += 1
+                progress = None
+                if node_status in completed_statuses:
+                    progress = 100
+                elif node_key and node_key == current_node_key:
+                    progress = task.progress_percentage
+                workflow_status["steps"].append(
+                    {
+                        "agent_type": agent_name,
+                        "node_key": node_key,
+                        "status": node_status,
+                        "progress": progress,
+                        "duration": None,
+                        "error": task.error_message if node_status in failed_statuses else None,
+                    }
+                )
+            workflow_status["runtime_session"] = {
+                "session_id": runtime_view.get("session_id") if isinstance(runtime_view, dict) else None,
+                "status": runtime_view.get("status") if isinstance(runtime_view, dict) else None,
+                "current_node_key": runtime_view.get("current_node_key") if isinstance(runtime_view, dict) else None,
+                "current_attempt_id": runtime_view.get("current_attempt_id") if isinstance(runtime_view, dict) else None,
+                "active_gate": runtime_view.get("active_gate") if isinstance(runtime_view, dict) else None,
             }
-            standby_agents = {
-                str(item).strip().lower()
-                for item in (activation_pool_projection.get("standby_agents") or [])
-                if str(item).strip()
-            }
+            return workflow_status
 
         # 仅返回粗粒度状态；详细执行信息改为事件/缓存，不依赖 AgentExecution 表
         for agent_type in agents_for_status:
-            agent_name = agent_type.value
-            step_status = "unknown"
-            if agent_name in active_agents:
-                step_status = "queued"
-            elif agent_name in standby_agents:
-                step_status = "standby"
             workflow_status["steps"].append(
                 {
-                    "agent_type": agent_name,
-                    "status": step_status,
+                    "agent_type": agent_type.value,
+                    "status": "unknown",
                     "progress": None,
                     "duration": None,
                     "error": None,
@@ -1536,7 +1384,7 @@ class OrchestratorAgent(BaseAgent):
         *,
         candidate_agents: Optional[List[AgentType]] = None,
     ) -> List[AgentType]:
-        return self._get_orchestration_state_adapter().build_execution_queue(
+        return OrchestrationQueuePolicy.build_execution_queue(
             task_specs=task_specs,
             candidate_agents=candidate_agents,
         )
@@ -1547,7 +1395,7 @@ class OrchestratorAgent(BaseAgent):
         *,
         candidate_agents: Optional[List[AgentType]] = None,
     ) -> List[AgentType]:
-        return self._get_orchestration_state_adapter().build_standby_agents(
+        return OrchestrationQueuePolicy.build_standby_agents(
             task_specs=task_specs,
             candidate_agents=candidate_agents,
         )
@@ -1822,9 +1670,16 @@ class OrchestratorAgent(BaseAgent):
             except Exception as route_err:
                 self.logger.warning("AUDIO_ORCHESTRATION diagnostics failed: %s", route_err)
 
-    async def _prepare_agent_context(self, workflow_data: Dict[str, Any], agent_type: AgentType, workflow_id: str) -> Dict[str, Any]:
+    async def _prepare_agent_context(
+        self,
+        workflow_data: Dict[str, Any],
+        agent_type: AgentType,
+        workflow_id: str,
+        *,
+        runtime_input_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """为Agent准备包含创意指导的上下文数据"""
-        
+
         try:
             # 复制基础工作流数据
             agent_input = workflow_data.copy()
@@ -1852,190 +1707,29 @@ class OrchestratorAgent(BaseAgent):
                         )
                     except Exception:
                         pass
-
-            def _merge_media_context(
-                include_roles: bool,
-                *,
-                include_audio_requirements: bool = False,
-                sfx_required_default: Optional[bool] = None,
-                sfx_required_override: Optional[bool] = None,
-            ) -> Dict[str, Any]:
-                context_bundle = build_media_agent_context(
-                    workflow_id,
-                    service=self.short_term_service,
-                    include_scripts=True,
-                    include_roles=include_roles,
-                    include_audio_requirements=include_audio_requirements,
-                    sfx_required_default=sfx_required_default,
-                    sfx_required_override=sfx_required_override,
-                )
-                for key, value in context_bundle.items():
+            boundary_context = self._get_context_contract_assembler().assemble_agent_context(
+                agent_type=agent_type,
+                workflow_state_id=workflow_id,
+                workflow_data=workflow_data,
+                runtime_input_payload=runtime_input_payload,
+            )
+            if isinstance(boundary_context, dict):
+                assembler_diagnostics = boundary_context.pop("_assembler_diagnostics", None)
+                if isinstance(assembler_diagnostics, dict):
+                    for name, receipt in assembler_diagnostics.items():
+                        if not isinstance(receipt, dict):
+                            continue
+                        status = str(receipt.get("status") or "").strip().lower()
+                        if status and status != "resolved":
+                            self.logger.warning(
+                                "Boundary assembly fallback for %s on %s: %s",
+                                agent_type.value,
+                                name,
+                                receipt,
+                            )
+                for key, value in boundary_context.items():
                     if value:
                         agent_input[key] = value
-                return context_bundle
-
-            # 统一静态上下文（静态背景 + 场景视图），传递给 ReAct 基类处理
-            static_context: Dict[str, Any] = {}
-            if agent_type == AgentType.AUDIO_GENERATOR:
-                audio_req = workflow_data.get("audio_requirements") if isinstance(workflow_data, dict) else None
-                sfx_override = None
-                if isinstance(audio_req, dict) and audio_req.get("sfx_required") is not None:
-                    sfx_override = bool(audio_req.get("sfx_required"))
-                elif isinstance(workflow_data, dict) and workflow_data.get("sfx_required") is not None:
-                    sfx_override = bool(workflow_data.get("sfx_required"))
-                static_context.update(
-                    _merge_media_context(
-                        include_roles=False,
-                        include_audio_requirements=True,
-                        sfx_required_default=getattr(settings, "AUDIO_SFX_REQUIRED_DEFAULT", False),
-                        sfx_required_override=sfx_override,
-                    )
-                    or {}
-                )
-                if isinstance(audio_req, dict) and audio_req:
-                    merged_req = dict(static_context.get("audio_requirements") or {})
-                    merged_req.update(audio_req)
-                    static_context["audio_requirements"] = merged_req
-            elif agent_type == AgentType.VIDEO_COMPOSER:
-                from .adapters.memory_views import build_video_composer_context
-
-                composer_ctx = build_video_composer_context(
-                    workflow_id,
-                    service=self.short_term_service,
-                    requests=None,
-                )
-                if composer_ctx:
-                    static_context.update(composer_ctx)
-                try:
-                    scene_videos = composer_ctx.get("scene_videos") if isinstance(composer_ctx, dict) else []
-                    total = len(scene_videos) if isinstance(scene_videos, list) else 0
-                    local_count = 0
-                    url_only = 0
-                    if isinstance(scene_videos, list):
-                        for item in scene_videos:
-                            if not isinstance(item, dict):
-                                continue
-                            if item.get("local_path"):
-                                local_count += 1
-                            elif item.get("video_url"):
-                                url_only += 1
-                    final_video = composer_ctx.get("final_video") if isinstance(composer_ctx, dict) else {}
-                    final_path = final_video.get("path") if isinstance(final_video, dict) else ""
-                    self.logger.info(
-                        "🧠 video_composer static_context scene_videos=%s local_paths=%s url_only=%s final_video_path=%s",
-                        total,
-                        local_count,
-                        url_only,
-                        final_path or None,
-                    )
-                except Exception:
-                    pass
-
-            if agent_type == AgentType.IMAGE_GENERATOR:
-                image_ctx = build_image_generation_context(workflow_id, service=self.short_term_service)
-                if isinstance(image_ctx, dict) and image_ctx.get("context"):
-                    ctx_payload = image_ctx.get("context") or {}
-                    scene_info_payload = image_ctx.get("scene_info_payload") or {}
-                    payload_for_ref = scene_info_payload or ctx_payload
-                    ref_path = self._persist_scene_info_ref(
-                        workflow_id=str(workflow_id),
-                        agent_type=agent_type,
-                        payload=payload_for_ref,
-                    )
-                    if ref_path:
-                        ctx_payload = dict(ctx_payload)
-                        ctx_payload["scene_info_ref"] = ref_path
-                        static_context.update(ctx_payload)
-                        try:
-                            self.logger.info(
-                                "🧠 image_generator scene_info_ref_ready=True ref_file=%s static_keys=%s",
-                                Path(ref_path).name,
-                                list(ctx_payload.keys()),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        fallback_ctx = dict(ctx_payload)
-                        if scene_info_payload:
-                            fallback_ctx["scene_info_payload"] = scene_info_payload
-                        static_context.update(fallback_ctx)
-                        try:
-                            self.logger.info(
-                                "🧠 image_generator scene_info_ref_ready=False static_keys=%s",
-                                list(fallback_ctx.keys()),
-                            )
-                        except Exception:
-                            pass
-            elif agent_type == AgentType.VIDEO_GENERATOR:
-                video_ctx = build_video_generation_context(workflow_id, service=self.short_term_service)
-                if isinstance(video_ctx, dict) and video_ctx.get("context"):
-                    ctx_payload = video_ctx.get("context") or {}
-                    scene_info_payload = video_ctx.get("scene_info_payload") or {}
-                    try:
-                        scenes_to_generate_count = len(scene_info_payload.get("scenes_to_generate") or [])
-                        self.logger.info(
-                            "🧠 video_generator static_context scenes_to_generate=%s total_scenes=%s has_scene_overview=%s",
-                            scenes_to_generate_count,
-                            scene_info_payload.get("total_scenes"),
-                            bool(scene_info_payload.get("scene_overview")),
-                        )
-                    except Exception:
-                        pass
-
-                    ref_path = self._persist_scene_info_ref(
-                        workflow_id=str(workflow_id),
-                        agent_type=agent_type,
-                        payload=scene_info_payload,
-                    )
-
-                    if ref_path:
-                        ctx_payload = dict(ctx_payload)
-                        ctx_payload["scene_info_ref"] = ref_path
-                        key_illustration = dict(ctx_payload.get("key_illustration") or {})
-                        key_illustration.setdefault("task_overview", "全局故事与风格/角色概览，仅用于规划")
-                        key_illustration.setdefault("scene_dependency_graph", "场景依赖关系，表示生成顺序")
-                        key_illustration["scene_info_ref"] = "场景详细信息的引用地址（包含所有场景的具体规划数据）"
-                        ctx_payload["key_illustration"] = key_illustration
-                        static_context.update(ctx_payload)
-                        try:
-                            ref_name = Path(ref_path).name
-                            self.logger.info(
-                                "🧠 video_generator scene_info_ref_ready=True ref_file=%s static_keys=%s",
-                                ref_name,
-                                list(ctx_payload.keys()),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        fallback_ctx = dict(ctx_payload)
-                        if scene_info_payload:
-                            fallback_ctx["scene_info_payload"] = scene_info_payload
-                        static_context.update(fallback_ctx)
-                        try:
-                            self.logger.info(
-                                "🧠 video_generator scene_info_ref_ready=False static_keys=%s",
-                                list(fallback_ctx.keys()),
-                            )
-                        except Exception:
-                            pass
-
-            elif agent_type == AgentType.VOICE_SYNTHESIZER:
-                voice_ctx = build_voice_synthesis_context(workflow_id, service=self.short_term_service)
-                if isinstance(voice_ctx, dict) and voice_ctx.get("context"):
-                    ctx_payload = voice_ctx.get("context") or {}
-                    static_context.update(ctx_payload)
-                    try:
-                        self.logger.info(
-                            "🧠 voice_synthesizer static_context scenes_to_synthesize=%s scenes_completed=%s scenes_blocked=%s",
-                            len(ctx_payload.get("scenes_to_synthesize") or []),
-                            len(ctx_payload.get("scenes_completed") or []),
-                            len(ctx_payload.get("scenes_blocked") or []),
-                        )
-                    except Exception:
-                        pass
-
-            if static_context:
-                agent_input["static_context"] = static_context
 
             if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
                 overall_guidance = workflow_data.get("creative_guidance")
@@ -2046,11 +1740,18 @@ class OrchestratorAgent(BaseAgent):
                     agent_input["scene_guidances"] = scene_guidances
 
             return agent_input
-            
+
+        except AgentError:
+            raise
         except Exception as e:
-            self.logger.error(f"❌ Failed to prepare agent context for {agent_type.value}: {e}")
-            # 返回原始数据，不阻塞workflow
-            return workflow_data
+            self.logger.error(
+                "❌ Failed to prepare agent context for %s: %s",
+                agent_type.value,
+                e,
+            )
+            raise AgentError(
+                f"Failed to prepare agent context for {agent_type.value}: {e}"
+            ) from e
 
     async def _llm_decompose_tasks(
         self,

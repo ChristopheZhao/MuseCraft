@@ -42,6 +42,26 @@ export interface TaskResponse {
   error_message?: string;
 }
 
+export interface TaskDetailResponse extends TaskResponse {
+  description?: string;
+  input_parameters: Record<string, any>;
+  output_metadata: Record<string, any>;
+  scenes_count: number;
+  resources_count: number;
+  agent_executions_count: number;
+}
+
+export interface TaskCoarseStatusResponse {
+  task_id: string;
+  status: string;
+  progress_percentage: number;
+  current_step?: string;
+  error_message?: string;
+  projection_role: string;
+  runtime_authoritative: boolean;
+  agent_executions: Array<Record<string, any>>;
+}
+
 export interface TaskRuntimeDecisionRequest {
   action: 'approve' | 'revise' | 'replan';
   feedback_text?: string;
@@ -65,6 +85,18 @@ export interface QuickCurrentRunTask {
 export interface QuickCurrentRunResponse {
   task: QuickCurrentRunTask | null;
   workflow_status: TaskRuntimeView | null;
+}
+
+export class TaskRuntimeEndpointError extends Error {
+  status: number;
+  detail: string;
+
+  constructor(status: number, detail?: string) {
+    super(detail || 'Failed to get task runtime');
+    this.name = 'TaskRuntimeEndpointError';
+    this.status = status;
+    this.detail = detail || 'Failed to get task runtime';
+  }
 }
 
 export class ApiClient {
@@ -108,7 +140,7 @@ export class ApiClient {
     return data;
   }
 
-  static async getTaskStatus(taskId: string): Promise<TaskResponse> {
+  static async getTaskDetail(taskId: string): Promise<TaskDetailResponse> {
     const response = await fetch(`${API_BASE_URL}/tasks/${taskId}`, {
       cache: 'no-store',
     });
@@ -116,6 +148,19 @@ export class ApiClient {
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.detail || 'Failed to get task status');
+    }
+
+    return response.json();
+  }
+
+  static async getTaskCoarseStatus(taskId: string): Promise<TaskCoarseStatusResponse> {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/status`, {
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to get coarse task status');
     }
 
     return response.json();
@@ -141,7 +186,10 @@ export class ApiClient {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.detail || 'Failed to get task runtime');
+      throw new TaskRuntimeEndpointError(
+        response.status,
+        error.detail || 'Failed to get task runtime'
+      );
     }
 
     return response.json();

@@ -1,11 +1,7 @@
-"""MAS-level workflow state view (facts-based, no decisions).
+"""Facts-only MAS summary view.
 
-聚合 MAS WorkingMemory 中的事实，提供轻量的工作流摘要：
-- status/progress/current_step（从概览 fact 推导）
-- 已完成/失败/待处理场景数（基于 scene_overview + scene_outputs）
-- 最近错误/备注（可选）
-
-不存储原子事实，不做决策，仅用于 UI/编排层展示。
+聚合 MAS WorkingMemory 中的领域事实，只回答 scene/deliverable 事实层状态。
+它不是 runtime read-model，也不回答 live execution status/progress/current_step。
 """
 from __future__ import annotations
 
@@ -18,10 +14,9 @@ if TYPE_CHECKING:
 
 
 def build_mas_state_view(workflow_id: str, *, service: WorkingMemoryService) -> Dict[str, Any]:
-    """Return a lightweight MAS workflow state view derived from WM facts."""
+    """Return a lightweight facts summary derived from WM facts only."""
     wm = get_mas_working_memory(str(workflow_id), service=service)
     overview = wm.get("scene_overview", {}) if wm else {}
-    wf_meta = wm.get("workflow_overview", {}) if wm else {}
 
     scenes = overview.get("scenes") if isinstance(overview, dict) else []
     completed_ids = set()
@@ -44,18 +39,13 @@ def build_mas_state_view(workflow_id: str, *, service: WorkingMemoryService) -> 
 
     state: Dict[str, Any] = {
         "workflow_id": str(workflow_id),
+        "projection_role": "facts_summary",
         "total_scenes": total,
         "completed_scenes": len(completed_ids),
         "failed_scenes": len(failed_ids),
         "pending_scenes": pending,
-        "status": wf_meta.get("status") if isinstance(wf_meta, dict) else None,
-        "progress": wf_meta.get("progress") if isinstance(wf_meta, dict) else None,
-        "current_step": wf_meta.get("current_step") if isinstance(wf_meta, dict) else None,
         "outputs_count": _collect_outputs_count(outputs_by_kind),
     }
-    last_error = wf_meta.get("last_error") if isinstance(wf_meta, dict) else None
-    if last_error:
-        state["last_error"] = last_error
     return state
 
 

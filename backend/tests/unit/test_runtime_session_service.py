@@ -9,6 +9,7 @@ from app.models import (
     Task,
     TaskType,
     TaskStatus,
+    WorkflowGateStatus,
     WorkflowSessionStatus,
     WorkflowNodeStatus,
 )
@@ -132,8 +133,74 @@ def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
     assert view["status"] == WorkflowSessionStatus.WAITING_GATE.value
     assert view["current_node_key"] == "script"
     assert view["active_gate"]["gate_name"] == "script_review"
+    assert view["active_gate"]["result"] == WorkflowGateStatus.AWAITING_HUMAN.value
+    assert view["active_gate"]["diagnostics"] == []
+    assert view["active_gate"]["scope"] == {}
     assert view["active_gate"]["latest_decision"] is None
     assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
+
+
+def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutation(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    session.input_payload = {
+        "user_prompt": "test prompt",
+        "script_review": {"action": "replan"},
+    }
+    sync_db.commit()
+
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+        progress_step="Generating script",
+        progress_percentage=15,
+    )
+    artifact_ref = {
+        "type": "published_deliverable",
+        "deliverable_id": 9,
+        "deliverable_type": "script",
+        "scope_type": "episode",
+        "scope_id": "episode",
+        "attempt_id": attempt.id,
+        "revision_no": 0,
+        "payload_ref": "tmp/script_payload.json",
+        "summary": {"total_scenes": 1},
+        "is_candidate": True,
+        "is_approved": False,
+    }
+
+    gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
+        sync_db,
+        session,
+        task=task,
+        workflow_state_id="wf-script-review",
+        attempt_id=attempt.id,
+        trigger_reason="replan",
+        script_output={"scenes_generated": 1, "total_scenes": 1},
+        artifact_ref=artifact_ref,
+        script_preview_text="draft preview",
+    )
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+    refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
+    script_payload = refreshed_session.input_payload.get("published_deliverables", {}).get("script", {})
+
+    assert gate.gate_name == "script_review"
+    assert gate.result_code == WorkflowGateStatus.AWAITING_HUMAN.value
+    assert gate.reason_code == "replan"
+    assert gate.scope == {"scope_type": "episode", "scope_ref": "wf-script-review"}
+    assert view["status"] == WorkflowSessionStatus.WAITING_GATE.value
+    assert view["active_gate"]["gate_name"] == "script_review"
+    assert view["active_gate"]["result"] == WorkflowGateStatus.AWAITING_HUMAN.value
+    assert view["active_gate"]["reason_code"] == "replan"
+    assert view["active_gate"]["scope"] == {"scope_type": "episode", "scope_ref": "wf-script-review"}
+    assert view["active_gate"]["diagnostics"] == []
+    assert view["active_gate"]["facts"]["script_preview_text"] == "draft preview"
+    assert refreshed_session.current_attempt_id == attempt.id
+    assert script_payload["payload_ref"] == "tmp/script_payload.json"
+    assert get_script_review_contract(refreshed_session.input_payload) is None
 
 
 def test_submit_gate_decision_marks_revision_state(sync_db):

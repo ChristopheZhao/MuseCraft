@@ -29,7 +29,11 @@ from .published_deliverable_service import (
     build_deliverable_ref,
     set_published_deliverable_ref,
 )
-from .script_review_contract import build_script_review_contract, set_script_review_contract
+from .script_review_contract import (
+    build_script_review_contract,
+    get_script_review_contract,
+    set_script_review_contract,
+)
 
 
 DEFAULT_NODE_BLUEPRINT = [
@@ -149,10 +153,13 @@ def _serialize_gate(
         "gate_type": gate.gate_type,
         "status": gate.status,
         "contract_version": gate.contract_version,
+        "scope": gate.scope or {},
         "artifact_refs": gate.artifact_refs or [],
         "facts": gate.facts or {},
+        "result": gate.result_code or gate.status,
         "result_code": gate.result_code,
         "reason_code": gate.reason_code,
+        "diagnostics": gate.diagnostics or [],
         "allowed_actions": gate.allowed_actions or [],
         "recommended_action": gate.recommended_action,
         "latest_decision": _serialize_decision(latest_decision),
@@ -684,8 +691,12 @@ class RuntimeSessionService:
         gate_name: str,
         gate_type: str,
         attempt_id: Optional[int] = None,
+        scope: Optional[Dict[str, Any]] = None,
         artifact_refs: Optional[List[Dict[str, Any]]] = None,
         facts: Optional[Dict[str, Any]] = None,
+        result_code: Optional[str] = None,
+        reason_code: Optional[str] = None,
+        diagnostics: Optional[List[Dict[str, Any]]] = None,
         allowed_actions: Optional[List[str]] = None,
         recommended_action: Optional[str] = None,
         task: Optional[Task] = None,
@@ -703,8 +714,12 @@ class RuntimeSessionService:
             gate_name=gate_name,
             gate_type=gate_type,
             status=WorkflowGateStatus.AWAITING_HUMAN.value,
+            scope=scope or {},
             artifact_refs=artifact_refs or [],
             facts=facts or {},
+            result_code=result_code or WorkflowGateStatus.AWAITING_HUMAN.value,
+            reason_code=reason_code,
+            diagnostics=diagnostics or [],
             allowed_actions=allowed_actions or [],
             recommended_action=recommended_action,
         )
@@ -727,6 +742,74 @@ class RuntimeSessionService:
         db.refresh(node)
         db.refresh(session)
         return gate
+
+    @staticmethod
+    def complete_script_attempt_and_open_review_gate_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        task: Task,
+        workflow_state_id: str,
+        attempt_id: int,
+        trigger_reason: str,
+        script_output: Dict[str, Any],
+        artifact_ref: Dict[str, Any],
+        script_preview_text: str,
+    ) -> WorkflowGate:
+        review_contract = get_script_review_contract(session.input_payload) or {}
+        payload = set_script_review_contract(session.input_payload, None)
+        payload = set_published_deliverable_ref(
+            payload,
+            node_key="script",
+            ref=dict(artifact_ref or {}),
+        )
+        session.input_payload = payload
+
+        artifact_refs = [dict(artifact_ref or {})]
+        RuntimeSessionService.complete_node_attempt_sync(
+            db,
+            session,
+            node_key="script",
+            attempt_id=attempt_id,
+            output_artifacts=artifact_refs,
+            metrics={
+                "trigger_reason": trigger_reason,
+                "scenes_generated": script_output.get("scenes_generated"),
+                "total_scenes": script_output.get("total_scenes"),
+                "review_contract_action": review_contract.get("action"),
+            },
+            artifact_refs=artifact_refs,
+            diagnostics=[],
+            node_status=WorkflowNodeStatus.RUNNING.value,
+        )
+
+        return RuntimeSessionService.open_human_gate_sync(
+            db,
+            session,
+            node_key="script",
+            gate_name="script_review",
+            gate_type="human_review",
+            attempt_id=attempt_id,
+            scope={
+                "scope_type": "episode",
+                "scope_ref": str(workflow_state_id or ""),
+            },
+            artifact_refs=artifact_refs,
+            facts={
+                "workflow_state_id": workflow_state_id,
+                "scenes_generated": script_output.get("scenes_generated"),
+                "total_scenes": script_output.get("total_scenes"),
+                "script_preview_text": script_preview_text,
+                "trigger_reason": trigger_reason,
+            },
+            reason_code=str(trigger_reason or "script_review_requested"),
+            diagnostics=[],
+            allowed_actions=["approve", "revise", "replan"],
+            recommended_action="approve",
+            task=task,
+            progress_step="Waiting for script approval",
+            progress_percentage=35,
+        )
 
     @staticmethod
     def submit_gate_decision_sync(

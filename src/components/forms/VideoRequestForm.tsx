@@ -60,7 +60,7 @@ const VideoRequestForm: React.FC = () => {
       try {
         const result = await ApiClient.getCurrentQuickRun(currentSessionId);
         if (!cancelled) {
-          setExistingRun(result.task ? result : null);
+          setExistingRun(result.task && result.workflow_status ? result : null);
           setExistingRunDismissed(false);
         }
       } catch (error) {
