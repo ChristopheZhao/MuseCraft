@@ -5,7 +5,7 @@
             "id": "PLAN-20260306-001",
       "title": "音频编排边界收敛与 Orchestrator 计划化修复",
       "kind": "fix",
-      "status": "completed",
+      "status": "archived",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260306-001.md",
@@ -1309,6 +1309,77 @@
         {
           "at": "2026-03-26T09:54:29Z",
           "text": "Recorded a post-closeout same-class micro cleanup without reopening lifecycle: removed the last three backend unit-test project_runtime_payload_deliverables stubs, verified zero remaining grep matches plus changed-file py_compile, and observed the same local focused-pytest D-state blocker already tracked as environment/tooling debt"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260326-026",
+      "title": "MAS residual purity successor for runtime read-path, scene-info contract, and governance inventory cleanup",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/archive/2026-03/PLAN-20260326-026.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-26T10:33:07Z",
+      "updated_at": "2026-03-26T14:19:04Z",
+      "archived_at": "2026-03-26T14:19:04Z",
+      "notes": [
+        {
+          "at": "2026-03-26T10:33:07Z",
+          "text": "Created a managed successor after the latest handoff and direct codepath review confirmed the remaining issues are active residual purity problems rather than a reason to reopen 022/023/025 or fold 024 back into the single-episode cleanup stream"
+        },
+        {
+          "at": "2026-03-26T10:33:07Z",
+          "text": "Completed Phase 0 governance freeze by creating the new successor plan plus validation ledger, freezing the phase order to runtime read-path purity, scene-info contract purity, low-level compat seam retirement, and architecture governance inventory refresh, with an explicit user-confirmation gate between every phase"
+        },
+        {
+          "at": "2026-03-26T12:00:11Z",
+          "text": "Tightened the Phase 0 audit trail after review found the original diff note did not explicitly cover the two untracked governance files; recorded tracked PLAN_INDEX diff evidence, no-index added-file diffs for the new successor assets, and a focused git status snapshot so the governance-only change set is fully auditable"
+        },
+        {
+          "at": "2026-03-26T12:05:28Z",
+          "text": "User confirmed Phase 0 and the plan moved to in_progress for Phase 1, with implementation explicitly limited to runtime read-path purity and focused validation that GET runtime reads no longer create sessions or repair default nodes"
+        },
+        {
+          "at": "2026-03-26T12:11:56Z",
+          "text": "Completed Phase 1 runtime read-path purity: removed implicit bootstrap/repair from runtime-view builders, kept session creation/default-node initialization on explicit write-side owners, and validated the new no-write-on-read behavior plus endpoint absence/integrity contracts with backend py_compile, bootstrap-helper grep, and focused backend pytest (18 passed)"
+        },
+        {
+          "at": "2026-03-26T12:26:17Z",
+          "text": "Completed Phase 2 scene-info contract purity: scene_info reference persistence now fails closed with explicit diagnostics, ContextContractAssembler no longer emits scene_info_payload fallback into leaf-facing static context, and focused backend pytest plus fallback-removal grep validated both success and fail-close paths"
+        },
+        {
+          "at": "2026-03-26T12:27:51Z",
+          "text": "Synced the plan wording after Phase 2 so the status-management section no longer describes 026 as still in draft/Phase-0-only state; lifecycle remains in_progress while waiting for user confirmation before Phase 3"
+        },
+        {
+          "at": "2026-03-26T12:40:09Z",
+          "text": "Completed Phase 3 low-level compat seam retirement: removed ContextContractAssembler.apply_execution_boundary(), stopped build_video_composer_context() from emitting legacy requests hints into active static context, moved legacy composer-vocabulary rejection to the explicit execution-contract boundary, and validated the change set with changed-file py_compile, production-only grep, and focused backend pytest (16 passed)"
+        },
+        {
+          "at": "2026-03-26T12:47:19Z",
+          "text": "Completed Phase 4 architecture governance inventory refresh: updated mas_architecture_deviation_inventory_20260323.md to absorb the verified 026 closeout facts, removed stale residual claims about memory_views fail-open and legacy websocket business-state vocabulary, and restated that 024 project-wrapper host uniformity remains a separate retained item rather than part of the single-episode cleanup stream"
+        },
+        {
+          "at": "2026-03-26T13:18:20Z",
+          "text": "Post-closeout review found that 026 Phase 3 had been closed too early: execution_contract is still not the sole video_composer input authority because active context projection continues to infer compose intent from helper state. Rolled governance back accordingly by returning Phase 3 to in_progress, returning Phase 4 to pending, and downgrading the deviation inventory to an interim non-overstated state until the composer contract-authority residual is actually fixed"
+        },
+        {
+          "at": "2026-03-26T13:48:01Z",
+          "text": "Completed the repaired 026 Phase 3 composer contract-authority alignment: active orchestration now builds execution_contract before composer context assembly, ContextContractAssembler threads that contract into build_video_composer_context(), helper-side compose inference and requests-based active/integration paths are removed, and validation passed with changed-file py_compile, 17 focused unit passes plus 2 integration passes, and inference-removal grep. Phase 4 remains pending user confirmation"
+        },
+        {
+          "at": "2026-03-26T13:57:05Z",
+          "text": "Completed 026 Phase 4 governance refresh: the deviation inventory now reflects the repaired Phase 3 facts without overstating an active composer-authority residual, 024 remains explicitly isolated as the retained project-wrapper host-uniformity item, PLAN_INDEX.json revalidated successfully, and the plan moved to awaiting_user_confirmation rather than completed so final lifecycle closeout still requires explicit user acceptance"
+        },
+        {
+          "at": "2026-03-26T14:15:58Z",
+          "text": "User accepted the full 026 result set after Phase 4 closeout, so the managed lifecycle is now marked completed; confirmed_by_user is true and no new implementation or governance scope was added during final closeout"
+        },
+        {
+          "at": "2026-03-26T14:19:04Z",
+          "text": "Archived 026 on user request after completion: moved the plan and validation ledger from docs/plans/active/ to docs/plans/archive/2026-03/, updated file_path and archived_at in PLAN_INDEX.json, and left 024 as the only active retained follow-up in this area"
         }
       ]
     }

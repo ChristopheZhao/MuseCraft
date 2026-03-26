@@ -67,13 +67,13 @@ def get_video_composer_execution_contract(
     workflow_state_id: str = "",
 ) -> Dict[str, Any]:
     if isinstance(payload, dict):
+        if _contains_legacy_compose_inputs(payload):
+            raise ValueError(
+                "legacy video_composer inputs are no longer supported; provide execution_contract without legacy compose flags"
+            )
         contract = payload.get("execution_contract")
         if isinstance(contract, dict):
             return dict(contract)
-        if _contains_legacy_compose_inputs(payload):
-            raise ValueError(
-                "legacy video_composer inputs are no longer supported; provide execution_contract instead"
-            )
     return build_video_composer_execution_contract(
         workflow_state_id=str(workflow_state_id or ""),
     )

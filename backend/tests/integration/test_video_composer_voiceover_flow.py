@@ -154,10 +154,14 @@ async def test_video_composer_voiceover_flow() -> None:
     write_shared_fact(wf_id, "scene_outputs.voice", scene_outputs_voice, service=memory_services.short_term)
     write_shared_fact(wf_id, "scene_overview", {"scenes": overview_scenes}, service=memory_services.short_term)
 
+    execution_contract = build_video_composer_execution_contract(
+        workflow_state_id=wf_id,
+        compose_mode="voiceover",
+    )
     static_context = build_video_composer_context(
         wf_id,
         service=memory_services.short_term,
-        requests={"compose_requested": True, "voiceover_requested": True, "bgm_requested": False},
+        execution_contract=execution_contract,
     )
     scene_media_ref = static_context.get("scene_media_ref") or ""
     assert scene_media_ref
@@ -176,10 +180,7 @@ async def test_video_composer_voiceover_flow() -> None:
     input_data = {
         "workflow_state_id": wf_id,
         "user_prompt": "compose with voiceover",
-        "execution_contract": build_video_composer_execution_contract(
-            workflow_state_id=wf_id,
-            compose_mode="voiceover",
-        ),
+        "execution_contract": execution_contract,
         "static_context": static_context,
     }
 

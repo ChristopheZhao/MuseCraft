@@ -338,13 +338,23 @@ async def get_current_quick_run(
 ):
     """Discover the latest unfinished quick run for the current workspace session."""
 
+    logger = logging.getLogger("tasks_api")
     task, _runtime_session = await _find_unfinished_quick_task_for_session(db, session_id)
     if task is None:
         return None
 
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    try:
+        runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    except ValueError as exc:
+        logger.error(
+            "Quick current runtime projection integrity error: task_id=%s session_id=%s detail=%s",
+            getattr(task, "task_id", None),
+            session_id,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if runtime_view is None:
-        logging.getLogger("tasks_api").warning(
+        logger.warning(
             "Suppressing quick current task without runtime view: task_id=%s session_id=%s",
             getattr(task, "task_id", None),
             session_id,
@@ -530,7 +540,10 @@ async def get_task_runtime(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    try:
+        runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if runtime_view is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
 

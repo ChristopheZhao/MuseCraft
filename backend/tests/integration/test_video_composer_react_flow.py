@@ -146,10 +146,14 @@ async def test_video_composer_react_flow() -> None:
         service=memory_services.short_term,
     )
 
+    execution_contract = build_video_composer_execution_contract(
+        workflow_state_id=wf_id,
+        compose_mode="bgm",
+    )
     static_context = build_video_composer_context(
         wf_id,
         service=memory_services.short_term,
-        requests={"bgm_requested": True, "voiceover_requested": False, "compose_requested": False},
+        execution_contract=execution_contract,
     )
 
     task = Task(
@@ -165,10 +169,7 @@ async def test_video_composer_react_flow() -> None:
     input_data = {
         "workflow_state_id": wf_id,
         "user_prompt": "mix bgm",
-        "execution_contract": build_video_composer_execution_contract(
-            workflow_state_id=wf_id,
-            compose_mode="bgm",
-        ),
+        "execution_contract": execution_contract,
         "static_context": static_context,
     }
 

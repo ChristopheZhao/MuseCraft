@@ -1,5 +1,6 @@
 import pytest
 import json
+from pathlib import Path
 
 from app.agents.adapters.memory_views import (
     build_video_composer_context,
@@ -23,6 +24,7 @@ from app.agents.utils.memory_helpers import (
     get_mas_working_memory,
     write_shared_fact,
 )
+from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
 def _build_service() -> WorkingMemoryService:
@@ -253,15 +255,190 @@ def test_video_composer_context_does_not_promote_legacy_nested_scene_outputs():
         service=service,
     )
 
-    composer_ctx = build_video_composer_context(workflow_id, service=service)
+    with pytest.raises(ValueError, match="missing scene_videos"):
+        build_video_composer_context(workflow_id, service=service)
 
-    assert composer_ctx["final_video"] == {"path": "", "url": ""}
-    assert composer_ctx["background_music"] == {
-        "path": "",
-        "url": "",
-        "duration": 0.0,
-        "style": "",
-    }
+
+def test_video_composer_context_compose_contract_keeps_scene_inputs_even_when_final_video_exists():
+    service = _build_service()
+    workflow_id = "wf-composer-compose-authority"
+
+    write_shared_fact(
+        workflow_id,
+        "project.final_video",
+        {"path": "/tmp/stale-final.mp4", "url": "file:///tmp/stale-final.mp4"},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.voice",
+        {
+            "1": {
+                "scene_number": 1,
+                "audio_path": "/tmp/scene-1.wav",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "duration": 1.0}]},
+        service=service,
+    )
+
+    composer_ctx = build_video_composer_context(
+        workflow_id,
+        service=service,
+        execution_contract=build_video_composer_execution_contract(
+            workflow_state_id=workflow_id,
+            compose_mode="compose",
+        ),
+    )
+
+    assert composer_ctx["scene_videos"][0]["local_path"] == "/tmp/scene-1.mp4"
+    assert "final_video" not in composer_ctx
+    assert "scene_voiceovers" not in composer_ctx
+    assert "voice_assets" not in composer_ctx
+    scene_media_ref = composer_ctx.get("scene_media_ref")
+    assert scene_media_ref
+    payload_path = Path(scene_media_ref)
+    if not payload_path.is_absolute():
+        payload_path = Path(__file__).resolve().parents[2] / payload_path
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["scenes"][0]["video_file"] == "/tmp/scene-1.mp4"
+    assert "audio_file" not in payload["scenes"][0]
+
+
+def test_video_composer_context_voiceover_contract_includes_scene_audio_in_ref():
+    service = _build_service()
+    workflow_id = "wf-composer-voice-authority"
+
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.voice",
+        {
+            "1": {
+                "scene_number": 1,
+                "audio_path": "/tmp/scene-1.wav",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "project.voice_assets",
+        {
+            "1": {
+                "local_path": "/tmp/scene-1.wav",
+                "duration": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "duration": 1.0}]},
+        service=service,
+    )
+
+    composer_ctx = build_video_composer_context(
+        workflow_id,
+        service=service,
+        execution_contract=build_video_composer_execution_contract(
+            workflow_state_id=workflow_id,
+            compose_mode="voiceover",
+        ),
+    )
+
+    assert composer_ctx["scene_media_has_voice"] is True
+    scene_media_ref = composer_ctx.get("scene_media_ref")
+    assert scene_media_ref
+    payload_path = Path(scene_media_ref)
+    if not payload_path.is_absolute():
+        payload_path = Path(__file__).resolve().parents[2] / payload_path
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["scenes"][0]["audio_file"] == "/tmp/scene-1.wav"
+
+
+def test_video_composer_context_bgm_contract_hides_scene_inputs_and_requires_final_video():
+    service = _build_service()
+    workflow_id = "wf-composer-bgm-authority"
+
+    write_shared_fact(
+        workflow_id,
+        "project.background_music",
+        {"audio_path": "/tmp/bgm.wav", "audio_url": "file:///tmp/bgm.wav", "duration": 2.0},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    contract = build_video_composer_execution_contract(
+        workflow_state_id=workflow_id,
+        compose_mode="bgm",
+    )
+
+    with pytest.raises(ValueError, match="missing final_video"):
+        build_video_composer_context(
+            workflow_id,
+            service=service,
+            execution_contract=contract,
+        )
+
+    write_shared_fact(
+        workflow_id,
+        "project.final_video",
+        {"path": "/tmp/final.mp4", "url": "file:///tmp/final.mp4"},
+        service=service,
+    )
+
+    composer_ctx = build_video_composer_context(
+        workflow_id,
+        service=service,
+        execution_contract=contract,
+    )
+
+    assert composer_ctx["final_video"]["path"] == "/tmp/final.mp4"
+    assert composer_ctx["background_music"]["path"] == "/tmp/bgm.wav"
+    assert "scene_videos" not in composer_ctx
+    assert "scene_media_ref" not in composer_ctx
 
 
 def test_load_scene_overview_does_not_fallback_to_legacy_video_memory_adapter():

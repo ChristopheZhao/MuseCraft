@@ -656,14 +656,6 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.info(f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
                 
                 try:
-                    # Prepare agent input with creative context (if available)
-                    self.logger.info(f"🧠 DEBUG: Preparing context for {agent_type.value}")
-                    agent_input = await self._prepare_agent_context(
-                        workflow_data,
-                        agent_type,
-                        wf_id,
-                        runtime_input_payload=runtime_input_payload,
-                    )
                     boundary_assembler = self._get_context_contract_assembler()
                     runtime_hints = boundary_assembler.resolve_runtime_hints(
                         workflow_state_id=wf_id,
@@ -674,13 +666,17 @@ class OrchestratorAgent(BaseAgent):
                         workflow_state_id=wf_id,
                         runtime_hints=runtime_hints,
                     )
+                    # Prepare agent input with creative context (if available)
+                    self.logger.info(f"🧠 DEBUG: Preparing context for {agent_type.value}")
+                    agent_input = await self._prepare_agent_context(
+                        workflow_data,
+                        agent_type,
+                        wf_id,
+                        runtime_input_payload=runtime_input_payload,
+                        execution_contract=execution_contract,
+                    )
                     if isinstance(execution_contract, dict) and execution_contract:
                         agent_input["execution_contract"] = execution_contract
-                        agent_input = boundary_assembler.apply_execution_boundary(
-                            agent_type=agent_type,
-                            agent_input=agent_input,
-                            execution_contract=execution_contract,
-                        )
                     # 注入 task 指令（LLM 分解或回退），与 static_context 并行
                     try:
                         task_spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
@@ -1528,6 +1524,7 @@ class OrchestratorAgent(BaseAgent):
         workflow_id: str,
         *,
         runtime_input_payload: Optional[Dict[str, Any]] = None,
+        execution_contract: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """为Agent准备包含创意指导的上下文数据"""
 
@@ -1563,6 +1560,7 @@ class OrchestratorAgent(BaseAgent):
                 workflow_state_id=workflow_id,
                 workflow_data=workflow_data,
                 runtime_input_payload=runtime_input_payload,
+                execution_contract=execution_contract,
             )
             if isinstance(boundary_context, dict):
                 assembler_diagnostics = boundary_context.pop("_assembler_diagnostics", None)

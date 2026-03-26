@@ -14,6 +14,8 @@ from app.core.database import Base
 from app.models import AgentType, Task, TaskStatus, TaskType
 from app.services.context_assembler import ContextContractAssembler
 from app.services.runtime_session_service import RuntimeSessionService
+from app.services.scene_info_reference_service import SceneInfoReferencePersistenceError
+from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
 def _build_service() -> WorkingMemoryService:
@@ -238,6 +240,149 @@ def test_assemble_agent_context_requires_no_projection_when_runtime_input_carrie
     assert diagnostics["source"] == "runtime_input"
 
 
+def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(tmp_path, monkeypatch):
+    service = _build_service()
+    workflow_id = "wf-image-scene-info-ref"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+
+    payload_path = Path(tmp_path) / "script_runtime_direct.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "deliverable_type": "script",
+                "workflow_state_id": workflow_id,
+                "concept_plan": {
+                    "overview": "runtime-direct overview",
+                    "scenes": [{"scene_number": 1, "title": "Immortal cave"}],
+                },
+                "scene_overview": {
+                    "scenes": [
+                        {
+                            "scene_number": 1,
+                            "visual_description": "runtime-direct scene",
+                            "narrative_description": "runtime-direct narrative",
+                            "duration": 6.0,
+                        }
+                    ]
+                },
+                "scene_scripts": {
+                    "1": {
+                        "script_text": "runtime-direct script",
+                        "voice_over_text": "runtime-direct voice",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "app.services.context_assembler.persist_scene_info_ref",
+        lambda **kwargs: "/tmp/runtime-direct-scene-info.json",
+    )
+
+    boundary = assembler.assemble_agent_context(
+        agent_type=AgentType.IMAGE_GENERATOR,
+        workflow_state_id=workflow_id,
+        workflow_data={},
+        runtime_input_payload={
+            "published_deliverables": {
+                "script": {
+                    "type": "published_deliverable",
+                    "deliverable_id": 31,
+                    "deliverable_type": "script",
+                    "scope_type": "episode",
+                    "scope_id": "episode",
+                    "attempt_id": 9,
+                    "revision_no": 1,
+                    "payload_ref": str(payload_path),
+                    "summary": {"total_scenes": 1},
+                    "is_candidate": False,
+                    "is_approved": True,
+                }
+            }
+        },
+    )
+
+    static_context = boundary["static_context"]
+    assert static_context["scene_info_ref"] == "/tmp/runtime-direct-scene-info.json"
+    assert "scene_info_payload" not in static_context
+
+
+def test_assemble_agent_context_fails_closed_when_scene_info_ref_persistence_fails(tmp_path, monkeypatch):
+    service = _build_service()
+    workflow_id = "wf-image-scene-info-persist-fail"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+
+    payload_path = Path(tmp_path) / "script_runtime_direct.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "deliverable_type": "script",
+                "workflow_state_id": workflow_id,
+                "concept_plan": {
+                    "overview": "runtime-direct overview",
+                    "scenes": [{"scene_number": 1, "title": "Immortal cave"}],
+                },
+                "scene_overview": {
+                    "scenes": [
+                        {
+                            "scene_number": 1,
+                            "visual_description": "runtime-direct scene",
+                            "narrative_description": "runtime-direct narrative",
+                            "duration": 6.0,
+                        }
+                    ]
+                },
+                "scene_scripts": {
+                    "1": {
+                        "script_text": "runtime-direct script",
+                        "voice_over_text": "runtime-direct voice",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def _raise_persist_error(**kwargs):
+        raise SceneInfoReferencePersistenceError(
+            "Scene info persistence failed: workflow_id=wf-image-scene-info-persist-fail "
+            "agent_type=image_generator detail=disk_full"
+        )
+
+    monkeypatch.setattr(
+        "app.services.context_assembler.persist_scene_info_ref",
+        _raise_persist_error,
+    )
+
+    with pytest.raises(AgentError, match="Scene info ref persistence failed"):
+        assembler.assemble_agent_context(
+            agent_type=AgentType.IMAGE_GENERATOR,
+            workflow_state_id=workflow_id,
+            workflow_data={},
+            runtime_input_payload={
+                "published_deliverables": {
+                    "script": {
+                        "type": "published_deliverable",
+                        "deliverable_id": 32,
+                        "deliverable_type": "script",
+                        "scope_type": "episode",
+                        "scope_id": "episode",
+                        "attempt_id": 10,
+                        "revision_no": 1,
+                        "payload_ref": str(payload_path),
+                        "summary": {"total_scenes": 1},
+                        "is_candidate": False,
+                        "is_approved": True,
+                    }
+                }
+            },
+        )
+
+
 def test_resolve_published_stage_payload_raises_explicitly_when_required_runtime_input_missing():
     service = _build_service()
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
@@ -248,4 +393,73 @@ def test_resolve_published_stage_payload_raises_explicitly_when_required_runtime
             node_key="script",
             prefer_approved=True,
             required=True,
+        )
+
+
+def test_assemble_agent_context_projects_video_composer_from_execution_contract():
+    service = _build_service()
+    workflow_id = "wf-video-composer-boundary-compose"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+
+    write_shared_fact(
+        workflow_id,
+        "project.final_video",
+        {"path": "/tmp/stale-final.mp4", "url": "file:///tmp/stale-final.mp4"},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "duration": 1.0}]},
+        service=service,
+    )
+
+    boundary = assembler.assemble_agent_context(
+        agent_type=AgentType.VIDEO_COMPOSER,
+        workflow_state_id=workflow_id,
+        workflow_data={},
+        execution_contract=build_video_composer_execution_contract(
+            workflow_state_id=workflow_id,
+            compose_mode="compose",
+        ),
+    )
+
+    static_context = boundary["static_context"]
+    assert static_context["scene_videos"][0]["local_path"] == "/tmp/scene-1.mp4"
+    assert "final_video" not in static_context
+
+
+def test_assemble_agent_context_fails_closed_when_video_composer_bgm_boundary_lacks_final_video():
+    service = _build_service()
+    workflow_id = "wf-video-composer-boundary-bgm"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+
+    write_shared_fact(
+        workflow_id,
+        "project.background_music",
+        {"audio_path": "/tmp/bgm.wav", "audio_url": "file:///tmp/bgm.wav"},
+        service=service,
+    )
+
+    with pytest.raises(AgentError, match="missing final_video"):
+        assembler.assemble_agent_context(
+            agent_type=AgentType.VIDEO_COMPOSER,
+            workflow_state_id=workflow_id,
+            workflow_data={},
+            execution_contract=build_video_composer_execution_contract(
+                workflow_state_id=workflow_id,
+                compose_mode="bgm",
+            ),
         )

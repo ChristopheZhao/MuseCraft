@@ -10,7 +10,9 @@ from app.models import (
     TaskType,
     TaskStatus,
     WorkflowGateStatus,
+    WorkflowNodeState,
     WorkflowSessionStatus,
+    WorkflowSession,
     WorkflowNodeStatus,
 )
 from app.services.runtime_session_service import RuntimeSessionService
@@ -66,24 +68,41 @@ def test_get_or_create_session_initializes_default_nodes(sync_db):
     ]
 
 
-def test_build_runtime_view_sync_bootstraps_active_quick_task_without_session(sync_db):
+def test_build_runtime_view_sync_returns_none_without_session(sync_db):
     task = _create_task(sync_db)
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
-    assert view is not None
-    assert view["status"] == WorkflowSessionStatus.QUEUED.value
-    assert view["task_db_id"] == task.id
-    assert [node["node_key"] for node in view["nodes"]] == [
-        "concept",
-        "script",
-        "image",
-        "video",
-        "voice",
-        "compose",
-        "audio",
-        "quality",
-    ]
+    assert view is None
+    assert RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id) is None
+
+
+def test_build_runtime_view_sync_does_not_repair_missing_nodes(sync_db):
+    task = _create_task(sync_db)
+    session = WorkflowSession(
+        task_db_id=task.id,
+        mode="quick",
+        shared_memory_id=str(task.task_id),
+        status=WorkflowSessionStatus.QUEUED.value,
+        input_payload=task.input_parameters or {},
+        gate_policy={},
+    )
+    sync_db.add(session)
+    sync_db.commit()
+    sync_db.refresh(session)
+
+    with pytest.raises(
+        ValueError,
+        match="missing workflow nodes; read path cannot repair runtime invariants",
+    ):
+        RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    node_count = (
+        sync_db.query(WorkflowNodeState)
+        .filter(WorkflowNodeState.session_id == session.id)
+        .count()
+    )
+    assert node_count == 0
 
 
 def test_mark_session_running_and_completed_updates_projection(sync_db):
@@ -302,6 +321,35 @@ def test_mark_session_cancelled_for_task_cancels_without_runtime_session(monkeyp
     assert result is None
     assert task.status == TaskStatus.CANCELLED.value
     assert commit_events["count"] == 1
+
+
+def test_build_runtime_view_async_returns_none_without_bootstrapping_session(monkeypatch):
+    task = SimpleNamespace(
+        id=7,
+        status=TaskStatus.IN_PROGRESS.value,
+        input_parameters={"user_prompt": "test prompt"},
+    )
+    calls = {"create": 0, "ensure": 0}
+
+    async def _return_none(*args, **kwargs):
+        return None
+
+    async def _forbidden_create(*args, **kwargs):
+        calls["create"] += 1
+        raise AssertionError("read path must not create runtime sessions")
+
+    async def _forbidden_ensure(*args, **kwargs):
+        calls["ensure"] += 1
+        raise AssertionError("read path must not repair default nodes")
+
+    monkeypatch.setattr(RuntimeSessionService, "get_latest_session_for_task", _return_none)
+    monkeypatch.setattr(RuntimeSessionService, "create_session_for_task", _forbidden_create)
+    monkeypatch.setattr(RuntimeSessionService, "_ensure_default_nodes_async", _forbidden_ensure)
+
+    view = asyncio.run(RuntimeSessionService.build_runtime_view_for_task(object(), task))
+
+    assert view is None
+    assert calls == {"create": 0, "ensure": 0}
 
 
 def test_create_session_for_task_refreshes_task_after_commit(monkeypatch):

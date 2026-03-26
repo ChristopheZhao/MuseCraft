@@ -13,6 +13,7 @@ from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.memory_helpers import write_shared_fact
 from app.models import AgentType
 from app.services.context_assembler import ContextContractAssembler
+from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
 def _build_service() -> WorkingMemoryService:
@@ -276,3 +277,56 @@ def test_prepare_agent_context_pins_boundary_reads_to_runtime_input_payload(tmp_
     assert static_context["concept_plan"]["overview"] == "published overview"
     assert static_context["scenes_to_generate"][0]["scene_number"] == 1
     assert static_context["scenes_to_generate"][0]["script_text"] == "published script"
+
+
+def test_prepare_agent_context_projects_video_composer_from_execution_contract():
+    service = _build_service()
+    workflow_id = "wf-video-composer-prepare-boundary"
+
+    write_shared_fact(
+        workflow_id,
+        "project.final_video",
+        {"path": "/tmp/stale-final.mp4", "url": "file:///tmp/stale-final.mp4"},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "duration": 1.0}]},
+        service=service,
+    )
+
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=service)
+    agent.logger = logging.getLogger("test_orchestrator_video_composer_context_boundary")
+    agent._context_contract_assembler = ContextContractAssembler(
+        memory_services=SimpleNamespace(short_term=service)
+    )
+
+    agent_input = asyncio.run(
+        agent._prepare_agent_context(
+            {},
+            AgentType.VIDEO_COMPOSER,
+            workflow_id,
+            execution_contract=build_video_composer_execution_contract(
+                workflow_state_id=workflow_id,
+                compose_mode="compose",
+            ),
+        )
+    )
+
+    static_context = agent_input["static_context"]
+    assert static_context["scene_videos"][0]["local_path"] == "/tmp/scene-1.mp4"
+    assert "final_video" not in static_context

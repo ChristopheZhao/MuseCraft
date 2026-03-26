@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from fastapi import BackgroundTasks
 
 from app.api.v1.endpoints import tasks as tasks_endpoint
@@ -103,6 +104,33 @@ def test_task_runtime_is_the_authoritative_projection(monkeypatch):
     assert runtime_payload == runtime_view
 
 
+def test_task_runtime_returns_404_when_runtime_session_is_absent(monkeypatch):
+    task = SimpleNamespace(
+        id=8,
+        task_id="task-8",
+    )
+
+    class _FakeQueryResult:
+        def scalar_one_or_none(self):
+            return task
+
+    class _FakeDb:
+        async def execute(self, query):
+            return _FakeQueryResult()
+
+    async def _fake_runtime_view(db, task_obj):
+        assert task_obj is task
+        return None
+
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_runtime_view)
+
+    with pytest.raises(tasks_endpoint.HTTPException) as exc_info:
+        asyncio.run(tasks_endpoint.get_task_runtime("task-8", db=_FakeDb()))
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Runtime session not found"
+
+
 def test_get_current_quick_run_returns_existing_task_and_runtime(monkeypatch):
     now = datetime.now(timezone.utc)
     task = SimpleNamespace(
@@ -166,6 +194,41 @@ def test_get_current_quick_run_suppresses_task_without_runtime_truth(monkeypatch
     payload = asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-2", db=object()))
 
     assert payload is None
+
+
+def test_get_current_quick_run_surfaces_runtime_projection_integrity_error(monkeypatch):
+    now = datetime.now(timezone.utc)
+    task = SimpleNamespace(
+        id=14,
+        task_id="task-14",
+        title="Video: broken runtime...",
+        description="demo prompt",
+        status="in_progress",
+        session_id="quick-session-3",
+        input_parameters={"user_prompt": "Demo\n\nRun"},
+        created_at=now,
+        updated_at=now,
+        error_message=None,
+    )
+
+    async def _fake_find(db, session_id):
+        assert session_id == "quick-session-3"
+        return task, SimpleNamespace(id=99, status="running", mode="quick")
+
+    async def _broken_runtime_view(db, task_obj):
+        assert task_obj is task
+        raise ValueError(
+            "Runtime session 99 missing workflow nodes; read path cannot repair runtime invariants"
+        )
+
+    monkeypatch.setattr(tasks_endpoint, "_find_unfinished_quick_task_for_session", _fake_find)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _broken_runtime_view)
+
+    with pytest.raises(tasks_endpoint.HTTPException) as exc_info:
+        asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-3", db=object()))
+
+    assert exc_info.value.status_code == 500
+    assert "missing workflow nodes" in str(exc_info.value.detail)
 
 
 def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):

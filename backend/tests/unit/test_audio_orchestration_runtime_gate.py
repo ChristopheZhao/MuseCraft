@@ -304,7 +304,13 @@ def _build_main_loop_runtime_harness(
     async def _update_progress(*args, **kwargs):
         return None
 
-    async def _prepare_agent_context(workflow_data, agent_type, workflow_id, runtime_input_payload=None):
+    async def _prepare_agent_context(
+        workflow_data,
+        agent_type,
+        workflow_id,
+        runtime_input_payload=None,
+        execution_contract=None,
+    ):
         return dict(workflow_data)
 
     async def _llm_select_candidate_agents(*args, **kwargs):

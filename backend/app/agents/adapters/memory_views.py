@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
+from ...services.video_composer_execution_contract import get_video_composer_compose_mode
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
 
@@ -230,7 +231,7 @@ def build_video_composer_context(
     workflow_id: str,
     *,
     service: "WorkingMemoryService",
-    requests: Optional[Dict[str, Any]] = None,
+    execution_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Aggregate composer facts for ReAct planning."""
     ctx: Dict[str, Any] = {}
@@ -313,78 +314,12 @@ def build_video_composer_context(
         scene_videos = []
         scene_voiceovers = []
 
-    scene_media_ref: Optional[str] = None
-    scene_media_has_voice = False
-    if scene_videos:
-        scene_numbers = [int(item.get("scene_number") or 0) for item in scene_videos]
-        voice_map = {
-            int(item.get("scene_number") or 0): item
-            for item in scene_voiceovers
-            if isinstance(item, dict) and item.get("local_path")
-        }
-        all_voice_ready = bool(scene_numbers) and all(sn in voice_map for sn in scene_numbers)
-        scene_media_has_voice = all_voice_ready
-        scene_media: List[Dict[str, Any]] = []
-        for item in scene_videos:
-            if not isinstance(item, dict):
-                continue
-            try:
-                sn = int(item.get("scene_number") or 0)
-            except Exception:
-                continue
-            video_path = (item.get("local_path") or "").strip()
-            if not video_path:
-                continue
-            entry: Dict[str, Any] = {
-                "scene_number": sn,
-                "video_file": video_path,
-                "duration": float(item.get("duration") or 0.0),
-            }
-            if all_voice_ready:
-                entry["audio_file"] = voice_map[sn].get("local_path") or ""
-            scene_media.append(entry)
-        if scene_media:
-            try:
-                base_dir = Path(settings.TEMP_PATH) / "context"
-                base_dir.mkdir(parents=True, exist_ok=True)
-                filename = f"video_composer_scene_media_{workflow_id}.json"
-                ref_path = (base_dir / filename).resolve()
-                with open(ref_path, "w", encoding="utf-8") as fh:
-                    json.dump({"scenes": scene_media}, fh, ensure_ascii=False)
-                try:
-                    backend_root = Path(__file__).resolve().parents[3]
-                    scene_media_ref = str(ref_path.relative_to(backend_root))
-                except Exception:
-                    scene_media_ref = str(ref_path)
-            except Exception:
-                scene_media_ref = None
-
-    has_final = bool(
-        isinstance(final_video, dict)
-        and (str(final_video.get("path") or "").strip() or str(final_video.get("url") or "").strip())
-    )
-    requested = requests or {}
-    compose_requested = bool(requested.get("compose_requested", (not has_final) and len(scene_videos) > 0))
-
-    ctx["final_video"] = {
+    compose_mode = get_video_composer_compose_mode(execution_contract)
+    final_video_ctx = {
         "path": final_video.get("path", "") if isinstance(final_video, dict) else "",
         "url": final_video.get("url", "") if isinstance(final_video, dict) else "",
     }
-    if compose_requested:
-        ctx["scene_videos"] = scene_videos
-    else:
-        ctx["scene_videos"] = []
-    ctx["scene_voiceovers"] = scene_voiceovers
-    ctx["scene_media_has_voice"] = scene_media_has_voice
-    if compose_requested and scene_media_ref:
-        ctx["scene_media_ref"] = scene_media_ref
-        key_illustration = dict(ctx.get("key_illustration") or {})
-        key_illustration.setdefault(
-            "scene_media_ref",
-            "场景合成清单的引用地址（包含场景视频路径/时长，可能包含配音路径）",
-        )
-        ctx["key_illustration"] = key_illustration
-    ctx["background_music"] = {
+    background_music_ctx = {
         "path": bgm.get("audio_path", "") if isinstance(bgm, dict) else "",
         "url": bgm.get("audio_url", "") if isinstance(bgm, dict) else "",
         "duration": (bgm.get("duration") or 0.0) if isinstance(bgm, dict) else 0.0,
@@ -399,24 +334,128 @@ def build_video_composer_context(
         }
         for k, v in (voice_assets.items() if isinstance(voice_assets, dict) else [])
     ]
-    ctx["voice_assets"] = voice_assets_ctx
-    # 当使用包含配音的合成清单时，隐藏逐场景音频路径，避免误导模型逐场景混音。
-    if (
-        scene_media_ref
-        and scene_media_has_voice
-        and bool(getattr(settings, "COMPOSER_HIDE_SCENE_AUDIO_ON_REF", False))
-    ):
-        ctx["scene_voiceovers"] = []
-        ctx["voice_assets"] = []
-    ctx["voice_settings"] = voice_settings if isinstance(voice_settings, dict) else {}
-    ctx["ducking_config"] = vm_state.get("ducking_config", {}) if isinstance(vm_state, dict) else {}
-    voiceover_requested = bool(requested.get("voiceover_requested", False))
-    ctx["requests"] = {
-        "compose_requested": compose_requested,
-        "voiceover_requested": voiceover_requested,
-        "bgm_requested": bool(requested.get("bgm_requested", False)),
-    }
+    scene_media_ref, scene_media_has_voice = _build_video_composer_scene_media_ref(
+        workflow_id=workflow_id,
+        scene_videos=scene_videos,
+        scene_voiceovers=scene_voiceovers,
+        include_voice_tracks=compose_mode == "voiceover",
+    )
+    if compose_mode == "bgm":
+        if not _has_video_artifact(final_video_ctx):
+            raise ValueError(
+                f"video_composer static context missing final_video for compose_mode=bgm: workflow_id={workflow_id}"
+            )
+        if not _has_audio_artifact(background_music_ctx):
+            raise ValueError(
+                f"video_composer static context missing background_music for compose_mode=bgm: workflow_id={workflow_id}"
+            )
+        ctx["final_video"] = final_video_ctx
+        ctx["background_music"] = background_music_ctx
+        ctx["ducking_config"] = vm_state.get("ducking_config", {}) if isinstance(vm_state, dict) else {}
+        return ctx
+
+    if not scene_videos:
+        raise ValueError(
+            "video_composer static context missing scene_videos for "
+            f"compose_mode={compose_mode}: workflow_id={workflow_id}"
+        )
+
+    ctx["scene_videos"] = scene_videos
+    if scene_media_ref:
+        ctx["scene_media_ref"] = scene_media_ref
+        key_illustration = dict(ctx.get("key_illustration") or {})
+        key_illustration.setdefault(
+            "scene_media_ref",
+            "场景合成清单的引用地址（包含场景视频路径/时长，可能包含配音路径）",
+        )
+        ctx["key_illustration"] = key_illustration
+
+    if compose_mode == "voiceover":
+        if not scene_media_has_voice:
+            raise ValueError(
+                "video_composer static context missing complete scene voice tracks for "
+                f"compose_mode=voiceover: workflow_id={workflow_id}"
+            )
+        ctx["scene_voiceovers"] = scene_voiceovers
+        ctx["scene_media_has_voice"] = True
+        ctx["voice_assets"] = voice_assets_ctx
+        if (
+            scene_media_ref
+            and bool(getattr(settings, "COMPOSER_HIDE_SCENE_AUDIO_ON_REF", False))
+        ):
+            ctx["scene_voiceovers"] = []
+            ctx["voice_assets"] = []
+        ctx["voice_settings"] = voice_settings if isinstance(voice_settings, dict) else {}
+        ctx["ducking_config"] = vm_state.get("ducking_config", {}) if isinstance(vm_state, dict) else {}
     return ctx
+
+
+def _has_video_artifact(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(str(payload.get("path") or "").strip() or str(payload.get("url") or "").strip())
+
+
+def _has_audio_artifact(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(str(payload.get("path") or "").strip() or str(payload.get("url") or "").strip())
+
+
+def _build_video_composer_scene_media_ref(
+    *,
+    workflow_id: str,
+    scene_videos: List[Dict[str, Any]],
+    scene_voiceovers: List[Dict[str, Any]],
+    include_voice_tracks: bool,
+) -> tuple[Optional[str], bool]:
+    if not scene_videos:
+        return None, False
+
+    scene_numbers = [int(item.get("scene_number") or 0) for item in scene_videos]
+    voice_map = {
+        int(item.get("scene_number") or 0): item
+        for item in scene_voiceovers
+        if isinstance(item, dict) and item.get("local_path")
+    }
+    scene_media_has_voice = bool(scene_numbers) and all(sn in voice_map for sn in scene_numbers)
+    include_audio = include_voice_tracks and scene_media_has_voice
+    scene_media: List[Dict[str, Any]] = []
+    for item in scene_videos:
+        if not isinstance(item, dict):
+            continue
+        try:
+            sn = int(item.get("scene_number") or 0)
+        except Exception:
+            continue
+        video_path = (item.get("local_path") or "").strip()
+        if not video_path:
+            continue
+        entry: Dict[str, Any] = {
+            "scene_number": sn,
+            "video_file": video_path,
+            "duration": float(item.get("duration") or 0.0),
+        }
+        if include_audio:
+            entry["audio_file"] = voice_map[sn].get("local_path") or ""
+        scene_media.append(entry)
+    if not scene_media:
+        return None, include_audio
+    try:
+        base_dir = Path(settings.TEMP_PATH) / "context"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"video_composer_scene_media_{workflow_id}.json"
+        ref_path = (base_dir / filename).resolve()
+        with open(ref_path, "w", encoding="utf-8") as fh:
+            json.dump({"scenes": scene_media}, fh, ensure_ascii=False)
+        try:
+            backend_root = Path(__file__).resolve().parents[3]
+            scene_media_ref = str(ref_path.relative_to(backend_root))
+        except Exception:
+            scene_media_ref = str(ref_path)
+        return scene_media_ref, include_audio
+    except Exception:
+        return None, include_audio
 
 
 def build_image_generation_context(

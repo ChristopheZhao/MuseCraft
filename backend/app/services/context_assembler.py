@@ -30,7 +30,10 @@ from .published_deliverable_service import (
     get_published_deliverables,
     load_published_payload,
 )
-from .scene_info_reference_service import persist_scene_info_ref
+from .scene_info_reference_service import (
+    SceneInfoReferencePersistenceError,
+    persist_scene_info_ref,
+)
 from .script_review_contract import build_script_preview_text
 from .video_composer_execution_contract import (
     build_video_composer_execution_contract,
@@ -50,13 +53,18 @@ class ContextContractAssembler:
         workflow_state_id: str,
         agent_type: AgentType,
         payload: Dict[str, Any],
-    ) -> Optional[str]:
-        ref = persist_scene_info_ref(
-            workflow_id=workflow_state_id,
-            agent_type=agent_type,
-            payload=payload,
-        )
-        return ref or None
+    ) -> str:
+        try:
+            return persist_scene_info_ref(
+                workflow_id=workflow_state_id,
+                agent_type=agent_type,
+                payload=payload,
+            )
+        except SceneInfoReferencePersistenceError as exc:
+            raise AgentError(
+                "Scene info ref persistence failed: "
+                f"workflow_id={workflow_state_id} agent_type={agent_type.value} detail={exc}"
+            ) from exc
 
     def _build_scene_info_context(
         self,
@@ -64,7 +72,6 @@ class ContextContractAssembler:
         workflow_state_id: str,
         agent_type: AgentType,
         context_payload: Dict[str, Any],
-        scene_info_payload: Dict[str, Any],
         payload_for_ref: Dict[str, Any],
         key_illustration_defaults: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
@@ -82,11 +89,10 @@ class ContextContractAssembler:
                     key_illustration.setdefault(key, value)
                 context["key_illustration"] = key_illustration
             return context
-
-        fallback_context = dict(context_payload or {})
-        if scene_info_payload:
-            fallback_context["scene_info_payload"] = scene_info_payload
-        return fallback_context
+        raise AgentError(
+            "Scene info ref persistence returned empty ref unexpectedly: "
+            f"workflow_id={workflow_state_id} agent_type={agent_type.value}"
+        )
 
     @staticmethod
     def _compact_resolution_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
@@ -204,6 +210,7 @@ class ContextContractAssembler:
         workflow_state_id: str,
         workflow_data: Optional[Dict[str, Any]] = None,
         runtime_input_payload: Optional[Dict[str, Any]] = None,
+        execution_contract: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         workflow_payload = dict(workflow_data or {})
         runtime_payload = dict(runtime_input_payload or {})
@@ -268,11 +275,14 @@ class ContextContractAssembler:
                 assembled["audio_requirements"] = merged_req
 
         elif agent_type == AgentType.VIDEO_COMPOSER:
-            composer_ctx = build_video_composer_context(
-                workflow_state_id,
-                service=self._memory_services.short_term,
-                requests=None,
-            )
+            try:
+                composer_ctx = build_video_composer_context(
+                    workflow_state_id,
+                    service=self._memory_services.short_term,
+                    execution_contract=execution_contract,
+                )
+            except ValueError as exc:
+                raise AgentError(f"Invalid video_composer static context boundary: {exc}") from exc
             if composer_ctx:
                 static_context.update(composer_ctx)
 
@@ -290,7 +300,6 @@ class ContextContractAssembler:
                         workflow_state_id=workflow_state_id,
                         agent_type=agent_type,
                         context_payload=context_payload,
-                        scene_info_payload=scene_info_payload,
                         payload_for_ref=scene_info_payload or context_payload,
                     )
                 )
@@ -309,7 +318,6 @@ class ContextContractAssembler:
                         workflow_state_id=workflow_state_id,
                         agent_type=agent_type,
                         context_payload=context_payload,
-                        scene_info_payload=scene_info_payload,
                         payload_for_ref=scene_info_payload,
                         key_illustration_defaults={
                             "task_overview": "全局故事与风格/角色概览，仅用于规划",
@@ -399,27 +407,6 @@ class ContextContractAssembler:
                 raise AgentError(f"Invalid video_composer execution boundary: {exc}") from exc
 
         return {}
-
-    def apply_execution_boundary(
-        self,
-        *,
-        agent_type: AgentType,
-        agent_input: Dict[str, Any],
-        execution_contract: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        if agent_type != AgentType.VIDEO_COMPOSER or not isinstance(agent_input, dict):
-            return agent_input
-
-        normalized = dict(agent_input)
-        normalized.pop("add_bgm", None)
-        normalized.pop("add_voiceover", None)
-        normalized.pop("compose_requested", None)
-        static_context = normalized.get("static_context")
-        if isinstance(static_context, dict) and "requests" in static_context:
-            static_context = dict(static_context)
-            static_context.pop("requests", None)
-            normalized["static_context"] = static_context
-        return normalized
 
     def publish_script_review_boundary_sync(
         self,
