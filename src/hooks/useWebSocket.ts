@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { WebSocketMessage, MessageType, Agent, GenerationResult, AgentStatus } from '@/types';
+import { WebSocketMessage, GenerationResult, AgentStatus } from '@/types';
 import { ApiClient } from '@/lib/api';
 import { generateId } from '@/lib/utils';
 
@@ -289,40 +289,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     }
   }, [updateAgent]);
 
-  // Concept plan ready → update scenesPlanned
-  const handleConceptPlanReady = useCallback((msg: any) => {
-    try {
-      const count = (msg as any).scenes_count ?? ((msg as any).data && (msg as any).data.scenes_count);
-      if (typeof count === 'number') {
-        useAppStore.getState().setScenesPlanned(count);
-      }
-    } catch (e) {
-      console.warn('Failed to handle concept_plan_ready:', e);
-    }
-  }, []);
-
-  const handleImageAssetsReady = useCallback((msg: any) => {
-    try {
-      const count = (msg as any).images_count ?? ((msg as any).data && (msg as any).data.images_count);
-      if (typeof count === 'number') {
-        useAppStore.getState().setImagesGenerated(count);
-      }
-    } catch (e) {
-      console.warn('Failed to handle image_assets_ready:', e);
-    }
-  }, []);
-
-  const handleVideoAssetsReady = useCallback((msg: any) => {
-    try {
-      const count = (msg as any).videos_count ?? ((msg as any).data && (msg as any).data.videos_count);
-      if (typeof count === 'number') {
-        useAppStore.getState().setVideosGenerated(count);
-      }
-    } catch (e) {
-      console.warn('Failed to handle video_assets_ready:', e);
-    }
-  }, []);
-
   const handleWorkflowCompleted = useCallback((msg: any) => {
     addNotification({
       type: 'success',
@@ -349,15 +315,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       const normalized = String(state || '').toLowerCase();
 
       switch (normalized) {
-        case 'concept_plan_ready':
-          handleConceptPlanReady({ ...msg, ...payload });
-          break;
-        case 'image_assets_ready':
-          handleImageAssetsReady({ ...msg, ...payload });
-          break;
-        case 'video_assets_ready':
-          handleVideoAssetsReady({ ...msg, ...payload });
-          break;
         case 'workflow_completed':
           handleWorkflowCompleted({ ...msg, results: payload.results, ...payload });
           break;
@@ -377,7 +334,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       console.warn('Failed to handle event.state:', e);
     }
     void refreshRuntimeView();
-  }, [handleConceptPlanReady, handleImageAssetsReady, handleVideoAssetsReady, handleWorkflowCompleted, handleWorkflowFailed, updateAgent, refreshRuntimeView]);
+  }, [handleWorkflowCompleted, handleWorkflowFailed, updateAgent, refreshRuntimeView]);
 
   const handleConnectionEstablished = useCallback((msg: any) => {
     setWSConnected(true);
@@ -480,9 +437,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     handleSystemMessage,
     handleConnectionEstablished,
     handleSubscriptionConfirmed,
-    handleConceptPlanReady,
-    handleImageAssetsReady,
-    handleVideoAssetsReady,
     handleResultReady,
     handleError,
   ]);

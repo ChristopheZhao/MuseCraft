@@ -19,7 +19,7 @@ describe('task polling runtime authority', () => {
     jest.clearAllMocks();
   });
 
-  it('does not fall back to coarse status when runtime endpoint fails non-lag reads', async () => {
+  it('surfaces runtime endpoint errors without any coarse-status fallback path', async () => {
     const store = {
       currentRequest: {
         id: 'task-123',
@@ -36,16 +36,6 @@ describe('task polling runtime authority', () => {
     const runtimeSpy = jest
       .spyOn(ApiClient, 'getTaskRuntime')
       .mockRejectedValue(new TaskRuntimeEndpointError(500, 'runtime endpoint exploded'));
-    const coarseSpy = jest.spyOn(ApiClient, 'getTaskCoarseStatus').mockResolvedValue({
-      task_id: 'task-123',
-      status: 'completed',
-      progress_percentage: 100,
-      current_step: 'Completed',
-      error_message: undefined,
-      projection_role: 'compatibility_coarse_task_status',
-      runtime_authoritative: false,
-      agent_executions: [],
-    });
 
     const view = render(<PollingHarness />);
 
@@ -53,7 +43,6 @@ describe('task polling runtime authority', () => {
       expect(runtimeSpy).toHaveBeenCalledWith('task-123');
     });
 
-    expect(coarseSpy).not.toHaveBeenCalled();
     expect(store.addNotification).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',

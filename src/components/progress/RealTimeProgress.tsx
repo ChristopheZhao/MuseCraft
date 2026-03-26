@@ -8,8 +8,6 @@ import {
   AlertCircle,
   CheckCircle,
   Clock,
-  Film,
-  Image as ImageIcon,
   Loader2,
   Timer,
   Zap,
@@ -38,7 +36,7 @@ const nodeLabelMap: Record<string, string> = {
 };
 
 const RealTimeProgress: React.FC = () => {
-  const { agents, currentRequest, quickRuntime, scenesPlanned, imagesGenerated, videosGenerated } = useAppStore();
+  const { agents, currentRequest, quickRuntime } = useAppStore();
   const { t } = useI18n();
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
@@ -116,7 +114,6 @@ const RealTimeProgress: React.FC = () => {
             <h4 className="text-xl font-semibold text-gray-900">总体完成度 {metrics.overallProgress}%</h4>
             <p className="text-gray-600">{metrics.currentPhase}</p>
             {metrics.waitingGate && <p className="text-amber-700 mt-1">流程已暂停，等待脚本审核后继续。</p>}
-            {typeof scenesPlanned === 'number' && <p className="text-gray-600 mt-1">已规划场景：{scenesPlanned}</p>}
           </div>
           <div className="flex items-center space-x-4 flex-wrap justify-end">
             <div className="flex items-center space-x-2">
@@ -127,18 +124,6 @@ const RealTimeProgress: React.FC = () => {
               <CheckCircle className="w-5 h-5 text-blue-500" />
               <span className="text-sm font-medium text-gray-700">{metrics.completedNodes}/{metrics.totalNodes} 节点</span>
             </div>
-            {typeof imagesGenerated === 'number' && (
-              <div className="flex items-center space-x-2">
-                <ImageIcon className="w-5 h-5 text-purple-500" />
-                <span className="text-sm font-medium text-gray-700">图片 {imagesGenerated}</span>
-              </div>
-            )}
-            {typeof videosGenerated === 'number' && (
-              <div className="flex items-center space-x-2">
-                <Film className="w-5 h-5 text-indigo-500" />
-                <span className="text-sm font-medium text-gray-700">视频 {videosGenerated}</span>
-              </div>
-            )}
           </div>
         </div>
 
@@ -176,7 +161,7 @@ const RealTimeProgress: React.FC = () => {
             <Zap className="w-4 h-4" /> 遥测
           </div>
           <div className="text-lg font-semibold text-gray-900">{telemetryAgents.length}</div>
-          <div className="text-sm text-gray-600 mt-1">WS 遥测仅作辅助，不再驱动主流程节点</div>
+          <div className="text-sm text-gray-600 mt-1">WS 遥测仅作辅助，业务进度以 runtime read-model 为准</div>
         </div>
       </div>
 

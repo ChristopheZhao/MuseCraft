@@ -2,7 +2,7 @@
 
 日期：2026-03-23
 
-状态：working inventory（2026-03-25 refreshed）
+状态：working inventory（2026-03-26 refreshed）
 
 用途：基于已冻结的 canonical vocabulary，记录当前实现与 `single-episode harness` 四层 MAS 架构之间仍然存在的偏差、受控保留项与清理噪音。
 
@@ -87,11 +87,10 @@
 | [orchestration_observation_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_observation_adapter.py) | orchestration trace / observation sink | supporting capability | `controlled-transition` | 当前未见 active authority reader，但 `workflow.gates.*` / `workflow.signals.*` 命名仍会模糊 diagnostics 与 gate truth。 |
 | [orchestration_state_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/orchestration_state_adapter.py) | orchestration context persistence、compat diagnostics projection | supporting capability | `mostly-aligned` | 当前已显式禁止写 runtime control prefixes，并把 `plan / activation_pool / audio_route` 压到 diagnostics-only key 下。 |
 | [workflow_completion_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/workflow_completion_adapter.py) | bounded terminal summary / result persistence helper | 治理层支撑能力 | `mostly-aligned` | 已明确 `runtime_authoritative=false`，但仍保留少量 legacy terminal vocabulary。 |
-| [tasks.py `/{task_id}/status`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/tasks.py) 和 [api.ts `getTaskCoarseStatus()`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/lib/api.ts) | coarse task projection | external compatibility surface | `controlled-transition` | 当前已明确标注 compatibility-only，但保留了 alternative authority surface 的制度性入口。 |
 | [useWebSocket.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useWebSocket.ts)、[types/index.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/types/index.ts) | websocket event handling / legacy direct message vocabulary | frontend read-model consumer | `controlled-transition` | 当前主线已走 `event.* + refresh runtime`，但 legacy vocabulary 仍保留 future drift 入口。 |
 | [useTaskPolling.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useTaskPolling.ts)、[ProjectModeView.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/components/project/ProjectModeView.tsx)、[useProjectStore.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/store/useProjectStore.ts) | authority read-model consumers | frontend read-model consumer | `aligned` | 前端主线已停止构建第二套业务状态机。 |
-| [projects.py `_schedule_project_plan(...)`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/projects.py) | project planning 的 endpoint-local thread host | project wrapper / product job host | `out-of-scope-retained` | 它不触碰 single-episode runtime SoT，但说明 whole-system host uniformity 仍未完成。 |
-| [mas_state.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/state/mas_state.py) | facts summary / completion summary helper | supporting capability | `controlled-transition` | 当前已退回 facts-summary vocabulary，但仍接受 legacy nested `scene_outputs` shape。 |
+| [projects.py `_schedule_project_plan(...)`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/projects.py) | project planning 的 endpoint-local thread host | project wrapper / product job host | `out-of-scope-retained` | 它不触碰 single-episode runtime SoT，但说明 whole-system host uniformity 仍未完成；后续治理已拆到 [PLAN-20260325-024.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260325-024.md)。 |
+| [mas_state.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/state/mas_state.py) | facts summary / completion summary helper | supporting capability | `aligned` | 当前只消费 canonical `scene_outputs.*` facts，并显式忽略 legacy nested `scene_outputs` bundle；该 helper 已不再承担 compat bridge。 |
 
 ## 4. 当前总评
 
@@ -112,8 +111,7 @@
    - `project planning` 仍保留单独宿主。
    - 它不是 single-episode blocker，但会影响 whole-system host uniformity。
 
-3. compat authority surface / diagnostics vocabulary noise
-   - coarse `/status`
+3. residual compatibility / diagnostics vocabulary noise
    - legacy websocket vocabulary
    - diagnostics key naming
 
@@ -123,8 +121,7 @@
 
 1. 先消 active-path fail-open。
 2. 再收 project wrapper / host uniformity。
-3. 再删 compat authority surface。
-4. 最后清 diagnostics vocabulary / alias noise。
+3. 再清 remaining compatibility vocabulary / diagnostics noise。
 
 这个顺序的原因是：
 

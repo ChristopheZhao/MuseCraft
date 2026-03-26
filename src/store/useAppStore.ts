@@ -27,12 +27,6 @@ interface AppState {
   
   // UI状态
   ui: UIState;
-
-  // 概念规划：场景数（粗粒度状态）
-  scenesPlanned: number | null;
-  // 产物计数：图片/视频（粗粒度）
-  imagesGenerated: number | null;
-  videosGenerated: number | null;
   
   // WebSocket连接状态
   wsConnected: boolean;
@@ -52,23 +46,20 @@ interface AppState {
   setLoading: (loading: boolean) => void;
   setWSConnected: (connected: boolean) => void;
   setFinalVideoUrl: (url?: string) => void;
-  setScenesPlanned: (count: number | null) => void;
-  setImagesGenerated: (count: number | null) => void;
-  setVideosGenerated: (count: number | null) => void;
   
   // 重置状态
   reset: () => void;
 }
 
-const initialUIState: UIState = {
+const createInitialUIState = (): UIState => ({
   isLoading: false,
   currentStep: 'input',
   sidebarCollapsed: false,
   notifications: [],
   modal: null,
-};
+});
 
-const initialAgents: Agent[] = [
+const createInitialAgents = (): Agent[] => [
   {
     id: 'concept-generator',
     name: '概念生成',
@@ -141,13 +132,10 @@ export const useAppStore = create<AppState>()(
       currentRequest: null,
       finalVideoUrl: undefined,
       mode: 'quick',
-      agents: initialAgents,
+      agents: createInitialAgents(),
       results: [],
       quickRuntime: null,
-      ui: initialUIState,
-      scenesPlanned: null,
-      imagesGenerated: null,
-      videosGenerated: null,
+      ui: createInitialUIState(),
       wsConnected: false,
 
       // Actions
@@ -235,23 +223,14 @@ export const useAppStore = create<AppState>()(
       setWSConnected: (connected) =>
         set({ wsConnected: connected }, false, 'setWSConnected'),
 
-      setScenesPlanned: (count) =>
-        set({ scenesPlanned: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setScenesPlanned'),
-
-      setImagesGenerated: (count) =>
-        set({ imagesGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setImagesGenerated'),
-
-      setVideosGenerated: (count) =>
-        set({ videosGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setVideosGenerated'),
-
       reset: () =>
         set({
           currentRequest: null,
           finalVideoUrl: undefined,
-          agents: initialAgents,
+          agents: createInitialAgents(),
           results: [],
           quickRuntime: null,
-          ui: initialUIState,
+          ui: createInitialUIState(),
           wsConnected: false,
         }, false, 'reset'),
     })),

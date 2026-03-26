@@ -187,7 +187,7 @@ The system supports multiple AI services:
 - `POST /api/v1/tasks/` - Create new video generation task
 - `GET /api/v1/tasks/` - List all tasks
 - `GET /api/v1/tasks/{task_id}` - Get task details
-- `GET /api/v1/tasks/{task_id}/status` - Get task status and progress
+- `GET /api/v1/tasks/{task_id}/runtime` - Get authoritative runtime session view
 - `POST /api/v1/tasks/{task_id}/retry` - Retry failed task
 - `DELETE /api/v1/tasks/{task_id}` - Cancel task
 

@@ -130,17 +130,6 @@ class TaskDetailResponse(TaskResponse):
     agent_executions_count: int = 0
 
 
-class TaskCoarseStatusResponse(BaseModel):
-    task_id: str
-    status: str
-    progress_percentage: int
-    current_step: Optional[str]
-    error_message: Optional[str]
-    projection_role: str
-    runtime_authoritative: bool = False
-    agent_executions: List[Dict[str, Any]] = Field(default_factory=list)
-
-
 class SceneResponse(BaseModel):
     id: int
     scene_number: int
@@ -525,37 +514,6 @@ async def get_task_resources(
         )
         for resource in resources
     ]
-
-
-@router.get("/{task_id}/status", response_model=TaskCoarseStatusResponse)
-async def get_task_status(
-    task_id: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """Get a coarse task-level status projection.
-
-    Compatibility-only surface for legacy coarse-status consumers.
-    For authoritative live runtime state, use `/{task_id}/runtime`.
-    """
-    
-    # Get task
-    query = select(Task).where(Task.task_id == task_id)
-    result = await db.execute(query)
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    return {
-        "task_id": str(task.task_id),
-        "status": _val(task.status),
-        "progress_percentage": task.progress_percentage,
-        "current_step": task.current_step,
-        "error_message": task.error_message,
-        "projection_role": "compatibility_coarse_task_status",
-        "runtime_authoritative": False,
-        "agent_executions": []
-    }
 
 
 @router.get("/{task_id}/runtime")

@@ -68,7 +68,7 @@ def test_schedule_task_execution_uses_in_process_runner_only_when_enabled(monkey
     assert thread_events["task_id"] == 7
 
 
-def test_task_status_returns_coarse_projection_and_runtime_stays_runtime_sot(monkeypatch):
+def test_task_runtime_is_the_authoritative_projection(monkeypatch):
     runtime_view = {
         "session_id": 11,
         "status": "waiting_gate",
@@ -93,7 +93,6 @@ def test_task_status_returns_coarse_projection_and_runtime_stays_runtime_sot(mon
         async def execute(self, query):
             return _FakeQueryResult()
 
-    status_payload = asyncio.run(tasks_endpoint.get_task_status("task-7", db=_FakeDb()))
     async def _fake_runtime_view(db, task_obj):
         assert task_obj is task
         return runtime_view
@@ -101,11 +100,6 @@ def test_task_status_returns_coarse_projection_and_runtime_stays_runtime_sot(mon
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_runtime_view)
     runtime_payload = asyncio.run(tasks_endpoint.get_task_runtime("task-7", db=_FakeDb()))
 
-    assert status_payload["task_id"] == "task-7"
-    assert status_payload["status"] == "in_progress"
-    assert status_payload["projection_role"] == "compatibility_coarse_task_status"
-    assert status_payload["runtime_authoritative"] is False
-    assert "workflow_status" not in status_payload
     assert runtime_payload == runtime_view
 
 

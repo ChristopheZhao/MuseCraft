@@ -1136,11 +1136,11 @@
       "id": "PLAN-20260325-022",
       "title": "MAS canonical harness 回正与残余旁路清理总计划",
       "kind": "fix",
-      "status": "awaiting_user_confirmation",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260325-022.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-25T13:55:00Z",
       "updated_at": "2026-03-25T14:33:03Z",
       "archived_at": null,
@@ -1187,13 +1187,13 @@
       "id": "PLAN-20260325-023",
       "title": "MAS residual tail cleanup 与 product-wrapper host 后续治理",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260325-023.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-25T15:12:14Z",
-      "updated_at": "2026-03-25T15:12:14Z",
+      "updated_at": "2026-03-26T03:10:27Z",
       "archived_at": null,
       "notes": [
         {
@@ -1203,6 +1203,57 @@
         {
           "at": "2026-03-25T15:12:14Z",
           "text": "Froze the successor scope so 023 does not reopen 022: blocker cleanup stays acceptance-ready in the earlier plan while residual cleanup proceeds as a separate governance stream with its own validation ledger"
+        },
+        {
+          "at": "2026-03-25T15:26:57Z",
+          "text": "Moved the successor plan to in_progress and started Phase A on the three scoped frontend runtime-consumer files, with the change boundary frozen to removing WS-derived counters, keeping workflow_completed/workflow_failed as notification-plus-refresh triggers, and tightening reset so prior-run telemetry does not bleed into the next quick run"
+        },
+        {
+          "at": "2026-03-25T15:29:13Z",
+          "text": "Completed Phase A first-party frontend runtime-read-model strictness: removed the event.state counter writers for concept_plan_ready/image_assets_ready/video_assets_ready, deleted the corresponding app-store fields and RealTimeProgress consumption, kept workflow_completed/workflow_failed as notification-plus-refresh triggers only, and validated the slice with a focused frontend type-check plus grep confirming the residual vocabulary is gone from src"
+        },
+        {
+          "at": "2026-03-25T21:02:29Z",
+          "text": "Completed Phase B coarse compatibility surface governance by deleting the backend coarse /tasks/{id}/status endpoint, removing the remaining stale coarse-status test path, updating backend/API documentation to point at /{task_id}/runtime, refreshing the active deviation inventory, and validating the slice with changed-file py_compile, focused backend pytest (6 passed), and a zero-match grep across current code/docs while a supplemental frontend jest probe remained locally stuck without output"
+        },
+        {
+          "at": "2026-03-25T21:05:05Z",
+          "text": "Closed Phase C with a successor decision instead of in-plan host implementation: _schedule_project_plan(...) remains explicit project-wrapper/product-job retained scope, the active deviation inventory now points to PLAN-20260325-024, and 023 moved to awaiting_user_confirmation after all three phases completed"
+        },
+        {
+          "at": "2026-03-26T02:44:34Z",
+          "text": "Reopened the plan after review found one remaining MAS-misaligned frontend test fixture: __tests__/integration/runtime-gate-sync.test.tsx still mocked the deleted scenesPlanned/imagesGenerated/videosGenerated store fields, so a narrow cleanup slice is required before final closeout"
+        },
+        {
+          "at": "2026-03-26T02:45:22Z",
+          "text": "Completed the stale frontend test-fixture cleanup slice by deleting the removed telemetry fields from __tests__/integration/runtime-gate-sync.test.tsx, re-running repo grep to confirm those fields are gone from src/__tests__/tests, and returning 023 to awaiting_user_confirmation while the targeted jest probe remained locally stuck without output"
+        },
+        {
+          "at": "2026-03-26T03:10:27Z",
+          "text": "User accepted closeout after the stale fixture cleanup and deviation-inventory recheck; reran focused 023 validation (frontend runtime type-check, focused backend pytest for tasks endpoint and working-memory service, zero-match telemetry grep, and PLAN_INDEX.json parsing) and moved the plan to completed without reopening 022"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260325-024",
+      "title": "Project-wrapper host uniformity successor governance",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260325-024.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-25T21:05:05Z",
+      "updated_at": "2026-03-25T21:05:05Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-25T21:05:05Z",
+          "text": "Created a managed successor after PLAN-20260325-023 Phase C decided that project-wrapper host uniformity should be governed separately from the residual single-episode cleanup stream"
+        },
+        {
+          "at": "2026-03-25T21:05:05Z",
+          "text": "Froze the successor boundary so host work can converge only toward an independent product-job/shared host path or an explicit retained rationale, without being folded back into single-episode harness cleanup"
         }
       ]
     }
