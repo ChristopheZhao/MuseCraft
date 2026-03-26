@@ -192,10 +192,6 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
-        project_runtime_payload_deliverables=lambda **kwargs: {
-            "projected_count": 0,
-            "projected_nodes": [],
-        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
@@ -309,10 +305,6 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
-        project_runtime_payload_deliverables=lambda **kwargs: {
-            "projected_count": 0,
-            "projected_nodes": [],
-        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),

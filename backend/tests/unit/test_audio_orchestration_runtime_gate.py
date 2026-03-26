@@ -266,10 +266,6 @@ def _build_main_loop_runtime_harness(
         apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=lambda **kwargs: {},
-        project_runtime_payload_deliverables=lambda **kwargs: {
-            "projected_count": 0,
-            "projected_nodes": [],
-        },
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return_json({"final_video_url": ""}),

@@ -12,14 +12,24 @@ global.TextDecoder = TextDecoder as any
 
 // Mock WebSocket for testing
 class MockWebSocket {
-  public readyState: number = 1
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  static instances: MockWebSocket[] = []
+
+  public readyState: number = MockWebSocket.CONNECTING
   public onopen: ((event: Event) => void) | null = null
   public onclose: ((event: CloseEvent) => void) | null = null
   public onmessage: ((event: MessageEvent) => void) | null = null
   public onerror: ((event: Event) => void) | null = null
+  public sentMessages: Array<string | ArrayBuffer | Blob | ArrayBufferView> = []
 
   constructor(public url: string) {
+    MockWebSocket.instances.push(this)
     setTimeout(() => {
+      this.readyState = MockWebSocket.OPEN
       if (this.onopen) {
         this.onopen(new Event('open'))
       }
@@ -27,12 +37,12 @@ class MockWebSocket {
   }
 
   send(data: string | ArrayBuffer | Blob | ArrayBufferView) {
-    // Mock send implementation
+    this.sentMessages.push(data)
     console.log('Mock WebSocket send:', data)
   }
 
   close(code?: number, reason?: string) {
-    this.readyState = 3
+    this.readyState = MockWebSocket.CLOSED
     if (this.onclose) {
       this.onclose(new CloseEvent('close', { code, reason }))
     }
@@ -44,10 +54,23 @@ class MockWebSocket {
       this.onmessage(new MessageEvent('message', { data: JSON.stringify(data) }))
     }
   }
+
+  static resetInstances() {
+    MockWebSocket.instances = []
+  }
 }
 
 // @ts-ignore
 global.WebSocket = MockWebSocket
+
+export const mockWebSocketTestUtils = {
+  reset() {
+    MockWebSocket.resetInstances()
+  },
+  getLastSocket(): MockWebSocket | null {
+    return MockWebSocket.instances[MockWebSocket.instances.length - 1] || null
+  },
+}
 
 // Mock IntersectionObserver
 global.IntersectionObserver = class IntersectionObserver {

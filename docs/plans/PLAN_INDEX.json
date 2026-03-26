@@ -1142,7 +1142,7 @@
       "file_path": "docs/plans/active/PLAN-20260325-022.md",
       "confirmed_by_user": true,
       "created_at": "2026-03-25T13:55:00Z",
-      "updated_at": "2026-03-25T14:33:03Z",
+      "updated_at": "2026-03-26T07:15:40Z",
       "archived_at": null,
       "notes": [
         {
@@ -1180,6 +1180,10 @@
         {
           "at": "2026-03-25T14:33:03Z",
           "text": "Closed the Phase 5 tail decision without code changes: _schedule_project_plan(...) remains an explicit project-wrapper/product-job retained scope item, host uniformity is deferred rather than forced into single-episode harness cleanup, and the plan now waits for user confirmation after Phases 1-4 completed with focused validation"
+        },
+        {
+          "at": "2026-03-26T07:15:40Z",
+          "text": "Governance sync reconciled the 022 markdown plan and validation ledger with the already-recorded completed lifecycle: the plan remains closed, no implementation phase was reopened, and successor cleanup continues separately in 023/024/025"
         }
       ]
     },
@@ -1254,6 +1258,57 @@
         {
           "at": "2026-03-25T21:05:05Z",
           "text": "Froze the successor boundary so host work can converge only toward an independent product-job/shared host path or an explicit retained rationale, without being folded back into single-episode harness cleanup"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260326-025",
+      "title": "MAS residual cleanup successor for supporting-capability strictness and governance/test anchor convergence",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260326-025.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-26T03:46:16Z",
+      "updated_at": "2026-03-26T09:54:29Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-26T03:46:16Z",
+          "text": "Created a managed successor cleanup plan after the handoff and architecture audit converged on the same baseline: 022/023 stay closed, 024 remains project-wrapper host-only, and the next window should handle residual cleanup rather than re-judge single-episode mainline correctness"
+        },
+        {
+          "at": "2026-03-26T03:46:16Z",
+          "text": "Completed Phase 0 governance freeze by creating the successor plan plus validation ledger, freezing the phase order to supporting-capability fail-open -> compat event vocabulary -> governance asset consistency -> stale test/mock anchors, and adding an explicit user-confirmation gate between every phase"
+        },
+        {
+          "at": "2026-03-26T04:08:57Z",
+          "text": "Completed Phase 1 supporting-capability fail-open closeout: removed load_scene_overview()'s legacy VideoMemoryAdapter fallback, added focused unit coverage locking helper and artifacts paths away from legacy adapter readback, and recorded that broader backend pytest stayed blocked in D state while changed-file py_compile, helper grep, and minimal module-level probes passed"
+        },
+        {
+          "at": "2026-03-26T06:50:31Z",
+          "text": "Completed Phase 2 residual compat event and telemetry cleanup: removed the extra concept_plan_ready/image_assets_ready/video_assets_ready production publishes, dropped first-party agent-status-update/progress-update websocket handlers and message types, and validated the narrowed production vocabulary with backend py_compile, focused frontend type-check, and a zero-match grep across backend/app and src"
+        },
+        {
+          "at": "2026-03-26T07:16:37Z",
+          "text": "Completed Phase 3 governance asset consistency repair: reconciled PLAN-20260325-022 markdown plus validation with the completed status already owned by PLAN_INDEX, refreshed the current-state pointer in PLAN-20260325-023, and validated the governance-only diff with PLAN_INDEX parsing and consistency review without reopening any lifecycle state"
+        },
+        {
+          "at": "2026-03-26T07:41:30Z",
+          "text": "Completed Phase 4 stale test/mock anchor refresh: rewrote frontend websocket mocks and integration coverage to canonical event.progress/event.state plus current direct notices, tightened test setup so hook tests exercise the actual first-party websocket contract, and updated same-class backend websocket tests to the current broadcast surface while recording local jest/pytest D-state hangs as environment blockers"
+        },
+        {
+          "at": "2026-03-26T09:15:09Z",
+          "text": "Completed the post-review Phase 4 follow-up: rewrote user-workflow browser smoke coverage to the current quick-workspace contract, fully rewrote backend websocket integration coverage to /api/v1/ws/connect plus current manager semantics, updated the websocket perf anchor to the current handshake path, and revalidated with clean grep plus backend py_compile and frontend type-check while focused jest/pytest remained blocked in D state"
+        },
+        {
+          "at": "2026-03-26T09:26:40Z",
+          "text": "User confirmed final closeout; plan completed with residual cleanup accepted as done, while repeated local jest/pytest D-state hangs remain explicitly tracked as environment/tooling debt rather than an in-scope architecture or contract blocker"
+        },
+        {
+          "at": "2026-03-26T09:54:29Z",
+          "text": "Recorded a post-closeout same-class micro cleanup without reopening lifecycle: removed the last three backend unit-test project_runtime_payload_deliverables stubs, verified zero remaining grep matches plus changed-file py_compile, and observed the same local focused-pytest D-state blocker already tracked as environment/tooling debt"
         }
       ]
     }

@@ -17,7 +17,6 @@ from ..core.story_plan import normalize_character_elements
 from .utils import SceneDurationCalculator,safe_json_loads
 from .adapters.video.models import SceneSnapshot
 from .utils.memory_helpers import read_shared_fact, write_shared_fact
-from ..events.publisher import publish_state_event
 from ..services.script_review_contract import format_script_review_guidance
 
 
@@ -389,25 +388,6 @@ class ConceptPlannerAgent(BaseAgent):
             self.logger.warning(f"⚠️ ConceptPlanner: failed to store creative guidance - {exc}")
 
         await self._update_progress(100, "Concept planning completed", db)
-
-        if concept_mode != "project":
-            try:
-                await publish_state_event(
-                    status="completed",
-                    extra_payload={
-                        "state": "concept_plan_ready",
-                        "scenes_count": len(scenes_data),
-                        "estimated_duration": duration,
-                        "workflow_state_id": workflow_state_id,
-                    },
-                    task_id=str(task.task_id),
-                    task_db_id=getattr(task, "id", None),
-                    workflow_state_id=workflow_state_id,
-                    agent_type=self.agent_type.value,
-                    agent_name=self.agent_name,
-                )
-            except Exception as ws_err:
-                self.logger.warning(f"Failed to publish concept_plan_ready event: {ws_err}")
 
         return {
             "concept_plan": concept_plan,

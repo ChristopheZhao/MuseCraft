@@ -47,8 +47,6 @@ from .utils.memory_helpers import (
     read_shared_fact,
 )
 
-from ..events.models import EventKind
-from ..events.publisher import publish_event
 from ..events.execution import execution_context_var
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
@@ -856,44 +854,6 @@ class OrchestratorAgent(BaseAgent):
                     
                     self.logger.info(f"Completed workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
 
-                    # 通过事件通道通知 coarse-grained UI 信号
-                    try:
-                        from .adapters.state.memory_state import build_memory_state
-                        from .adapters.state.mas_state import build_mas_state_view
-                        shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-                        wm_state = build_memory_state(shared)
-                        facts_summary = build_mas_state_view(str(wf_id), service=self.short_term_service)
-                        if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(wf_id):
-                            await publish_event(
-                                kind=EventKind.STATE,
-                                payload={
-                                    "state": "image_assets_ready",
-                                    "images_count": int(wm_state.get("outputs", {}).get("image", 0)),
-                                    "facts_summary": facts_summary,
-                                },
-                                task_id=str(task.task_id),
-                                task_db_id=self._task_db_id,
-                                workflow_state_id=wf_id,
-                                agent_type=self.agent_type.value,
-                                agent_name=self.agent_name,
-                            )
-                        if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(wf_id):
-                            await publish_event(
-                                kind=EventKind.STATE,
-                                payload={
-                                    "state": "video_assets_ready",
-                                    "videos_count": int(wm_state.get("outputs", {}).get("video", 0)),
-                                    "facts_summary": facts_summary,
-                                },
-                                task_id=str(task.task_id),
-                                task_db_id=self._task_db_id,
-                                workflow_state_id=wf_id,
-                                agent_type=self.agent_type.value,
-                                agent_name=self.agent_name,
-                            )
-                    except Exception as _ws_sig_err:
-                        self.logger.warning(f"Event coarse signal failed: {str(_ws_sig_err)}")
-                    
                 except Exception as e:
                     if (
                         runtime_session is not None

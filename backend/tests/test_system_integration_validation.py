@@ -96,15 +96,12 @@ class TestSystemIntegrationValidation:
     ):
         """Test API and WebSocket integration for real-time updates."""
         
-        session_id = "websocket-integration-test"
-        websocket_manager.active_connections[session_id] = mock_websocket
-        
         # Submit task via API
         request_data = {
             "user_prompt": "Test WebSocket integration",
             "video_style": "professional",
             "duration": 30,
-            "session_id": session_id
+            "session_id": "websocket-integration-test"
         }
         
         response = await test_client.post("/api/v1/tasks/", json=request_data)
@@ -112,39 +109,50 @@ class TestSystemIntegrationValidation:
         
         task_data = response.json()
         task_id = task_data["task_id"]
-        
-        # Simulate task processing and progress updates
-        await websocket_manager.send_task_update(session_id, {
-            "type": "task-created",
-            "task_id": task_id,
-            "status": "pending"
-        })
-        
-        await websocket_manager.send_progress_update(session_id, {
-            "type": "progress-update",
-            "task_id": task_id,
-            "stage": "processing",
-            "progress": 50
-        })
-        
-        # Verify WebSocket messages were sent
-        assert len(mock_websocket.messages) >= 2
-        
-        # Check message content
-        messages = mock_websocket.messages
-        task_created_msg = next(
-            (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "task-created"),
-            None
-        )
-        assert task_created_msg is not None
-        assert task_created_msg["task_id"] == task_id
-        
-        progress_msg = next(
-            (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "progress-update"),
-            None
-        )
-        assert progress_msg is not None
-        assert progress_msg["progress"] == 50
+
+        websocket_manager.active_connections.add(mock_websocket)
+        websocket_manager.task_connections[task_id] = {mock_websocket}
+
+        try:
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "task_notification",
+                "task_id": task_id,
+                "message": "Task created",
+                "level": "info",
+            })
+
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "event.progress",
+                "agent_type": "script_writer",
+                "payload": {
+                    "progress": 50,
+                    "current_step": "processing",
+                },
+            })
+
+            assert len(mock_websocket.messages) >= 2
+
+            messages = [
+                json.loads(msg) if isinstance(msg, str) else msg
+                for msg in mock_websocket.messages
+            ]
+
+            task_created_msg = next(
+                (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "task_notification"),
+                None
+            )
+            assert task_created_msg is not None
+            assert task_created_msg["task_id"] == task_id
+
+            progress_msg = next(
+                (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "event.progress"),
+                None
+            )
+            assert progress_msg is not None
+            assert progress_msg["payload"]["progress"] == 50
+        finally:
+            websocket_manager.task_connections.pop(task_id, None)
+            websocket_manager.active_connections.discard(mock_websocket)
     
     async def test_ai_service_integration_chain(
         self,

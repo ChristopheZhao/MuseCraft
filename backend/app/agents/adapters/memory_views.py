@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .video import VideoMemoryAdapter
 from ...core.config import settings
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
@@ -93,12 +92,7 @@ def load_scene_overview(workflow_id: str, *, service: "WorkingMemoryService") ->
             workflow_id=workflow_id,
             service=service,
         )
-    # legacy path: adapt VideoMemoryAdapter over WM if snapshot present
-    try:
-        adapter = VideoMemoryAdapter(wm)
-        return adapter.build_fact_observation()
-    except Exception:
-        return {}
+    return {}
 
 
 def load_scene_scripts(workflow_id: str, *, service: "WorkingMemoryService") -> Dict[int, Dict[str, Any]]:

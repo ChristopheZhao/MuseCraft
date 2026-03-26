@@ -113,8 +113,6 @@ export interface WebSocketMessage {
 }
 
 export type MessageType = 
-  | 'agent-status-update'
-  | 'progress-update'
   | 'result-ready'
   | 'error'
   | 'system-message'

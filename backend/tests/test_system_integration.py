@@ -227,29 +227,23 @@ class TestSystemIntegration:
         task_id = task_data["task_id"]
         
         # Test WebSocket connection
-        with websocket_test_client.websocket_connect(f"/ws?session_id=test-session") as websocket:
-            # Send a message
-            test_message = {
-                "type": "subscribe",
-                "task_id": task_id
-            }
-            websocket.send_json(test_message)
-            
-            # Simulate sending progress update
-            await websocket_manager.send_progress_update(
-                session_id="test-session",
-                task_id=task_id,
-                progress=50,
-                status="processing",
-                agent_name="script_writer"
-            )
-            
-            # Receive message
+        with websocket_test_client.websocket_connect(f"/api/v1/ws/connect?task_id={task_id}") as websocket:
+            websocket.receive_json()
+
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "event.progress",
+                "agent_type": "script_writer",
+                "payload": {
+                    "progress": 50,
+                    "current_step": "Drafting integration-test script",
+                },
+            })
+
             received_message = websocket.receive_json()
             
-            assert received_message["type"] == "progress-update"
-            assert received_message["data"]["task_id"] == task_id
-            assert received_message["data"]["progress"] == 50
+            assert received_message["type"] == "event.progress"
+            assert received_message["agent_type"] == "script_writer"
+            assert received_message["payload"]["progress"] == 50
     
     async def test_database_transaction_integrity(
         self,

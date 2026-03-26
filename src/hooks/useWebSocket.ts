@@ -68,7 +68,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     setQuickRuntime,
   } = useAppStore();
 
-  const eventStateToAgentStatus: Record<string, AgentStatus> = {
+  const eventStatusToAgentStatus: Record<string, AgentStatus> = {
     running: 'working',
     started: 'working',
     processing: 'working',
@@ -235,43 +235,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     return false;
   }, []);
 
-  const handleAgentStatusUpdate = useCallback((data: any) => {
-    const { agentId, status, currentTask, estimatedTime, progress } = data;
-    
-    updateAgent(agentId, {
-      status,
-      currentTask,
-      estimatedTime,
-      progress: progress || 0,
-    });
-
-    // Show notification for significant status changes
-    if (status === 'working') {
-      addNotification({
-        type: 'info',
-        title: 'Agent Started',
-        message: `${data.agentName || agentId} is now working on your video`,
-        autoClose: 3000,
-      });
-    } else if (status === 'completed') {
-      addNotification({
-        type: 'success',
-        title: 'Agent Completed',
-        message: `${data.agentName || agentId} has finished its task`,
-        autoClose: 3000,
-      });
-    }
-  }, [updateAgent, addNotification]);
-
-  const handleProgressUpdate = useCallback((data: any) => {
-    const { agentId, progress, message: progressMessage } = data;
-    
-    updateAgent(agentId, {
-      progress: progress || 0,
-      currentTask: progressMessage,
-    });
-  }, [updateAgent]);
-
   // Map backend event.progress to frontend update
   const handleEventProgress = useCallback((msg: any) => {
     try {
@@ -307,14 +270,14 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     });
   }, [addNotification]);
 
-  // Handle new event.state messages
+  // Handle canonical event.state messages only.
   const handleEventState = useCallback((msg: any) => {
     try {
       const payload = msg.payload || {};
-      const state = payload.state || payload.status;
-      const normalized = String(state || '').toLowerCase();
+      const state = String(payload.state || '').toLowerCase();
+      const statusKey = String(payload.status || '').toLowerCase();
 
-      switch (normalized) {
+      switch (state) {
         case 'workflow_completed':
           handleWorkflowCompleted({ ...msg, results: payload.results, ...payload });
           break;
@@ -324,7 +287,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
         default:
           if (msg.agent_name) {
             const agentId = getAgentId(msg.agent_name);
-            const status = eventStateToAgentStatus[normalized];
+            const status = eventStatusToAgentStatus[statusKey];
             if (status) {
               updateAgent(agentId, { status });
             }
@@ -408,12 +371,10 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       'event.state': handleEventState,
     };
 
-    // 直传/遗留消息（保留少量仍在用的类型，其他状态类事件统一走 event.*）
+    // Direct transport/system messages that are still intentionally consumed.
     const directHandlers: Record<string, (msg: any) => void> = {
       task_notification: (msg) => handleSystemMessage({ message: msg.message, level: msg.level || 'info' }),
       system_notification: (msg) => handleSystemMessage({ message: msg.message, level: msg.level || 'info' }),
-      'agent-status-update': (msg) => handleAgentStatusUpdate(msg.data),
-      'progress-update': (msg) => handleProgressUpdate(msg.data),
       connection_established: handleConnectionEstablished,
       subscription_confirmed: handleSubscriptionConfirmed,
       'result-ready': (msg) => handleResultReady(msg.data),
@@ -428,12 +389,8 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       console.warn('Unknown message type:', message.type);
     }
   }, [
-    handleAgentStatusUpdate,
-    handleProgressUpdate,
     handleEventProgress,
     handleEventState,
-    handleWorkflowCompleted,
-    handleWorkflowFailed,
     handleSystemMessage,
     handleConnectionEstablished,
     handleSubscriptionConfirmed,

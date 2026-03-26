@@ -5,13 +5,17 @@ from app.agents.adapters.memory_views import (
     build_video_composer_context,
     build_image_generation_context,
     build_video_generation_context,
+    load_scene_overview,
 )
 from app.agents.adapters.state.mas_state import build_mas_state_view
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
+from app.agents.memory.short_term import SceneArtifact, SceneSnapshot
 from app.agents.memory.short_term.service import (
     MemoryNotInitializedError,
     WorkingMemoryService,
 )
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
+from app.agents.utils.artifacts import finalize_scene_outputs
 from app.agents.utils.memory_helpers import (
     agent_scope,
     ensure_agent_working_memory,
@@ -258,6 +262,57 @@ def test_video_composer_context_does_not_promote_legacy_nested_scene_outputs():
         "duration": 0.0,
         "style": "",
     }
+
+
+def test_load_scene_overview_does_not_fallback_to_legacy_video_memory_adapter():
+    service = _build_service()
+    workflow_id = "wf-scene-overview-no-legacy-fallback"
+
+    shared = ensure_mas_working_memory(workflow_id, service=service)
+    adapter = VideoMemoryAdapter(shared)
+    adapter.upsert_scene(
+        SceneSnapshot(
+            scene_number=1,
+            duration=5.0,
+            visual_description="legacy adapter scene",
+        )
+    )
+    adapter.mark_completed(
+        1,
+        SceneArtifact(
+            video_url="https://example.com/legacy-video.mp4",
+            video_path="/tmp/legacy-video.mp4",
+            prompt_text="legacy prompt",
+        ),
+    )
+
+    assert not shared.get("scene_overview")
+    assert load_scene_overview(workflow_id, service=service) == {}
+
+
+def test_finalize_scene_outputs_does_not_read_failed_scenes_from_legacy_video_memory_adapter():
+    service = _build_service()
+    workflow_id = "wf-finalize-no-legacy-overview"
+
+    shared = ensure_mas_working_memory(workflow_id, service=service)
+    adapter = VideoMemoryAdapter(shared)
+    adapter.upsert_scene(SceneSnapshot(scene_number=1, duration=5.0))
+    adapter.mark_failed(
+        1,
+        "legacy failure",
+        {"error_type": "temporary"},
+        retryable=True,
+    )
+
+    completed, failed = finalize_scene_outputs(
+        kind="video",
+        workflow_id=workflow_id,
+        agent_memory=None,
+        service=service,
+    )
+
+    assert completed == []
+    assert failed == []
 
 
 def test_mas_state_view_ignores_legacy_nested_scene_outputs():
