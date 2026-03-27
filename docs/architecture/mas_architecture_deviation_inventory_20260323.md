@@ -2,7 +2,7 @@
 
 日期：2026-03-23
 
-状态：refreshed inventory（2026-03-26 Phase 4 refresh after repaired `026` Phase 3; `024` retained separately）
+状态：refreshed inventory（2026-03-26 Phase 4 refresh after repaired `026` Phase 3; `024` C2 split to `027` synced）
 
 用途：基于已冻结的 canonical vocabulary，记录当前实现与 `single-episode harness` 四层 MAS 架构之间仍然存在的偏差、受控保留项与清理噪音；本版已吸收 `026` 的最终验证事实，并把此前 review rollback 期间的临时降级结论刷新回与实现一致的可审计状态。
 
@@ -11,8 +11,8 @@
 - 本文不是新的架构定义。
 - 本文只使用已冻结的 `编排层 / 控制层 / 门控层 / 治理层` 口径做差距评估。
 - 本文当前吸收了 [PLAN-20260326-026.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/archive/2026-03/PLAN-20260326-026.md) 中已经验证完成的事实：Phase 1-4 已全部完成，其中 Phase 3 的 repaired composer contract-authority alignment 已重新验证通过。
-- [PLAN-20260325-024.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260325-024.md) 的 project-wrapper host uniformity 仍是独立 retained item；本次刷新不会把它算作 `026` 已完成范围。
-- `026` 的治理 closeout 已进入等待用户验收阶段，但本文记录的是实现/治理事实对齐，不替代 plan lifecycle 的最终 `completed` 决策。
+- [PLAN-20260325-024.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260325-024.md) 已完成 bounded host-uniformity governance，并把超出边界的 project-level substrate 改造拆到 [PLAN-20260326-027.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260326-027.md)；当前代码状态仍是 retained item，但不再被当作长期终局。
+- `026` 的治理 closeout 已完成并归档，但本文记录的是实现/治理事实对齐，不替代各 plan 的 lifecycle ownership。
 - 本文重点区分：
   - 当前主线是否已回正
   - 哪些只是 compat debt
@@ -94,7 +94,7 @@
 | [workflow_completion_adapter.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/services/workflow_completion_adapter.py) | bounded terminal summary / result persistence helper | 治理层支撑能力 | `mostly-aligned` | 已明确 `runtime_authoritative=false`，但仍保留少量 legacy terminal vocabulary。 |
 | [useWebSocket.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useWebSocket.ts)、[types/index.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/types/index.ts) | websocket event handling / runtime refresh trigger | frontend read-model consumer | `mostly-aligned` | active path 已收敛到 `event.progress` / `event.state` + refresh runtime；旧 business-state websocket vocabulary 已无 active match，剩余 direct transport/system messages 不拥有 authority truth。 |
 | [useTaskPolling.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/hooks/useTaskPolling.ts)、[ProjectModeView.tsx](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/components/project/ProjectModeView.tsx)、[useProjectStore.ts](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/src/store/useProjectStore.ts) | authority read-model consumers | frontend read-model consumer | `aligned` | 前端主线已停止构建第二套业务状态机。 |
-| [projects.py `_schedule_project_plan(...)`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/projects.py) | project planning 的 endpoint-local thread host | project wrapper / product job host | `out-of-scope-retained` | 它不触碰 single-episode runtime SoT，但说明 whole-system host uniformity 仍未完成；后续治理已拆到 [PLAN-20260325-024.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260325-024.md)。 |
+| [projects.py `_schedule_project_plan(...)`](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/api/v1/endpoints/projects.py) | project planning 的 endpoint-local thread host | project wrapper / product job host | `out-of-scope-retained` | 它不触碰 single-episode runtime SoT，但说明 whole-system host uniformity 仍未完成；`024` 已完成 bounded governance 并确认它不能在当前边界内直接迁移，后续由 [PLAN-20260326-027.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260326-027.md) 收 project read-model persistence 与 host-neutral job substrate。 |
 | [mas_state.py](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/agents/adapters/state/mas_state.py) | facts summary / completion summary helper | supporting capability | `aligned` | 当前只消费 canonical `scene_outputs.*` facts，并显式忽略 legacy nested `scene_outputs` bundle；该 helper 已不再承担 compat bridge。 |
 
 ## 4. 当前总评
@@ -110,8 +110,8 @@
 当前 inventory 不再记录 active single-episode residual issue；剩余的是 1 个 repo-level retained item 与一组 controlled-transition 噪音：
 
 1. project-level retained host
-   - `project planning` 仍保留单独宿主。
-   - 它不是 single-episode blocker，但会影响 whole-system host uniformity；继续由 [PLAN-20260325-024.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260325-024.md) 独立承接。
+   - `project planning` 当前代码仍保留单独宿主。
+   - 它不是 single-episode blocker，但会影响 whole-system host uniformity；`024` 已把 bounded host-uniformity 治理收口，后续由 [PLAN-20260326-027.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260326-027.md) 继续处理 project read-model persistence 与 host-neutral dispatch 这些更大的前置能力。
 
 2. residual compatibility / diagnostics vocabulary noise
    - published deliverable projection / retired host alias / observation naming
@@ -122,11 +122,11 @@
 
 后续若要继续把代码拉回更干净的 MAS 实现，建议按以下顺序：
 
-1. 继续由 `024` 单独收 project wrapper / host uniformity。
+1. 先由 [PLAN-20260326-027.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260326-027.md) 补 project-level read-model persistence 与 host-neutral job substrate，再决定 project planning host 的迁移实现。
 2. 再按需要清理 remaining controlled-transition vocabulary / diagnostics noise。
 
 这个顺序的原因是：
 
 - `026` 的 residual purity stream 已完成实现与治理刷新，single-episode mainline 不再有 active residual authority 问题。
-- `024` 仍是独立 retained 的 repo-level host 问题，不能伪装成 single-episode 已完成统一。
+- `024` 已完成它应承担的 bounded host-uniformity 治理；虽然当前代码还保留 retained host，但这条线已经显式拆出为更大的 project-level substrate successor，不能伪装成 single-episode 已完成统一，也不能再把 retained 当作长期终局。
 - compatibility / diagnostics noise 更多是防 future drift 的治理清洁度工作，应排在 retained host uniformity 之后处理。

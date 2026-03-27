@@ -1242,13 +1242,13 @@
       "id": "PLAN-20260325-024",
       "title": "Project-wrapper host uniformity successor governance",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P2",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260325-024.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-25T21:05:05Z",
-      "updated_at": "2026-03-25T21:05:05Z",
+      "updated_at": "2026-03-26T15:22:44Z",
       "archived_at": null,
       "notes": [
         {
@@ -1258,6 +1258,34 @@
         {
           "at": "2026-03-25T21:05:05Z",
           "text": "Froze the successor boundary so host work can converge only toward an independent product-job/shared host path or an explicit retained rationale, without being folded back into single-episode harness cleanup"
+        },
+        {
+          "at": "2026-03-26T14:32:45Z",
+          "text": "User requested that 024 resume after the 026 checkpoint commit; lifecycle moved from draft to in_progress, with immediate focus limited to Phase A host inventory and ownership freeze"
+        },
+        {
+          "at": "2026-03-26T14:38:56Z",
+          "text": "Completed Phase A host inventory and ownership freeze: the project planning path was confirmed to own only project-wrapper task/progress state, while single-episode runtime/control-plane ownership remains in the queued EpisodeOrchestratorAgent -> OrchestratorAgent path"
+        },
+        {
+          "at": "2026-03-26T14:43:03Z",
+          "text": "Completed Phase B successor decision: rejected long-term retention of the endpoint-local planning host and selected convergence toward an independent product-job/shared host that stays outside the single-episode MAS runtime control plane"
+        },
+        {
+          "at": "2026-03-26T15:03:33Z",
+          "text": "Refined the post-Phase-B execution path: split the former coarse Phase C into C1 project-state visibility plus host-neutral job-boundary work, followed by C2 minimal implementation or explicit defer, so the plan can adapt to real constraints without changing its architectural boundary"
+        },
+        {
+          "at": "2026-03-26T15:08:35Z",
+          "text": "Completed Phase C1: confirmed that project read-model visibility is still process-local and current queue dispatch remains keyed by GenerationMode plus quick-runtime semantics, so C2 is now gated on explicit shared project-state visibility and a neutral job_kind/handler_key dispatch contract"
+        },
+        {
+          "at": "2026-03-26T15:16:00Z",
+          "text": "Completed Phase C2 via explicit defer instead of direct migration: kept 024 bounded to host-uniformity governance, created PLAN-20260326-027 for the larger project-level read-model persistence and host-neutral job substrate work, and moved 024 to awaiting_user_confirmation"
+        },
+        {
+          "at": "2026-03-26T15:21:52Z",
+          "text": "User confirmed closeout after the explicit-defer split; 024 is now completed without archive, and PLAN-20260326-027 remains the active successor for the larger project-level substrate work"
         }
       ]
     },
@@ -1380,6 +1408,29 @@
         {
           "at": "2026-03-26T14:19:04Z",
           "text": "Archived 026 on user request after completion: moved the plan and validation ledger from docs/plans/active/ to docs/plans/archive/2026-03/, updated file_path and archived_at in PLAN_INDEX.json, and left 024 as the only active retained follow-up in this area"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260326-027",
+      "title": "Project-level read-model persistence and host-neutral job substrate convergence",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260326-027.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-26T15:16:00Z",
+      "updated_at": "2026-03-26T15:16:00Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-26T15:16:00Z",
+          "text": "Created a managed successor after 024 C1/C2 proved that planning-host migration is blocked by a larger project-level substrate problem: project read-model visibility is process-local and queue dispatch is still semantically keyed by GenerationMode"
+        },
+        {
+          "at": "2026-03-26T15:16:00Z",
+          "text": "Froze the new successor boundary to project-level multi-episode wrapper concerns only: shared project-state/read-model persistence, host-neutral job_kind/handler_key dispatch, and planning-host migration, without reopening single-episode MAS control-plane work"
         }
       ]
     }
