@@ -96,23 +96,11 @@ class ConceptPlannerAgent(BaseAgent):
 
         system_prompt = self._build_system_prompt()
 
-        from ..core.ai_config import get_ai_config
-
-        ai_config_manager = get_ai_config()
-        concept_model = ai_config_manager.get_model_for_agent("concept_planner")
-        model_config = ai_config_manager.get_model_config(concept_model)
-        fallback_model = (
-            ai_config_manager.get_fallback_model_for_agent("concept_planner")
-            or (
-                model_config.fallback_model
-                if model_config and getattr(model_config, "fallback_model", None)
-                else None
-            )
-            or ai_config_manager.agent_model_mapping.get("default")
-        )
-        fallback_model_config = (
-            ai_config_manager.get_model_config(fallback_model) if fallback_model else None
-        )
+        llm_route = self._resolve_planning_route()
+        concept_model = llm_route["model_name"]
+        model_config = llm_route["model_config"]
+        fallback_model = llm_route["fallback_model"]
+        fallback_model_config = llm_route["fallback_model_config"]
 
         try:
             total_timeout = int(getattr(settings, "CONCEPT_PLANNER_TIMEOUT_SECONDS", 180))
@@ -429,6 +417,56 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception as exc:
             self.logger.debug("Failed to build system prompt: %s", exc)
             return ""
+
+    def _resolve_planning_route(self) -> Dict[str, Any]:
+        from ..core.ai_config import get_ai_config
+
+        route = self.get_llm_route("plan")
+        provider_name = route.get("provider_name")
+        model_name = route.get("model")
+        if not model_name:
+            raise AgentError("ConceptPlanner planning route missing default model")
+
+        ai_config_manager = get_ai_config()
+        model_config = ai_config_manager.get_model_config(model_name)
+        if model_config is None:
+            raise AgentError(
+                f"ConceptPlanner planning route model metadata missing: model={model_name}"
+            )
+
+        model_provider = ai_config_manager.get_model_provider(model_name)
+        if model_provider and provider_name and model_provider != provider_name:
+            raise AgentError(
+                "ConceptPlanner planning route provider/model mismatch: "
+                f"provider={provider_name} model={model_name} model_provider={model_provider}"
+            )
+        provider_name = provider_name or model_provider
+
+        fallback_model = getattr(model_config, "fallback_model", None)
+        fallback_model_config = None
+        if fallback_model:
+            fallback_model_config = ai_config_manager.get_model_config(fallback_model)
+            fallback_provider = ai_config_manager.get_model_provider(fallback_model)
+            if fallback_provider and provider_name and fallback_provider != provider_name:
+                raise AgentError(
+                    "ConceptPlanner cross-provider fallback is not allowed: "
+                    f"primary_provider={provider_name} primary_model={model_name} "
+                    f"fallback_model={fallback_model} fallback_provider={fallback_provider}"
+                )
+
+        self.logger.info(
+            "CONCEPT_PLAN_ROUTE provider=%s model=%s fallback_model=%s",
+            provider_name,
+            model_name,
+            fallback_model,
+        )
+        return {
+            "provider_name": provider_name,
+            "model_name": model_name,
+            "model_config": model_config,
+            "fallback_model": fallback_model,
+            "fallback_model_config": fallback_model_config,
+        }
 
     def _compose_messages(self, system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []

@@ -67,6 +67,7 @@ class VideoCapabilities:
 class ServiceProvider(Enum):
     """AI服务供应商枚举"""
     ZHIPU = "zhipu"
+    DEEPSEEK = "deepseek"
     OPENAI = "openai" 
     ANTHROPIC = "anthropic"
     STABILITY = "stability"
@@ -279,18 +280,29 @@ class ServiceManager:
     def get_llm_service(self, provider: ServiceProvider = None) -> LLMServiceInterface:
         """获取LLM服务实例"""
         target_provider = provider or self._default_llm_provider
-        
+
+        if target_provider is None:
+            raise RuntimeError("No default LLM provider registered")
+
         if target_provider not in self._llm_services:
-            raise ValueError(f"LLM Provider {target_provider} not available")
-        
+            provider_name = (
+                target_provider.value if isinstance(target_provider, ServiceProvider) else str(target_provider)
+            )
+            available = sorted([p.value for p in self._llm_services.keys()])
+            diag = _diagnose_provider_requirements(target_provider, "llm")
+            raise ValueError(
+                f"LLM provider '{provider_name}' is not registered; "
+                f"available={available}; missing_env={diag.get('missing_required_env', [])}"
+            )
+
         service = self._llm_services[target_provider]
         if not service.is_available():
-            # 尝试回退到其他可用的LLM供应商
-            for backup_provider, backup_service in self._llm_services.items():
-                if backup_service.is_available():
-                    return backup_service
-            raise RuntimeError("No LLM services available")
-        
+            diag = _diagnose_provider_requirements(target_provider, "llm")
+            raise RuntimeError(
+                f"LLM provider '{target_provider.value}' is unavailable; "
+                f"missing_env={diag.get('missing_required_env', [])}"
+            )
+
         return service
     
     # === VLM服务管理 ===
@@ -495,6 +507,31 @@ def _initialize_default_services():
     except ImportError as e:
         print(f"Warning: Failed to initialize Zhipu services: {e}")
 
+    # 注册DeepSeek（可选，LLM only）
+    try:
+        from .deepseek_services import DeepSeekLLMService
+        deepseek_llm_cfg = {}
+        try:
+            from ....core.ai_config import get_ai_config  # type: ignore
+            ai_cfg = get_ai_config()
+            pcfg = ai_cfg.get_provider_config("deepseek")
+            if pcfg:
+                if getattr(pcfg, "api_key", None):
+                    deepseek_llm_cfg["api_key"] = pcfg.api_key
+                if getattr(pcfg, "timeout", None):
+                    deepseek_llm_cfg["timeout"] = int(pcfg.timeout)
+                if getattr(pcfg, "default_model", None):
+                    deepseek_llm_cfg["default_model"] = pcfg.default_model
+                if getattr(pcfg, "base_url", None):
+                    deepseek_llm_cfg["base_url"] = pcfg.base_url
+        except Exception:
+            pass
+        deepseek_llm = DeepSeekLLMService(config=deepseek_llm_cfg)
+        if deepseek_llm.is_available():
+            manager.register_llm_service(ServiceProvider.DEEPSEEK, deepseek_llm)
+    except ImportError as e:
+        print(f"Warning: Failed to initialize DeepSeek services: {e}")
+
     # 注册Doubao（可选）
     try:
         from .doubao_services import DoubaoVideoService, DoubaoVLMService
@@ -544,23 +581,45 @@ def _any_env_set(keys: List[str]) -> bool:
     return False
 
 
+def _provider_config_has_value(provider_name: str, field_name: str) -> bool:
+    try:
+        from ....core.ai_config import get_ai_config  # type: ignore
+
+        provider_config = get_ai_config().get_provider_config(provider_name)
+        value = getattr(provider_config, field_name, None) if provider_config else None
+        return bool(isinstance(value, str) and value.strip())
+    except Exception:
+        return False
+
+
 def _diagnose_provider_requirements(provider: Optional[ServiceProvider], domain: str) -> Dict[str, Any]:
     """Return startup diagnostics for provider-level required envs."""
     result: Dict[str, Any] = {"domain": domain, "provider": provider.value if isinstance(provider, ServiceProvider) else None}
+    if provider == ServiceProvider.DEEPSEEK and domain == "llm":
+        result["missing_required_env"] = [] if _provider_config_has_value("deepseek", "api_key") else _missing_required_env(["DEEPSEEK_API_KEY"])
+        return result
+    if provider == ServiceProvider.OPENAI and domain == "llm":
+        result["missing_required_env"] = [] if _provider_config_has_value("openai", "api_key") else _missing_required_env(["OPENAI_API_KEY"])
+        return result
+    if provider == ServiceProvider.ANTHROPIC and domain == "llm":
+        result["missing_required_env"] = [] if _provider_config_has_value("anthropic", "api_key") else _missing_required_env(["ANTHROPIC_API_KEY"])
+        return result
     if provider == ServiceProvider.DOUBAO and domain == "vlm":
         missing = _missing_required_env(["DOUBAO_API_KEY", "DOUBAO_IMAGE_MODEL"])
+        if _provider_config_has_value("doubao", "api_key") and "DOUBAO_API_KEY" in missing:
+            missing = [key for key in missing if key != "DOUBAO_API_KEY"]
         result["missing_required_env"] = missing
         return result
     if provider == ServiceProvider.DOUBAO and domain == "video":
-        missing = _missing_required_env(["DOUBAO_API_KEY"])
+        missing = [] if _provider_config_has_value("doubao", "api_key") else _missing_required_env(["DOUBAO_API_KEY"])
         result["missing_required_env"] = missing
         return result
     if provider == ServiceProvider.ZHIPU and domain in {"llm", "vlm", "video"}:
         # zhipu系列共用 GLM_API_KEY/ZHIPU_API_KEY，任意一个即可
-        if not _any_env_set(["GLM_API_KEY", "ZHIPU_API_KEY"]):
-            result["missing_required_env"] = ["GLM_API_KEY|ZHIPU_API_KEY"]
-        else:
+        if _provider_config_has_value("zhipu", "api_key") or _any_env_set(["GLM_API_KEY", "ZHIPU_API_KEY"]):
             result["missing_required_env"] = []
+        else:
+            result["missing_required_env"] = ["GLM_API_KEY|ZHIPU_API_KEY"]
         return result
     result["missing_required_env"] = []
     return result
@@ -666,6 +725,23 @@ def _emit_service_registration_diagnostics(manager: ServiceManager) -> None:
             )
     except Exception as exc:
         logger.warning("AI_SERVICE_PROVIDER_UNAVAILABLE logging failed: %s", exc)
+
+
+_LLM_PROVIDER_MAPPING: Dict[str, ServiceProvider] = {
+    "zhipu": ServiceProvider.ZHIPU,
+    "deepseek": ServiceProvider.DEEPSEEK,
+    "openai": ServiceProvider.OPENAI,
+    "anthropic": ServiceProvider.ANTHROPIC,
+    "doubao": ServiceProvider.DOUBAO,
+}
+
+
+def resolve_llm_provider(name: Optional[str]) -> Optional[ServiceProvider]:
+    return _resolve_selected_provider(name, _LLM_PROVIDER_MAPPING)
+
+
+def get_supported_llm_provider_names() -> List[str]:
+    return sorted(_LLM_PROVIDER_MAPPING.keys())
 
 
 # 便捷函数

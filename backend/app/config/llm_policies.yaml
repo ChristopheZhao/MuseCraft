@@ -2,6 +2,18 @@ default:
   provider: zhipu
   model: glm-default
 
+# concept_planner supplier/model authority lives here.
+# If users need to switch the planning LLM supplier, change this route and
+# ensure the target provider/model is defined in backend/config/ai_config.yaml
+# with matching credentials exposed via .env(.example).
+agents.concept_planner:
+  default:
+    provider: deepseek
+    model: deepseek-chat
+  plan:
+    provider: deepseek
+    model: deepseek-chat
+
 agents.image_generator:
   observe:
     provider: zhipu

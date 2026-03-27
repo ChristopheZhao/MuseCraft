@@ -1063,6 +1063,34 @@ class BaseAgent(ABC):
         when explicit injections are not provided. This keeps agents supplier-agnostic
         and ensures CLI/tests can bootstrap without the orchestrator wiring.
         """
+        policy_manager = self._load_llm_policy_manager()
+        try:
+            llm_handles = policy_manager.build_llms_for_agent(self.agent_name)
+        except Exception as exc:
+            raise AgentError(
+                f"Failed to load LLM policy for agent {self.agent_name}: {exc}"
+            ) from exc
+
+        if not llm_handles:
+            raise AgentError(
+                f"No LLM handles configured for agent {self.agent_name} in {policy_manager.policy_path}"
+            )
+
+        try:
+            self.logger.info(
+                "LLM handles auto-loaded for %s using policy %s",
+                self.agent_name,
+                policy_manager.policy_path,
+            )
+        except Exception as e:
+            raise AgentError(
+                f"Failed to log LLM policy load for agent {self.agent_name},err happend: {e} "
+            )
+
+        return llm_handles
+
+    def _load_llm_policy_manager(self):
+        """Load the shared LLM policy manager without instantiating provider services."""
         from pathlib import Path
         try:
             from .utils.llm_policy import LLMPolicyManager
@@ -1078,30 +1106,32 @@ class BaseAgent(ABC):
             )
 
         try:
-            policy_manager = LLMPolicyManager(str(policy_path))
-            llm_handles = policy_manager.build_llms_for_agent(self.agent_name)
+            return LLMPolicyManager(str(policy_path))
         except Exception as exc:
             raise AgentError(
                 f"Failed to load LLM policy for agent {self.agent_name}: {exc}"
             ) from exc
 
-        if not llm_handles:
-            raise AgentError(
-                f"No LLM handles configured for agent {self.agent_name} in {policy_path}"
-            )
-
+    def get_llm_route(self, role: str = None) -> Dict[str, Any]:
+        """Resolve provider/model metadata for a role without forcing service execution."""
+        r = role or "default"
+        if self._llms:
+            handle = self._llms.get(r) or self._llms.get("default")
+            if handle is not None:
+                provider_name = getattr(handle, "provider_name", None)
+                default_model = getattr(handle, "default_model", None)
+                if provider_name or default_model:
+                    return {
+                        "provider_name": provider_name,
+                        "model": default_model,
+                    }
+        policy_manager = self._load_llm_policy_manager()
         try:
-            self.logger.info(
-                "LLM handles auto-loaded for %s using policy %s",
-                self.agent_name,
-                policy_path,
-            )
-        except Exception as e:
+            return policy_manager.resolve_route_for_agent(self.agent_name, r)
+        except Exception as exc:
             raise AgentError(
-                f"Failed to log LLM policy load for agent {self.agent_name},err happend: {e} "
-            )
-
-        return llm_handles
+                f"Failed to resolve LLM route for agent {self.agent_name} (role={r}): {exc}"
+            ) from exc
 
     # === LLM依赖注入访问器 ===
     def _resolve_llm_for_role(self, role: str):

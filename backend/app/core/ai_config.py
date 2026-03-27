@@ -260,6 +260,41 @@ class AIConfigManager:
             kimi_config.models = kimi_models
             self.providers["kimi"] = kimi_config
             self.models.update(kimi_models)
+
+        # DeepSeek配置
+        if settings.DEEPSEEK_API_KEY:
+            deepseek_config = ProviderConfig(
+                name="deepseek",
+                api_key=settings.DEEPSEEK_API_KEY,
+                base_url=settings.DEEPSEEK_BASE_URL,
+                default_model=getattr(settings, "DEEPSEEK_DEFAULT_MODEL", "deepseek-chat"),
+                enabled=bool(settings.DEEPSEEK_API_KEY)
+            )
+
+            deepseek_models = {
+                "deepseek-chat": ModelConfig(
+                    name="deepseek-chat",
+                    provider="deepseek",
+                    max_tokens=8192,
+                    temperature=0.7,
+                    timeout=120,
+                    capabilities=["text_generation", "chat", "reasoning", "json_output"],
+                    fallback_model="deepseek-reasoner",
+                ),
+                "deepseek-reasoner": ModelConfig(
+                    name="deepseek-reasoner",
+                    provider="deepseek",
+                    max_tokens=64000,
+                    temperature=0.7,
+                    timeout=120,
+                    capabilities=["text_generation", "chat", "reasoning", "json_output", "thinking"],
+                    fallback_model="deepseek-chat",
+                ),
+            }
+
+            deepseek_config.models = deepseek_models
+            self.providers["deepseek"] = deepseek_config
+            self.models.update(deepseek_models)
         
         # 默认Agent模型映射
         self._set_default_agent_mapping()
@@ -409,6 +444,10 @@ class AIConfigManager:
                 # 合入用户配置字段
                 if "default_model" in provider_config:
                     existing.default_model = self._resolve_model_alias(provider_config["default_model"])
+                if "api_key" in provider_config:
+                    existing.api_key = provider_config["api_key"]
+                if "base_url" in provider_config:
+                    existing.base_url = provider_config["base_url"]
                 if "enabled" in provider_config:
                     existing.enabled = provider_config["enabled"]
                 if "timeout" in provider_config:
@@ -419,18 +458,35 @@ class AIConfigManager:
         # 更新模型配置
         if "models" in user_config:
             for model_name, model_config in user_config["models"].items():
-                if model_name in self.models:
-                    existing = self.models[model_name]
-                    if "temperature" in model_config:
-                        existing.temperature = model_config["temperature"]
-                    if "max_tokens" in model_config:
-                        existing.max_tokens = model_config["max_tokens"]
-                    if "enabled" in model_config:
-                        existing.enabled = model_config["enabled"]
-                    if "timeout" in model_config:
-                        existing.timeout = model_config["timeout"]
-                    if "fallback_model" in model_config:
-                        existing.fallback_model = model_config["fallback_model"]
+                existing = self.models.get(model_name)
+                if existing is None:
+                    provider_name = str(model_config.get("provider") or "").strip().lower()
+                    if not provider_name:
+                        continue
+                    existing = ModelConfig(
+                        name=model_name,
+                        provider=provider_name,
+                    )
+                    self.models[model_name] = existing
+                if "provider" in model_config:
+                    existing.provider = str(model_config["provider"]).strip().lower()
+                if "temperature" in model_config:
+                    existing.temperature = model_config["temperature"]
+                if "max_tokens" in model_config:
+                    existing.max_tokens = model_config["max_tokens"]
+                if "enabled" in model_config:
+                    existing.enabled = model_config["enabled"]
+                if "timeout" in model_config:
+                    existing.timeout = model_config["timeout"]
+                if "fallback_model" in model_config:
+                    existing.fallback_model = model_config["fallback_model"]
+                if "capabilities" in model_config:
+                    existing.capabilities = list(model_config["capabilities"] or [])
+                if "cost_per_token" in model_config:
+                    existing.cost_per_token = model_config["cost_per_token"]
+                provider_ref = self.providers.get(existing.provider)
+                if provider_ref is not None:
+                    provider_ref.models[model_name] = existing
 
     def _resolve_model_alias(self, model_name: Optional[str]) -> Optional[str]:
         if not model_name:

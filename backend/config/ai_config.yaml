@@ -1,9 +1,11 @@
 # AI服务统一配置文件
 # 本文件用于配置所有AI模型和服务提供商
 
-# Agent模型映射 - 指定每个Agent使用哪个模型
+# Agent模型映射 - 指定非 route-aware 调用使用哪个模型。
+# 注意：concept_planner 的主 planning supplier/model authority 不在这里，
+# 而在 backend/app/config/llm_policies.yaml；下面的 concept_planner 项仅保留为兼容元数据。
 agent_model_mapping:
-  concept_planner: "glm-default"    # 概念规划 - 使用默认主模型
+  concept_planner: "glm-default"    # 概念规划兼容映射；主 route authority 见 llm_policies.yaml
   script_writer: "glm-default"      # 脚本写作 - 使用默认主模型
   quality_checker: "glm-light"      # 质量检查 - 使用轻量版本即可
   audio_generator: "glm-default"    # 音频生成 - 需要理解内容，使用默认主模型
@@ -62,6 +64,13 @@ providers:
     enabled: true
     rate_limit: 50
     timeout: 120
+
+  deepseek:
+    default_model: "deepseek-chat"
+    enabled: true
+    rate_limit: 80
+    timeout: 120
+    base_url: "https://api.deepseek.com"
 
 # 模型具体配置
 models:
@@ -128,6 +137,23 @@ models:
     max_tokens: 8000              # Kimi支持长上下文
     enabled: true
     timeout: 120
+
+  # DeepSeek模型
+  deepseek-chat:
+    provider: "deepseek"
+    temperature: 0.7
+    max_tokens: 8192
+    enabled: true
+    timeout: 120
+    fallback_model: "deepseek-reasoner"
+
+  deepseek-reasoner:
+    provider: "deepseek"
+    temperature: 0.7
+    max_tokens: 64000
+    enabled: true
+    timeout: 120
+    fallback_model: "deepseek-chat"
   
   # CogView 图像生成模型
   cogview-3:
@@ -147,7 +173,7 @@ environments:
   development:
     # 开发环境使用更快的轻量模型
     agent_model_mapping:
-      concept_planner: "glm-light"
+      concept_planner: "glm-light"   # 兼容映射；主 planning route authority 见 llm_policies.yaml
       script_writer: "glm-light"
       quality_checker: "glm-light"
       default: "glm-light"
@@ -166,7 +192,7 @@ environments:
   production:
     # 生产环境使用默认主模型
     agent_model_mapping:
-      concept_planner: "glm-default"
+      concept_planner: "glm-default" # 兼容映射；主 planning route authority 见 llm_policies.yaml
       script_writer: "glm-default"
       quality_checker: "glm-light"
       audio_generator: "glm-default"
