@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import uuid
 import math
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-import asyncio
-import threading
 
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.orm import Session
 
-from ....agents import SeriesPlannerAgent
 from ....agents.base import AgentError
 from ....core.database import SessionLocal
 from ....core.constants import GenerationMode
@@ -27,6 +23,8 @@ from ....core.story_plan import (
     project_state_repository,
 )
 from ....models import Task, TaskStatus, TaskType
+from ....services.project_job_contract import attach_project_plan_contract
+from ....services.project_job_queue import ProjectJobQueueService
 from ....services.task_queue import TaskQueueService
 from ....services.project_service import update_episode_script
 
@@ -145,113 +143,12 @@ class EpisodeGenerationRequest(BaseModel):
     project_character_reference_images_enabled: Optional[bool] = None
 
 
-def _schedule_project_plan(task_db_id: Optional[int], payload: Dict[str, Any]) -> None:
+def _schedule_project_plan(task_db_id: Optional[int]) -> Optional[str]:
     if task_db_id is None:
-        return
+        return None
 
-    def runner() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(_run_project_plan(task_db_id, payload))
-        finally:
-            loop.close()
-
-    threading.Thread(target=runner, name=f"project-plan-{task_db_id}", daemon=True).start()
-
-
-async def _run_project_plan(task_db_id: int, payload: Dict[str, Any]) -> None:
-    session = SessionLocal()
-    task: Optional[Task] = None
-    try:
-        task = session.get(Task, task_db_id)
-        if not task:
-            return
-
-        task.status = TaskStatus.IN_PROGRESS.value
-        task.update_progress("Project planning started", 1)
-        session.commit()
-
-        project_id = payload.get("project_id")
-        if project_id:
-            project_state = project_state_repository.get(project_id)
-            if project_state:
-                project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
-                project_state.progress.planning.task_id = str(task.task_id)
-                project_state.progress.planning.error = None
-                project_state_repository.save(project_state)
-
-        from ....agents.utils.llm_policy import LLMPolicyManager
-
-        policy_path = Path(__file__).resolve().parents[3].joinpath('config', 'llm_policies.yaml')
-        policy_manager = LLMPolicyManager(str(policy_path))
-        planner_llms = policy_manager.build_llms_for_agent('series_planner')
-
-        planner = SeriesPlannerAgent.create_default(llms=planner_llms)
-        await planner.execute(
-            task=task,
-            input_data=payload,
-            db=session,
-            execution_order=1,
-        )
-
-        # Optional: generate project character reference images (avatar/full_body)
-        try:
-            from ....services.character_reference_images import ensure_project_character_reference_images
-
-            if project_id:
-                task.update_progress("Generating character references", 90)
-                session.commit()
-                refs_started = await ensure_project_character_reference_images(
-                    str(project_id),
-                    enabled=bool(payload.get("generate_character_references", True)),
-                    logger=getattr(planner, "logger", None),
-                )
-                project_state = project_state_repository.get(project_id)
-                if project_state and not refs_started:
-                    project_state.progress.character_references.status = ProjectOperationState.SKIPPED
-                    project_state.progress.character_references.error = None
-                    project_state_repository.save(project_state)
-        except Exception as exc:  # noqa: BLE001
-            # Keep planning successful even if refs fail; surface diagnostics in project_state.
-            if project_id:
-                project_state = project_state_repository.get(project_id)
-                if project_state:
-                    project_state.progress.character_references.status = ProjectOperationState.FAILED
-                    project_state.progress.character_references.error = str(exc)
-                    project_state_repository.save(project_state)
-
-        task.status = TaskStatus.COMPLETED.value
-        task.error_message = None
-        task.output_metadata = {"project_id": payload.get("project_id")}
-        task.update_progress("Project planning completed", 100)
-        session.commit()
-
-        if project_id:
-            project_state = project_state_repository.get(project_id)
-            if project_state:
-                project_state.progress.planning.status = ProjectOperationState.COMPLETED
-                project_state.progress.planning.task_id = str(task.task_id)
-                project_state.progress.planning.error = None
-                project_state_repository.save(project_state)
-
-    except Exception as exc:  # noqa: BLE001
-        session.rollback()
-        if task:
-            task.status = TaskStatus.FAILED.value
-            task.error_message = str(exc)
-            task.update_progress("Project planning failed", task.progress_percentage or 1)
-            session.commit()
-
-        project_id = payload.get("project_id")
-        if project_id:
-            project_state = project_state_repository.get(project_id)
-            if project_state:
-                project_state.progress.planning.status = ProjectOperationState.FAILED
-                project_state.progress.planning.error = str(exc)
-                project_state_repository.save(project_state)
-    finally:
-        session.close()
+    task_queue = ProjectJobQueueService()
+    return task_queue.queue_task(task_db_id)
 
 
 class EpisodeGenerationResponse(BaseModel):
@@ -333,7 +230,7 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
     session = SessionLocal()
     task: Optional[Task] = None
     try:
-        payload = {
+        payload = attach_project_plan_contract({
             "project_id": project_id,
             "user_prompt": request.user_prompt,
             "target_duration_seconds": request.target_duration_seconds,
@@ -350,7 +247,7 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             "additional_notes": request.additional_notes,
             "auto_generate_scripts": bool(request.auto_generate_scripts),
             "generate_character_references": bool(request.generate_character_references),
-        }
+        })
 
         task = _create_task(
             session,
@@ -398,7 +295,9 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
         project_state.progress.planning.task_id = str(task.task_id)
         project_state_repository.save(project_state)
 
-        _schedule_project_plan(task.id, payload)
+        celery_task_id = _schedule_project_plan(task.id)
+        if not celery_task_id:
+            raise RuntimeError("Failed to queue project planning job")
 
     except Exception as exc:  # noqa: BLE001
         session.rollback()
@@ -407,6 +306,11 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             task.status = TaskStatus.FAILED.value
             task.error_message = str(exc)
             session.commit()
+        project_state = project_state_repository.get(project_id)
+        if project_state:
+            project_state.progress.planning.status = ProjectOperationState.FAILED
+            project_state.progress.planning.error = str(exc)
+            project_state_repository.save(project_state)
         raise HTTPException(status_code=500, detail=f"Failed to create project plan: {exc}") from exc
     finally:
         session.close()

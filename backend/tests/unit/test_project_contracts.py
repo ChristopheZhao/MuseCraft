@@ -17,9 +17,16 @@ from app.core.story_plan import (
     EpisodePlan,
     project_state_repository,
 )
-from app.models import TaskStatus
+from app.models import Task, TaskStatus, TaskType
 from app.api.v1.endpoints.projects import _serialize_project_state
+from app.services.project_job_contract import (
+    PROJECT_JOB_HANDLER_PLAN_PROJECT,
+    PROJECT_JOB_KIND_WORKFLOW,
+)
 from app.services.project_service import update_episode_script
+
+
+pytestmark = pytest.mark.usefixtures("project_state_store")
 
 
 def _build_project_state(project_id: str = "project-contracts") -> tuple[ProjectState, EpisodePlan]:
@@ -123,6 +130,76 @@ def test_project_response_serialization_materializes_runtime_for_each_episode():
     assert episode.episode_id in payload.episodes_runtime
     assert payload.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.IDLE.value
     project_state_repository.remove(project_state.project_id)
+
+
+def test_project_state_repository_round_trips_through_shared_backing():
+    project_state, episode = _build_project_state("project-contracts-persistent-roundtrip")
+    project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
+    project_state.progress.planning.task_id = "task-plan-persistent"
+    runtime = project_state.ensure_runtime_state(episode.episode_id)
+    runtime.status = EpisodeExecutionStatus.STALE
+    runtime.approved_script = "approved script"
+    project_state_repository.save(project_state)
+
+    loaded = project_state_repository.get(project_state.project_id)
+
+    assert loaded is not None
+    assert loaded.project_id == project_state.project_id
+    assert loaded.progress.planning.status == ProjectOperationState.IN_PROGRESS
+    assert loaded.progress.planning.task_id == "task-plan-persistent"
+    assert loaded.story_plan.episodes[0].episode_id == episode.episode_id
+    assert loaded.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.STALE
+    assert loaded.episodes_runtime[episode.episode_id].approved_script == "approved script"
+
+    project_state_repository.remove(project_state.project_id)
+
+
+def test_create_project_bootstraps_placeholder_from_shared_backing(monkeypatch, project_state_store):
+    monkeypatch.setattr(projects_endpoint, "SessionLocal", project_state_store)
+    monkeypatch.setattr(projects_endpoint, "_schedule_project_plan", lambda *args, **kwargs: "project-celery-1")
+
+    response = asyncio.run(
+        projects_endpoint.create_project(
+            projects_endpoint.ProjectCreateRequest(
+                user_prompt="A rabbit hero project",
+                target_duration_seconds=120,
+            )
+        )
+    )
+    fetched = asyncio.run(projects_endpoint.get_project(response.project.project_id))
+
+    assert fetched.project_id == response.project.project_id
+    assert fetched.progress.planning.status == ProjectOperationState.QUEUED.value
+    assert len(fetched.story_plan.episodes) >= 1
+    assert fetched.story_plan.project_id == response.project.project_id
+
+    project_state_repository.remove(response.project.project_id)
+
+
+def test_create_project_attaches_explicit_project_job_contract(monkeypatch, project_state_store):
+    monkeypatch.setattr(projects_endpoint, "SessionLocal", project_state_store)
+    monkeypatch.setattr(projects_endpoint, "_schedule_project_plan", lambda *args, **kwargs: "project-celery-2")
+
+    response = asyncio.run(
+        projects_endpoint.create_project(
+            projects_endpoint.ProjectCreateRequest(
+                user_prompt="A fox detective project",
+                target_duration_seconds=120,
+            )
+        )
+    )
+
+    db = project_state_store()
+    try:
+        task = db.query(Task).filter(Task.task_id == response.task_id).first()
+        assert task is not None
+        assert task.task_type == TaskType.SCRIPT_WRITING
+        assert (task.input_parameters or {}).get("job_kind") == PROJECT_JOB_KIND_WORKFLOW
+        assert (task.input_parameters or {}).get("handler_key") == PROJECT_JOB_HANDLER_PLAN_PROJECT
+    finally:
+        db.close()
+
+    project_state_repository.remove(response.project.project_id)
 
 
 def test_orchestrate_project_force_rerun_does_not_pre_mark_unapproved_episode(monkeypatch):

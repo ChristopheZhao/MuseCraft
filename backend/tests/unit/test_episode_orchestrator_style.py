@@ -3,6 +3,12 @@ from app.core.story_plan import EpisodePlan, ProjectState, StoryPlan, normalize_
 from app.core.story_plan import project_state_repository
 
 
+import pytest
+
+
+pytestmark = pytest.mark.usefixtures("project_state_store")
+
+
 def test_sync_project_foundation_reuses_story_plan_foundation():
     project_id = "proj-test"
     story_plan = StoryPlan(

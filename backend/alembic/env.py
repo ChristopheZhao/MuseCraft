@@ -11,6 +11,7 @@ from app.models import (
     Task,
     Scene,
     Resource,
+    ProjectWorkspace,
     WorkflowSession,
     WorkflowNodeState,
     WorkflowNodeAttempt,

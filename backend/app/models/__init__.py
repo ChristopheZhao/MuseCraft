@@ -18,6 +18,7 @@ from .workflow_runtime import (
     WorkflowGateDecision,
     WorkflowPublishedDeliverable,
 )
+from .project_workspace import ProjectWorkspace
 
 __all__ = [
     "BaseModel",
@@ -31,4 +32,5 @@ __all__ = [
     "WorkflowGate", "WorkflowGateStatus",
     "WorkflowGateDecision",
     "WorkflowPublishedDeliverable",
+    "ProjectWorkspace",
 ]

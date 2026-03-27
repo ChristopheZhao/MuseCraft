@@ -1415,13 +1415,13 @@
       "id": "PLAN-20260326-027",
       "title": "Project-level read-model persistence and host-neutral job substrate convergence",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P2",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260326-027.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-26T15:16:00Z",
-      "updated_at": "2026-03-26T15:16:00Z",
+      "updated_at": "2026-03-27T02:35:49Z",
       "archived_at": null,
       "notes": [
         {
@@ -1431,6 +1431,89 @@
         {
           "at": "2026-03-26T15:16:00Z",
           "text": "Froze the new successor boundary to project-level multi-episode wrapper concerns only: shared project-state/read-model persistence, host-neutral job_kind/handler_key dispatch, and planning-host migration, without reopening single-episode MAS control-plane work"
+        },
+        {
+          "at": "2026-03-27T01:52:55Z",
+          "text": "Refined the draft boundary before execution: project-level is explicitly a predefined workflow/product-job surface that is parallel to quick-mode at product entry, contains single-episode MAS only by invoking it per episode, and requires Phase A to separate authority facts from read-model projection while keeping queue support for quick/project semantically neutral"
+        },
+        {
+          "at": "2026-03-27T02:01:07Z",
+          "text": "Moved 027 from draft to in_progress and completed Phase A: confirmed that the current ProjectStateRepository is a host-local mixed authority/read-model object shared by planning, project orchestration, and /projects/{id} consumers, so later phases are gated on a shared project authority surface plus projection that preserves placeholder creation, project summary, and polling contracts without turning this plan into a repo-level queue rewrite"
+        },
+        {
+          "at": "2026-03-27T02:21:25Z",
+          "text": "Completed Phase B by freezing a narrow project-job substrate decision: reuse the existing Celery transport/container layer only, add a sibling project-job adapter/host entry with explicit job_kind/handler_key dispatch for project workflow jobs, and keep GenerationMode, process_video_task, and run_generation_in_host(...) scoped to the existing generation mainline"
+        },
+        {
+          "at": "2026-03-27T02:25:06Z",
+          "text": "Completed Phase C via narrower implementation successor instead of in-plan code changes: created PLAN-20260327-028 for the concrete project authority/read-model persistence plus sibling project-job host migration work, and kept 027 as the active governance/decomposition plan with only Phase D closeout remaining"
+        },
+        {
+          "at": "2026-03-27T02:31:08Z",
+          "text": "Completed Phase D governance closeout: synced the deviation inventory and plan assets so 027 now ends at architecture/governance convergence, pointed the retained project-level implementation follow-up to draft successor PLAN-20260327-028, and moved 027 to awaiting_user_confirmation without starting 028"
+        },
+        {
+          "at": "2026-03-27T02:35:49Z",
+          "text": "User confirmed the 027 closeout after Phase D governance completion; the plan lifecycle now moves from awaiting_user_confirmation to completed, while PLAN-20260327-028 remains a separate draft successor for later discussion"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260327-028",
+      "title": "Project authority surface and planning-host migration implementation successor",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260327-028.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-27T02:25:06Z",
+      "updated_at": "2026-03-27T06:43:17Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-27T02:25:06Z",
+          "text": "Created a narrower implementation successor after 027 Phase C concluded that direct in-plan migration would otherwise mix shared project authority/read-model persistence, project reader/writer rewiring, and sibling project-job host work into one oversized stream"
+        },
+        {
+          "at": "2026-03-27T02:25:06Z",
+          "text": "Froze the new successor to project-level concerns only: explicit authority store/projection, project reader/writer migration, and planning-host migration through a sibling project-job adapter, without reopening the single-episode MAS mainline or repo-level queue rewrites"
+        },
+        {
+          "at": "2026-03-27T02:59:52Z",
+          "text": "Tightened the draft boundary after multi-angle review: authority surface is explicitly limited to the four project wrapper fact groups frozen in 027 Phase A, GenerationMode and TaskType are explicitly excluded from project planning dispatch authority, and the future sibling project-job host is forbidden from reading runtime session state or calling run_generation_in_host(...)"
+        },
+        {
+          "at": "2026-03-27T03:17:48Z",
+          "text": "Bounded 028 as a return-to-mainline unblocker: the plan now closes once project mode has shared authority backing, stable /projects projection, unified project-fact readers/writers, a sibling planning host, and one minimal frontend authority-consumer smoke plus backend contract slice, after which work should return to single-episode MAS mainline integration instead of expanding project-level scope"
+        },
+        {
+          "at": "2026-03-27T03:27:10Z",
+          "text": "Started 028 execution at Phase A only: active work is limited to the authority backing / projection substrate slice, while Phase B/C remain frozen until Phase A evidence is complete and user-confirmed"
+        },
+        {
+          "at": "2026-03-27T04:10:09Z",
+          "text": "Completed 028 Phase A only: added durable project backing behind the existing ProjectStateRepository facade, preserved placeholder /projects projection behavior, passed focused project/orchestrator unit validation, and kept Phase B/C frozen pending user confirmation"
+        },
+        {
+          "at": "2026-03-27T05:42:29Z",
+          "text": "Completed 028 Phase B only: planner and project-service writers now return/store canonical shared-state results, project contract and planner persistence tests pass on shared backing, and the old host-local _states repository path is no longer present in ProjectStateRepository"
+        },
+        {
+          "at": "2026-03-27T05:58:15Z",
+          "text": "Completed 028 Phase C only: project planning now uses explicit project_workflow/plan_project dispatch contracts plus a sibling process_project_job worker host, create_project no longer spins an endpoint-local planning thread, focused contract/project-job/generation-mainline regressions passed (23 passed), and the new project_job path stays decoupled from GenerationMode, RuntimeSessionService, and run_generation_in_host(...) while Phase D remains pending user confirmation"
+        },
+        {
+          "at": "2026-03-27T06:20:14Z",
+          "text": "Completed 028 Phase D closeout: the bounded backend regression slice still passes, a minimal frontend project-mode store smoke now covers create->poll->read-projection->orchestrate, the deviation inventory no longer describes project planning as a retained endpoint-local host, and the plan moves to awaiting_user_confirmation so work can return to MAS-mainline FE/BE integration after user acceptance"
+        },
+        {
+          "at": "2026-03-27T06:36:03Z",
+          "text": "Tightened 028 Phase D evidence wording after acceptance review: the current frontend proof is recorded as a store-level authority-consumer smoke paired with backend contract validation, not as a full FE/BE end-to-end smoke; real integrated request-chain validation is deferred to the MAS-mainline integration stream"
+        },
+        {
+          "at": "2026-03-27T06:43:17Z",
+          "text": "User confirmed the 028 closeout after the acceptance wording tightening; lifecycle now advances from awaiting_user_confirmation to completed, and follow-up work should return to single-episode MAS mainline frontend/backend integration rather than extending project-level scope"
         }
       ]
     }

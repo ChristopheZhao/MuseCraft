@@ -16,6 +16,9 @@ from app.core.story_plan import (
 from app.services import character_reference_images as charref_service
 
 
+pytestmark = pytest.mark.usefixtures("project_state_store")
+
+
 def test_build_episode_payload_uses_episode_context(monkeypatch):
     agent = object.__new__(EpisodeOrchestratorAgent)
 

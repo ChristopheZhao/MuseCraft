@@ -153,11 +153,11 @@ class SeriesPlannerAgent(BaseAgent):
                 user_prompt=user_prompt,
             )
 
-        project_state_repository.save(project_state)
+        project_state = project_state_repository.save(project_state)
 
         return {
             "project_id": project_id,
-            "story_plan": story_plan.to_dict(),
+            "story_plan": project_state.story_plan.to_dict(),
         }
 
     async def _populate_episode_scripts(self, project_state: ProjectState, user_prompt: str) -> None:

@@ -67,8 +67,7 @@ def update_episode_script(
     if additional_notes:
         runtime.output_assets.setdefault("notes", {}).update(additional_notes)
 
-    project_state_repository.save(project_state)
-    return project_state
+    return project_state_repository.save(project_state)
 
 
 def mark_episode_runtime_status(
@@ -86,8 +85,7 @@ def mark_episode_runtime_status(
     runtime.status = status
     runtime.error = error
     project_state.mark_episode_runtime_status(episode_id, status, error)
-    project_state_repository.save(project_state)
-    return project_state
+    return project_state_repository.save(project_state)
 
 
 def _locate_episode(project_state: ProjectState, episode_id: str) -> Optional[EpisodePlan]:

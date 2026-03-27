@@ -231,6 +231,9 @@ class EpisodeOrchestratorAgent(BaseAgent):
             enabled=enabled,
             logger=self.logger,
         )
+        refreshed_state = project_state_repository.get(project_state.project_id)
+        if refreshed_state is not None:
+            project_state.sync_from(refreshed_state)
 
 
     async def _run_single_episode(
