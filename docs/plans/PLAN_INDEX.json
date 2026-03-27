@@ -1516,6 +1516,92 @@
           "text": "User confirmed the 028 closeout after the acceptance wording tightening; lifecycle now advances from awaiting_user_confirmation to completed, and follow-up work should return to single-episode MAS mainline frontend/backend integration rather than extending project-level scope"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260327-029",
+      "title": "Workflow gate schema alignment for runtime gate projection",
+      "kind": "fix",
+      "status": "awaiting_user_confirmation",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260327-029.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-27T07:24:27Z",
+      "updated_at": "2026-03-27T07:45:54Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-27T07:24:27Z",
+          "text": "Created a new MAS-mainline fix plan after runtime execution failed on workflow_gates.scope; Phase 0 audit confirmed the issue is ORM-vs-migration schema drift in workflow_gates, not a project-level concern and not a valid compatibility/fallback scenario"
+        },
+        {
+          "at": "2026-03-27T07:24:27Z",
+          "text": "Completed Phase 0 audit only: runtime gate reads currently select the full WorkflowGate entity, the ORM model requires scope and diagnostics while the Alembic workflow_gates table creation omits both columns, and Phase 1 is frozen to a pure schema-alignment migration with no query-side workaround"
+        },
+        {
+          "at": "2026-03-27T07:24:27Z",
+          "text": "Completed Phase 1 only: added a focused Alembic migration to align workflow_gates with the current WorkflowGate ORM contract by introducing scope and diagnostics plus minimal backfill, while keeping runtime query code unchanged and deferring actual migration-path validation to Phase 2"
+        },
+        {
+          "at": "2026-03-27T07:45:54Z",
+          "text": "Completed Phase 2 validation: applied the Alembic migration to the local MySQL dev database, confirmed workflow_gates now physically contains scope and diagnostics, verified direct ORM reads plus RuntimeSessionService.get_latest_gate_for_node_sync(...) succeed on the previously failing runtime path, and moved 029 to awaiting_user_confirmation instead of auto-closing"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260327-030",
+      "title": "MAS LLM multi-provider routing and provider-agnostic concept planner routing",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260327-030.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-27T09:23:14Z",
+      "updated_at": "2026-03-27T13:26:17Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-27T09:23:14Z",
+          "text": "Created a new MAS-level successor after reviewing the handoff, the open 029 governance state, the prior 009 timeout-governance plan, and the current LLM/provider code paths; the next stream needs a separate managed plan for supplier-agnostic multi-provider routing plus provider-agnostic concept-side routing, with DeepSeek used only as the initial policy-selected primary target and the work kept strictly separate from 029 closeout and project-level scope"
+        },
+        {
+          "at": "2026-03-27T09:31:47Z",
+          "text": "Completed Phase 0 routing audit and scope freeze: concept_planner currently gets primary/fallback model selection from ai_config, gets provider service selection from llm_policy role handles, and remains exposed to implicit cross-provider fallback in the LLM service registry. Subsequent phases are now frozen to replace this split ownership with a single resolved route contract, keep concept-side code provider-agnostic, and remove silent provider switching"
+        },
+        {
+          "at": "2026-03-27T09:42:23Z",
+          "text": "Completed Phase 1 provider-routing substrate without entering DeepSeek integration: llm_policy now resolves explicit provider/model routes and rejects mismatch instead of collapsing to zhipu, the LLM service registry now fails with explicit diagnostics instead of silently switching providers, and focused unit validation passed for both the new routing tests and the existing Zhipu timeout/fallback regressions"
+        },
+        {
+          "at": "2026-03-27T10:01:31Z",
+          "text": "Completed Phase 2 DeepSeek provider integration without entering concept-side cutover: added a shared-contract DeepSeek LLM service and registry registration, extended ai_config plus backend/config/ai_config.yaml to carry DeepSeek provider/model metadata, taught startup diagnostics to accept config-backed provider credentials, and validated DeepSeek service behavior, config merge/registration, and Phase 1 routing regressions under the narrowed unit harness"
+        },
+        {
+          "at": "2026-03-27T10:16:21Z",
+          "text": "Completed Phase 3 provider-agnostic concept routing cutover without entering real-path validation: concept_planner now resolves its planning route from shared llm policy metadata instead of agent_model_mapping, the repo policy points concept_planner.plan to DeepSeek, cross-provider fallback contracts fail fast, and focused unit validation passed for concept routing, timeout regressions, and the provider-routing substrate while the existing async project_mode unit test remained a residual harness gap"
+        },
+        {
+          "at": "2026-03-27T10:33:01Z",
+          "text": "Completed Phase 4 focused validation and governance sync while keeping the plan in_progress pending user acceptance: added a quasi-real concept_planner route proof on the real _execute_impl path with policy-resolved DeepSeek plan routing, revalidated the focused pytest bundle plus changed-file py_compile, and kept the existing async project_mode test explicitly outside the passing evidence set"
+        },
+        {
+          "at": "2026-03-27T12:31:43Z",
+          "text": "Reopened Phase 4 for configuration-exposure closeout after user review found that deployment-facing configurability still lagged the runtime routing work: .env.example and backend/.env.example do not yet expose DEEPSEEK_* for the selected concept_planner route, and ai_config.yaml still presents a misleading legacy concept_planner agent_model_mapping entry"
+        },
+        {
+          "at": "2026-03-27T12:35:19Z",
+          "text": "Completed the Phase 4 configuration-exposure closeout while keeping the plan in_progress pending user acceptance: added DEEPSEEK_* to both env templates, labeled llm_policies.yaml as the concept_planner supplier authority, marked ai_config.yaml concept_planner mappings as compatibility-only metadata, and passed the new config-surface guardrail test plus focused routing/config regressions"
+        },
+        {
+          "at": "2026-03-27T12:50:57Z",
+          "text": "Completed live DeepSeek acceptance probing without closing the lifecycle: a real DeepSeekLLMService smoke call succeeded on deepseek-chat, bounded 2/4/6 concurrency completed without rate-limit or timeout failures in the tested range, and a minimal real concept_planner main path finished successfully with DeepSeek-selected routing plus visible TIME_BUDGET diagnostics"
+        },
+        {
+          "at": "2026-03-27T13:26:17Z",
+          "text": "Closed the plan after explicit user confirmation that the integration validation gate passed: live DeepSeek smoke, bounded concurrency probing, minimal real concept_planner path validation, and deployment-facing DEEPSEEK_* configuration exposure were all accepted, while 029 remained outside this lifecycle"
+        }
+      ]
     }
   ]
 }
