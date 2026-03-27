@@ -3,7 +3,7 @@ Control-plane state adapter for orchestration context and runtime traces.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from ..models import AgentType
@@ -199,6 +199,44 @@ class OrchestrationStateAdapter:
                 "projection_role": "diagnostics_only",
             },
         )
+
+    def load_task_specs(
+        self,
+        *,
+        workflow_state_id: str,
+    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        raw_task_specs = read_shared_fact(
+            str(workflow_state_id),
+            "workflow.task_specs",
+            {},
+            service=self._memory_services.short_term,
+        ) or {}
+        raw_conditional = read_shared_fact(
+            str(workflow_state_id),
+            "workflow.conditional_tasks",
+            {},
+            service=self._memory_services.short_term,
+        ) or {}
+
+        task_specs: Dict[AgentType, Dict[str, Any]] = {}
+        if isinstance(raw_task_specs, dict):
+            for raw_agent, spec in raw_task_specs.items():
+                if not isinstance(spec, dict):
+                    continue
+                try:
+                    agent_type = AgentType(str(raw_agent))
+                except Exception:
+                    continue
+                task_specs[agent_type] = dict(spec)
+
+        conditional_task_specs: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_conditional, dict):
+            for key, value in raw_conditional.items():
+                if not isinstance(value, dict):
+                    continue
+                conditional_task_specs[str(key)] = dict(value)
+
+        return task_specs, conditional_task_specs
 
     def persist_runtime_activation(
         self,

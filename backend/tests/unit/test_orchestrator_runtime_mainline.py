@@ -171,7 +171,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         "read_shared_fact",
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
     )
-    monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop)
+    monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop, raising=False)
 
     agent = object.__new__(OrchestratorAgent)
     agent.agent_type = AgentType.ORCHESTRATOR
@@ -181,11 +181,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
     agent._memory_services = memory_services
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
-    agent._orchestration_state = SimpleNamespace(
-        build_audio_contract=lambda **kwargs: {"policy": "adaptive"},
-        persist_llm_planning_context=lambda **kwargs: None,
-        persist_task_specs=lambda **kwargs: None,
-    )
+    agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
         resolve_runtime_hints=lambda **kwargs: {},
         build_execution_contract=lambda **kwargs: {},
@@ -286,7 +282,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
         "read_shared_fact",
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
     )
-    monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop)
+    monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop, raising=False)
 
     agent = object.__new__(OrchestratorAgent)
     agent.agent_type = AgentType.ORCHESTRATOR
@@ -414,9 +410,52 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        planning_calls = {"select": 0, "decompose": 0}
+        continuation_calls = []
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+
+        async def _count_select(*args, **kwargs):
+            planning_calls["select"] += 1
+            return (
+                [
+                    AgentType.CONCEPT_PLANNER,
+                    AgentType.SCRIPT_WRITER,
+                    AgentType.IMAGE_GENERATOR,
+                ],
+                "test-selection",
+            )
+
+        async def _count_decompose(*args, **kwargs):
+            planning_calls["decompose"] += 1
+            return (
+                {
+                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
+                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                },
+                {},
+            )
+
+        agent._llm_select_candidate_agents = _count_select
+        agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+        original_consume = RuntimeSessionService.consume_script_approval_continuation_sync
+
+        def _record_consume(db, runtime_session, *, task=None):
+            continuation_calls.append(
+                {
+                    "session_id": runtime_session.id,
+                    "task_id": getattr(task, "id", None),
+                }
+            )
+            return original_consume(db, runtime_session, task=task)
+
+        monkeypatch.setattr(
+            RuntimeSessionService,
+            "consume_script_approval_continuation_sync",
+            staticmethod(_record_consume),
+        )
 
         first = asyncio.run(
             agent._execute_impl(
@@ -451,6 +490,8 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["image"]["status"] == WorkflowNodeStatus.COMPLETED.value
+        assert planning_calls == {"select": 1, "decompose": 1}
+        assert continuation_calls == [{"session_id": session.id, "task_id": task.id}]
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert len(call_log["image_generator"]) == 1
@@ -514,7 +555,33 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        planning_calls = {"select": 0, "decompose": 0}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+
+        async def _count_select(*args, **kwargs):
+            planning_calls["select"] += 1
+            return (
+                [
+                    AgentType.CONCEPT_PLANNER,
+                    AgentType.SCRIPT_WRITER,
+                    AgentType.IMAGE_GENERATOR,
+                ],
+                "test-selection",
+            )
+
+        async def _count_decompose(*args, **kwargs):
+            planning_calls["decompose"] += 1
+            return (
+                {
+                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
+                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                },
+                {},
+            )
+
+        agent._llm_select_candidate_agents = _count_select
+        agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
@@ -550,11 +617,12 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
         assert runtime_view["status"] == WorkflowSessionStatus.WAITING_GATE.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
-        assert len(call_log["concept_planner"]) == 2
+        assert planning_calls == {"select": 1, "decompose": 1}
+        assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 2
         assert call_log["image_generator"] == []
-        assert call_log["concept_planner"][1]["input_data"]["script_review_contract"]["action"] == "revise"
-        assert call_log["concept_planner"][1]["input_data"]["script_review_contract"]["feedback_text"] == "tighten pacing"
+        assert call_log["script_writer"][1]["input_data"]["script_review_contract"]["action"] == "revise"
+        assert call_log["script_writer"][1]["input_data"]["script_review_contract"]["feedback_text"] == "tighten pacing"
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -566,7 +634,33 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        planning_calls = {"select": 0, "decompose": 0}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+
+        async def _count_select(*args, **kwargs):
+            planning_calls["select"] += 1
+            return (
+                [
+                    AgentType.CONCEPT_PLANNER,
+                    AgentType.SCRIPT_WRITER,
+                    AgentType.IMAGE_GENERATOR,
+                ],
+                "test-selection",
+            )
+
+        async def _count_decompose(*args, **kwargs):
+            planning_calls["decompose"] += 1
+            return (
+                {
+                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
+                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                },
+                {},
+            )
+
+        agent._llm_select_candidate_agents = _count_select
+        agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
@@ -602,6 +696,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
         assert runtime_view["status"] == WorkflowSessionStatus.WAITING_GATE.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
+        assert planning_calls == {"select": 2, "decompose": 2}
         assert len(call_log["concept_planner"]) == 2
         assert len(call_log["script_writer"]) == 2
         assert call_log["image_generator"] == []

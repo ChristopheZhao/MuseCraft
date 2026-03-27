@@ -1602,6 +1602,49 @@
           "text": "Closed the plan after explicit user confirmation that the integration validation gate passed: live DeepSeek smoke, bounded concurrency probing, minimal real concept_planner path validation, and deployment-facing DEEPSEEK_* configuration exposure were all accepted, while 029 remained outside this lifecycle"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260327-031",
+      "title": "HITL script-gate resume path control-plane alignment",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260327-031.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-27T14:14:42Z",
+      "updated_at": "2026-03-27T15:23:11Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-27T14:14:42Z",
+          "text": "Created a new MAS-mainline fix plan after script HITL resume-path review showed the current residual issue is not gate ownership or queue semantics but a control-plane continuation problem: approval is persisted correctly, yet orchestrator still performs candidate selection and task decomposition before consuming the approve continuation"
+        },
+        {
+          "at": "2026-03-27T14:14:42Z",
+          "text": "Completed Phase 0 audit only: architecture ownership is now frozen as governance defining review criteria, gate layer producing review input, control layer owning gate/session/decision state and resume semantics, and queue/worker remaining transport-only; the next phase is narrowed to explicit continuation-contract design for approve/revise/replan without reopening 029, 030, or any project-level scope"
+        },
+        {
+          "at": "2026-03-27T14:23:46Z",
+          "text": "Completed Phase 1 contract freeze and moved 031 to in_progress: approve is now explicitly frozen as a control-plane continuation that must bypass candidate selection and task decomposition, revise remains a script_writer-only node continuation with script_review_contract, replan remains the only workflow-scoped action allowed to re-enter top-level planning, and Phase 2 is narrowed to implementing a loader/split around persisted workflow.task_specs plus workflow.conditional_tasks without changing queue or gate ownership"
+        },
+        {
+          "at": "2026-03-27T14:38:40Z",
+          "text": "Completed Phase 2 implementation without entering closeout: orchestration state now provides a narrow loader for persisted workflow.task_specs plus workflow.conditional_tasks, approve and revise now resume through that control-plane continuation path without re-running candidate selection or task decomposition, replan still re-enters top-level planning, and focused resume-path validation passed on the three direct HITL cases"
+        },
+        {
+          "at": "2026-03-27T14:56:40Z",
+          "text": "Corrected the residual Phase 2 control-plane leakage before closeout: approve continuation no longer lets orchestrator mutate runtime node/session/task state directly, because the APPROVED -> COMPLETED and RESUMING -> RUNNING transition now lives in RuntimeSessionService.consume_script_approval_continuation_sync, with focused service-level and orchestrator-level validation both passing"
+        },
+        {
+          "at": "2026-03-27T15:20:03Z",
+          "text": "Completed Phase 3 and moved 031 to awaiting_user_confirmation: governance now records the corrected control-plane boundary, focused validation covers both the approve continuation transition and the three distinct HITL resume paths, the old orchestration-side runtime mutation block is gone, and lifecycle closeout remains gated on explicit user acceptance"
+        },
+        {
+          "at": "2026-03-27T15:23:11Z",
+          "text": "Closed the plan after explicit user confirmation: 031 now records the approve continuation transition as control-plane-owned, keeps orchestrator as a pure consumer of runtime state, preserves queue/worker transport-only semantics, and establishes this layered boundary as the accepted baseline for ongoing MAS-mainline integration work"
+        }
+      ]
     }
   ]
 }

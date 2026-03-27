@@ -15,7 +15,6 @@ from ..models import (
     Task,
     TaskStatus,
     AgentType,
-    WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
 from ..services.memory_provider import build_memory_services, MemoryServices
@@ -364,6 +363,30 @@ class OrchestratorAgent(BaseAgent):
             "node_key": "script",
         }
 
+    def _load_authoritative_resume_task_specs(
+        self,
+        *,
+        workflow_state_id: str,
+        resume_action: str,
+    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]], List[AgentType]]:
+        task_specs, conditional_task_specs = self._orchestration_state.load_task_specs(
+            workflow_state_id=workflow_state_id,
+        )
+        if not task_specs:
+            raise AgentError(
+                f"Missing persisted workflow.task_specs for resume action: {resume_action or '<empty>'}"
+            )
+        if resume_action in {"approve", "revise"} and AgentType.SCRIPT_WRITER not in task_specs:
+            raise AgentError(
+                f"Persisted workflow.task_specs missing script_writer for resume action: {resume_action}"
+            )
+        candidate_agents = [agent_type for agent_type in task_specs.keys() if isinstance(agent_type, AgentType)]
+        if not candidate_agents:
+            raise AgentError(
+                f"Persisted workflow.task_specs produced empty candidate pool for resume action: {resume_action or '<empty>'}"
+            )
+        return task_specs, conditional_task_specs, candidate_agents
+
     async def _llm_select_candidate_agents(
         self,
         *,
@@ -525,46 +548,52 @@ class OrchestratorAgent(BaseAgent):
         else:
             workflow_data.pop("script_review_contract", None)
 
-        candidate_agents, selection_rationale = await self._llm_select_candidate_agents(
-            workflow_data=workflow_data,
-            workflow_id=wf_id,
-        )
-        self._orchestration_state.persist_llm_planning_context(
-            workflow_state_id=wf_id,
-            registered_agents=self._registered_agents(),
-            candidate_agents=list(candidate_agents),
-            audio_contract=audio_contract,
-            capability_snapshot=audio_capability,
-            selection_rationale=selection_rationale,
-        )
-
-        if script_resume_action == "approve":
-            skip_agents.update({AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER})
-            script_node = RuntimeSessionService.get_node_by_key_sync(db, runtime_session.id, "script")
-            if script_node is not None and script_node.status == WorkflowNodeStatus.APPROVED.value:
-                script_node.status = WorkflowNodeStatus.COMPLETED.value
-            runtime_session.status = WorkflowSessionStatus.RUNNING.value
-            runtime_session.current_node_key = None
-            runtime_session.current_attempt_id = None
-            task.status = TaskStatus.IN_PROGRESS.value
-            db.commit()
-
         workflow_results = {}
-        # 任务分解（LLM → per-agent 指令），失败则回退
-        task_specs, _conditional_task_specs = await self._llm_decompose_tasks(
-            workflow_data,
-            wf_id,
-            candidate_agents=list(candidate_agents),
-        )
-        self._orchestration_state.persist_task_specs(
-            workflow_state_id=wf_id,
-            task_specs=task_specs,
-            conditional_task_specs=_conditional_task_specs,
-            candidate_agents=list(candidate_agents),
-        )
+        if script_resume_action in {"approve", "revise"}:
+            task_specs, _conditional_task_specs, candidate_agents = self._load_authoritative_resume_task_specs(
+                workflow_state_id=wf_id,
+                resume_action=script_resume_action,
+            )
+            if script_resume_action == "approve":
+                skip_agents.update({AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER})
+                RuntimeSessionService.consume_script_approval_continuation_sync(
+                    db,
+                    runtime_session,
+                    task=task,
+                )
+            else:
+                skip_agents.add(AgentType.CONCEPT_PLANNER)
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        else:
+            candidate_agents, selection_rationale = await self._llm_select_candidate_agents(
+                workflow_data=workflow_data,
+                workflow_id=wf_id,
+            )
+            self._orchestration_state.persist_llm_planning_context(
+                workflow_state_id=wf_id,
+                registered_agents=self._registered_agents(),
+                candidate_agents=list(candidate_agents),
+                audio_contract=audio_contract,
+                capability_snapshot=audio_capability,
+                selection_rationale=selection_rationale,
+            )
 
-        execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
-        standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+            # 任务分解（LLM → per-agent 指令），失败则回退
+            task_specs, _conditional_task_specs = await self._llm_decompose_tasks(
+                workflow_data,
+                wf_id,
+                candidate_agents=list(candidate_agents),
+            )
+            self._orchestration_state.persist_task_specs(
+                workflow_state_id=wf_id,
+                task_specs=task_specs,
+                conditional_task_specs=_conditional_task_specs,
+                candidate_agents=list(candidate_agents),
+            )
+
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
         replan_count = 0
         max_replans = int(getattr(settings, "ORCHESTRATOR_MAX_REPLAN_ACTIVATIONS", 2))
         total_steps = len(execution_queue)

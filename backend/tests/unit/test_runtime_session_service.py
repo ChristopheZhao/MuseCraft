@@ -16,6 +16,7 @@ from app.models import (
     WorkflowNodeStatus,
 )
 from app.services.runtime_session_service import RuntimeSessionService
+from app.services.published_deliverable_service import PublishedDeliverableService
 from app.services.script_review_contract import get_script_review_contract
 
 
@@ -301,6 +302,76 @@ def test_submit_gate_decision_marks_revision_state(sync_db):
     assert review_contract["action"] == "revise"
     assert review_contract["feedback_text"] == "tighten scene pacing"
     assert review_contract["structured_constraints"] == {"keep_character": True}
+
+
+def test_consume_script_approval_continuation_sync_rehomes_runtime_transition(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+        progress_step="Generating script",
+        progress_percentage=15,
+    )
+    RuntimeSessionService.complete_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        attempt_id=attempt.id,
+        output_artifacts=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
+        metrics={"scenes_generated": 1},
+        artifact_refs=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
+        node_status=WorkflowNodeStatus.RUNNING.value,
+    )
+    RuntimeSessionService.open_human_gate_sync(
+        sync_db,
+        session,
+        node_key="script",
+        gate_name="script_review",
+        gate_type="human_review",
+        attempt_id=attempt.id,
+        facts={"script_preview_text": "draft"},
+        allowed_actions=["approve", "revise", "replan"],
+        recommended_action="approve",
+        task=task,
+        progress_step="Waiting for script approval",
+        progress_percentage=35,
+    )
+    PublishedDeliverableService.publish_script_deliverable_sync(
+        sync_db,
+        session=session,
+        workflow_id=str(task.task_id),
+        attempt_id=attempt.id,
+        payload={"scene_scripts": {"1": {"script_text": "draft"}}},
+        summary={"total_scenes": 1},
+    )
+
+    RuntimeSessionService.submit_gate_decision_sync(
+        sync_db,
+        session.id,
+        node_key="script",
+        action="approve",
+        feedback_text="looks good",
+    )
+
+    RuntimeSessionService.consume_script_approval_continuation_sync(
+        sync_db,
+        session,
+        task=task,
+    )
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+    nodes_by_key = {node["node_key"]: node for node in view["nodes"]}
+
+    assert view["status"] == WorkflowSessionStatus.RUNNING.value
+    assert view["current_node_key"] is None
+    assert view["current_attempt_id"] is None
+    assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.COMPLETED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.requires_human_review is False
 
 
 def test_mark_session_cancelled_for_task_cancels_without_runtime_session(monkeypatch):

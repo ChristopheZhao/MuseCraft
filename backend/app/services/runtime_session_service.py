@@ -285,6 +285,47 @@ class RuntimeSessionService:
         return node
 
     @staticmethod
+    def consume_script_approval_continuation_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        task: Optional[Task] = None,
+    ) -> WorkflowNodeState:
+        node = RuntimeSessionService.get_node_by_key_sync(db, session.id, "script")
+        if node is None:
+            raise ValueError(f"Workflow node script not found for session {session.id}")
+        gate = RuntimeSessionService.get_latest_gate_for_node_sync(db, session.id, "script")
+        if gate is None:
+            raise ValueError(f"No gate found for node script in session {session.id}")
+        latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, gate.id)
+        if latest_decision is None or str(latest_decision.action or "").strip().lower() != "approve":
+            raise ValueError(
+                f"Workflow node script for session {session.id} has no approved continuation decision"
+            )
+        if session.status != WorkflowSessionStatus.RESUMING.value:
+            raise ValueError(
+                f"Workflow session {session.id} is not awaiting continuation consumption"
+            )
+        if node.status != WorkflowNodeStatus.APPROVED.value:
+            raise ValueError(
+                f"Workflow node script for session {session.id} is not in approved state"
+            )
+
+        node.status = WorkflowNodeStatus.COMPLETED.value
+        session.status = WorkflowSessionStatus.RUNNING.value
+        session.current_node_key = None
+        session.current_attempt_id = None
+        session.error_message = None
+        if task is not None:
+            task.status = TaskStatus.IN_PROGRESS.value
+            task.requires_human_review = False
+
+        db.commit()
+        db.refresh(node)
+        db.refresh(session)
+        return node
+
+    @staticmethod
     async def _get_latest_gate_for_session_async(
         db: AsyncSession,
         session_id: int,
