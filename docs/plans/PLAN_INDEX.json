@@ -1521,13 +1521,13 @@
       "id": "PLAN-20260327-029",
       "title": "Workflow gate schema alignment for runtime gate projection",
       "kind": "fix",
-      "status": "awaiting_user_confirmation",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260327-029.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-27T07:24:27Z",
-      "updated_at": "2026-03-27T07:45:54Z",
+      "updated_at": "2026-03-28T01:57:42Z",
       "archived_at": null,
       "notes": [
         {
@@ -1545,6 +1545,10 @@
         {
           "at": "2026-03-27T07:45:54Z",
           "text": "Completed Phase 2 validation: applied the Alembic migration to the local MySQL dev database, confirmed workflow_gates now physically contains scope and diagnostics, verified direct ORM reads plus RuntimeSessionService.get_latest_gate_for_node_sync(...) succeed on the previously failing runtime path, and moved 029 to awaiting_user_confirmation instead of auto-closing"
+        },
+        {
+          "at": "2026-03-28T01:57:42Z",
+          "text": "Closed the plan after subsequent MAS-mainline runtime work exercised the fix successfully: 029 is now completed with confirmed_by_user=true, and the accepted conclusion remains schema-first alignment of workflow_gates with the ORM contract without any query-side compatibility workaround"
         }
       ]
     },

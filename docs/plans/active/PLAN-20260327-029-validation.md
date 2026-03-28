@@ -2,7 +2,7 @@
 
 - Plan ID: PLAN-20260327-029
 - Recorded At: 2026-03-27T07:24:27Z
-- Status: awaiting_user_confirmation
+- Status: completed
 
 ## Purpose
 - Record phase-by-phase verification for [PLAN-20260327-029](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260327-029.md).
@@ -62,3 +62,4 @@
 - 2026-03-27T07:24:27Z completed Phase 0 audit: root cause is confirmed as `workflow_gates` schema drift (`scope` and `diagnostics` absent from the Alembic table definition while present in the ORM model), so the next phase is a pure schema-alignment migration without runtime query compatibility changes.
 - 2026-03-27T07:24:27Z completed Phase 1 implementation: the new migration aligns `workflow_gates` with the current ORM contract by adding `scope` and `diagnostics` plus minimal backfill, while intentionally leaving runtime query code untouched so the fix remains schema-first and auditable.
 - 2026-03-27T07:45:54Z completed Phase 2 validation: the local MySQL dev database is now at Alembic head `5d2e7a9c4f1b`, the physical `workflow_gates` table includes `scope` and `diagnostics`, and the previously failing runtime gate read path succeeds without any query-side compatibility changes; lifecycle remains at `awaiting_user_confirmation` until explicit user acceptance.
+- 2026-03-28T01:57:42Z completed lifecycle closeout after the schema fix had already been exercised by subsequent runtime work. Validation status now matches the plan as `completed`, preserving the same architectural conclusion: `workflow_gates` drift was resolved by schema alignment only, with no query-side compatibility seam introduced.
