@@ -118,6 +118,23 @@ def set_published_deliverable_ref(
     deliverables[str(node_key)] = dict(ref)
     merged[PUBLISHED_DELIVERABLES_PAYLOAD_KEY] = deliverables
     return merged
+
+
+def clear_published_deliverable_ref(
+    payload: Optional[Dict[str, Any]],
+    *,
+    node_key: str,
+) -> Dict[str, Any]:
+    merged = dict(payload or {})
+    deliverables = dict(merged.get(PUBLISHED_DELIVERABLES_PAYLOAD_KEY) or {})
+    deliverables.pop(str(node_key), None)
+    if deliverables:
+        merged[PUBLISHED_DELIVERABLES_PAYLOAD_KEY] = deliverables
+    else:
+        merged.pop(PUBLISHED_DELIVERABLES_PAYLOAD_KEY, None)
+    return merged
+
+
 class PublishedDeliverableService:
     """Publishes non-artifact stage outputs as stable, referenced deliverables."""
 

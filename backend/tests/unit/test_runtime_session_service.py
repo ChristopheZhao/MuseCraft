@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from app.core.database import Base
 from app.models import (
+    AgentType,
     Task,
     TaskType,
     TaskStatus,
@@ -18,6 +19,8 @@ from app.models import (
 from app.services.runtime_session_service import RuntimeSessionService
 from app.services.published_deliverable_service import PublishedDeliverableService
 from app.services.script_review_contract import get_script_review_contract
+from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.services.published_deliverable_service import get_published_deliverable_ref
 
 
 @pytest.fixture
@@ -46,6 +49,23 @@ def _create_task(db):
     db.commit()
     db.refresh(task)
     return task
+
+
+def _build_continuation_checkpoint():
+    return OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={
+            AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
+            AgentType.SCRIPT_WRITER: {"run": True, "order": 1},
+            AgentType.IMAGE_GENERATOR: {"run": True, "order": 2},
+        },
+        conditional_task_specs={},
+        candidate_agents=[
+            AgentType.CONCEPT_PLANNER,
+            AgentType.SCRIPT_WRITER,
+            AgentType.IMAGE_GENERATOR,
+        ],
+        decision_id=None,
+    )
 
 
 def test_get_or_create_session_initializes_default_nodes(sync_db):
@@ -185,7 +205,21 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
     session.input_payload = {
         "user_prompt": "test prompt",
-        "script_review": {"action": "replan"},
+        "published_deliverables": {
+            "script": {
+                "type": "published_deliverable",
+                "deliverable_id": 3,
+                "deliverable_type": "script",
+                "scope_type": "episode",
+                "scope_id": "episode",
+                "attempt_id": 1,
+                "revision_no": 0,
+                "payload_ref": "tmp/approved_script_payload.json",
+                "summary": {"total_scenes": 1},
+                "is_candidate": False,
+                "is_approved": True,
+            }
+        },
     }
     sync_db.commit()
 
@@ -221,11 +255,13 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
         script_output={"scenes_generated": 1, "total_scenes": 1},
         artifact_ref=artifact_ref,
         script_preview_text="draft preview",
+        continuation_checkpoint=_build_continuation_checkpoint(),
     )
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
     refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-    script_payload = refreshed_session.input_payload.get("published_deliverables", {}).get("script", {})
+    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(sync_db, session.id, attempt.id)
+    script_payload = get_published_deliverable_ref(refreshed_session.input_payload, node_key="script")
 
     assert gate.gate_name == "script_review"
     assert gate.result_code == WorkflowGateStatus.AWAITING_HUMAN.value
@@ -239,11 +275,101 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
     assert view["active_gate"]["diagnostics"] == []
     assert view["active_gate"]["facts"]["script_preview_text"] == "draft preview"
     assert refreshed_session.current_attempt_id == attempt.id
-    assert script_payload["payload_ref"] == "tmp/script_payload.json"
+    assert script_payload is None
     assert get_script_review_contract(refreshed_session.input_payload) is None
+    assert refreshed_attempt.continuation_checkpoint["decision_id"] is None
+    assert refreshed_attempt.continuation_checkpoint["candidate_agents"] == [
+        AgentType.CONCEPT_PLANNER.value,
+        AgentType.SCRIPT_WRITER.value,
+        AgentType.IMAGE_GENERATOR.value,
+    ]
 
 
 def test_submit_gate_decision_marks_revision_state(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    session.input_payload = {
+        "published_deliverables": {
+            "script": {
+                "type": "published_deliverable",
+                "deliverable_id": 11,
+                "deliverable_type": "script",
+                "scope_type": "episode",
+                "scope_id": "episode",
+                "attempt_id": 7,
+                "revision_no": 0,
+                "payload_ref": "tmp/approved_script_payload.json",
+                "summary": {"total_scenes": 1},
+                "is_candidate": False,
+                "is_approved": True,
+            }
+        }
+    }
+    sync_db.commit()
+
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+        progress_step="Generating script",
+        progress_percentage=15,
+    )
+    RuntimeSessionService.complete_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        attempt_id=attempt.id,
+        output_artifacts=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
+        metrics={"scenes_generated": 1},
+        artifact_refs=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
+        node_status=WorkflowNodeStatus.RUNNING.value,
+    )
+    attempt.continuation_checkpoint = _build_continuation_checkpoint()
+    sync_db.commit()
+    RuntimeSessionService.open_human_gate_sync(
+        sync_db,
+        session,
+        node_key="script",
+        gate_name="script_review",
+        gate_type="human_review",
+        attempt_id=attempt.id,
+        facts={"script_preview_text": "draft"},
+        allowed_actions=["approve", "revise", "replan"],
+        recommended_action="approve",
+        task=task,
+        progress_step="Waiting for script approval",
+        progress_percentage=35,
+    )
+
+    decision = RuntimeSessionService.submit_gate_decision_sync(
+        sync_db,
+        session.id,
+        node_key="script",
+        action="revise",
+        feedback_text="tighten scene pacing",
+        structured_constraints={"keep_character": True},
+    )
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+    nodes_by_key = {node["node_key"]: node for node in view["nodes"]}
+
+    assert decision.action == "revise"
+    assert view["status"] == WorkflowSessionStatus.RESUMING.value
+    assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.NEEDS_REVISION.value
+    assert nodes_by_key["script"]["revision_index"] == 1
+    assert view["active_gate"]["latest_decision"]["feedback_text"] == "tighten scene pacing"
+    refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
+    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(sync_db, session.id, attempt.id)
+    review_contract = get_script_review_contract(refreshed_session.input_payload)
+    assert review_contract is not None
+    assert review_contract["action"] == "revise"
+    assert review_contract["feedback_text"] == "tighten scene pacing"
+    assert review_contract["structured_constraints"] == {"keep_character": True}
+    assert get_published_deliverable_ref(refreshed_session.input_payload, node_key="script") is None
+    assert refreshed_attempt.continuation_checkpoint["decision_id"] == decision.id
+
+
+def test_submit_gate_decision_requires_pending_continuation_checkpoint(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
@@ -280,28 +406,77 @@ def test_submit_gate_decision_marks_revision_state(sync_db):
         progress_percentage=35,
     )
 
+    with pytest.raises(ValueError, match="Continuation checkpoint must be a dict"):
+        RuntimeSessionService.submit_gate_decision_sync(
+            sync_db,
+            session.id,
+            node_key="script",
+            action="approve",
+        )
+
+
+def test_load_active_script_continuation_sync_validates_latest_decision_binding(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+        progress_step="Generating script",
+        progress_percentage=15,
+    )
+    gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
+        sync_db,
+        session,
+        task=task,
+        workflow_state_id="wf-script-review",
+        attempt_id=attempt.id,
+        trigger_reason="initial",
+        script_output={"scenes_generated": 1, "total_scenes": 1},
+        artifact_ref={
+            "type": "published_deliverable",
+            "deliverable_id": 9,
+            "deliverable_type": "script",
+            "scope_type": "episode",
+            "scope_id": "episode",
+            "attempt_id": attempt.id,
+            "revision_no": 0,
+            "payload_ref": "tmp/script_payload.json",
+            "summary": {"total_scenes": 1},
+            "is_candidate": True,
+            "is_approved": False,
+        },
+        script_preview_text="draft preview",
+        continuation_checkpoint=_build_continuation_checkpoint(),
+    )
     decision = RuntimeSessionService.submit_gate_decision_sync(
         sync_db,
         session.id,
         node_key="script",
         action="revise",
         feedback_text="tighten scene pacing",
-        structured_constraints={"keep_character": True},
     )
-    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
-    nodes_by_key = {node["node_key"]: node for node in view["nodes"]}
 
-    assert decision.action == "revise"
-    assert view["status"] == WorkflowSessionStatus.RESUMING.value
-    assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.NEEDS_REVISION.value
-    assert nodes_by_key["script"]["revision_index"] == 1
-    assert view["active_gate"]["latest_decision"]["feedback_text"] == "tighten scene pacing"
-    refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-    review_contract = get_script_review_contract(refreshed_session.input_payload)
-    assert review_contract is not None
-    assert review_contract["action"] == "revise"
-    assert review_contract["feedback_text"] == "tighten scene pacing"
-    assert review_contract["structured_constraints"] == {"keep_character": True}
+    checkpoint = RuntimeSessionService.load_active_script_continuation_sync(
+        sync_db,
+        RuntimeSessionService.get_session_by_id_sync(sync_db, session.id),
+    )
+    assert checkpoint["decision_id"] == decision.id
+    assert checkpoint["task_specs"][AgentType.SCRIPT_WRITER.value]["run"] is True
+
+    attempt = RuntimeSessionService.get_attempt_by_id_sync(sync_db, session.id, gate.attempt_id)
+    stale_checkpoint = dict(attempt.continuation_checkpoint or {})
+    stale_checkpoint["decision_id"] = decision.id + 1
+    attempt.continuation_checkpoint = stale_checkpoint
+    sync_db.commit()
+
+    with pytest.raises(ValueError, match="decision binding is stale"):
+        RuntimeSessionService.load_active_script_continuation_sync(
+            sync_db,
+            RuntimeSessionService.get_session_by_id_sync(sync_db, session.id),
+        )
 
 
 def test_consume_script_approval_continuation_sync_rehomes_runtime_transition(sync_db):
@@ -326,6 +501,8 @@ def test_consume_script_approval_continuation_sync_rehomes_runtime_transition(sy
         artifact_refs=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
         node_status=WorkflowNodeStatus.RUNNING.value,
     )
+    attempt.continuation_checkpoint = _build_continuation_checkpoint()
+    sync_db.commit()
     RuntimeSessionService.open_human_gate_sync(
         sync_db,
         session,

@@ -27,6 +27,7 @@ from ..core.generation_mode import resolve_generation_mode
 from .published_deliverable_service import (
     PublishedDeliverableService,
     build_deliverable_ref,
+    clear_published_deliverable_ref,
     set_published_deliverable_ref,
 )
 from .script_review_contract import (
@@ -34,6 +35,7 @@ from .script_review_contract import (
     get_script_review_contract,
     set_script_review_contract,
 )
+from .orchestration_state_adapter import OrchestrationStateAdapter
 
 
 DEFAULT_NODE_BLUEPRINT = [
@@ -602,6 +604,73 @@ class RuntimeSessionService:
         )
 
     @staticmethod
+    def get_attempt_by_id_sync(
+        db: Session,
+        session_id: int,
+        attempt_id: Optional[int],
+    ) -> Optional[WorkflowNodeAttempt]:
+        if attempt_id is None:
+            return None
+        return (
+            db.query(WorkflowNodeAttempt)
+            .filter(
+                WorkflowNodeAttempt.id == attempt_id,
+                WorkflowNodeAttempt.session_id == session_id,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def load_active_script_continuation_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        node_key: str = "script",
+    ) -> Dict[str, Any]:
+        if session is None:
+            raise ValueError("Workflow session is required for continuation loading")
+        if session.status != WorkflowSessionStatus.RESUMING.value:
+            raise ValueError(f"Workflow session {session.id} is not in resuming state")
+        if str(session.current_node_key or "") != str(node_key):
+            raise ValueError(
+                f"Workflow session {session.id} is not anchored to node {node_key}"
+            )
+
+        gate = RuntimeSessionService.get_latest_gate_for_node_sync(db, session.id, node_key)
+        if gate is None:
+            raise ValueError(f"No gate found for node {node_key} in session {session.id}")
+        latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, gate.id)
+        if latest_decision is None:
+            raise ValueError(
+                f"No continuation decision found for gate {gate.id} in session {session.id}"
+            )
+
+        attempt_id = session.current_attempt_id
+        if attempt_id is None:
+            raise ValueError(
+                f"Workflow session {session.id} missing current attempt anchor for continuation"
+            )
+        if gate.attempt_id != attempt_id:
+            raise ValueError(
+                f"Workflow session {session.id} attempt anchor {attempt_id} does not match gate attempt {gate.attempt_id}"
+            )
+
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+
+        checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+            attempt.continuation_checkpoint,
+            require_decision_id=True,
+        )
+        if int(checkpoint.get("decision_id")) != int(latest_decision.id):
+            raise ValueError(
+                f"Continuation checkpoint decision binding is stale for session {session.id}: "
+                f"checkpoint={checkpoint.get('decision_id')} latest={latest_decision.id}"
+            )
+        return checkpoint
+
+    @staticmethod
     def start_node_attempt_sync(
         db: Session,
         session: WorkflowSession,
@@ -815,41 +884,47 @@ class RuntimeSessionService:
         script_output: Dict[str, Any],
         artifact_ref: Dict[str, Any],
         script_preview_text: str,
+        continuation_checkpoint: Optional[Dict[str, Any]] = None,
     ) -> WorkflowGate:
+        node = RuntimeSessionService.get_node_by_key_sync(db, session.id, "script")
+        if node is None:
+            raise ValueError(f"Workflow node script not found for session {session.id}")
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+
         review_contract = get_script_review_contract(session.input_payload) or {}
         payload = set_script_review_contract(session.input_payload, None)
-        payload = set_published_deliverable_ref(
+        payload = clear_published_deliverable_ref(
             payload,
             node_key="script",
-            ref=dict(artifact_ref or {}),
         )
         session.input_payload = payload
 
         artifact_refs = [dict(artifact_ref or {})]
-        RuntimeSessionService.complete_node_attempt_sync(
-            db,
-            session,
-            node_key="script",
-            attempt_id=attempt_id,
-            output_artifacts=artifact_refs,
-            metrics={
-                "trigger_reason": trigger_reason,
-                "scenes_generated": script_output.get("scenes_generated"),
-                "total_scenes": script_output.get("total_scenes"),
-                "review_contract_action": review_contract.get("action"),
-            },
-            artifact_refs=artifact_refs,
-            diagnostics=[],
-            node_status=WorkflowNodeStatus.RUNNING.value,
-        )
+        attempt.status = WorkflowAttemptStatus.SUCCEEDED.value
+        attempt.output_artifacts = artifact_refs
+        attempt.metrics = {
+            "trigger_reason": trigger_reason,
+            "scenes_generated": script_output.get("scenes_generated"),
+            "total_scenes": script_output.get("total_scenes"),
+            "review_contract_action": review_contract.get("action"),
+        }
+        if continuation_checkpoint is None:
+            attempt.continuation_checkpoint = None
+        else:
+            attempt.continuation_checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+                continuation_checkpoint,
+                require_decision_id=False,
+            )
 
-        return RuntimeSessionService.open_human_gate_sync(
-            db,
-            session,
-            node_key="script",
+        gate = WorkflowGate(
+            session_id=session.id,
+            node_id=node.id,
+            attempt_id=attempt.id,
             gate_name="script_review",
             gate_type="human_review",
-            attempt_id=attempt_id,
+            status=WorkflowGateStatus.AWAITING_HUMAN.value,
             scope={
                 "scope_type": "episode",
                 "scope_ref": str(workflow_state_id or ""),
@@ -862,14 +937,33 @@ class RuntimeSessionService:
                 "script_preview_text": script_preview_text,
                 "trigger_reason": trigger_reason,
             },
+            result_code=WorkflowGateStatus.AWAITING_HUMAN.value,
             reason_code=str(trigger_reason or "script_review_requested"),
             diagnostics=[],
             allowed_actions=["approve", "revise", "replan"],
             recommended_action="approve",
-            task=task,
-            progress_step="Waiting for script approval",
-            progress_percentage=35,
         )
+        db.add(gate)
+        db.flush()
+
+        node.artifact_refs = artifact_refs
+        node.diagnostics = []
+        node.last_gate_id = gate.id
+        node.status = WorkflowNodeStatus.PENDING_GATE.value
+        session.status = WorkflowSessionStatus.WAITING_GATE.value
+        session.current_node_key = node.node_key
+        session.current_attempt_id = attempt.id
+        if task is not None:
+            task.status = TaskStatus.IN_PROGRESS.value
+            task.requires_human_review = True
+            task.update_progress("Waiting for script approval", 35)
+
+        db.commit()
+        db.refresh(gate)
+        db.refresh(node)
+        db.refresh(session)
+        db.refresh(attempt)
+        return gate
 
     @staticmethod
     def submit_gate_decision_sync(
@@ -901,6 +995,13 @@ class RuntimeSessionService:
         allowed_actions = [str(item).strip().lower() for item in (gate.allowed_actions or [])]
         if allowed_actions and normalized_action not in allowed_actions:
             raise ValueError(f"Action {normalized_action} is not allowed for gate {gate.id}")
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, gate.attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {gate.attempt_id} not found for session {session.id}")
+        checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+            attempt.continuation_checkpoint,
+            require_decision_id=False,
+        )
 
         invalidation_scope = "workflow" if normalized_action == "replan" else "node"
         decision = WorkflowGateDecision(
@@ -916,6 +1017,8 @@ class RuntimeSessionService:
         )
         db.add(decision)
         db.flush()
+        checkpoint["decision_id"] = decision.id
+        attempt.continuation_checkpoint = checkpoint
 
         gate.status = WorkflowGateStatus.DECIDED.value
         gate.result_code = normalized_action
@@ -945,6 +1048,11 @@ class RuntimeSessionService:
                 payload,
                 node_key=node_key,
                 ref=build_deliverable_ref(deliverable),
+            )
+        else:
+            payload = clear_published_deliverable_ref(
+                payload,
+                node_key=node_key,
             )
         if normalized_action in {"revise", "replan"}:
             payload = set_script_review_contract(

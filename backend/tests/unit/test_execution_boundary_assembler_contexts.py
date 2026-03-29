@@ -153,6 +153,51 @@ def test_resolve_published_stage_payload_returns_explicit_receipt_and_payload(tm
     assert receipt["payload"]["concept_plan"]["overview"] == "resolved overview"
 
 
+def test_resolve_published_stage_payload_rejects_unapproved_runtime_ref(tmp_path):
+    service = _build_service()
+    workflow_id = "wf-stage-payload-unapproved"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+    payload_path = Path(tmp_path) / "script_payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "deliverable_type": "script",
+                "workflow_state_id": workflow_id,
+                "concept_plan": {"overview": "candidate overview"},
+                "scene_overview": {"scenes": [{"scene_number": 1}]},
+                "scene_scripts": {"1": {"script_text": "candidate script"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AgentError, match="runtime_input_ref_not_approved"):
+        assembler.resolve_published_stage_payload(
+            workflow_state_id=workflow_id,
+            node_key="script",
+            prefer_approved=True,
+            required=True,
+            runtime_input_payload={
+                "published_deliverables": {
+                    "script": {
+                        "type": "published_deliverable",
+                        "deliverable_id": 14,
+                        "deliverable_type": "script",
+                        "scope_type": "episode",
+                        "scope_id": "episode",
+                        "attempt_id": 6,
+                        "revision_no": 0,
+                        "payload_ref": str(payload_path),
+                        "summary": {"total_scenes": 1},
+                        "is_candidate": True,
+                        "is_approved": False,
+                    }
+                }
+            },
+        )
+
+
 def test_assemble_agent_context_requires_no_projection_when_runtime_input_carries_script_ref(tmp_path):
     service = _build_service()
     workflow_id = "wf-assemble-runtime-input"

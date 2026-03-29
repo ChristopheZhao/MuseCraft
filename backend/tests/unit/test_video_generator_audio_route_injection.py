@@ -1,11 +1,10 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 
+from app.agents.orchestrator import OrchestratorAgent
 from app.agents.video_generator import VideoGeneratorAgent
 from app.models import AgentType
-from app.services.context_assembler import ContextContractAssembler
 from app.services.video_execution_contract import build_video_generation_execution_contract
 
 
@@ -117,10 +116,8 @@ def test_resolve_execution_contract_uses_explicit_contract_without_plan_or_route
     assert resolved["constraints"]["generate_audio"] is False
 
 
-def test_execution_boundary_assembler_builds_video_execution_contract_from_runtime_hints():
-    assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
-
-    contract = assembler.build_execution_contract(
+def test_orchestrator_builds_video_execution_contract_from_runtime_hints():
+    contract = OrchestratorAgent._build_agent_execution_contract(
         agent_type=AgentType.VIDEO_GENERATOR,
         workflow_state_id="wf-9",
         runtime_hints={"generate_audio": True},

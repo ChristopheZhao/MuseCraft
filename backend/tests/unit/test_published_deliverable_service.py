@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.core.database import Base
 from app.models import (
+    AgentType,
     Task,
     TaskStatus,
     TaskType,
@@ -23,6 +24,7 @@ from app.services.published_deliverable_adapter import (
     build_script_deliverable_payload,
 )
 from app.services.runtime_session_service import RuntimeSessionService
+from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
 from app.agents.utils.memory_helpers import write_shared_fact
@@ -98,6 +100,18 @@ def _seed_script_facts(service: WorkingMemoryService, workflow_id: str) -> None:
     )
 
 
+def _build_continuation_checkpoint():
+    return OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={
+            AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
+            AgentType.SCRIPT_WRITER: {"run": True, "order": 1},
+        },
+        conditional_task_specs={},
+        candidate_agents=[AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER],
+        decision_id=None,
+    )
+
+
 def test_publish_script_deliverable_persists_payload_without_direct_wm_projection(sync_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "TEMP_PATH", str(tmp_path))
 
@@ -169,6 +183,8 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
         metrics={"scenes_generated": 1},
         artifact_refs=artifact_refs,
     )
+    attempt.continuation_checkpoint = _build_continuation_checkpoint()
+    sync_db.commit()
     RuntimeSessionService.open_human_gate_sync(
         sync_db,
         session,

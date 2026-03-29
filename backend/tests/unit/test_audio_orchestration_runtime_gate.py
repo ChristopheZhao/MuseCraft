@@ -13,7 +13,6 @@ from app.core.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.services import audio_delivery_gate_evaluator as audio_gate_module
 from app.services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
-from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_control_plane import (
     OrchestrationControlPlane,
     OrchestrationControlPlaneError,
@@ -173,7 +172,7 @@ def _build_main_loop_runtime_harness(
         global_service=object(),
         long_term=object(),
     )
-    state_calls = {"task_specs": [], "activation": [], "trace": []}
+    state_calls = {"trace": []}
     runtime_calls = {"open": [], "apply": [], "llm": []}
 
     monkeypatch.setattr(
@@ -192,19 +191,8 @@ def _build_main_loop_runtime_harness(
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
     )
 
-    async def _publish_event(**kwargs):
-        return None
-
-    monkeypatch.setattr(orchestrator_module, "publish_event", _publish_event)
-
     state_adapter = SimpleNamespace(
         build_audio_contract=lambda **kwargs: {"policy": "adaptive", "need_global_bgm": False},
-        persist_llm_planning_context=lambda **kwargs: {},
-        persist_task_specs=lambda **kwargs: state_calls["task_specs"].append(kwargs),
-        persist_runtime_activation=lambda **kwargs: state_calls["activation"].append(kwargs) or {
-            "route_payload": {"route_source": "control_plane.runtime_activation"},
-            "activation_payload": kwargs,
-        },
         append_replan_trace=lambda **kwargs: state_calls["trace"].append(kwargs),
     )
     observation_adapter = SimpleNamespace(
@@ -261,9 +249,6 @@ def _build_main_loop_runtime_harness(
     agent._orchestration_protocol = OrchestrationProtocol()
     agent._orchestration_control_plane = control_plane
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_hints=lambda **kwargs: {},
-        build_execution_contract=lambda **kwargs: {},
-        apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=lambda **kwargs: {},
     )
@@ -454,19 +439,8 @@ def test_evaluate_global_bgm_mix_delivery_returns_fail_when_mix_missing(monkeypa
     assert gate_result["facts"]["delivery_complete"] is False
 
 
-def test_orchestration_state_adapter_persists_llm_planning_context(monkeypatch):
+def test_orchestration_state_adapter_build_audio_contract_writes_no_compat_projection(monkeypatch):
     adapter = OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object()))
-    registered_agents = [
-        AgentType.CONCEPT_PLANNER,
-        AgentType.VIDEO_GENERATOR,
-        AgentType.AUDIO_GENERATOR,
-        AgentType.QUALITY_CHECKER,
-    ]
-    candidate_agents = [
-        AgentType.CONCEPT_PLANNER,
-        AgentType.VIDEO_GENERATOR,
-        AgentType.QUALITY_CHECKER,
-    ]
 
     writes = {}
 
@@ -479,24 +453,11 @@ def test_orchestration_state_adapter_persists_llm_planning_context(monkeypatch):
         workflow_state_id="wf-plan-1",
         input_data={"audio_policy": "adaptive"},
     )
-    plan = adapter.persist_llm_planning_context(
-        workflow_state_id="wf-plan-1",
-        registered_agents=registered_agents,
-        candidate_agents=candidate_agents,
-        audio_contract=audio_contract,
-        capability_snapshot={"provider": "doubao", "supports_native_audio": True},
-    )
 
     assert audio_contract["policy"] == "adaptive"
     assert writes["workflow.contract.audio"]["policy"] == "adaptive"
-    assert writes["workflow.diagnostics.compat.plan_snapshot"]["contract"]["audio"]["policy"] == "adaptive"
-    assert writes["workflow.diagnostics.compat.plan_snapshot"]["registered_agents"] == [item.value for item in registered_agents]
-    assert writes["workflow.diagnostics.compat.plan_snapshot"]["available_agents"] == [item.value for item in candidate_agents]
-    assert writes["workflow.diagnostics.compat.plan_snapshot"]["projection_role"] == "diagnostics_only"
-    assert "actions" not in writes["workflow.diagnostics.compat.plan_snapshot"]
-    assert "decision_basis" not in writes["workflow.diagnostics.compat.plan_snapshot"]
-    assert "decision_basis" not in writes["workflow.diagnostics.compat.activation_pool_snapshot"]
-    assert writes["workflow.diagnostics.compat.activation_pool_snapshot"]["projection_role"] == "diagnostics_only"
+    assert "workflow.diagnostics.compat.plan_snapshot" not in writes
+    assert "workflow.diagnostics.compat.activation_pool_snapshot" not in writes
     assert "workflow.plan" not in writes
     assert "workflow.activation_pool" not in writes
 
@@ -576,6 +537,30 @@ def test_build_execution_queue_falls_back_to_candidate_order_when_order_missing(
     ]
 
 
+def test_build_execution_queue_moves_script_consumers_after_script_writer():
+    queue = OrchestrationQueuePolicy.build_execution_queue(
+        candidate_agents=[
+            AgentType.CONCEPT_PLANNER,
+            AgentType.IMAGE_GENERATOR,
+            AgentType.SCRIPT_WRITER,
+            AgentType.QUALITY_CHECKER,
+        ],
+        task_specs={
+            AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
+            AgentType.IMAGE_GENERATOR: {"run": True, "order": 1},
+            AgentType.SCRIPT_WRITER: {"run": True, "order": 5},
+            AgentType.QUALITY_CHECKER: {"run": True, "order": 6},
+        },
+    )
+
+    assert queue == [
+        AgentType.CONCEPT_PLANNER,
+        AgentType.SCRIPT_WRITER,
+        AgentType.IMAGE_GENERATOR,
+        AgentType.QUALITY_CHECKER,
+    ]
+
+
 def test_audio_agent_gate_is_no_longer_driven_by_workflow_plan(monkeypatch):
     agent = object.__new__(OrchestratorAgent)
     agent._memory_services = SimpleNamespace(short_term=object())
@@ -596,21 +581,11 @@ def test_audio_agent_gate_is_no_longer_driven_by_workflow_plan(monkeypatch):
     assert agent._last_audio_route_payload == {}
 
 
-def test_resolve_agent_runtime_hints_uses_enabled_plan_action(monkeypatch):
-    assembler = ContextContractAssembler(SimpleNamespace(short_term=object()))
-
-    monkeypatch.setattr(
-        "app.services.context_assembler.read_shared_fact",
-        lambda workflow_id, key, default=None, service=None: {
-            AgentType.VIDEO_COMPOSER.value: {
-                "runtime_hints": {"compose_mode": "bgm"},
-            }
-        },
-    )
-
-    runtime_hints = assembler.resolve_runtime_hints(
-        workflow_state_id="wf-override-1",
-        agent_type=AgentType.VIDEO_COMPOSER,
+def test_orchestrator_resolve_task_runtime_hints_uses_assignment_contract():
+    runtime_hints = OrchestratorAgent._resolve_task_runtime_hints(
+        {
+            "runtime_hints": {"compose_mode": "bgm"},
+        }
     )
     assert runtime_hints == {"compose_mode": "bgm"}
 
@@ -928,8 +903,8 @@ def test_orchestrator_main_loop_runs_runtime_true_chain_via_control_plane(monkey
     assert len(runtime_calls["llm"]) == 1
     assert len(runtime_calls["apply"]) == 1
     assert AgentType.AUDIO_GENERATOR.value in result["results"]
-    assert len(state_calls["activation"]) == 1
-    assert state_calls["activation"][0]["agent_type"] == AgentType.AUDIO_GENERATOR
+    assert len(state_calls["trace"]) == 1
+    assert state_calls["trace"][0]["record"]["target_agent"] == AgentType.AUDIO_GENERATOR.value
 
 
 def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch):
@@ -951,7 +926,7 @@ def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
     assert AgentType.AUDIO_GENERATOR.value not in result["results"]
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_fails_fast_when_runtime_decision_errors(monkeypatch):
@@ -973,7 +948,7 @@ def test_orchestrator_main_loop_fails_fast_when_runtime_decision_errors(monkeypa
     assert len(runtime_calls["open"]) == 1
     assert len(runtime_calls["llm"]) == 1
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_fails_fast_when_report_missing(monkeypatch):
@@ -995,7 +970,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_missing(monkeypatch):
     assert runtime_calls["open"] == []
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_fails_fast_when_report_field_malformed(monkeypatch):
@@ -1028,7 +1003,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_field_malformed(monkeypat
     assert runtime_calls["open"] == []
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_aborts_workflow_on_runtime_abort_decision(monkeypatch):
@@ -1050,7 +1025,8 @@ def test_orchestrator_main_loop_aborts_workflow_on_runtime_abort_decision(monkey
     assert len(runtime_calls["open"]) == 1
     assert len(runtime_calls["llm"]) == 1
     assert len(runtime_calls["apply"]) == 1
-    assert state_calls["activation"] == []
+    assert len(state_calls["trace"]) == 1
+    assert state_calls["trace"][0]["record"]["action"] == "abort"
 
 
 def test_orchestrator_main_loop_fails_fast_when_scheduled_agent_lacks_task_spec(monkeypatch):
@@ -1085,7 +1061,7 @@ def test_orchestrator_main_loop_fails_fast_when_scheduled_agent_lacks_task_spec(
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unknown(monkeypatch):
@@ -1109,7 +1085,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unknown(monkeypatch
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unauthorized(monkeypatch):
@@ -1136,7 +1112,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unauthorized(monkey
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
-    assert state_calls["activation"] == []
+    assert state_calls["trace"] == []
 
 
 def test_control_plane_open_runtime_decision_collects_boundary_gate_events_for_video(monkeypatch):
@@ -1736,7 +1712,7 @@ def test_llm_runtime_decision_activates_composer_for_bgm_mix(monkeypatch):
     assert len(decision["facts"]["gate_events"]) == 2
 
 
-def test_state_adapter_persists_runtime_activation_state(monkeypatch):
+def test_state_adapter_appends_replan_trace_without_compat_projection(monkeypatch):
     adapter = OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object()))
 
     writes = {}
@@ -1745,28 +1721,25 @@ def test_state_adapter_persists_runtime_activation_state(monkeypatch):
         writes[key] = value
 
     monkeypatch.setattr("app.services.orchestration_state_adapter.write_shared_fact", _capture_write)
-
-    payload = adapter.persist_runtime_activation(
-        workflow_state_id="wf-replan-3",
-        agent_type=AgentType.AUDIO_GENERATOR,
-        reason="contract_disallow_silence_runtime_gap",
-        active_agents=[
-            AgentType.CONCEPT_PLANNER,
-            AgentType.VIDEO_GENERATOR,
-            AgentType.AUDIO_GENERATOR,
-            AgentType.QUALITY_CHECKER,
-        ],
-        standby_agents=[AgentType.VIDEO_COMPOSER],
+    monkeypatch.setattr(
+        "app.services.orchestration_state_adapter.read_shared_fact",
+        lambda *args, **kwargs: [],
     )
 
-    assert payload["route_payload"]["decision_reason"] == "contract_disallow_silence_runtime_gap"
-    assert payload["route_payload"]["route_source"] == "control_plane.runtime_activation"
-    assert writes["workflow.diagnostics.compat.audio_route_snapshot"]["decision_reason"] == "contract_disallow_silence_runtime_gap"
-    assert writes["workflow.diagnostics.compat.audio_route_snapshot"]["projection_role"] == "diagnostics_only"
-    assert AgentType.AUDIO_GENERATOR.value in writes["workflow.diagnostics.compat.activation_pool_snapshot"]["active_agents"]
-    assert "decision_basis" not in payload["route_payload"]
-    assert "decision_basis" not in writes["workflow.diagnostics.compat.activation_pool_snapshot"]
-    assert writes["workflow.diagnostics.compat.activation_pool_snapshot"]["projection_role"] == "diagnostics_only"
+    adapter.append_replan_trace(
+        workflow_state_id="wf-replan-3",
+        record={
+            "action": "activate_from_standby",
+            "target_agent": AgentType.AUDIO_GENERATOR.value,
+            "reason": "contract_disallow_silence_runtime_gap",
+        },
+    )
+
+    assert writes["workflow.replan_trace"][-1]["action"] == "activate_from_standby"
+    assert writes["workflow.replan_trace"][-1]["target_agent"] == AgentType.AUDIO_GENERATOR.value
+    assert writes["workflow.replan_trace"][-1]["reason"] == "contract_disallow_silence_runtime_gap"
+    assert "workflow.diagnostics.compat.audio_route_snapshot" not in writes
+    assert "workflow.diagnostics.compat.activation_pool_snapshot" not in writes
     assert "workflow.audio_route" not in writes
     assert "workflow.activation_pool" not in writes
 
@@ -1828,6 +1801,35 @@ def test_queue_policy_insert_agent_into_execution_queue_respects_task_spec_order
     ]
 
 
+def test_queue_policy_insert_agent_into_execution_queue_defers_script_consumers_until_after_pending_script_writer():
+    execution_queue = [
+        AgentType.CONCEPT_PLANNER,
+        AgentType.SCRIPT_WRITER,
+        AgentType.QUALITY_CHECKER,
+    ]
+    task_specs = {
+        AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
+        AgentType.IMAGE_GENERATOR: {"run": False, "order": 1},
+        AgentType.SCRIPT_WRITER: {"run": True, "order": 5},
+        AgentType.QUALITY_CHECKER: {"run": True, "order": 6},
+    }
+
+    changed = OrchestrationQueuePolicy.insert_agent_into_execution_queue(
+        execution_queue,
+        current_index=0,
+        agent_type=AgentType.IMAGE_GENERATOR,
+        task_specs=task_specs,
+    )
+
+    assert changed is True
+    assert execution_queue == [
+        AgentType.CONCEPT_PLANNER,
+        AgentType.SCRIPT_WRITER,
+        AgentType.IMAGE_GENERATOR,
+        AgentType.QUALITY_CHECKER,
+    ]
+
+
 def test_observation_adapter_persists_audio_gate_observation(monkeypatch):
     adapter = OrchestrationObservationAdapter(memory_services=SimpleNamespace(short_term=object()))
 
@@ -1864,11 +1866,6 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
     writes = {}
 
     state_adapter = SimpleNamespace(
-        persist_task_specs=lambda **kwargs: writes.setdefault("task_specs", kwargs),
-        persist_runtime_activation=lambda **kwargs: {
-            "route_payload": {"route_source": "control_plane.runtime_activation"},
-            "activation_payload": kwargs,
-        },
         append_replan_trace=lambda **kwargs: writes.setdefault("trace", kwargs),
     )
     controller = OrchestrationRuntimeController(
@@ -1890,7 +1887,6 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
     result = controller.apply_runtime_decision(
         workflow_state_id="wf-apply-1",
         current_agent=AgentType.VIDEO_GENERATOR,
-        conditional_task_specs={},
         apply_payload={
             "action": "activate_from_standby",
             "target_agent": AgentType.AUDIO_GENERATOR,
@@ -1907,8 +1903,8 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
 
     assert result["status"] == "activated"
     assert result["target_agent"] == AgentType.AUDIO_GENERATOR
-    assert writes["task_specs"]["task_specs"][AgentType.AUDIO_GENERATOR]["run"] is True
-    assert writes["task_specs"]["candidate_agents"] == updated_queue
+    assert result["task_specs"][AgentType.AUDIO_GENERATOR]["run"] is True
+    assert result["execution_queue"] == updated_queue
     assert writes["trace"]["record"]["queue_changed"] is True
     assert result["replan_count"] == 1
     assert result["standby_agents"] == []
@@ -1918,8 +1914,6 @@ def test_runtime_controller_rejects_unknown_apply_action():
     controller = OrchestrationRuntimeController(
         memory_services=SimpleNamespace(short_term=object()),
         orchestration_state=SimpleNamespace(
-            persist_task_specs=lambda **kwargs: None,
-            persist_runtime_activation=lambda **kwargs: None,
             append_replan_trace=lambda **kwargs: None,
         ),
     )
@@ -1928,7 +1922,6 @@ def test_runtime_controller_rejects_unknown_apply_action():
         controller.apply_runtime_decision(
             workflow_state_id="wf-apply-unknown-action",
             current_agent=AgentType.VIDEO_GENERATOR,
-            conditional_task_specs={},
             apply_payload={
                 "action": "pause",
                 "reason": "invalid",

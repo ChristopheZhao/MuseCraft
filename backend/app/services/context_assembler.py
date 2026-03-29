@@ -1,5 +1,5 @@
 """
-Formal Context/Contract Assembler host for active single-episode harness paths.
+Formal context assembler for published-deliverable and static-boundary inputs.
 """
 from __future__ import annotations
 
@@ -35,14 +35,10 @@ from .scene_info_reference_service import (
     persist_scene_info_ref,
 )
 from .script_review_contract import build_script_preview_text
-from .video_composer_execution_contract import (
-    build_video_composer_execution_contract,
-)
-from .video_execution_contract import build_video_generation_execution_contract
 
 
 class ContextContractAssembler:
-    """Builds stage-boundary inputs and leaf-facing execution contracts."""
+    """Builds stage-boundary inputs for downstream agents."""
 
     def __init__(self, memory_services: MemoryServices):
         self._memory_services = memory_services
@@ -178,6 +174,23 @@ class ContextContractAssembler:
             node_key=node_key,
         )
         if isinstance(runtime_ref, dict):
+            if prefer_approved and runtime_ref.get("is_approved") is not True:
+                receipt: Dict[str, Any] = {
+                    "workflow_state_id": workflow_state_id,
+                    "node_key": node_key,
+                    "prefer_approved": bool(prefer_approved),
+                    "required": bool(required),
+                    "status": "runtime_input_ref_not_approved",
+                    "source": "runtime_input",
+                    "ref": dict(runtime_ref),
+                }
+                if required:
+                    raise AgentError(
+                        "Runtime-input published deliverable ref is not approved: "
+                        f"workflow_id={workflow_state_id} node_key={node_key} "
+                        f"prefer_approved={prefer_approved} status=runtime_input_ref_not_approved"
+                    )
+                return receipt
             return self._resolve_payload_from_ref(
                 workflow_state_id=workflow_state_id,
                 node_key=node_key,
@@ -345,68 +358,6 @@ class ContextContractAssembler:
         if assembler_diagnostics:
             assembled["_assembler_diagnostics"] = assembler_diagnostics
         return assembled
-
-    def resolve_runtime_hints(
-        self,
-        *,
-        workflow_state_id: str,
-        agent_type: AgentType,
-    ) -> Dict[str, Any]:
-        task_specs = read_shared_fact(
-            workflow_state_id,
-            "workflow.task_specs",
-            {},
-            service=self._memory_services.short_term,
-        ) or {}
-        if not isinstance(task_specs, dict):
-            return {}
-        spec = task_specs.get(agent_type.value)
-        if not isinstance(spec, dict):
-            return {}
-        params = spec.get("runtime_hints")
-        return dict(params) if isinstance(params, dict) else {}
-
-    def build_execution_contract(
-        self,
-        *,
-        agent_type: AgentType,
-        workflow_state_id: str,
-        runtime_hints: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        if agent_type == AgentType.VIDEO_GENERATOR:
-            generate_audio = None
-            if isinstance(runtime_hints, dict):
-                candidate = runtime_hints.get("generate_audio")
-                if isinstance(candidate, bool):
-                    generate_audio = bool(candidate)
-            return build_video_generation_execution_contract(
-                workflow_state_id=workflow_state_id,
-                generate_audio=generate_audio,
-            )
-
-        if agent_type == AgentType.VIDEO_COMPOSER:
-            try:
-                if isinstance(runtime_hints, dict):
-                    legacy_keys = [
-                        key for key in ("add_bgm", "add_voiceover", "compose_requested")
-                        if runtime_hints.get(key) is not None
-                    ]
-                    if legacy_keys:
-                        raise AgentError(
-                            "Legacy video_composer runtime overrides are no longer supported; "
-                            f"use compose_mode instead (got: {', '.join(legacy_keys)})"
-                        )
-                compose_mode = "compose"
-                if isinstance(runtime_hints, dict) and runtime_hints.get("compose_mode") is not None:
-                    compose_mode = str(runtime_hints.get("compose_mode"))
-                return build_video_composer_execution_contract(
-                    workflow_state_id=workflow_state_id,
-                    compose_mode=compose_mode,
-                )
-            except ValueError as exc:
-                raise AgentError(f"Invalid video_composer execution boundary: {exc}") from exc
-
-        return {}
 
     def publish_script_review_boundary_sync(
         self,

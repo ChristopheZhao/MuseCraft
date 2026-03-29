@@ -183,9 +183,6 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_hints=lambda **kwargs: {},
-        build_execution_contract=lambda **kwargs: {},
-        apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
@@ -296,9 +293,6 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
-        resolve_runtime_hints=lambda **kwargs: {},
-        build_execution_contract=lambda **kwargs: {},
-        apply_execution_boundary=lambda **kwargs: kwargs["agent_input"],
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
@@ -473,6 +467,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
             action="approve",
             feedback_text="looks good",
         )
+        agent._memory_services.short_term._shared_store.clear()
 
         second = asyncio.run(
             agent._execute_impl(
@@ -532,7 +527,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
         session.input_payload = {}
         sync_db.commit()
 
-        with pytest.raises(AgentError, match="missing_runtime_input_ref"):
+        with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
             asyncio.run(
                 agent._execute_impl(
                     task=task,
@@ -544,6 +539,60 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
         runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
         assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
         assert len(call_log["image_generator"]) == 0
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queue_is_misordered(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        task = _create_task(sync_db)
+
+        agent._llm_select_candidate_agents = _async_return(
+            (
+                [
+                    AgentType.CONCEPT_PLANNER,
+                    AgentType.IMAGE_GENERATOR,
+                    AgentType.SCRIPT_WRITER,
+                ],
+                "misordered-selection",
+            )
+        )
+        agent._llm_decompose_tasks = _async_return(
+            (
+                {
+                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 1, "scope": {}},
+                    AgentType.SCRIPT_WRITER: {"run": True, "order": 2, "scope": {}},
+                },
+                {},
+            )
+        )
+        agent._build_execution_queue = lambda task_specs, candidate_agents=None: [
+            AgentType.CONCEPT_PLANNER,
+            AgentType.IMAGE_GENERATOR,
+            AgentType.SCRIPT_WRITER,
+        ]
+
+        with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
+            asyncio.run(
+                agent._execute_impl(
+                    task=task,
+                    input_data={"user_prompt": "test prompt"},
+                    db=sync_db,
+                )
+            )
+
+        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
+        assert len(call_log["concept_planner"]) == 1
+        assert len(call_log["image_generator"]) == 0
+        assert len(call_log["script_writer"]) == 0
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -602,6 +651,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
             feedback_text="tighten pacing",
             structured_constraints={"keep_character": True},
         )
+        agent._memory_services.short_term._shared_store.clear()
 
         second = asyncio.run(
             agent._execute_impl(
@@ -681,6 +731,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
             feedback_text="change structure",
             structured_constraints={"new_arc": "stronger opening"},
         )
+        agent._memory_services.short_term._shared_store.clear()
 
         second = asyncio.run(
             agent._execute_impl(
@@ -817,28 +868,23 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
             )
         )
 
-        workflow_plan = shared_store.get("workflow.diagnostics.compat.plan_snapshot", {})
-        activation_pool = shared_store.get("workflow.diagnostics.compat.activation_pool_snapshot", {})
-        task_specs_projection = shared_store.get("workflow.task_specs", {})
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(
+            sync_db,
+            session.id,
+            session.current_attempt_id,
+        )
+        checkpoint = dict(getattr(attempt, "continuation_checkpoint", {}) or {})
 
         assert result["status"] == "waiting_gate"
-        assert workflow_plan["available_agents"] == [
-            AgentType.CONCEPT_PLANNER.value,
-            AgentType.SCRIPT_WRITER.value,
-            AgentType.VIDEO_GENERATOR.value,
-        ]
-        assert workflow_plan["selection_rationale"] == selection_payload["selection_rationale"]
-        assert workflow_plan["projection_role"] == "diagnostics_only"
-        assert activation_pool["active_agents"] == [
-            AgentType.CONCEPT_PLANNER.value,
-            AgentType.SCRIPT_WRITER.value,
-        ]
-        assert activation_pool["standby_agents"] == [AgentType.VIDEO_GENERATOR.value]
-        assert activation_pool["projection_role"] == "diagnostics_only"
+        assert shared_store.get("workflow.diagnostics.compat.plan_snapshot") is None
+        assert shared_store.get("workflow.diagnostics.compat.activation_pool_snapshot") is None
         assert shared_store.get("workflow.plan") is None
         assert shared_store.get("workflow.activation_pool") is None
-        assert task_specs_projection[AgentType.VIDEO_GENERATOR.value]["run"] is False
-        assert task_specs_projection[AgentType.VIDEO_GENERATOR.value]["runtime_hints"] == {
+        assert shared_store.get("workflow.task_specs") is None
+        assert shared_store.get("workflow.conditional_tasks") is None
+        assert checkpoint["task_specs"][AgentType.VIDEO_GENERATOR.value]["run"] is False
+        assert checkpoint["task_specs"][AgentType.VIDEO_GENERATOR.value]["runtime_hints"] == {
             "generate_audio": True
         }
         assert len(call_log["concept_planner"]) == 1

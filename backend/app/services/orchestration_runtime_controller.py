@@ -35,7 +35,6 @@ class OrchestrationRuntimeController:
         *,
         workflow_state_id: str,
         current_agent: AgentType,
-        conditional_task_specs: Dict[str, Dict[str, Any]],
         apply_payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         if not isinstance(apply_payload, dict):
@@ -78,21 +77,6 @@ class OrchestrationRuntimeController:
                     "activate_from_standby requires explicit standby_agents payload"
                 )
 
-            self._orchestration_state.persist_task_specs(
-                workflow_state_id=workflow_state_id,
-                task_specs=task_specs,
-                conditional_task_specs=conditional_task_specs,
-                candidate_agents=(
-                    candidate_agents if isinstance(candidate_agents, list) else None
-                ),
-            )
-            self._orchestration_state.persist_runtime_activation(
-                workflow_state_id=workflow_state_id,
-                agent_type=target_agent,
-                reason=reason,
-                active_agents=execution_queue,
-                standby_agents=standby_agents,
-            )
             trace_record = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "trigger_agent": current_agent.value,

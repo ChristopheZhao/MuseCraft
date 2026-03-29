@@ -11,6 +11,17 @@ from ..models import AgentType
 class OrchestrationQueuePolicy:
     """Pure policy object for internal orchestrator <-> control-plane queue shaping."""
 
+    _SCRIPT_CONSUMER_AGENTS = {
+        AgentType.AUDIO_GENERATOR,
+        AgentType.IMAGE_GENERATOR,
+        AgentType.VIDEO_GENERATOR,
+        AgentType.VOICE_SYNTHESIZER,
+    }
+
+    @classmethod
+    def requires_approved_script_input(cls, agent_type: AgentType) -> bool:
+        return agent_type in cls._SCRIPT_CONSUMER_AGENTS
+
     @staticmethod
     def _agent_pool_order(
         *,
@@ -40,6 +51,34 @@ class OrchestrationQueuePolicy:
             return fallback_index, fallback_index
 
     @classmethod
+    def _reorder_for_script_prerequisite(
+        cls,
+        ordered_agents: List[AgentType],
+    ) -> List[AgentType]:
+        if AgentType.SCRIPT_WRITER not in ordered_agents:
+            return list(ordered_agents or [])
+        script_index = ordered_agents.index(AgentType.SCRIPT_WRITER)
+        if script_index <= 0:
+            return list(ordered_agents or [])
+
+        before_script = ordered_agents[:script_index]
+        moved_consumers = [
+            agent_type
+            for agent_type in before_script
+            if cls.requires_approved_script_input(agent_type)
+        ]
+        if not moved_consumers:
+            return list(ordered_agents or [])
+
+        kept_before = [
+            agent_type
+            for agent_type in before_script
+            if agent_type not in cls._SCRIPT_CONSUMER_AGENTS
+        ]
+        after_script = ordered_agents[script_index + 1:]
+        return kept_before + [AgentType.SCRIPT_WRITER] + moved_consumers + after_script
+
+    @classmethod
     def build_execution_queue(
         cls,
         *,
@@ -65,7 +104,8 @@ class OrchestrationQueuePolicy:
             )
             ranked.append((order, fallback_index, agent_type))
         ranked.sort(key=lambda item: (item[0], item[1]))
-        return [agent_type for _, _, agent_type in ranked]
+        ordered_agents = [agent_type for _, _, agent_type in ranked]
+        return cls._reorder_for_script_prerequisite(ordered_agents)
 
     @classmethod
     def build_standby_agents(
@@ -100,6 +140,13 @@ class OrchestrationQueuePolicy:
                 execution_queue[:] = updated_queue
                 return False
 
+        pending_script_index = None
+        if cls.requires_approved_script_input(agent_type):
+            for idx in range(max(0, int(current_index)) + 1, len(updated_queue)):
+                if updated_queue[idx] == AgentType.SCRIPT_WRITER:
+                    pending_script_index = idx
+                    break
+
         order_index = {
             atype: idx
             for idx, atype in enumerate(
@@ -114,8 +161,12 @@ class OrchestrationQueuePolicy:
             task_specs=task_specs,
             fallback_index=order_index.get(agent_type, len(order_index) + 100),
         )
+        insert_floor = max(0, int(current_index)) + 1
+        if pending_script_index is not None:
+            insert_floor = max(insert_floor, pending_script_index + 1)
+
         insert_at = len(updated_queue)
-        for idx in range(max(0, int(current_index)) + 1, len(updated_queue)):
+        for idx in range(insert_floor, len(updated_queue)):
             pending_agent = updated_queue[idx]
             pending_order, pending_fallback = cls._rank_agent_spec(
                 agent_type=pending_agent,

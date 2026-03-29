@@ -8,24 +8,29 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from ..models import AgentType
 from .memory_provider import MemoryServices
-from .orchestration_queue_policy import OrchestrationQueuePolicy
 
 
 class OrchestrationStateAdapter:
     """Owns deterministic orchestration state normalization and persistence."""
 
+    CONTINUATION_CHECKPOINT_VERSION = 1
+    _CONTINUATION_ALLOWED_SPEC_FIELDS = (
+        "agent",
+        "mission",
+        "deliverable",
+        "constraints",
+        "order",
+        "runtime_hints",
+        "run",
+        "conditional_task_id",
+        "trigger",
+    )
     _FORBIDDEN_WORKFLOW_CONTROL_PREFIXES = (
         "workflow.session.",
         "workflow.node.",
         "workflow.attempt.",
         "workflow.gate_decision.",
     )
-    _COMPAT_DIAGNOSTICS_KEYS = {
-        "plan": "workflow.diagnostics.compat.plan_snapshot",
-        "activation_pool": "workflow.diagnostics.compat.activation_pool_snapshot",
-        "audio_route": "workflow.diagnostics.compat.audio_route_snapshot",
-    }
-
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
             raise ValueError("memory_services is required for OrchestrationStateAdapter")
@@ -52,13 +57,6 @@ class OrchestrationStateAdapter:
             service=self._memory_services.short_term,
         )
 
-    @classmethod
-    def _compat_diagnostics_key(cls, projection_name: str) -> str:
-        key = cls._COMPAT_DIAGNOSTICS_KEYS.get(str(projection_name or ""))
-        if not isinstance(key, str) or not key:
-            raise ValueError(f"Unsupported compatibility diagnostics projection: {projection_name}")
-        return key
-
     @staticmethod
     def normalize_audio_policy(value: Any) -> str:
         raw = str(value or "").strip().lower()
@@ -71,6 +69,200 @@ class OrchestrationStateAdapter:
             "agent_only": "mas_only",
         }
         return alias_map.get(raw, "adaptive")
+
+    @classmethod
+    def _normalize_spec_payload(
+        cls,
+        *,
+        spec: Dict[str, Any],
+        default_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(spec, dict):
+            raise ValueError("Continuation spec must be a dict")
+
+        normalized: Dict[str, Any] = {}
+        agent_value = spec.get("agent")
+        if agent_value is None:
+            agent_value = default_agent
+        if agent_value is not None:
+            normalized["agent"] = str(agent_value)
+
+        if spec.get("mission") is not None:
+            normalized["mission"] = str(spec.get("mission"))
+        if spec.get("deliverable") is not None:
+            normalized["deliverable"] = str(spec.get("deliverable"))
+        if "constraints" in spec:
+            raw_constraints = spec.get("constraints")
+            if raw_constraints is None:
+                normalized["constraints"] = []
+            elif isinstance(raw_constraints, list):
+                normalized["constraints"] = [
+                    str(item)
+                    for item in raw_constraints
+                    if str(item or "").strip()
+                ]
+            else:
+                raise ValueError("Continuation spec constraints must be a list")
+        if spec.get("order") is not None:
+            normalized["order"] = int(spec.get("order"))
+        if "runtime_hints" in spec:
+            raw_runtime_hints = spec.get("runtime_hints")
+            if raw_runtime_hints is None:
+                normalized["runtime_hints"] = {}
+            elif isinstance(raw_runtime_hints, dict):
+                normalized["runtime_hints"] = dict(raw_runtime_hints)
+            else:
+                raise ValueError("Continuation spec runtime_hints must be a dict")
+        if "run" in spec:
+            normalized["run"] = bool(spec.get("run"))
+        if spec.get("conditional_task_id") is not None:
+            normalized["conditional_task_id"] = str(spec.get("conditional_task_id"))
+        if spec.get("trigger") is not None:
+            normalized["trigger"] = str(spec.get("trigger"))
+
+        unknown_keys = set(spec.keys()) - set(cls._CONTINUATION_ALLOWED_SPEC_FIELDS)
+        if unknown_keys:
+            # Ignore extra keys at the checkpoint boundary to keep the stored contract minimal.
+            pass
+        return normalized
+
+    @classmethod
+    def build_continuation_checkpoint(
+        cls,
+        *,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        conditional_task_specs: Dict[str, Dict[str, Any]],
+        candidate_agents: Optional[List[AgentType]] = None,
+        decision_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        ordered_candidates: List[AgentType] = []
+        seen_agents = set()
+        for raw_agent in candidate_agents or list((task_specs or {}).keys()):
+            if isinstance(raw_agent, AgentType) and raw_agent not in seen_agents:
+                ordered_candidates.append(raw_agent)
+                seen_agents.add(raw_agent)
+
+        serialized_task_specs: Dict[str, Dict[str, Any]] = {}
+        for agent_type, spec in (task_specs or {}).items():
+            if not isinstance(agent_type, AgentType):
+                raise ValueError(f"Unsupported continuation agent key: {agent_type!r}")
+            if not isinstance(spec, dict):
+                raise ValueError(f"Continuation task spec for {agent_type.value} must be a dict")
+            serialized_task_specs[agent_type.value] = cls._normalize_spec_payload(
+                spec=dict(spec),
+                default_agent=agent_type.value,
+            )
+            if agent_type not in seen_agents:
+                ordered_candidates.append(agent_type)
+                seen_agents.add(agent_type)
+
+        serialized_conditional_specs: Dict[str, Dict[str, Any]] = {}
+        for raw_task_id, spec in (conditional_task_specs or {}).items():
+            task_id = str(raw_task_id or "").strip()
+            if not task_id:
+                raise ValueError("Continuation conditional task id cannot be empty")
+            if not isinstance(spec, dict):
+                raise ValueError(f"Continuation conditional task spec for {task_id} must be a dict")
+            serialized_conditional_specs[task_id] = cls._normalize_spec_payload(spec=dict(spec))
+
+        return {
+            "version": cls.CONTINUATION_CHECKPOINT_VERSION,
+            "decision_id": int(decision_id) if decision_id is not None else None,
+            "candidate_agents": [agent_type.value for agent_type in ordered_candidates],
+            "task_specs": serialized_task_specs,
+            "conditional_task_specs": serialized_conditional_specs,
+        }
+
+    @classmethod
+    def validate_continuation_checkpoint(
+        cls,
+        checkpoint: Any,
+        *,
+        require_decision_id: bool,
+    ) -> Dict[str, Any]:
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Continuation checkpoint must be a dict")
+
+        raw_version = checkpoint.get("version")
+        if raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:
+            raise ValueError(
+                f"Unsupported continuation checkpoint version: {raw_version!r}"
+            )
+
+        raw_decision_id = checkpoint.get("decision_id")
+        if raw_decision_id is None:
+            if require_decision_id:
+                raise ValueError("Continuation checkpoint decision_id is not bound")
+            normalized_decision_id = None
+        else:
+            normalized_decision_id = int(raw_decision_id)
+
+        raw_candidate_agents = checkpoint.get("candidate_agents")
+        if not isinstance(raw_candidate_agents, list) or not raw_candidate_agents:
+            raise ValueError("Continuation checkpoint candidate_agents must be a non-empty list")
+        normalized_candidate_agents: List[str] = []
+        for item in raw_candidate_agents:
+            normalized_candidate_agents.append(AgentType(str(item)).value)
+
+        raw_task_specs = checkpoint.get("task_specs")
+        if not isinstance(raw_task_specs, dict) or not raw_task_specs:
+            raise ValueError("Continuation checkpoint task_specs must be a non-empty dict")
+        normalized_task_specs: Dict[str, Dict[str, Any]] = {}
+        for raw_agent, spec in raw_task_specs.items():
+            agent_type = AgentType(str(raw_agent))
+            normalized_task_specs[agent_type.value] = cls._normalize_spec_payload(
+                spec=dict(spec),
+                default_agent=agent_type.value,
+            )
+
+        raw_conditional_specs = checkpoint.get("conditional_task_specs")
+        if raw_conditional_specs is None:
+            raw_conditional_specs = {}
+        if not isinstance(raw_conditional_specs, dict):
+            raise ValueError("Continuation checkpoint conditional_task_specs must be a dict")
+        normalized_conditional_specs: Dict[str, Dict[str, Any]] = {}
+        for raw_task_id, spec in raw_conditional_specs.items():
+            task_id = str(raw_task_id or "").strip()
+            if not task_id:
+                raise ValueError("Continuation checkpoint conditional task id cannot be empty")
+            if not isinstance(spec, dict):
+                raise ValueError(f"Continuation conditional task spec for {task_id} must be a dict")
+            normalized_conditional_specs[task_id] = cls._normalize_spec_payload(spec=dict(spec))
+
+        return {
+            "version": cls.CONTINUATION_CHECKPOINT_VERSION,
+            "decision_id": normalized_decision_id,
+            "candidate_agents": normalized_candidate_agents,
+            "task_specs": normalized_task_specs,
+            "conditional_task_specs": normalized_conditional_specs,
+        }
+
+    @classmethod
+    def checkpoint_to_task_specs(
+        cls,
+        checkpoint: Any,
+        *,
+        require_decision_id: bool,
+    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]], List[AgentType]]:
+        normalized = cls.validate_continuation_checkpoint(
+            checkpoint,
+            require_decision_id=require_decision_id,
+        )
+
+        task_specs: Dict[AgentType, Dict[str, Any]] = {}
+        for raw_agent, spec in normalized.get("task_specs", {}).items():
+            agent_type = AgentType(str(raw_agent))
+            task_specs[agent_type] = dict(spec)
+
+        conditional_task_specs: Dict[str, Dict[str, Any]] = {
+            str(task_id): dict(spec)
+            for task_id, spec in (normalized.get("conditional_task_specs") or {}).items()
+        }
+        candidate_agents = [
+            AgentType(str(raw_agent))
+            for raw_agent in (normalized.get("candidate_agents") or [])
+        ]
+        return task_specs, conditional_task_specs, candidate_agents
 
     def build_audio_contract(
         self,
@@ -106,176 +298,6 @@ class OrchestrationStateAdapter:
             dict(contract),
         )
         return contract
-
-    def persist_llm_planning_context(
-        self,
-        *,
-        workflow_state_id: str,
-        registered_agents: List[AgentType],
-        candidate_agents: List[AgentType],
-        audio_contract: Dict[str, Any],
-        capability_snapshot: Optional[Dict[str, Any]] = None,
-        selection_rationale: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        capability = dict(capability_snapshot or {})
-        registered = [agent.value for agent in registered_agents if isinstance(agent, AgentType)]
-        available_agents = [agent.value for agent in candidate_agents if isinstance(agent, AgentType)]
-        plan = {
-            "source": "orchestrator.llm_planning_context",
-            "workflow_state_id": str(workflow_state_id or ""),
-            "contract": {"audio": dict(audio_contract or {})},
-            "registered_agents": registered,
-            "capability_snapshot": {
-                "provider": capability.get("provider"),
-                "supports_native_audio": bool(capability.get("supports_native_audio")),
-                "native_audio_param_name": capability.get("native_audio_param_name"),
-                "native_audio_default_enabled": capability.get("native_audio_default_enabled"),
-            },
-            "available_agents": available_agents,
-        }
-        if isinstance(selection_rationale, str) and selection_rationale.strip():
-            plan["selection_rationale"] = selection_rationale.strip()
-        plan["projection_role"] = "diagnostics_only"
-        activation_payload = {
-            "route_source": "orchestrator.llm_task_spec",
-            "workflow_state_id": str(workflow_state_id or ""),
-            "available_agents": available_agents,
-            "projection_role": "diagnostics_only",
-        }
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            self._compat_diagnostics_key("plan"),
-            dict(plan),
-        )
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            self._compat_diagnostics_key("activation_pool"),
-            activation_payload,
-        )
-        return plan
-
-    def persist_task_specs(
-        self,
-        *,
-        workflow_state_id: str,
-        task_specs: Dict[AgentType, Dict[str, Any]],
-        conditional_task_specs: Dict[str, Dict[str, Any]],
-        candidate_agents: Optional[List[AgentType]] = None,
-    ) -> None:
-        serialized = {
-            atype.value: dict(spec or {})
-            for atype, spec in (task_specs or {}).items()
-            if isinstance(spec, dict)
-        }
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            "workflow.task_specs",
-            serialized,
-        )
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            "workflow.conditional_tasks",
-            dict(conditional_task_specs or {}),
-        )
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            self._compat_diagnostics_key("activation_pool"),
-            {
-                "route_source": "orchestrator.llm_task_spec",
-                "active_agents": [
-                    atype.value
-                    for atype in OrchestrationQueuePolicy.build_execution_queue(
-                        task_specs=task_specs,
-                        candidate_agents=candidate_agents,
-                    )
-                ],
-                "standby_agents": [
-                    atype.value
-                    for atype in OrchestrationQueuePolicy.build_standby_agents(
-                        task_specs=task_specs,
-                        candidate_agents=candidate_agents,
-                    )
-                ],
-                "projection_role": "diagnostics_only",
-            },
-        )
-
-    def load_task_specs(
-        self,
-        *,
-        workflow_state_id: str,
-    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-        raw_task_specs = read_shared_fact(
-            str(workflow_state_id),
-            "workflow.task_specs",
-            {},
-            service=self._memory_services.short_term,
-        ) or {}
-        raw_conditional = read_shared_fact(
-            str(workflow_state_id),
-            "workflow.conditional_tasks",
-            {},
-            service=self._memory_services.short_term,
-        ) or {}
-
-        task_specs: Dict[AgentType, Dict[str, Any]] = {}
-        if isinstance(raw_task_specs, dict):
-            for raw_agent, spec in raw_task_specs.items():
-                if not isinstance(spec, dict):
-                    continue
-                try:
-                    agent_type = AgentType(str(raw_agent))
-                except Exception:
-                    continue
-                task_specs[agent_type] = dict(spec)
-
-        conditional_task_specs: Dict[str, Dict[str, Any]] = {}
-        if isinstance(raw_conditional, dict):
-            for key, value in raw_conditional.items():
-                if not isinstance(value, dict):
-                    continue
-                conditional_task_specs[str(key)] = dict(value)
-
-        return task_specs, conditional_task_specs
-
-    def persist_runtime_activation(
-        self,
-        *,
-        workflow_state_id: str,
-        agent_type: AgentType,
-        reason: str,
-        active_agents: Optional[List[AgentType]] = None,
-        standby_agents: Optional[List[AgentType]] = None,
-    ) -> Dict[str, Any]:
-        route = {
-            "route_source": "control_plane.runtime_activation",
-            "workflow_state_id": str(workflow_state_id or ""),
-            "decision_reason": str(reason or "adaptive_replan"),
-            "activated_agent": agent_type.value,
-            "projection_role": "diagnostics_only",
-        }
-        activation_payload = {
-            "route_source": "control_plane.runtime_activation",
-            "workflow_state_id": str(workflow_state_id or ""),
-            "decision_reason": str(reason or "adaptive_replan"),
-            "active_agents": [agent.value for agent in (active_agents or [])],
-            "standby_agents": [agent.value for agent in (standby_agents or [])],
-            "projection_role": "diagnostics_only",
-        }
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            self._compat_diagnostics_key("audio_route"),
-            dict(route),
-        )
-        self._write_workflow_projection(
-            str(workflow_state_id),
-            self._compat_diagnostics_key("activation_pool"),
-            activation_payload,
-        )
-        return {
-            "route_payload": dict(route),
-            "activation_payload": activation_payload,
-        }
 
     def append_replan_trace(self, *, workflow_state_id: str, record: Dict[str, Any]) -> None:
         trace = read_shared_fact(

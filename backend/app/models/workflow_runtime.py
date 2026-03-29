@@ -110,6 +110,7 @@ class WorkflowNodeAttempt(BaseModel):
     trigger_reason = Column(String(30), nullable=False, default="initial")
     requested_by = Column(String(30), nullable=False, default="system")
     input_contract = Column(JSON, default=dict)
+    continuation_checkpoint = Column(JSON, nullable=True)
     output_artifacts = Column(JSON, default=list)
     metrics = Column(JSON, default=dict)
     status = Column(String(20), nullable=False, default=WorkflowAttemptStatus.RUNNING.value)

@@ -369,7 +369,6 @@ class OrchestrationControlPlane:
         apply_result = self._runtime_controller.apply_runtime_decision(
             workflow_state_id=workflow_state_id,
             current_agent=current_agent,
-            conditional_task_specs=conditional_task_specs,
             apply_payload=apply_payload,
         )
         return {
