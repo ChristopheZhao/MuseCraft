@@ -1861,18 +1861,22 @@
       "id": "PLAN-20260329-037",
       "title": "Generic stale-run continuation checkpoint contract and resume closure",
       "kind": "fix",
-      "status": "draft",
+      "status": "in_progress",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260329-037.md",
       "confirmed_by_user": false,
       "created_at": "2026-03-29T03:57:20Z",
-      "updated_at": "2026-03-29T03:57:20Z",
+      "updated_at": "2026-03-29T05:40:55Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-03-29T03:57:20Z",
           "text": "Created the successor after checkpointing 036 into separate governance and implementation commits. This plan now owns the residual architecture closure: generic stale resume must consume a canonical continuation checkpoint, projection reason precedence must match the frozen contract, and completion must be gated by a validation ledger plus user confirmation."
+        },
+        {
+          "at": "2026-03-29T05:40:55Z",
+          "text": "Completed the Phase 1 contract freeze without implementation. The continuation carrier is now frozen as a v2 attempt.continuation_checkpoint schema with anchor_type/node_key/attempt_id, resume must flow through a generic control-plane loader/consumer before RESUMING is written, and resume_control precedence is explicitly ordered as waiting_gate -> transport_active -> runtime_recent -> transport_state_unknown -> missing_continuation_checkpoint -> stalled_runtime_with_checkpoint."
         }
       ]
     }
