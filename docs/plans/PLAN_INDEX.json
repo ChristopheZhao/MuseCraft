@@ -1867,7 +1867,7 @@
       "file_path": "docs/plans/active/PLAN-20260329-037.md",
       "confirmed_by_user": false,
       "created_at": "2026-03-29T03:57:20Z",
-      "updated_at": "2026-03-29T05:40:55Z",
+      "updated_at": "2026-03-29T07:14:08Z",
       "archived_at": null,
       "notes": [
         {
@@ -1877,6 +1877,10 @@
         {
           "at": "2026-03-29T05:40:55Z",
           "text": "Completed the Phase 1 contract freeze without implementation. The continuation carrier is now frozen as a v2 attempt.continuation_checkpoint schema with anchor_type/node_key/attempt_id, resume must flow through a generic control-plane loader/consumer before RESUMING is written, and resume_control precedence is explicitly ordered as waiting_gate -> transport_active -> runtime_recent -> transport_state_unknown -> missing_continuation_checkpoint -> stalled_runtime_with_checkpoint."
+        },
+        {
+          "at": "2026-03-29T07:14:08Z",
+          "text": "Completed Phase 2 implementation and focused automated verification while keeping the plan in progress. Generic runtime nodes now bind v2 continuation checkpoints on control-plane attempts, the orchestrator can resume from runtime_checkpoint anchors instead of relying on the script-gate path alone, runtime/resume loads and validates a canonical checkpoint before writing RESUMING, and focused backend tests plus npm build passed; manual restart-path validation and user confirmation remain open."
         }
       ]
     }
