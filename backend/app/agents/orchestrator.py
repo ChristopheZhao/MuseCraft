@@ -16,6 +16,7 @@ from ..models import (
     TaskStatus,
     AgentType,
     WorkflowSessionStatus,
+    WorkflowNodeStatus,
 )
 from ..services.memory_provider import build_memory_services, MemoryServices
 from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
@@ -451,6 +452,9 @@ class OrchestratorAgent(BaseAgent):
             task_specs=task_specs,
             conditional_task_specs=conditional_task_specs,
             candidate_agents=list(candidate_agents),
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+            node_key="script",
+            attempt_id=script_attempt_id,
             decision_id=None,
         )
         gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
