@@ -1649,6 +1649,178 @@
           "text": "Closed the plan after explicit user confirmation: 031 now records the approve continuation transition as control-plane-owned, keeps orchestrator as a pure consumer of runtime state, preserves queue/worker transport-only semantics, and establishes this layered boundary as the accepted baseline for ongoing MAS-mainline integration work"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260328-032",
+      "title": "HITL continuation snapshot and single-path resume recovery alignment",
+      "kind": "fix",
+      "status": "awaiting_user_confirmation",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260328-032.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-28T02:54:28Z",
+      "updated_at": "2026-03-28T03:12:40Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-28T02:54:28Z",
+          "text": "Created this managed successor after the latest live approve-resume failure proved that the current continuation path still depends on Shared WM-backed workflow.task_specs rather than durable control-plane continuation authority; scope is frozen to minimal continuation snapshot design and a single-path recovery chain, explicitly excluding queue/worker redesign, full WM persistence, and artifact-owner promotion"
+        },
+        {
+          "at": "2026-03-28T02:54:28Z",
+          "text": "Completed Phase 0 audit only: the failure occurs after requeue into a fresh queued execution host, orchestrator raises Missing persisted workflow.task_specs for resume action approve before resume execution can continue, orchestration_state_adapter still reads and writes task specs through short-term memory, and the next stage is narrowed to freezing the minimal continuation snapshot field table plus the single recovery chain before any implementation"
+        },
+        {
+          "at": "2026-03-28T02:59:16Z",
+          "text": "Completed Phase 1 field freeze without entering implementation: existing control-plane facts for decision action/invalidation scope, resume anchor, published deliverable refs, and script review contract are now explicitly frozen as reused SoT rather than duplicated snapshot fields, while the only new durable projection is narrowed to versioned continuation-plan data containing decision_id, ordered candidate_agents, normalized task_specs, and normalized conditional_task_specs; execution_queue, standby_agents, diagnostics snapshots, and full WM persistence are explicitly rejected"
+        },
+        {
+          "at": "2026-03-28T03:04:25Z",
+          "text": "Completed Phase 2 recovery-chain freeze without entering implementation decisions: the normalized continuation plan must be persisted by the control plane before the script gate returns waiting_gate, the latest human decision must bind that checkpoint during submit_gate_decision_sync, and resume bootstrap must reload the active continuation by session/node/attempt/decision anchor before hydrating any WM projections; queue/worker remain transport-only, ContextContractAssembler remains content-fact-only, and missing or stale continuation anchors must fail fast with no Shared WM fallback"
+        },
+        {
+          "at": "2026-03-28T03:12:40Z",
+          "text": "Completed Phase 3 implementation-cut design without writing code: the chosen carrier is a dedicated attempt-scoped continuation_checkpoint JSON field on WorkflowNodeAttempt, because it stays internal to the control plane and aligns naturally with gate.attempt_id, while reuse of input_contract, gate.facts, session.input_payload, or session.gate_policy would either pollute existing semantics or leak continuation internals into runtime read-models; the next bounded implementation slice is therefore migration plus write/bind/read/hydrate wiring around that single field"
+        },
+        {
+          "at": "2026-03-28T04:05:39Z",
+          "text": "Completed Phase 6 live smoke on the current-code 8006 API: a real quick task reached script_review, accepted approve, resumed into image, and persisted decision_id=8 onto workflow_node_attempts.continuation_checkpoint; the earlier 8005 failure is now classified as stale dev-process drift rather than a surviving continuation-path regression"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260328-033",
+      "title": "Dev startup stale-process governance for local API/worker services",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260328-033.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-28T04:10:38Z",
+      "updated_at": "2026-03-28T06:52:09Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-28T04:10:38Z",
+          "text": "Created this managed successor after the real resume smoke succeeded on the current-code API and isolated the remaining local risk to stale 8005-style dev processes rather than MAS continuation semantics; scope is frozen to startup-harness governance for repo-local uvicorn/watchmedo/celery services"
+        },
+        {
+          "at": "2026-03-28T04:10:38Z",
+          "text": "Completed Phase 0 audit only: start_dev_uv currently performs best-effort cleanup only during shutdown, has no startup residual-process preflight, and therefore allows stale repo-local services to coexist with current-code ones; the next phase is narrowed to freezing a scoped startup-governance contract with explicit diagnostics and opt-in cleanup, not to runtime/control-plane code changes"
+        },
+        {
+          "at": "2026-03-28T04:18:52Z",
+          "text": "Completed Phase 1 boundary freeze without implementation: Ctrl+C exit hygiene is now split into launcher-owned scoped process-group shutdown versus app-owned import-time async init cleanup; manual repo-scoped pkill is accepted only as an emergency operator escape hatch, not as the formal startup or shutdown contract"
+        },
+        {
+          "at": "2026-03-28T04:24:01Z",
+          "text": "Completed Phase 2 implementation-cut design without writing code: the initial patch is now tightly bounded to start_dev_uv.py plus focused launcher tests, using one repo-scoped matcher for startup preflight, opt-in cleanup, interrupt-time shutdown reporting, and exit cleanup; app-lifecycle pending-task hygiene is explicitly excluded and reserved for a separate follow-up if still needed"
+        },
+        {
+          "at": "2026-03-28T04:35:26Z",
+          "text": "Completed Phase 3 implementation and focused verification: start_dev_uv now owns repo-scoped residual detection, explicit --cleanup-residuals preflight, and scoped shutdown cleanup without broad pkill; direct Python smokes and py_compile passed, while pytest runner hangs are recorded as an environment issue outside the launcher patch scope"
+        },
+        {
+          "at": "2026-03-28T06:43:17Z",
+          "text": "Reopened launcher closeout after the latest real operator retest showed that the start_dev_uv parent can already be gone while repo-local uvicorn 8005 and celery beat children remain alive; 033 is now narrowed further to live exit/orphan correction only, while the concurrently observed Doubao image-size contract failure is split to successor PLAN-20260328-034"
+        },
+        {
+          "at": "2026-03-28T06:52:09Z",
+          "text": "Completed Phase 4 live revalidation without new code changes: a fresh controlled run of uv run python scripts/start_dev_uv.py --cleanup-residuals cleared stale services on startup, then shut down cleanly on a single Ctrl+C with no repo-local uvicorn/watchmedo/celery residuals left afterward; launcher scope is now fully validated again, while image size compatibility remains isolated in PLAN-20260328-034"
+        },
+        {
+          "at": "2026-03-28T06:58:01Z",
+          "text": "User confirmed closeout; 033 is now completed with startup preflight and single-Ctrl+C shutdown both validated on a fresh real run, and all further work moves to successor PLAN-20260328-034"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260328-034",
+      "title": "Provider-aware image size contract correction for image generation tools",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260328-034.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-28T06:43:17Z",
+      "updated_at": "2026-03-28T08:31:03Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-28T06:43:17Z",
+          "text": "Created this successor after the latest real dev run showed a second independent defect alongside launcher exit hygiene: the image path selected Doubao, emitted 1024x1024 scene sizes, and failed with explicit provider 400s requiring at least 3686400 pixels"
+        },
+        {
+          "at": "2026-03-28T06:43:17Z",
+          "text": "Completed Phase 0 audit only: image_prompt_composer and image_generation_tool still default to 1024x1024, FC guard still only warns on an outdated size set, and the Doubao adapter simply passes size through; the next phase is narrowed to freezing one provider-aware normalization and validation chain before implementation"
+        },
+        {
+          "at": "2026-03-28T06:58:01Z",
+          "text": "Completed Phase 1 design freeze without writing code: 034 now reuses the existing capability host in service_interfaces.py rather than inventing a new provider-size model, freezes image_generation_tool as the single normalization and validation boundary, and demotes fc_param_guard to a consumer of the same selected-provider capability snapshot"
+        },
+        {
+          "at": "2026-03-28T07:55:06Z",
+          "text": "Completed Phase 2 implementation inside the frozen boundary: provider-aware image-size truth now lives in service_interfaces.py, Doubao publishes canonical 2K plus compatibility aliases, image_prompt_composer no longer injects a default size, image_generation_tool now selects provider default / normalizes aliases / fail-fast rejects invalid sizes, and fc_param_guard consumes the same snapshot for image-size rejection"
+        },
+        {
+          "at": "2026-03-28T07:55:06Z",
+          "text": "Focused verification passed via py_compile and direct backend .venv calls (provider capability export, enum normalization, guard accept/reject behavior, composer pass-through without default size); backend uv/pytest runner still hangs in this environment, so runner debugging remains explicitly out of 034 scope"
+        },
+        {
+          "at": "2026-03-28T08:00:51Z",
+          "text": "User confirmed Phase 2 closeout. 034 remains in progress rather than completed because the next stage decision (real image-generation live smoke vs stop at contract-level verification) has not been taken yet"
+        },
+        {
+          "at": "2026-03-28T08:28:32Z",
+          "text": "Completed Phase 3 live smoke: after scoped residual cleanup and Celery broker/result reset, a real image_generation tool call normalized alias size 1024x1024 to Doubao canonical 2K and returned a real image URL from doubao-seedream-5-0-lite-260128"
+        },
+        {
+          "at": "2026-03-28T08:28:32Z",
+          "text": "The same clean-stack session exposed a separate workflow-path failure outside 034 scope: quick task 756a5a91-1d84-4f79-8b68-a3baf2fb9ec9 failed at image_generator with missing_runtime_input_ref for script while script remained queued, so follow-up should be tracked as a new runtime/orchestration successor instead of reopening the image-size contract fix"
+        },
+        {
+          "at": "2026-03-28T08:31:03Z",
+          "text": "User confirmed closeout; 034 is now completed and the separate script-to-image runtime prerequisite gap moves to successor PLAN-20260328-035"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260328-035",
+      "title": "Script-to-image runtime prerequisite gap after clean quick-run smoke",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260328-035.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-28T08:31:03Z",
+      "updated_at": "2026-03-28T15:00:48Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-28T08:31:03Z",
+          "text": "Created this successor after 034 live smoke closure: direct Doubao image generation succeeded, but quick task 756a5a91-1d84-4f79-8b68-a3baf2fb9ec9 failed because image_generator started while script remained queued and no published script runtime input ref existed"
+        },
+        {
+          "at": "2026-03-28T08:49:44Z",
+          "text": "Completed Phase 1 design freeze without code changes: the runtime gap is now framed as one control-plane contract family with two responsibilities, approved-only downstream projection in session.input_payload.published_deliverables and mandatory script-producer prerequisite enforcement before any script-consuming node dispatch"
+        },
+        {
+          "at": "2026-03-28T13:27:41Z",
+          "text": "Completed Phase 2 implementation and focused uv regression: approved-only runtime projection now excludes candidate refs, prefer_approved is enforced as a read-side contract, and script prerequisite is enforced across initial queue build, runtime standby activation, and pre-dispatch gating"
+        },
+        {
+          "at": "2026-03-28T14:03:56Z",
+          "text": "Reopened into Phase 3 architecture convergence after deep review found a dual-carrier planning state: continuation_checkpoint is now the authoritative resume source, but workflow.task_specs still survives as a live Shared WM execution input through ContextAssembler/runtime-hints. Phase 3 will remove the Shared WM planning-state mainline, demote adapter/helper code back to pure translation roles, and unify prerequisite policy ownership before closeout"
+        },
+        {
+          "at": "2026-03-28T15:00:48Z",
+          "text": "User confirmed completion after Phase 3 architecture convergence and compat projection cleanup. continuation_checkpoint is the sole planning-state carrier, Shared WM planning/compat projections are removed from app code, and focused backend uv regression passed (103 passed)"
+        }
+      ]
     }
   ]
 }
