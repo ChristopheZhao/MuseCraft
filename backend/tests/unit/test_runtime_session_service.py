@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -21,6 +22,7 @@ from app.services.published_deliverable_service import PublishedDeliverableServi
 from app.services.script_review_contract import get_script_review_contract
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.published_deliverable_service import get_published_deliverable_ref
+import app.services.runtime_session_service as runtime_session_service_module
 
 
 @pytest.fixture
@@ -197,7 +199,96 @@ def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
     assert view["active_gate"]["diagnostics"] == []
     assert view["active_gate"]["scope"] == {}
     assert view["active_gate"]["latest_decision"] is None
+    assert view["resume_control"] == {
+        "state": "waiting_gate",
+        "can_resume": False,
+        "reason_code": "awaiting_gate_decision",
+    }
     assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
+
+
+def test_running_runtime_exposes_view_only_recent_resume_control(sync_db, monkeypatch):
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        900,
+    )
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert view["resume_control"] == {
+        "state": "view_only_running",
+        "can_resume": False,
+        "reason_code": "runtime_recent",
+    }
+
+
+def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(sync_db, monkeypatch):
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        60,
+    )
+    probe_calls = {}
+
+    def _fake_probe(celery_task_id):
+        probe_calls["celery_task_id"] = celery_task_id
+        return SimpleNamespace(state="not_live", reason_code="missing_queue_handle")
+
+    monkeypatch.setattr(runtime_session_service_module, "probe_task_transport_state", _fake_probe)
+
+    task = _create_task(sync_db)
+    task.output_metadata = {"celery_task_id": "celery-task-1"}
+    sync_db.commit()
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    task.updated_at = stale_at
+    session.updated_at = stale_at
+    sync_db.commit()
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert probe_calls["celery_task_id"] == "celery-task-1"
+    assert view["resume_control"] == {
+        "state": "resume_available",
+        "can_resume": True,
+        "reason_code": "stalled_runtime_no_live_transport",
+    }
+
+
+def test_stalled_runtime_exposes_resume_unknown_when_transport_state_is_unknown(sync_db, monkeypatch):
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        60,
+    )
+    monkeypatch.setattr(
+        runtime_session_service_module,
+        "probe_task_transport_state",
+        lambda celery_task_id: SimpleNamespace(state="unknown", reason_code="transport_probe_unavailable"),
+    )
+
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    task.updated_at = stale_at
+    session.updated_at = stale_at
+    sync_db.commit()
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert view["resume_control"] == {
+        "state": "resume_unknown",
+        "can_resume": False,
+        "reason_code": "transport_state_unknown",
+    }
 
 
 def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutation(sync_db):

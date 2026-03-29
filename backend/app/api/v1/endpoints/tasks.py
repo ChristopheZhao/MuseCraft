@@ -550,6 +550,75 @@ async def get_task_runtime(
     return runtime_view
 
 
+@router.post("/{task_id}/runtime/resume", response_model=TaskRuntimeDecisionResponse)
+async def resume_task_runtime(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Explicitly resume a stalled quick runtime after control-plane eligibility checks."""
+
+    query = select(Task).where(Task.task_id == task_id)
+    result = await db.execute(query)
+    task = result.scalar_one_or_none()
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
+    if runtime_session is None:
+        raise HTTPException(status_code=404, detail="Runtime session not found")
+    if runtime_session.mode != "quick":
+        raise HTTPException(status_code=400, detail="Runtime resume is only supported for quick mode")
+
+    def _load_resume_control(sync_db):
+        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
+        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
+        if sync_task is None or sync_session is None:
+            raise ValueError("Runtime session not found")
+        return RuntimeSessionService.get_resume_control_sync(sync_db, sync_task, sync_session)
+
+    try:
+        resume_control = await db.run_sync(_load_resume_control)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not resume_control or not bool(resume_control.get("can_resume")):
+        state = str((resume_control or {}).get("state") or "unavailable")
+        reason_code = str((resume_control or {}).get("reason_code") or "resume_not_available")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Runtime session is not resumable: state={state} reason={reason_code}",
+        )
+
+    def _mark_runtime_resuming(sync_db):
+        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
+        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
+        if sync_task is None or sync_session is None:
+            raise ValueError("Runtime session not found")
+        RuntimeSessionService.mark_session_resuming_sync(sync_db, sync_session, task=sync_task)
+
+    try:
+        await db.run_sync(_mark_runtime_resuming)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    await db.refresh(task)
+    _schedule_task_execution(background_tasks, task.id)
+    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    if runtime_view is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Authoritative runtime view missing after runtime resume",
+        )
+
+    return TaskRuntimeDecisionResponse(
+        message="Runtime resume accepted",
+        task_id=str(task.task_id),
+        runtime=runtime_view,
+    )
+
+
 @router.post("/{task_id}/retry")
 async def retry_task(
     task_id: str,

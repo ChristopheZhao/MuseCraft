@@ -306,3 +306,167 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
     assert queue_calls["created_task_session_id"] == "quick-session-2"
     assert queue_calls["scheduled_task_id"] == 101
     assert response.task_id == "task-new"
+
+
+def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
+    task = SimpleNamespace(id=21, task_id="task-21")
+    runtime_session = SimpleNamespace(id=91, mode="quick")
+    runtime_view = {
+        "session_id": 91,
+        "status": "resuming",
+        "resume_control": {
+            "state": "view_only_running",
+            "can_resume": False,
+            "reason_code": "runtime_recent",
+        },
+    }
+    events = {}
+
+    class _FakeQueryResult:
+        def scalar_one_or_none(self):
+            return task
+
+    class _FakeDb:
+        async def execute(self, query):
+            return _FakeQueryResult()
+
+        async def run_sync(self, fn):
+            return fn(self)
+
+        async def refresh(self, obj):
+            events["refreshed"] = obj
+
+        def query(self, model):
+            return self
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return task
+
+    async def _fake_get_latest_session(db, task_db_id):
+        assert task_db_id == 21
+        return runtime_session
+
+    def _fake_get_latest_session_sync(sync_db, task_db_id):
+        assert task_db_id == 21
+        return runtime_session
+
+    def _fake_get_resume_control_sync(sync_db, task_obj, session_obj):
+        assert task_obj is task
+        assert session_obj is runtime_session
+        return {
+            "state": "resume_available",
+            "can_resume": True,
+            "reason_code": "stalled_runtime_no_live_transport",
+        }
+
+    def _fake_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
+        events["marked_session"] = session_obj
+        events["marked_task"] = task
+        return session_obj
+
+    def _fake_schedule(background_tasks, task_db_id):
+        events["scheduled_task_id"] = task_db_id
+
+    async def _fake_build_runtime_view(db, task_obj):
+        assert task_obj is task
+        return runtime_view
+
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task_sync", _fake_get_latest_session_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_resume_control_sync", _fake_get_resume_control_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "mark_session_resuming_sync", _fake_mark_session_resuming_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_build_runtime_view)
+    monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _fake_schedule)
+
+    response = asyncio.run(
+        tasks_endpoint.resume_task_runtime(
+            "task-21",
+            background_tasks=BackgroundTasks(),
+            db=_FakeDb(),
+        )
+    )
+
+    assert events["marked_session"] is runtime_session
+    assert events["marked_task"] is task
+    assert events["scheduled_task_id"] == 21
+    assert events["refreshed"] is task
+    assert response.message == "Runtime resume accepted"
+    assert response.task_id == "task-21"
+    assert response.runtime == runtime_view
+
+
+def test_resume_task_runtime_rejects_when_resume_control_is_not_available(monkeypatch):
+    task = SimpleNamespace(id=22, task_id="task-22")
+    runtime_session = SimpleNamespace(id=92, mode="quick")
+    events = {"marked": 0, "scheduled": 0}
+
+    class _FakeQueryResult:
+        def scalar_one_or_none(self):
+            return task
+
+    class _FakeDb:
+        async def execute(self, query):
+            return _FakeQueryResult()
+
+        async def run_sync(self, fn):
+            return fn(self)
+
+        async def refresh(self, obj):
+            raise AssertionError("refresh should not run when resume is rejected")
+
+        def query(self, model):
+            return self
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return task
+
+    async def _fake_get_latest_session(db, task_db_id):
+        assert task_db_id == 22
+        return runtime_session
+
+    def _fake_get_latest_session_sync(sync_db, task_db_id):
+        assert task_db_id == 22
+        return runtime_session
+
+    def _fake_get_resume_control_sync(sync_db, task_obj, session_obj):
+        assert task_obj is task
+        assert session_obj is runtime_session
+        return {
+            "state": "view_only_running",
+            "can_resume": False,
+            "reason_code": "runtime_recent",
+        }
+
+    def _forbidden_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
+        events["marked"] += 1
+        raise AssertionError("resume should not mutate runtime state when not resumable")
+
+    def _forbidden_schedule(background_tasks, task_db_id):
+        events["scheduled"] += 1
+        raise AssertionError("resume should not queue dispatch when not resumable")
+
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task_sync", _fake_get_latest_session_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_resume_control_sync", _fake_get_resume_control_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "mark_session_resuming_sync", _forbidden_mark_session_resuming_sync)
+    monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _forbidden_schedule)
+
+    with pytest.raises(tasks_endpoint.HTTPException) as exc_info:
+        asyncio.run(
+            tasks_endpoint.resume_task_runtime(
+                "task-22",
+                background_tasks=BackgroundTasks(),
+                db=_FakeDb(),
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "state=view_only_running" in str(exc_info.value.detail)
+    assert "reason=runtime_recent" in str(exc_info.value.detail)
+    assert events == {"marked": 0, "scheduled": 0}

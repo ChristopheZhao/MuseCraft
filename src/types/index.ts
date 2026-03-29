@@ -221,6 +221,17 @@ export interface RuntimeNodeState {
   diagnostics: Array<Record<string, any>>;
 }
 
+export interface RuntimeResumeControl {
+  state:
+    | 'waiting_gate'
+    | 'view_only_running'
+    | 'resume_available'
+    | 'resume_unknown'
+    | string;
+  can_resume: boolean;
+  reason_code: string;
+}
+
 export interface TaskRuntimeView {
   session_id: number;
   task_db_id: number;
@@ -234,6 +245,7 @@ export interface TaskRuntimeView {
   active_gate?: RuntimeGate | null;
   error_message?: string | null;
   summary_output: Record<string, any>;
+  resume_control?: RuntimeResumeControl | null;
   nodes: RuntimeNodeState[];
   created_at?: string | null;
   updated_at?: string | null;

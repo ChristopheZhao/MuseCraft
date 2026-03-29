@@ -331,6 +331,11 @@ class Settings(BaseSettings):
         default=False,
         cast=bool,
     )
+    QUICK_RUNTIME_STALL_THRESHOLD_SECONDS: int = config(
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        default=900,
+        cast=int,
+    )
     
     # WebSocket Settings
     WEBSOCKET_PATH: str = config("WEBSOCKET_PATH", default="/ws")

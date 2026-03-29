@@ -46,9 +46,11 @@ const QuickModeWorkspace: React.FC = () => {
   const { currentRequest, quickRuntime, setQuickRuntime, addNotification } = useAppStore();
   const [feedbackText, setFeedbackText] = useState('');
   const [submittingAction, setSubmittingAction] = useState<string | null>(null);
+  const [resumingRuntime, setResumingRuntime] = useState(false);
   const [resumeHint, setResumeHint] = useState<string | null>(null);
 
   const activeGate = quickRuntime?.active_gate;
+  const resumeControl = quickRuntime?.resume_control;
   const isScriptGate = activeGate?.gate_name === 'script_review';
   const scriptPreviewText = useMemo(
     () => String(activeGate?.facts?.script_preview_text || '').trim(),
@@ -68,6 +70,30 @@ const QuickModeWorkspace: React.FC = () => {
       setResumeHint(null);
     }
   }, [activeGate?.id, activeGate?.status]);
+
+  const handleResumeRuntime = async () => {
+    if (!currentRequest?.id || !resumeControl?.can_resume) return;
+    try {
+      setResumingRuntime(true);
+      const result = await ApiClient.resumeTaskRuntime(currentRequest.id);
+      setQuickRuntime(result.runtime);
+      addNotification({
+        type: 'success',
+        title: '已请求恢复执行',
+        message: `任务 ${currentRequest.id} 已重新进入执行流程。`,
+        autoClose: 3000,
+      });
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: '恢复执行失败',
+        message: error instanceof Error ? error.message : '恢复执行失败，请稍后重试',
+        autoClose: 6000,
+      });
+    } finally {
+      setResumingRuntime(false);
+    }
+  };
 
   const handleDecision = async (action: 'approve' | 'revise' | 'replan') => {
     if (!currentRequest?.id) return;
@@ -175,6 +201,46 @@ const QuickModeWorkspace: React.FC = () => {
                   要求重规划
                 </button>
               </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {resumeControl?.state === 'resume_available' && (
+        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-slate-200 p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <RefreshCcw className="w-5 h-5 text-slate-700 mt-0.5" />
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">可恢复执行</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  当前工作台只是在查看既有 runtime；control-plane 已判定该 run 无活动 transport，可显式恢复执行。
+                </p>
+                <p className="text-xs text-gray-500 mt-2">reason: {resumeControl.reason_code}</p>
+              </div>
+            </div>
+            <button
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-950 disabled:opacity-60"
+              disabled={resumingRuntime}
+              onClick={() => void handleResumeRuntime()}
+            >
+              {resumingRuntime ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
+              恢复执行
+            </button>
+          </div>
+        </section>
+      )}
+
+      {resumeControl?.state === 'resume_unknown' && (
+        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-amber-200 p-6">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-700 mt-0.5" />
+            <div>
+              <h3 className="text-lg font-semibold text-amber-900">执行状态待确认</h3>
+              <p className="text-sm text-amber-800 mt-1">
+                当前工作台已附着到 runtime 视图，但 transport 活性暂时无法判定，因此暂不提供恢复执行按钮。
+              </p>
+              <p className="text-xs text-amber-700 mt-2">reason: {resumeControl.reason_code}</p>
             </div>
           </div>
         </section>

@@ -3,6 +3,7 @@ DB-backed runtime session service for the single-episode kernel
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import desc, select
@@ -23,6 +24,7 @@ from ..models import (
     WorkflowGateDecision,
 )
 from ..core.constants import GenerationMode
+from ..core.config import settings
 from ..core.generation_mode import resolve_generation_mode
 from .published_deliverable_service import (
     PublishedDeliverableService,
@@ -36,6 +38,7 @@ from .script_review_contract import (
     set_script_review_contract,
 )
 from .orchestration_state_adapter import OrchestrationStateAdapter
+from .task_execution_policy import probe_task_transport_state
 
 
 DEFAULT_NODE_BLUEPRINT = [
@@ -176,6 +179,7 @@ def _serialize_session(
     *,
     active_gate: Optional[WorkflowGate] = None,
     latest_decision: Optional[WorkflowGateDecision] = None,
+    resume_control: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "session_id": session.id,
@@ -190,9 +194,95 @@ def _serialize_session(
         "active_gate": _serialize_gate(active_gate, latest_decision=latest_decision),
         "error_message": session.error_message,
         "summary_output": session.summary_output or {},
+        "resume_control": resume_control,
         "nodes": [_serialize_node(node) for node in nodes],
         "created_at": session.created_at.isoformat() if session.created_at else None,
         "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+    }
+
+
+def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _latest_runtime_activity_at(task: Task, session: WorkflowSession) -> Optional[datetime]:
+    candidates = [
+        _normalize_datetime(getattr(task, "updated_at", None)),
+        _normalize_datetime(getattr(session, "updated_at", None)),
+    ]
+    present = [candidate for candidate in candidates if candidate is not None]
+    if not present:
+        return None
+    return max(present)
+
+
+def _extract_task_queue_handle(task: Task) -> Optional[str]:
+    output_metadata = dict(getattr(task, "output_metadata", None) or {})
+    queue_handle = str(output_metadata.get("celery_task_id") or "").strip()
+    return queue_handle or None
+
+
+def _build_resume_control_projection(
+    task: Task,
+    session: WorkflowSession,
+    *,
+    active_gate: Optional[WorkflowGate] = None,
+) -> Optional[Dict[str, Any]]:
+    session_status = str(session.status or "").strip().lower()
+    if session_status in {
+        WorkflowSessionStatus.COMPLETED.value,
+        WorkflowSessionStatus.FAILED.value,
+        WorkflowSessionStatus.CANCELLED.value,
+    }:
+        return None
+
+    if active_gate is not None and str(active_gate.status or "").strip().lower() == WorkflowGateStatus.AWAITING_HUMAN.value:
+        return {
+            "state": "waiting_gate",
+            "can_resume": False,
+            "reason_code": "awaiting_gate_decision",
+        }
+
+    last_activity_at = _latest_runtime_activity_at(task, session)
+    if last_activity_at is not None:
+        inactivity_seconds = max(
+            0,
+            int((datetime.now(timezone.utc) - last_activity_at).total_seconds()),
+        )
+    else:
+        inactivity_seconds = 0
+    stall_threshold_seconds = max(
+        1,
+        int(getattr(settings, "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS", 900)),
+    )
+    if inactivity_seconds < stall_threshold_seconds:
+        return {
+            "state": "view_only_running",
+            "can_resume": False,
+            "reason_code": "runtime_recent",
+        }
+
+    transport_probe = probe_task_transport_state(_extract_task_queue_handle(task))
+    if transport_probe.state == "live":
+        return {
+            "state": "view_only_running",
+            "can_resume": False,
+            "reason_code": "transport_active",
+        }
+    if transport_probe.state == "not_live":
+        return {
+            "state": "resume_available",
+            "can_resume": True,
+            "reason_code": "stalled_runtime_no_live_transport",
+        }
+    return {
+        "state": "resume_unknown",
+        "can_resume": False,
+        "reason_code": "transport_state_unknown",
     }
 
 
@@ -410,7 +500,14 @@ class RuntimeSessionService:
         latest_decision = None
         if active_gate is not None:
             latest_decision = await RuntimeSessionService._get_latest_decision_for_gate_async(db, active_gate.id)
-        return _serialize_session(session, nodes, active_gate=active_gate, latest_decision=latest_decision)
+        resume_control = _build_resume_control_projection(task, session, active_gate=active_gate)
+        return _serialize_session(
+            session,
+            nodes,
+            active_gate=active_gate,
+            latest_decision=latest_decision,
+            resume_control=resume_control,
+        )
 
     @staticmethod
     async def mark_session_cancelled_for_task(db: AsyncSession, task: Task) -> Optional[WorkflowSession]:
@@ -538,12 +635,23 @@ class RuntimeSessionService:
         latest_decision = None
         if active_gate is not None:
             latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, active_gate.id)
+        resume_control = _build_resume_control_projection(task, session, active_gate=active_gate)
         return _serialize_session(
             session,
             list(nodes),
             active_gate=active_gate,
             latest_decision=latest_decision,
+            resume_control=resume_control,
         )
+
+    @staticmethod
+    def get_resume_control_sync(
+        db: Session,
+        task: Task,
+        session: WorkflowSession,
+    ) -> Optional[Dict[str, Any]]:
+        active_gate = RuntimeSessionService.get_latest_gate_for_session_sync(db, session.id)
+        return _build_resume_control_projection(task, session, active_gate=active_gate)
 
     @staticmethod
     def get_node_by_key_sync(
@@ -1103,6 +1211,22 @@ class RuntimeSessionService:
                     first_node.status = WorkflowNodeStatus.RUNNING.value
         if task is not None:
             task.status = TaskStatus.IN_PROGRESS.value
+        db.commit()
+        db.refresh(session)
+        return session
+
+    @staticmethod
+    def mark_session_resuming_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        task: Optional[Task] = None,
+    ) -> WorkflowSession:
+        session.status = WorkflowSessionStatus.RESUMING.value
+        session.error_message = None
+        if task is not None:
+            task.status = TaskStatus.IN_PROGRESS.value
+            task.error_message = None
         db.commit()
         db.refresh(session)
         return session

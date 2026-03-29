@@ -76,6 +76,12 @@ export interface QuickCurrentRunResponse {
   runtime: TaskRuntimeView;
 }
 
+export interface TaskRuntimeActionResponse {
+  message: string;
+  task_id: string;
+  runtime: TaskRuntimeView;
+}
+
 export class TaskRuntimeEndpointError extends Error {
   status: number;
   detail: string;
@@ -190,7 +196,7 @@ export class ApiClient {
   static async submitScriptGateDecision(
     taskId: string,
     payload: TaskRuntimeDecisionRequest,
-  ): Promise<{ message: string; task_id: string; runtime: TaskRuntimeView }> {
+  ): Promise<TaskRuntimeActionResponse> {
     const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/runtime/script/decision`, {
       method: 'POST',
       headers: {
@@ -203,6 +209,20 @@ export class ApiClient {
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.detail || 'Failed to submit script gate decision');
+    }
+
+    return response.json();
+  }
+
+  static async resumeTaskRuntime(taskId: string): Promise<TaskRuntimeActionResponse> {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/runtime/resume`, {
+      method: 'POST',
+      mode: 'cors',
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to resume runtime execution');
     }
 
     return response.json();

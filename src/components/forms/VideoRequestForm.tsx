@@ -26,6 +26,7 @@ const VideoRequestForm: React.FC = () => {
   const { t } = useI18n();
   const [workspaceSessionId, setWorkspaceSessionId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [resumingExistingRun, setResumingExistingRun] = useState(false);
   const [loadingExistingRun, setLoadingExistingRun] = useState(true);
   const [existingRun, setExistingRun] = useState<QuickCurrentRunResponse | null>(null);
   const [existingRunDismissed, setExistingRunDismissed] = useState(false);
@@ -48,6 +49,7 @@ const VideoRequestForm: React.FC = () => {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [currentTab, setCurrentTab] = useState<'basic' | 'style' | 'music' | 'advanced'>('basic');
   const hasPendingRunChoice = !loadingExistingRun && !!existingRun?.task && !existingRunDismissed;
+  const existingRunResumeControl = existingRun?.runtime?.resume_control;
 
   useEffect(() => {
     const currentSessionId = getOrCreateQuickWorkspaceSessionId();
@@ -126,23 +128,65 @@ const VideoRequestForm: React.FC = () => {
     };
   };
 
-  const handleContinueExistingRun = () => {
-    if (!existingRun) return;
-
-    console.info('CONTINUE_EXISTING_RUN selected', { taskId: existingRun.task.task_id });
-    const request = mapQuickRunToRequest(existingRun);
+  const attachExistingRunToWorkspace = (
+    run: QuickCurrentRunResponse,
+    notification?: {
+      type: 'success' | 'error' | 'warning' | 'info';
+      title: string;
+      message: string;
+      autoClose?: number;
+    } | null
+  ) => {
+    const request = mapQuickRunToRequest(run);
     if (!request) return;
 
     setExistingRunDismissed(true);
     setCurrentRequest(request);
-    setQuickRuntime(existingRun.runtime);
+    setQuickRuntime(run.runtime);
     setCurrentStep('processing');
-    addNotification({
+    if (notification) {
+      addNotification(notification);
+    }
+  };
+
+  const handleViewExistingRun = () => {
+    if (!existingRun) return;
+
+    console.info('ATTACH_EXISTING_RUN_VIEW selected', { taskId: existingRun.task.task_id });
+    attachExistingRunToWorkspace(existingRun, {
       type: 'info',
-      title: '已恢复未完成任务',
-      message: `继续查看任务 ${existingRun.task.task_id}`,
-      autoClose: 3000,
+      title: '已恢复工作台视图',
+      message: `当前正在查看任务 ${existingRun.task.task_id}；如需恢复后端执行，请使用明确的“恢复执行”按钮。`,
+      autoClose: 4000,
     });
+  };
+
+  const handleResumeExistingRun = async () => {
+    if (!existingRun) return;
+
+    console.info('RESUME_EXISTING_RUN selected', { taskId: existingRun.task.task_id });
+    attachExistingRunToWorkspace(existingRun, null);
+    try {
+      setResumingExistingRun(true);
+      const result = await ApiClient.resumeTaskRuntime(existingRun.task.task_id);
+      setQuickRuntime(result.runtime);
+      setExistingRun(null);
+      addNotification({
+        type: 'success',
+        title: '已请求恢复执行',
+        message: `任务 ${existingRun.task.task_id} 已重新进入执行流程。`,
+        autoClose: 3000,
+      });
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: '恢复执行失败',
+        message: error instanceof Error ? error.message : '恢复执行失败，请稍后重试',
+        autoClose: 6000,
+      });
+    } finally {
+      setResumingExistingRun(false);
+    }
   };
 
   const handleCreateNewRun = () => {
@@ -177,7 +221,7 @@ const VideoRequestForm: React.FC = () => {
       addNotification({
         type: 'warning',
         title: '请先选择任务操作',
-        message: '请先选择继续查看当前任务，或点击“新建运行”后再提交新的测试 run。',
+        message: '请先选择查看当前任务、恢复执行，或点击“新建运行”后再提交新的测试 run。',
         autoClose: 5000,
       });
       return;
@@ -310,19 +354,47 @@ const VideoRequestForm: React.FC = () => {
             <div className="flex-1">
               <div className="text-sm font-semibold text-amber-900">检测到未完成任务</div>
               <p className="mt-1 text-sm text-amber-800">
-                当前 workspace 下存在一条未终态 run：`{existingRun.task.task_id}`。你可以继续查看它，或者保留当前输入并启动一条新的测试 run。
+                当前 workspace 下存在一条未终态 run：`{existingRun.task.task_id}`。你可以先恢复工作台视图，再决定是否显式恢复后端执行；或者保留当前输入并启动一条新的测试 run。
               </p>
+              {existingRunResumeControl?.state === 'resume_available' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 已无活动 transport，control-plane 允许显式恢复执行。
+                </p>
+              )}
+              {existingRunResumeControl?.state === 'resume_unknown' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前只能恢复工作台视图，transport 活性暂时无法判定，尚不能直接恢复执行。
+                </p>
+              )}
+              {existingRunResumeControl?.state === 'view_only_running' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 仍被视为运行中，“查看当前任务”只会重新附着工作台视图，不会触发新的后端执行。
+                </p>
+              )}
               <div className="mt-3 flex flex-wrap gap-3">
                 <button
                   type="button"
-                  onClick={handleContinueExistingRun}
+                  onClick={handleViewExistingRun}
+                  disabled={resumingExistingRun}
                   className="inline-flex items-center gap-2 rounded-lg bg-amber-700 px-4 py-2 text-sm font-medium text-white hover:bg-amber-800"
                 >
-                  继续查看当前任务
+                  查看当前任务
                 </button>
+                {existingRunResumeControl?.can_resume && (
+                  <button
+                    type="button"
+                    onClick={() => void handleResumeExistingRun()}
+                    disabled={resumingExistingRun}
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-950 disabled:opacity-60"
+                  >
+                    {resumingExistingRun ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                    恢复执行
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleCreateNewRun}
+                  disabled={resumingExistingRun}
                   className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
                 >
                   新建运行
