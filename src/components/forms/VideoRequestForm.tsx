@@ -366,6 +366,11 @@ const VideoRequestForm: React.FC = () => {
                   检测结果：当前只能恢复工作台视图，transport 活性暂时无法判定，尚不能直接恢复执行。
                 </p>
               )}
+              {existingRunResumeControl?.state === 'resume_blocked' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 已判定停滞，但 control-plane 缺少可消费的 continuation checkpoint，不能把“查看当前任务”当成恢复执行。
+                </p>
+              )}
               {existingRunResumeControl?.state === 'view_only_running' && (
                 <p className="mt-2 text-xs text-amber-700">
                   检测结果：当前 run 仍被视为运行中，“查看当前任务”只会重新附着工作台视图，不会触发新的后端执行。

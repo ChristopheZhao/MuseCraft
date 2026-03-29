@@ -663,6 +663,33 @@ class OrchestratorAgent(BaseAgent):
         else:
             workflow_data.pop("script_review_contract", None)
 
+        runtime_resume_checkpoint: Optional[Dict[str, Any]] = None
+        resume_anchor_agent: Optional[AgentType] = None
+        if (
+            runtime_session is not None
+            and runtime_session.status == WorkflowSessionStatus.RESUMING.value
+            and not script_resume_action
+        ):
+            try:
+                runtime_resume_checkpoint = RuntimeSessionService.load_active_continuation_sync(
+                    db,
+                    runtime_session,
+                    expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+                    require_decision_id=False,
+                    require_resuming=True,
+                )
+            except ValueError as exc:
+                raise AgentError(
+                    f"Missing runtime continuation checkpoint for generic resume: {exc}"
+                ) from exc
+            resume_anchor_agent = self._agent_type_for_runtime_node_key(
+                runtime_resume_checkpoint.get("node_key")
+            )
+            if resume_anchor_agent is None:
+                raise AgentError(
+                    "Runtime continuation checkpoint cannot be mapped to a scheduled agent"
+                )
+
         workflow_results = {}
         if script_resume_action in {"approve", "revise"}:
             task_specs, _conditional_task_specs, candidate_agents = self._load_authoritative_resume_task_specs(
@@ -680,6 +707,18 @@ class OrchestratorAgent(BaseAgent):
             else:
                 skip_agents.add(AgentType.CONCEPT_PLANNER)
             execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        elif runtime_resume_checkpoint is not None:
+            task_specs, _conditional_task_specs, candidate_agents = self._orchestration_state.checkpoint_to_task_specs(
+                runtime_resume_checkpoint,
+                require_decision_id=False,
+            )
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            if resume_anchor_agent not in execution_queue:
+                raise AgentError(
+                    f"Runtime continuation anchor {resume_anchor_agent.value} is not dispatchable from persisted task_specs"
+                )
+            execution_queue = execution_queue[execution_queue.index(resume_anchor_agent) :]
             standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
         else:
             candidate_agents, _selection_rationale = await self._llm_select_candidate_agents(
@@ -699,20 +738,77 @@ class OrchestratorAgent(BaseAgent):
         replan_count = 0
         max_replans = int(getattr(settings, "ORCHESTRATOR_MAX_REPLAN_ACTIVATIONS", 2))
         total_steps = len(execution_queue)
-        script_attempt_id: Optional[int] = None
         script_trigger_reason = (
             script_resume_action if script_resume_action in {"revise", "replan"} else "initial"
         )
+        if runtime_resume_checkpoint is not None and resume_anchor_agent == AgentType.SCRIPT_WRITER:
+            script_trigger_reason = "resume"
         script_requested_by = (
             str(getattr(latest_script_decision, "actor_type", "") or "system")
             if latest_script_decision is not None
             else "system"
         )
+
+        def _start_runtime_attempt(
+            current_agent_type: AgentType,
+            *,
+            trigger_reason_override: Optional[str] = None,
+        ) -> Tuple[Optional[str], Optional[int], str]:
+            if runtime_session is None:
+                return None, None, ""
+            runtime_node_key = self._runtime_node_key_for_agent(current_agent_type)
+            if runtime_node_key is None:
+                return None, None, ""
+
+            if trigger_reason_override is not None:
+                effective_trigger_reason = str(trigger_reason_override or "").strip().lower() or "retry"
+            elif current_agent_type == AgentType.SCRIPT_WRITER and script_trigger_reason in {"revise", "replan"}:
+                effective_trigger_reason = script_trigger_reason
+            elif runtime_resume_checkpoint is not None and resume_anchor_agent == current_agent_type:
+                effective_trigger_reason = "resume"
+            else:
+                effective_trigger_reason = "initial"
+
+            requested_by = (
+                script_requested_by if current_agent_type == AgentType.SCRIPT_WRITER else "system"
+            )
+            progress_step = "Generating script" if current_agent_type == AgentType.SCRIPT_WRITER else None
+            progress_percentage = 15 if current_agent_type == AgentType.SCRIPT_WRITER else None
+            attempt = RuntimeSessionService.start_node_attempt_sync(
+                db,
+                runtime_session,
+                node_key=runtime_node_key,
+                trigger_reason=effective_trigger_reason,
+                requested_by=requested_by,
+                input_contract={"stage": runtime_node_key, "workflow_state_id": wf_id},
+                task=task,
+                progress_step=progress_step,
+                progress_percentage=progress_percentage,
+            )
+            continuation_checkpoint = self._orchestration_state.build_continuation_checkpoint(
+                task_specs=task_specs,
+                conditional_task_specs=_conditional_task_specs,
+                candidate_agents=list(candidate_agents),
+                anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+                node_key=runtime_node_key,
+                attempt_id=attempt.id,
+                decision_id=None,
+            )
+            RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
+                db,
+                runtime_session,
+                attempt_id=attempt.id,
+                continuation_checkpoint=continuation_checkpoint,
+            )
+            return runtime_node_key, attempt.id, effective_trigger_reason
         
         try:
             for step_index, agent_type in enumerate(execution_queue):
                 total_steps = max(len(execution_queue), 1)
                 agent = self.agents[agent_type]
+                current_runtime_node_key: Optional[str] = None
+                current_attempt_id: Optional[int] = None
+                current_attempt_trigger_reason = ""
                 if agent_type in skip_agents:
                     self.logger.info("⏭️ Skipping %s due to runtime skip_agents", agent.agent_name)
                     continue
@@ -751,33 +847,12 @@ class OrchestratorAgent(BaseAgent):
                     )
 
                 self._emit_pre_dispatch_diagnostics(agent_type, wf_id)
-                if (
-                    runtime_session is not None
-                    and script_attempt_id is None
-                    and agent_type == AgentType.SCRIPT_WRITER
-                    and agent_type not in skip_agents
-                ):
-                    script_attempt = RuntimeSessionService.start_node_attempt_sync(
-                        db,
-                        runtime_session,
-                        node_key="script",
-                        trigger_reason=script_trigger_reason,
-                        requested_by=script_requested_by,
-                        input_contract={"stage": "script", "workflow_state_id": wf_id},
-                        task=task,
-                        progress_step="Generating script",
-                        progress_percentage=15,
-                    )
-                    script_attempt_id = script_attempt.id
-                elif runtime_session is not None:
-                    runtime_node_key = self._runtime_node_key_for_agent(agent_type)
-                    if runtime_node_key is not None:
-                        RuntimeSessionService.mark_node_running_sync(
-                            db,
-                            runtime_session,
-                            node_key=runtime_node_key,
-                            task=task,
-                        )
+                if runtime_session is not None:
+                    (
+                        current_runtime_node_key,
+                        current_attempt_id,
+                        current_attempt_trigger_reason,
+                    ) = _start_runtime_attempt(agent_type)
                 
                 # Update progress
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
@@ -838,27 +913,32 @@ class OrchestratorAgent(BaseAgent):
                     if agent_type == AgentType.VIDEO_COMPOSER:
                         self._store_composer_outputs(str(wf_id), agent_output)
 
-                    if runtime_session is not None and agent_type != AgentType.SCRIPT_WRITER:
-                        runtime_node_key = self._runtime_node_key_for_agent(agent_type)
-                        if runtime_node_key is not None:
-                            RuntimeSessionService.mark_node_completed_sync(
-                                db,
-                                runtime_session,
-                                node_key=runtime_node_key,
-                            )
+                    if (
+                        runtime_session is not None
+                        and agent_type != AgentType.SCRIPT_WRITER
+                        and current_runtime_node_key is not None
+                        and current_attempt_id is not None
+                    ):
+                        RuntimeSessionService.complete_node_attempt_sync(
+                            db,
+                            runtime_session,
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            node_status=WorkflowNodeStatus.COMPLETED.value,
+                        )
 
                     if (
                         runtime_session is not None
                         and agent_type == AgentType.SCRIPT_WRITER
-                        and script_attempt_id is not None
+                        and current_attempt_id is not None
                     ):
                         return self._open_script_review_gate(
                             runtime_session=runtime_session,
                             task=task,
                             db=db,
                             workflow_id=wf_id,
-                            script_attempt_id=script_attempt_id,
-                            trigger_reason=script_trigger_reason,
+                            script_attempt_id=current_attempt_id,
+                            trigger_reason=current_attempt_trigger_reason or script_trigger_reason,
                             script_output=dict(agent_output or {}),
                             task_specs=task_specs,
                             conditional_task_specs=_conditional_task_specs,
@@ -967,52 +1047,44 @@ class OrchestratorAgent(BaseAgent):
                 except Exception as e:
                     if (
                         runtime_session is not None
-                        and script_attempt_id is not None
-                        and agent_type in {AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER}
+                        and current_runtime_node_key is not None
+                        and current_attempt_id is not None
                     ):
                         RuntimeSessionService.fail_node_attempt_sync(
                             db,
                             runtime_session,
-                            node_key="script",
-                            attempt_id=script_attempt_id,
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
                             error_message=str(e),
                             diagnostics=[
                                 {
-                                    "code": "script_stage_failed",
-                                    "stage": "script",
+                                    "code": f"{current_runtime_node_key}_stage_failed",
+                                    "stage": current_runtime_node_key,
                                     "message": str(e),
                                 }
                             ],
                         )
-                        script_attempt_id = None
+                        current_attempt_id = None
                     error_msg = f"Workflow failed at step {step_index + 1} ({agent.agent_name}): {str(e)}"
                     self.logger.error(error_msg)
                     
                     # Check if we should retry the failed step
                     if await self._should_retry_step(agent_type, e, db):
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
-                        if (
-                            runtime_session is not None
-                            and agent_type in {AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER}
-                            and script_attempt_id is None
-                        ):
-                            retry_trigger_reason = (
-                                script_trigger_reason
-                                if script_trigger_reason in {"revise", "replan"}
-                                else "retry"
+                        retry_trigger_reason = (
+                            script_trigger_reason
+                            if agent_type == AgentType.SCRIPT_WRITER and script_trigger_reason in {"revise", "replan"}
+                            else "retry"
+                        )
+                        if runtime_session is not None:
+                            (
+                                current_runtime_node_key,
+                                current_attempt_id,
+                                current_attempt_trigger_reason,
+                            ) = _start_runtime_attempt(
+                                agent_type,
+                                trigger_reason_override=retry_trigger_reason,
                             )
-                            retry_attempt = RuntimeSessionService.start_node_attempt_sync(
-                                db,
-                                runtime_session,
-                                node_key="script",
-                                trigger_reason=retry_trigger_reason,
-                                requested_by=script_requested_by,
-                                input_contract={"stage": "script", "workflow_state_id": wf_id},
-                                task=task,
-                                progress_step="Generating script",
-                                progress_percentage=15,
-                            )
-                            script_attempt_id = retry_attempt.id
                         agent_input = await self._prepare_scheduled_agent_input(
                             workflow_data=workflow_data,
                             agent_type=agent_type,
@@ -1036,21 +1108,29 @@ class OrchestratorAgent(BaseAgent):
                                 pass
                         if (
                             runtime_session is not None
-                            and agent_type == AgentType.SCRIPT_WRITER
-                            and script_attempt_id is not None
+                            and agent_type != AgentType.SCRIPT_WRITER
+                            and current_runtime_node_key is not None
+                            and current_attempt_id is not None
                         ):
-                            retry_trigger_reason = (
-                                script_trigger_reason
-                                if script_trigger_reason in {"revise", "replan"}
-                                else "retry"
+                            RuntimeSessionService.complete_node_attempt_sync(
+                                db,
+                                runtime_session,
+                                node_key=current_runtime_node_key,
+                                attempt_id=current_attempt_id,
+                                node_status=WorkflowNodeStatus.COMPLETED.value,
                             )
+                        if (
+                            runtime_session is not None
+                            and agent_type == AgentType.SCRIPT_WRITER
+                            and current_attempt_id is not None
+                        ):
                             return self._open_script_review_gate(
                                 runtime_session=runtime_session,
                                 task=task,
                                 db=db,
                                 workflow_id=wf_id,
-                                script_attempt_id=script_attempt_id,
-                                trigger_reason=retry_trigger_reason,
+                                script_attempt_id=current_attempt_id,
+                                trigger_reason=current_attempt_trigger_reason or retry_trigger_reason,
                                 script_output=dict(agent_output or {}),
                                 task_specs=task_specs,
                                 conditional_task_specs=_conditional_task_specs,

@@ -246,6 +246,21 @@ const QuickModeWorkspace: React.FC = () => {
         </section>
       )}
 
+      {resumeControl?.state === 'resume_blocked' && (
+        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-orange-200 p-6">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-orange-700 mt-0.5" />
+            <div>
+              <h3 className="text-lg font-semibold text-orange-900">恢复条件缺失</h3>
+              <p className="text-sm text-orange-800 mt-1">
+                当前工作台已经附着到停滞 runtime，但 control-plane 没有找到可消费的 continuation checkpoint，因此不能显式恢复执行。
+              </p>
+              <p className="text-xs text-orange-700 mt-2">reason: {resumeControl.reason_code}</p>
+            </div>
+          </div>
+        </section>
+      )}
+
       {runtimeFailureMessage && (
         <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-red-200 p-6">
           <div className="flex items-start gap-3">

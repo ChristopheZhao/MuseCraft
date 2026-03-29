@@ -596,12 +596,19 @@ async def resume_task_runtime(
         sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
         if sync_task is None or sync_session is None:
             raise ValueError("Runtime session not found")
+        RuntimeSessionService.load_active_continuation_sync(
+            sync_db,
+            sync_session,
+            expected_anchor_type="runtime_checkpoint",
+            require_decision_id=False,
+            require_resuming=False,
+        )
         RuntimeSessionService.mark_session_resuming_sync(sync_db, sync_session, task=sync_task)
 
     try:
         await db.run_sync(_mark_runtime_resuming)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     await db.refresh(task)
     _schedule_task_execution(background_tasks, task.id)

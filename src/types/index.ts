@@ -225,6 +225,7 @@ export interface RuntimeResumeControl {
   state:
     | 'waiting_gate'
     | 'view_only_running'
+    | 'resume_blocked'
     | 'resume_available'
     | 'resume_unknown'
     | string;

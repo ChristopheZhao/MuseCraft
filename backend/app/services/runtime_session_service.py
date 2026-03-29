@@ -227,6 +227,7 @@ def _extract_task_queue_handle(task: Task) -> Optional[str]:
 
 
 def _build_resume_control_projection(
+    db: Session,
     task: Task,
     session: WorkflowSession,
     *,
@@ -259,13 +260,6 @@ def _build_resume_control_projection(
         1,
         int(getattr(settings, "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS", 900)),
     )
-    if inactivity_seconds < stall_threshold_seconds:
-        return {
-            "state": "view_only_running",
-            "can_resume": False,
-            "reason_code": "runtime_recent",
-        }
-
     transport_probe = probe_task_transport_state(_extract_task_queue_handle(task))
     if transport_probe.state == "live":
         return {
@@ -273,16 +267,40 @@ def _build_resume_control_projection(
             "can_resume": False,
             "reason_code": "transport_active",
         }
-    if transport_probe.state == "not_live":
+
+    if inactivity_seconds < stall_threshold_seconds:
         return {
-            "state": "resume_available",
-            "can_resume": True,
-            "reason_code": "stalled_runtime_no_live_transport",
+            "state": "view_only_running",
+            "can_resume": False,
+            "reason_code": "runtime_recent",
         }
+
+    if transport_probe.state != "not_live":
+        return {
+            "state": "resume_unknown",
+            "can_resume": False,
+            "reason_code": "transport_state_unknown",
+        }
+
+    try:
+        RuntimeSessionService.load_active_continuation_sync(
+            db,
+            session,
+            expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            require_decision_id=False,
+            require_resuming=False,
+        )
+    except ValueError:
+        return {
+            "state": "resume_blocked",
+            "can_resume": False,
+            "reason_code": "missing_continuation_checkpoint",
+        }
+
     return {
-        "state": "resume_unknown",
-        "can_resume": False,
-        "reason_code": "transport_state_unknown",
+        "state": "resume_available",
+        "can_resume": True,
+        "reason_code": "stalled_runtime_with_checkpoint",
     }
 
 
@@ -500,7 +518,18 @@ class RuntimeSessionService:
         latest_decision = None
         if active_gate is not None:
             latest_decision = await RuntimeSessionService._get_latest_decision_for_gate_async(db, active_gate.id)
-        resume_control = _build_resume_control_projection(task, session, active_gate=active_gate)
+        resume_control = await db.run_sync(
+            lambda sync_db: _build_resume_control_projection(
+                sync_db,
+                sync_db.query(Task).filter(Task.id == task.id).first(),
+                RuntimeSessionService.get_session_by_id_sync(sync_db, session.id),
+                active_gate=(
+                    RuntimeSessionService.get_latest_gate_for_session_sync(sync_db, session.id)
+                    if active_gate is not None
+                    else None
+                ),
+            )
+        )
         return _serialize_session(
             session,
             nodes,
@@ -635,7 +664,7 @@ class RuntimeSessionService:
         latest_decision = None
         if active_gate is not None:
             latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, active_gate.id)
-        resume_control = _build_resume_control_projection(task, session, active_gate=active_gate)
+        resume_control = _build_resume_control_projection(db, task, session, active_gate=active_gate)
         return _serialize_session(
             session,
             list(nodes),
@@ -651,7 +680,7 @@ class RuntimeSessionService:
         session: WorkflowSession,
     ) -> Optional[Dict[str, Any]]:
         active_gate = RuntimeSessionService.get_latest_gate_for_session_sync(db, session.id)
-        return _build_resume_control_projection(task, session, active_gate=active_gate)
+        return _build_resume_control_projection(db, task, session, active_gate=active_gate)
 
     @staticmethod
     def get_node_by_key_sync(
@@ -735,32 +764,41 @@ class RuntimeSessionService:
         *,
         node_key: str = "script",
     ) -> Dict[str, Any]:
+        checkpoint = RuntimeSessionService.load_active_continuation_sync(
+            db,
+            session,
+            expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+            require_decision_id=True,
+            require_resuming=True,
+        )
+        if str(checkpoint.get("node_key") or "") != str(node_key or "").strip().lower():
+            raise ValueError(
+                f"Workflow session {session.id} continuation is not anchored to node {node_key}"
+            )
+        return checkpoint
+
+    @staticmethod
+    def load_active_continuation_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        expected_anchor_type: Optional[str] = None,
+        require_decision_id: bool,
+        require_resuming: bool,
+    ) -> Dict[str, Any]:
         if session is None:
             raise ValueError("Workflow session is required for continuation loading")
-        if session.status != WorkflowSessionStatus.RESUMING.value:
+        if require_resuming and session.status != WorkflowSessionStatus.RESUMING.value:
             raise ValueError(f"Workflow session {session.id} is not in resuming state")
-        if str(session.current_node_key or "") != str(node_key):
-            raise ValueError(
-                f"Workflow session {session.id} is not anchored to node {node_key}"
-            )
 
-        gate = RuntimeSessionService.get_latest_gate_for_node_sync(db, session.id, node_key)
-        if gate is None:
-            raise ValueError(f"No gate found for node {node_key} in session {session.id}")
-        latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, gate.id)
-        if latest_decision is None:
-            raise ValueError(
-                f"No continuation decision found for gate {gate.id} in session {session.id}"
-            )
+        node_key = str(session.current_node_key or "").strip().lower()
+        if not node_key:
+            raise ValueError(f"Workflow session {session.id} missing current node anchor")
 
         attempt_id = session.current_attempt_id
         if attempt_id is None:
             raise ValueError(
                 f"Workflow session {session.id} missing current attempt anchor for continuation"
-            )
-        if gate.attempt_id != attempt_id:
-            raise ValueError(
-                f"Workflow session {session.id} attempt anchor {attempt_id} does not match gate attempt {gate.attempt_id}"
             )
 
         attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
@@ -769,14 +807,65 @@ class RuntimeSessionService:
 
         checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
             attempt.continuation_checkpoint,
-            require_decision_id=True,
+            require_decision_id=require_decision_id,
         )
-        if int(checkpoint.get("decision_id")) != int(latest_decision.id):
+        checkpoint_anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
+        if expected_anchor_type is not None and checkpoint_anchor_type != str(expected_anchor_type).strip().lower():
             raise ValueError(
-                f"Continuation checkpoint decision binding is stale for session {session.id}: "
-                f"checkpoint={checkpoint.get('decision_id')} latest={latest_decision.id}"
+                f"Workflow session {session.id} continuation anchor_type mismatch: "
+                f"expected={expected_anchor_type} actual={checkpoint_anchor_type or '<empty>'}"
             )
+        if str(checkpoint.get("node_key") or "").strip().lower() != node_key:
+            raise ValueError(
+                f"Workflow session {session.id} continuation node anchor mismatch: "
+                f"checkpoint={checkpoint.get('node_key')} session={node_key}"
+            )
+        if int(checkpoint.get("attempt_id")) != int(attempt_id):
+            raise ValueError(
+                f"Workflow session {session.id} continuation attempt anchor mismatch: "
+                f"checkpoint={checkpoint.get('attempt_id')} session={attempt_id}"
+            )
+
+        if checkpoint_anchor_type == OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION:
+            gate = RuntimeSessionService.get_latest_gate_for_node_sync(db, session.id, node_key)
+            if gate is None:
+                raise ValueError(f"No gate found for node {node_key} in session {session.id}")
+            latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, gate.id)
+            if latest_decision is None:
+                raise ValueError(
+                    f"No continuation decision found for gate {gate.id} in session {session.id}"
+                )
+            if gate.attempt_id != attempt_id:
+                raise ValueError(
+                    f"Workflow session {session.id} attempt anchor {attempt_id} does not match gate attempt {gate.attempt_id}"
+                )
+            if require_decision_id and int(checkpoint.get("decision_id")) != int(latest_decision.id):
+                raise ValueError(
+                    f"Continuation checkpoint decision binding is stale for session {session.id}: "
+                    f"checkpoint={checkpoint.get('decision_id')} latest={latest_decision.id}"
+                )
+
         return checkpoint
+
+    @staticmethod
+    def bind_attempt_continuation_checkpoint_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        continuation_checkpoint: Dict[str, Any],
+    ) -> WorkflowNodeAttempt:
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        attempt.continuation_checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+            continuation_checkpoint,
+            require_decision_id=False,
+        )
+        db.commit()
+        db.refresh(attempt)
+        db.refresh(session)
+        return attempt
 
     @staticmethod
     def start_node_attempt_sync(
@@ -1222,12 +1311,31 @@ class RuntimeSessionService:
         *,
         task: Optional[Task] = None,
     ) -> WorkflowSession:
+        node = None
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(
+            db,
+            session.id,
+            session.current_attempt_id,
+        )
+        if attempt is not None and attempt.status == WorkflowAttemptStatus.RUNNING.value:
+            attempt.status = WorkflowAttemptStatus.ABORTED.value
+            node = RuntimeSessionService.get_node_by_key_sync(
+                db,
+                session.id,
+                attempt.node.node_key if attempt.node is not None else session.current_node_key,
+            )
+            if node is not None and node.status == WorkflowNodeStatus.RUNNING.value:
+                node.status = WorkflowNodeStatus.STALE.value
         session.status = WorkflowSessionStatus.RESUMING.value
         session.error_message = None
         if task is not None:
             task.status = TaskStatus.IN_PROGRESS.value
             task.error_message = None
         db.commit()
+        if node is not None:
+            db.refresh(node)
+        if attempt is not None:
+            db.refresh(attempt)
         db.refresh(session)
         return session
 

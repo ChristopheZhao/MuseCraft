@@ -13,7 +13,9 @@ from .memory_provider import MemoryServices
 class OrchestrationStateAdapter:
     """Owns deterministic orchestration state normalization and persistence."""
 
-    CONTINUATION_CHECKPOINT_VERSION = 1
+    CONTINUATION_CHECKPOINT_VERSION = 2
+    CONTINUATION_ANCHOR_GATE_DECISION = "gate_decision"
+    CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT = "runtime_checkpoint"
     _CONTINUATION_ALLOWED_SPEC_FIELDS = (
         "agent",
         "mission",
@@ -133,8 +135,30 @@ class OrchestrationStateAdapter:
         task_specs: Dict[AgentType, Dict[str, Any]],
         conditional_task_specs: Dict[str, Dict[str, Any]],
         candidate_agents: Optional[List[AgentType]] = None,
+        anchor_type: str,
+        node_key: str,
+        attempt_id: int,
         decision_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        normalized_anchor_type = str(anchor_type or "").strip().lower()
+        if normalized_anchor_type not in {
+            cls.CONTINUATION_ANCHOR_GATE_DECISION,
+            cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        }:
+            raise ValueError(f"Unsupported continuation anchor_type: {anchor_type!r}")
+        normalized_node_key = str(node_key or "").strip().lower()
+        if not normalized_node_key:
+            raise ValueError("Continuation checkpoint node_key cannot be empty")
+        normalized_attempt_id = int(attempt_id)
+        if normalized_attempt_id <= 0:
+            raise ValueError("Continuation checkpoint attempt_id must be positive")
+        normalized_decision_id = int(decision_id) if decision_id is not None else None
+        if (
+            normalized_anchor_type == cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT
+            and normalized_decision_id is not None
+        ):
+            raise ValueError("Runtime continuation checkpoints cannot bind a decision_id")
+
         ordered_candidates: List[AgentType] = []
         seen_agents = set()
         for raw_agent in candidate_agents or list((task_specs or {}).keys()):
@@ -167,7 +191,10 @@ class OrchestrationStateAdapter:
 
         return {
             "version": cls.CONTINUATION_CHECKPOINT_VERSION,
-            "decision_id": int(decision_id) if decision_id is not None else None,
+            "anchor_type": normalized_anchor_type,
+            "node_key": normalized_node_key,
+            "attempt_id": normalized_attempt_id,
+            "decision_id": normalized_decision_id,
             "candidate_agents": [agent_type.value for agent_type in ordered_candidates],
             "task_specs": serialized_task_specs,
             "conditional_task_specs": serialized_conditional_specs,
@@ -189,13 +216,38 @@ class OrchestrationStateAdapter:
                 f"Unsupported continuation checkpoint version: {raw_version!r}"
             )
 
+        normalized_anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
+        if normalized_anchor_type not in {
+            cls.CONTINUATION_ANCHOR_GATE_DECISION,
+            cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        }:
+            raise ValueError(
+                f"Unsupported continuation checkpoint anchor_type: {checkpoint.get('anchor_type')!r}"
+            )
+
+        normalized_node_key = str(checkpoint.get("node_key") or "").strip().lower()
+        if not normalized_node_key:
+            raise ValueError("Continuation checkpoint node_key is required")
+
+        raw_attempt_id = checkpoint.get("attempt_id")
+        if raw_attempt_id is None:
+            raise ValueError("Continuation checkpoint attempt_id is required")
+        normalized_attempt_id = int(raw_attempt_id)
+        if normalized_attempt_id <= 0:
+            raise ValueError("Continuation checkpoint attempt_id must be positive")
+
         raw_decision_id = checkpoint.get("decision_id")
         if raw_decision_id is None:
-            if require_decision_id:
+            if (
+                normalized_anchor_type == cls.CONTINUATION_ANCHOR_GATE_DECISION
+                and require_decision_id
+            ):
                 raise ValueError("Continuation checkpoint decision_id is not bound")
             normalized_decision_id = None
         else:
             normalized_decision_id = int(raw_decision_id)
+            if normalized_anchor_type == cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT:
+                raise ValueError("Runtime continuation checkpoint decision_id must be null")
 
         raw_candidate_agents = checkpoint.get("candidate_agents")
         if not isinstance(raw_candidate_agents, list) or not raw_candidate_agents:
@@ -231,6 +283,9 @@ class OrchestrationStateAdapter:
 
         return {
             "version": cls.CONTINUATION_CHECKPOINT_VERSION,
+            "anchor_type": normalized_anchor_type,
+            "node_key": normalized_node_key,
+            "attempt_id": normalized_attempt_id,
             "decision_id": normalized_decision_id,
             "candidate_agents": normalized_candidate_agents,
             "task_specs": normalized_task_specs,

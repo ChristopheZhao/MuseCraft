@@ -359,13 +359,32 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
         return {
             "state": "resume_available",
             "can_resume": True,
-            "reason_code": "stalled_runtime_no_live_transport",
+            "reason_code": "stalled_runtime_with_checkpoint",
         }
 
     def _fake_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
         events["marked_session"] = session_obj
         events["marked_task"] = task
         return session_obj
+
+    def _fake_load_active_continuation_sync(
+        sync_db,
+        session_obj,
+        *,
+        expected_anchor_type,
+        require_decision_id,
+        require_resuming,
+    ):
+        events["loaded_session"] = session_obj
+        events["loaded_anchor_type"] = expected_anchor_type
+        events["loaded_require_decision_id"] = require_decision_id
+        events["loaded_require_resuming"] = require_resuming
+        return {
+            "anchor_type": "runtime_checkpoint",
+            "node_key": "image",
+            "attempt_id": 17,
+            "decision_id": None,
+        }
 
     def _fake_schedule(background_tasks, task_db_id):
         events["scheduled_task_id"] = task_db_id
@@ -377,6 +396,7 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task_sync", _fake_get_latest_session_sync)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_resume_control_sync", _fake_get_resume_control_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "load_active_continuation_sync", _fake_load_active_continuation_sync)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "mark_session_resuming_sync", _fake_mark_session_resuming_sync)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_build_runtime_view)
     monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _fake_schedule)
@@ -391,6 +411,10 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
 
     assert events["marked_session"] is runtime_session
     assert events["marked_task"] is task
+    assert events["loaded_session"] is runtime_session
+    assert events["loaded_anchor_type"] == "runtime_checkpoint"
+    assert events["loaded_require_decision_id"] is False
+    assert events["loaded_require_resuming"] is False
     assert events["scheduled_task_id"] == 21
     assert events["refreshed"] is task
     assert response.message == "Runtime resume accepted"
@@ -447,6 +471,16 @@ def test_resume_task_runtime_rejects_when_resume_control_is_not_available(monkey
         events["marked"] += 1
         raise AssertionError("resume should not mutate runtime state when not resumable")
 
+    def _forbidden_load_active_continuation_sync(
+        sync_db,
+        session_obj,
+        *,
+        expected_anchor_type,
+        require_decision_id,
+        require_resuming,
+    ):
+        raise AssertionError("resume should not load continuation when resume_control rejects it")
+
     def _forbidden_schedule(background_tasks, task_db_id):
         events["scheduled"] += 1
         raise AssertionError("resume should not queue dispatch when not resumable")
@@ -454,6 +488,7 @@ def test_resume_task_runtime_rejects_when_resume_control_is_not_available(monkey
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task_sync", _fake_get_latest_session_sync)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_resume_control_sync", _fake_get_resume_control_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "load_active_continuation_sync", _forbidden_load_active_continuation_sync)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "mark_session_resuming_sync", _forbidden_mark_session_resuming_sync)
     monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _forbidden_schedule)
 
@@ -468,5 +503,85 @@ def test_resume_task_runtime_rejects_when_resume_control_is_not_available(monkey
 
     assert exc_info.value.status_code == 409
     assert "state=view_only_running" in str(exc_info.value.detail)
-    assert "reason=runtime_recent" in str(exc_info.value.detail)
+
+
+def test_resume_task_runtime_rejects_when_checkpoint_validation_fails(monkeypatch):
+    task = SimpleNamespace(id=23, task_id="task-23")
+    runtime_session = SimpleNamespace(id=93, mode="quick")
+    events = {"marked": 0, "scheduled": 0}
+
+    class _FakeQueryResult:
+        def scalar_one_or_none(self):
+            return task
+
+    class _FakeDb:
+        async def execute(self, query):
+            return _FakeQueryResult()
+
+        async def run_sync(self, fn):
+            return fn(self)
+
+        async def refresh(self, obj):
+            raise AssertionError("refresh should not run when checkpoint load fails")
+
+        def query(self, model):
+            return self
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return task
+
+    async def _fake_get_latest_session(db, task_db_id):
+        assert task_db_id == 23
+        return runtime_session
+
+    def _fake_get_latest_session_sync(sync_db, task_db_id):
+        assert task_db_id == 23
+        return runtime_session
+
+    def _fake_get_resume_control_sync(sync_db, task_obj, session_obj):
+        return {
+            "state": "resume_available",
+            "can_resume": True,
+            "reason_code": "stalled_runtime_with_checkpoint",
+        }
+
+    def _failing_load_active_continuation_sync(
+        sync_db,
+        session_obj,
+        *,
+        expected_anchor_type,
+        require_decision_id,
+        require_resuming,
+    ):
+        raise ValueError("Workflow session 93 missing current attempt anchor for continuation")
+
+    def _forbidden_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
+        events["marked"] += 1
+        raise AssertionError("resume should not mutate runtime state when checkpoint validation fails")
+
+    def _forbidden_schedule(background_tasks, task_db_id):
+        events["scheduled"] += 1
+        raise AssertionError("resume should not queue dispatch when checkpoint validation fails")
+
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_latest_session_for_task_sync", _fake_get_latest_session_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "get_resume_control_sync", _fake_get_resume_control_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "load_active_continuation_sync", _failing_load_active_continuation_sync)
+    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "mark_session_resuming_sync", _forbidden_mark_session_resuming_sync)
+    monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _forbidden_schedule)
+
+    with pytest.raises(tasks_endpoint.HTTPException) as exc_info:
+        asyncio.run(
+            tasks_endpoint.resume_task_runtime(
+                "task-23",
+                background_tasks=BackgroundTasks(),
+                db=_FakeDb(),
+            )
+    )
+
+    assert exc_info.value.status_code == 409
+    assert "missing current attempt anchor" in str(exc_info.value.detail)
     assert events == {"marked": 0, "scheduled": 0}

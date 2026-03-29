@@ -53,7 +53,13 @@ def _create_task(db):
     return task
 
 
-def _build_continuation_checkpoint():
+def _build_continuation_checkpoint(
+    *,
+    anchor_type: str = OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+    node_key: str = "image",
+    attempt_id: int = 1,
+    decision_id: int | None = None,
+):
     return OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
             AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
@@ -66,7 +72,10 @@ def _build_continuation_checkpoint():
             AgentType.SCRIPT_WRITER,
             AgentType.IMAGE_GENERATOR,
         ],
-        decision_id=None,
+        anchor_type=anchor_type,
+        node_key=node_key,
+        attempt_id=attempt_id,
+        decision_id=decision_id,
     )
 
 
@@ -226,6 +235,32 @@ def test_running_runtime_exposes_view_only_recent_resume_control(sync_db, monkey
     }
 
 
+def test_running_runtime_exposes_transport_active_before_freshness(sync_db, monkeypatch):
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        900,
+    )
+    monkeypatch.setattr(
+        runtime_session_service_module,
+        "probe_task_transport_state",
+        lambda celery_task_id: SimpleNamespace(state="live", reason_code="transport_active"),
+    )
+    task = _create_task(sync_db)
+    task.output_metadata = {"celery_task_id": "celery-task-live"}
+    sync_db.commit()
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert view["resume_control"] == {
+        "state": "view_only_running",
+        "can_resume": False,
+        "reason_code": "transport_active",
+    }
+
+
 def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(sync_db, monkeypatch):
     monkeypatch.setattr(
         runtime_session_service_module.settings,
@@ -244,8 +279,22 @@ def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(syn
     task.output_metadata = {"celery_task_id": "celery-task-1"}
     sync_db.commit()
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+    RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        continuation_checkpoint=_build_continuation_checkpoint(
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="image",
+            attempt_id=attempt.id,
+        ),
+    )
     stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
     task.updated_at = stale_at
     session.updated_at = stale_at
@@ -257,7 +306,7 @@ def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(syn
     assert view["resume_control"] == {
         "state": "resume_available",
         "can_resume": True,
-        "reason_code": "stalled_runtime_no_live_transport",
+        "reason_code": "stalled_runtime_with_checkpoint",
     }
 
 
@@ -288,6 +337,36 @@ def test_stalled_runtime_exposes_resume_unknown_when_transport_state_is_unknown(
         "state": "resume_unknown",
         "can_resume": False,
         "reason_code": "transport_state_unknown",
+    }
+
+
+def test_stalled_runtime_exposes_resume_blocked_when_checkpoint_is_missing(sync_db, monkeypatch):
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        60,
+    )
+    monkeypatch.setattr(
+        runtime_session_service_module,
+        "probe_task_transport_state",
+        lambda celery_task_id: SimpleNamespace(state="not_live", reason_code="missing_queue_handle"),
+    )
+
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    task.updated_at = stale_at
+    session.updated_at = stale_at
+    sync_db.commit()
+
+    view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+
+    assert view["resume_control"] == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "missing_continuation_checkpoint",
     }
 
 
@@ -346,7 +425,11 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
         script_output={"scenes_generated": 1, "total_scenes": 1},
         artifact_ref=artifact_ref,
         script_preview_text="draft preview",
-        continuation_checkpoint=_build_continuation_checkpoint(),
+        continuation_checkpoint=_build_continuation_checkpoint(
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+            node_key="script",
+            attempt_id=attempt.id,
+        ),
     )
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
@@ -416,7 +499,11 @@ def test_submit_gate_decision_marks_revision_state(sync_db):
         artifact_refs=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
         node_status=WorkflowNodeStatus.RUNNING.value,
     )
-    attempt.continuation_checkpoint = _build_continuation_checkpoint()
+    attempt.continuation_checkpoint = _build_continuation_checkpoint(
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+        node_key="script",
+        attempt_id=attempt.id,
+    )
     sync_db.commit()
     RuntimeSessionService.open_human_gate_sync(
         sync_db,
@@ -540,7 +627,11 @@ def test_load_active_script_continuation_sync_validates_latest_decision_binding(
             "is_approved": False,
         },
         script_preview_text="draft preview",
-        continuation_checkpoint=_build_continuation_checkpoint(),
+        continuation_checkpoint=_build_continuation_checkpoint(
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+            node_key="script",
+            attempt_id=attempt.id,
+        ),
     )
     decision = RuntimeSessionService.submit_gate_decision_sync(
         sync_db,
@@ -592,7 +683,11 @@ def test_consume_script_approval_continuation_sync_rehomes_runtime_transition(sy
         artifact_refs=[{"type": "shared_fact", "ref": "project.scene_scripts"}],
         node_status=WorkflowNodeStatus.RUNNING.value,
     )
-    attempt.continuation_checkpoint = _build_continuation_checkpoint()
+    attempt.continuation_checkpoint = _build_continuation_checkpoint(
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+        node_key="script",
+        attempt_id=attempt.id,
+    )
     sync_db.commit()
     RuntimeSessionService.open_human_gate_sync(
         sync_db,
