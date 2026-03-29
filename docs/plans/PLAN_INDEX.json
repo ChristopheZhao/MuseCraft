@@ -1861,13 +1861,13 @@
       "id": "PLAN-20260329-037",
       "title": "Generic stale-run continuation checkpoint contract and resume closure",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260329-037.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-29T03:57:20Z",
-      "updated_at": "2026-03-29T07:14:08Z",
+      "updated_at": "2026-03-29T08:38:41Z",
       "archived_at": null,
       "notes": [
         {
@@ -1881,6 +1881,18 @@
         {
           "at": "2026-03-29T07:14:08Z",
           "text": "Completed Phase 2 implementation and focused automated verification while keeping the plan in progress. Generic runtime nodes now bind v2 continuation checkpoints on control-plane attempts, the orchestrator can resume from runtime_checkpoint anchors instead of relying on the script-gate path alone, runtime/resume loads and validates a canonical checkpoint before writing RESUMING, and focused backend tests plus npm build passed; manual restart-path validation and user confirmation remain open."
+        },
+        {
+          "at": "2026-03-29T07:32:27Z",
+          "text": "Completed Phase 3 manual validation evidence without closing the plan. A fresh 8006 API instance proved quick/current plus WebSocket subscribe only reattach the stale-checkpoint run until explicit resume, runtime read-models matched transport_active/resume_blocked/resume_available/waiting_gate, resume rejected live transport, missing checkpoint, and waiting gate at 409, and the resumable stale fixture queued task 1029 and reached worker/orchestrator startup before an unrelated downstream I/O failure. Temporary validation fixtures and the scheduled transport probe task were then cleaned up."
+        },
+        {
+          "at": "2026-03-29T08:38:41Z",
+          "text": "Closed the post-validation regression within the original orchestrator boundary only: restored the missing WorkflowNodeStatus import, updated script review gate checkpoint creation to bind gate_decision/script/attempt_id on attempt.continuation_checkpoint, and reran the focused backend regressions to green (orchestrator file: 8 passed; three-file bundle: 37 passed)."
+        },
+        {
+          "at": "2026-03-29T08:38:41Z",
+          "text": "User confirmed the repaired result, so 037 is now completed. Accepted closure remains unchanged: generic stale resume is owned by control-plane continuation checkpoints on a single canonical path, queue/worker stay transport-only, and the frontend continues to consume read-model projections only."
         }
       ]
     }
