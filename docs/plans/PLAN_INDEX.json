@@ -1821,6 +1821,41 @@
           "text": "User confirmed completion after Phase 3 architecture convergence and compat projection cleanup. continuation_checkpoint is the sole planning-state carrier, Shared WM planning/compat projections are removed from app code, and focused backend uv regression passed (103 passed)"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260329-036",
+      "title": "Quick current-run explicit resume semantics and stalled recovery path",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260329-036.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-29T02:21:42Z",
+      "updated_at": "2026-03-29T03:53:18Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-29T02:22:39Z",
+          "text": "Completed Phase 0 freeze without implementation. quick/current and the continue CTA only reattach the runtime view, so the minimal safe direction is explicit resume command plus a stalled/resumable read-model projection, with copy changes limited to semantic alignment."
+        },
+        {
+          "at": "2026-03-29T02:32:39Z",
+          "text": "Completed Phase 1 contract freeze without implementation. resume_control is frozen as a runtime projection with waiting_gate/view_only_running/resume_available/resume_unknown, queue handle presence is only a transport probe key, and explicit resume is frozen as a standalone control-plane command gated by resume_available."
+        },
+        {
+          "at": "2026-03-29T02:56:47Z",
+          "text": "Tightened the boundary after implementation review: resume_control is explicitly frozen as a derived interpretation layer only, never a future canonical status line or generic business-state bus."
+        },
+        {
+          "at": "2026-03-29T03:16:05Z",
+          "text": "Completed implementation and focused verification. A fresh 8006 API instance proved quick/current remains view-only after restart, a controlled stale fixture projected resume_available and explicit resume produced a new queue dispatch plus worker/orchestrator start, and a waiting_gate fixture projected waiting_gate with runtime/resume rejected at 409."
+        },
+        {
+          "at": "2026-03-29T03:53:18Z",
+          "text": "Reopened after post-verification review. The implementation correctly split view reattach from explicit resume and kept queue/worker transport-only, but the resume path is still a guarded re-dispatch instead of a generic checkpoint resume because control-plane lacks a canonical stale-run continuation carrier/consumer outside the script-gate path; successor plan 037 must freeze carrier/consumer, reason precedence, and completion-gate closure."
+        }
+      ]
     }
   ]
 }
