@@ -16,6 +16,7 @@ from .service_interfaces import (
     ServiceProvider,
     PromptCapability,
     VideoCapabilities,
+    ImageGenerationCapabilities,
     EnumCapability,
 )
 from ....core.config import settings
@@ -499,6 +500,14 @@ class ZhipuVLMService(VLMServiceInterface):
             "vision": self.vision_models.copy(),
             "generation": self.generation_models.copy()
         }
+
+    def get_capabilities(self) -> ImageGenerationCapabilities:
+        return ImageGenerationCapabilities(
+            size=EnumCapability(
+                options=["1024x1024", "1024x1792", "1792x1024"],
+                description_suffix="当前 Zhipu 图像生成支持的 canonical size 列表",
+            )
+        )
     
     async def image_understanding(
         self,
@@ -578,7 +587,7 @@ class ZhipuVLMService(VLMServiceInterface):
         self,
         prompt: str,
         model: str = None,
-        size: str = "1024x1024",
+        size: str | None = None,
         style: str = "vivid",
         quality: str = "standard",
         **kwargs

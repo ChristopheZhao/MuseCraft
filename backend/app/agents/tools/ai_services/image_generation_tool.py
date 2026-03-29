@@ -14,7 +14,7 @@ from ....core.config import settings
 from ....core.consistency_policy import get_consistency_policy
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
-from .service_interfaces import get_vlm_service
+from .service_interfaces import get_vlm_service, get_vlm_capabilities
 from ...prompts.template_manager import get_template_manager
 from ....services.prompt_safety import (
     sanitize_prompt,
@@ -98,10 +98,7 @@ class ImageGenerationTool(AsyncTool):
                     "type": "string",
                     "description": "图像风格（例如 写实、艺术、电影感 等）"
                 },
-                "size": {
-                    "type": "string",
-                    "description": "图像尺寸（任意字符串，例如 1024x1024、2K、1K）"
-                },
+                "size": self._build_size_schema_property("图像尺寸；若不提供则由当前 provider 能力自动选择默认值"),
                 "persist": {
                     "type": "boolean",
                     "description": "可选：将生成结果持久化到文件存储/OSS（若可用）并返回可访问 URL"
@@ -136,7 +133,7 @@ class ImageGenerationTool(AsyncTool):
                 "scene_data": {"type": "object", "description": "场景信息（视觉描述/标题/脚本摘要等）"},
                 "style_guidance": {"type": "object", "description": "风格指导（如画风、构图偏好、色彩基调等）"},
                 "fallback_prompt": {"type": "string", "description": "当自动提示生成失败时使用的备用提示词"},
-                "size": {"type": "string", "enum": ["1024x1024", "1024x1792", "1792x1024"], "description": "图像尺寸"},
+                "size": self._build_size_schema_property("图像尺寸；若不提供则由当前 provider 能力自动选择默认值"),
                 "persist": {"type": "boolean", "description": "是否持久化到存储（默认 true）"}
             }
             base_schema["description"] = "自动生成符合场景的图像提示词并调用底层服务生成图像，可配置尺寸与持久化。"
@@ -168,6 +165,90 @@ class ImageGenerationTool(AsyncTool):
         
         return base_schema
 
+    def _build_size_schema_property(self, description: str) -> Dict[str, Any]:
+        prop: Dict[str, Any] = {
+            "type": "string",
+            "description": description,
+        }
+        try:
+            caps = get_vlm_capabilities()
+            size_cap = caps.size if caps else None
+            if size_cap and size_cap.options:
+                prop["enum"] = list(size_cap.options)
+                notes: List[str] = []
+                if size_cap.description_suffix:
+                    notes.append(size_cap.description_suffix)
+                if size_cap.note:
+                    notes.append(size_cap.note)
+                if notes:
+                    prop["description"] = f"{description} {' '.join(notes)}"
+        except Exception:
+            pass
+        return prop
+
+    def _get_active_vlm_service(self):
+        if not self._vlm_service:
+            self._vlm_service = get_vlm_service()
+        return self._vlm_service
+
+    def _normalize_image_size(self, requested_size: Any) -> str:
+        service = self._get_active_vlm_service()
+        provider_name = "unknown"
+        try:
+            provider_name = service.get_provider_name() or provider_name
+        except Exception:
+            pass
+
+        caps = None
+        if hasattr(service, "get_capabilities"):
+            try:
+                caps = service.get_capabilities()
+            except Exception:
+                caps = None
+        if caps is None:
+            try:
+                caps = get_vlm_capabilities()
+            except Exception:
+                caps = None
+
+        size_cap = caps.size if caps and getattr(caps, "size", None) else None
+        requested = str(requested_size).strip() if requested_size is not None else ""
+
+        if size_cap:
+            if requested:
+                normalized = size_cap.resolve(requested)
+                if normalized:
+                    return normalized
+            else:
+                default_size = size_cap.default_option()
+                if default_size:
+                    return default_size
+
+            raise ToolError(
+                (
+                    f"Unsupported image size for provider '{provider_name}': "
+                    f"requested={requested or '<missing>'}, allowed={list(size_cap.options or [])}"
+                ),
+                tool_name=self.metadata.name,
+                error_code="invalid_image_size",
+                details={
+                    "provider": provider_name,
+                    "requested_size": requested or None,
+                    "allowed_sizes": list(size_cap.options or []),
+                    "accepted_inputs": size_cap.expand_enum(),
+                },
+            )
+
+        raise ToolError(
+            f"Image size capability is unavailable for provider '{provider_name}'",
+            tool_name=self.metadata.name,
+            error_code="image_size_capability_missing",
+            details={
+                "provider": provider_name,
+                "requested_size": requested or None,
+            },
+        )
+
     # 取消阶段语义：工具仅具有执行属性
     
     async def _execute_impl(self, tool_input) -> Dict[str, Any]:
@@ -195,7 +276,7 @@ class ImageGenerationTool(AsyncTool):
         prompt = (params.get("prompt", "") or "").strip()
         # 风格改为“按需透传”：无则不默认，避免硬编码偏置
         style = (params.get("style") or "").strip()
-        size = params.get("size", "1024x1024")
+        size = self._normalize_image_size(params.get("size"))
         persist = bool(params.get("persist", False))
         destination_key = (params.get("destination_key") or "").strip()
         scene_number = params.get("scene_number")
@@ -267,8 +348,7 @@ class ImageGenerationTool(AsyncTool):
         advisor_meta: Dict[str, Any] = {}
         try:
             # 通过供应商无关的服务接口生成图像（当前默认Zhipu实现）
-            if not self._vlm_service:
-                self._vlm_service = get_vlm_service()
+            self._get_active_vlm_service()
 
             provider_name = None
             if self._vlm_service and hasattr(self._vlm_service, "get_provider_name"):
@@ -417,7 +497,8 @@ class ImageGenerationTool(AsyncTool):
                         }
                 # 非敏感或关闭重写：交由下方 except 统一返回失败
                 raise
-                
+        except ToolError:
+            raise
         except Exception as e:
             raise ToolError(
                 f"图像生成异常: {str(e)}",
@@ -578,7 +659,7 @@ class ImageGenerationTool(AsyncTool):
         """复合：自动提示词 → 生成 → 可选持久化。"""
         scene_data = params.get("scene_data") or {}
         style_guidance = params.get("style_guidance") or {}
-        size = params.get("size", "1024x1024")
+        size = params.get("size")
         persist = params.get("persist", True)
         scene_number = params.get("scene_number")
 
@@ -605,7 +686,7 @@ class ImageGenerationTool(AsyncTool):
             "prompt": prompt_text,
             # 风格可选：缺省时不传递，避免下游误导
             **({"style": style} if style else {}),
-            "size": size,
+            **({"size": size} if size else {}),
             "scene_number": scene_number
         })
 
@@ -668,7 +749,7 @@ class ImageGenerationTool(AsyncTool):
             "file_path": file_path,
             "prompt_text": prompt_text,
             "style": style,
-            "size": size,
+            "size": gen.get("size") or "",
             "scene_number": scene_number,
             "prompt_safety": gen.get("prompt_safety", {}),
         }

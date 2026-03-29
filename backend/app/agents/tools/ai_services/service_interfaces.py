@@ -56,12 +56,46 @@ class EnumCapability:
                 expanded.append(alias)
         return expanded
 
+    def resolve(self, value: Any) -> Optional[str]:
+        """Normalize an option or alias to the canonical enum value."""
+        if value is None:
+            return None
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+
+        for option in self.options or []:
+            if candidate == option:
+                return option
+        for alias, target in (self.aliases or {}).items():
+            if candidate == alias:
+                return target
+
+        lower_candidate = candidate.lower()
+        for option in self.options or []:
+            if isinstance(option, str) and lower_candidate == option.lower():
+                return option
+        for alias, target in (self.aliases or {}).items():
+            if isinstance(alias, str) and lower_candidate == alias.lower():
+                return target
+        return None
+
+    def default_option(self) -> Optional[str]:
+        options = list(self.options or [])
+        return options[0] if options else None
+
 
 @dataclass
 class VideoCapabilities:
     prompt: Optional[PromptCapability] = None
     resolution: Optional[EnumCapability] = None
     ratio: Optional[EnumCapability] = None
+
+
+@dataclass
+class ImageGenerationCapabilities:
+    prompt: Optional[PromptCapability] = None
+    size: Optional[EnumCapability] = None
 
 
 class ServiceProvider(Enum):
@@ -156,7 +190,7 @@ class VLMServiceInterface(ABC):
         self,
         prompt: str,
         model: str = None,
-        size: str = "1024x1024",
+        size: Optional[str] = None,
         style: str = "vivid",
         quality: str = "standard",
         **kwargs
@@ -189,6 +223,10 @@ class VLMServiceInterface(ABC):
     def is_available(self) -> bool:
         """检查服务是否可用"""
         pass
+
+    def get_capabilities(self) -> "ImageGenerationCapabilities":
+        """返回图像生成参数约束（默认无额外限制）。"""
+        return ImageGenerationCapabilities()
 
 
 class VideoModelServiceInterface(ABC):
@@ -356,6 +394,15 @@ class ServiceManager:
             raise RuntimeError("No VLM services available")
         
         return service
+
+    def get_vlm_capabilities(self, provider: ServiceProvider = None) -> ImageGenerationCapabilities:
+        """获取当前图像生成供应商的能力快照。"""
+        service = self.get_vlm_service(provider)
+        if hasattr(service, "get_capabilities"):
+            caps = service.get_capabilities()
+            if isinstance(caps, ImageGenerationCapabilities):
+                return caps
+        return ImageGenerationCapabilities()
     
     # === 视频服务管理 ===
     def register_video_service(self, provider: ServiceProvider, service: VideoModelServiceInterface):
@@ -753,6 +800,11 @@ def get_llm_service(provider: ServiceProvider = None) -> LLMServiceInterface:
 def get_vlm_service(provider: ServiceProvider = None) -> VLMServiceInterface:
     """获取VLM服务"""
     return get_service_manager().get_vlm_service(provider)
+
+
+def get_vlm_capabilities(provider: ServiceProvider = None) -> ImageGenerationCapabilities:
+    """获取图像生成能力快照。"""
+    return get_service_manager().get_vlm_capabilities(provider)
 
 
 def get_video_service(provider: ServiceProvider = None) -> VideoModelServiceInterface:

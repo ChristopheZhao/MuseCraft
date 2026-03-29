@@ -1,12 +1,12 @@
 """
-FC Parameter Guard (warn-only)
+FC Parameter Guard
 
 Non-intrusive validation for tool_calls returned by LLM function call.
 Goals:
-- Do not modify tool_calls (no coercion/clip/reject here).
+- Do not modify tool_calls (no coercion/clip here).
 - Do not couple providers or hardcode constants in code.
 - Read policies from config (fc_param_policies.yaml) and provider capabilities dynamically.
-- Emit diagnostics to help tune prompts/policies later.
+- Emit diagnostics and reject contract-invalid calls when policy requires it.
 """
 
 from __future__ import annotations
@@ -15,6 +15,12 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from ..tools.ai_services.service_interfaces import get_vlm_capabilities
+
+
+class FCParamPolicyViolation(ValueError):
+    """Raised when a tool-call parameter violates an enforced FC policy."""
 
 
 class FCParamGuard:
@@ -73,8 +79,8 @@ class FCParamGuard:
                                 "name": "image_prompt_composer.generate",
                                 "params": {
                                     "size": {
-                                        "allowed_values": ["1024x1024", "1024x1792", "1792x1024"],
-                                        "on_violation": "warn",
+                                        "allowed_values": "${provider.image_size_inputs}",
+                                        "on_violation": "reject",
                                     }
                                 },
                             }
@@ -94,6 +100,19 @@ class FCParamGuard:
                     "provider": {
                         "duration_capabilities": list(getattr(cfg, "duration_capabilities", []) or []),
                         "model_name": getattr(cfg, "model_name", None),
+                    }
+                }
+        except Exception:
+            pass
+        try:
+            if getattr(agent, "agent_name", "") == "image_generator":
+                caps = get_vlm_capabilities()
+                size_cap = caps.size if caps else None
+                return {
+                    "provider": {
+                        "image_size_options": list(size_cap.options or []) if size_cap else [],
+                        "image_size_aliases": dict(size_cap.aliases or {}) if size_cap else {},
+                        "image_size_inputs": size_cap.expand_enum() if size_cap else [],
                     }
                 }
         except Exception:
@@ -123,6 +142,7 @@ class FCParamGuard:
             if not isinstance(rule, dict):
                 continue
             val = args_obj.get(p_name)
+            on_violation = str(rule.get("on_violation") or "warn").strip().lower()
             # allowed_values
             try:
                 allowed = self._resolve_tokens(rule.get("allowed_values"), caps)
@@ -132,9 +152,15 @@ class FCParamGuard:
                     if isinstance(vv, float) and float(int(vv)) == vv:
                         vv = int(vv)
                     if vv not in allowed:
-                        self.logger.warning(
-                            f"POLICY_VALIDATION function={fname} param={p_name} value={val} rule=allowed_values expected={allowed} severity=warn"
+                        message = (
+                            f"POLICY_VALIDATION function={fname} param={p_name} value={val} "
+                            f"rule=allowed_values expected={allowed} severity={on_violation}"
                         )
+                        if on_violation == "reject":
+                            raise FCParamPolicyViolation(message)
+                        self.logger.warning(message)
+            except FCParamPolicyViolation:
+                raise
             except Exception:
                 pass
             # allow_schemes for URL-like params
@@ -145,9 +171,16 @@ class FCParamGuard:
                         ok = any(val.startswith(s + "://") for s in schemes)
                         # also allow raw http(s) forms without ://? No, strict
                         if not ok:
-                            self.logger.warning(
-                                f"POLICY_VALIDATION function={fname} param={p_name} value_preview={str(val)[:80]} rule=allow_schemes expected={schemes} severity=warn"
+                            message = (
+                                f"POLICY_VALIDATION function={fname} param={p_name} "
+                                f"value_preview={str(val)[:80]} rule=allow_schemes expected={schemes} "
+                                f"severity={on_violation}"
                             )
+                            if on_violation == "reject":
+                                raise FCParamPolicyViolation(message)
+                            self.logger.warning(message)
+            except FCParamPolicyViolation:
+                raise
             except Exception:
                 pass
 
@@ -215,8 +248,12 @@ class FCParamGuard:
                     if not isinstance(args_obj, dict):
                         continue
                     self._apply_param_rules(agent, fname, args_obj, rule_map[fname], caps)
+                except FCParamPolicyViolation:
+                    raise
                 except Exception:
                     continue
+        except FCParamPolicyViolation:
+            raise
         except Exception as e:
             self.logger.debug(f"FCParamGuard.validate skipped due to error: {e}")
         return tool_calls

@@ -1,9 +1,28 @@
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 
 from app.agents.tools.ai_services import image_generation_tool as img_module
 from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
+from app.agents.tools.ai_services.service_interfaces import EnumCapability, ImageGenerationCapabilities
 from app.agents.tools.base_tool import ToolError
 from app.core.consistency_policy import ConsistencyPolicy, PromptSafetyPolicy
+
+
+def _patch_noop_prompt_safety(monkeypatch):
+    monkeypatch.setattr(
+        img_module,
+        "apply_prompt_safety",
+        lambda prompt, *_args, **_kwargs: (prompt, SimpleNamespace(metadata={})),
+    )
+
+    def fake_sanitize_with_locks(text, locks, ctx):
+        from app.services.prompt_safety import SanitizedPrompt
+
+        return SanitizedPrompt(text=text, changed=False, matches=[], metadata={})
+
+    monkeypatch.setattr(img_module, "sanitize_with_locks", fake_sanitize_with_locks)
 
 
 def test_image_sensitive_error_triggers_one_shot_rewrite(monkeypatch):
@@ -101,3 +120,112 @@ def test_image_no_advisory_injection(monkeypatch):
     assert captured_prompts and captured_prompts[0] == sanitized_prompt
     assert res.get("generated_prompt") == sanitized_prompt
     assert "PG-13" not in res.get("generated_prompt", "")
+
+
+def test_generate_image_uses_provider_default_size_when_missing(monkeypatch):
+    _patch_noop_prompt_safety(monkeypatch)
+    tool = ImageGenerationTool()
+    calls = []
+
+    class FakeVLM:
+        def get_provider_name(self):
+            return "doubao"
+
+        def get_capabilities(self):
+            return ImageGenerationCapabilities(
+                size=EnumCapability(
+                    options=["2K"],
+                    aliases={"1024x1024": "2K", "1024x1792": "2K", "1792x1024": "2K"},
+                )
+            )
+
+        async def image_generation(self, **kwargs):
+            calls.append(kwargs)
+            return {"image_url": "https://img.example.com/default-size.jpg"}
+
+    tool._vlm_service = FakeVLM()
+
+    result = asyncio.run(
+        tool._generate_image(
+            {
+                "prompt": "东方玄幻史诗动画风格的韩立站在晨雾山村中，手持古籍，光影细节充足，构图清晰稳定。",
+            }
+        )
+    )
+
+    assert calls and calls[0]["size"] == "2K"
+    assert result["size"] == "2K"
+
+
+def test_generate_image_normalizes_alias_size_before_provider_call(monkeypatch):
+    _patch_noop_prompt_safety(monkeypatch)
+    tool = ImageGenerationTool()
+    calls = []
+
+    class FakeVLM:
+        def get_provider_name(self):
+            return "doubao"
+
+        def get_capabilities(self):
+            return ImageGenerationCapabilities(
+                size=EnumCapability(
+                    options=["2K"],
+                    aliases={"1024x1024": "2K", "1024x1792": "2K", "1792x1024": "2K"},
+                )
+            )
+
+        async def image_generation(self, **kwargs):
+            calls.append(kwargs)
+            return {"image_url": "https://img.example.com/normalized-size.jpg"}
+
+    tool._vlm_service = FakeVLM()
+
+    result = asyncio.run(
+        tool._generate_image(
+            {
+                "prompt": "东方玄幻史诗动画风格的韩立站在晨雾山村中，手持古籍，光影细节充足，构图清晰稳定。",
+                "size": "1024x1024",
+            }
+        )
+    )
+
+    assert calls and calls[0]["size"] == "2K"
+    assert result["size"] == "2K"
+
+
+def test_generate_image_rejects_unsupported_size_before_provider_call(monkeypatch):
+    _patch_noop_prompt_safety(monkeypatch)
+    tool = ImageGenerationTool()
+    calls = []
+
+    class FakeVLM:
+        def get_provider_name(self):
+            return "doubao"
+
+        def get_capabilities(self):
+            return ImageGenerationCapabilities(
+                size=EnumCapability(
+                    options=["2K"],
+                    aliases={"1024x1024": "2K", "1024x1792": "2K", "1792x1024": "2K"},
+                )
+            )
+
+        async def image_generation(self, **kwargs):
+            calls.append(kwargs)
+            return {"image_url": "https://img.example.com/should-not-run.jpg"}
+
+    tool._vlm_service = FakeVLM()
+
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(
+            tool._generate_image(
+                {
+                    "prompt": "东方玄幻史诗动画风格的韩立站在晨雾山村中，手持古籍，光影细节充足，构图清晰稳定。",
+                    "size": "1920x1924",
+                }
+            )
+        )
+
+    assert exc.value.error_code == "invalid_image_size"
+    assert exc.value.details["allowed_sizes"] == ["2K"]
+    assert calls == []

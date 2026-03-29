@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
+from .ai_services.service_interfaces import get_vlm_capabilities
 
 
 class ImagePromptComposerTool(AsyncTool):
@@ -47,8 +48,9 @@ class ImagePromptComposerTool(AsyncTool):
                     "description": "场景信息引用（本地 JSON 路径或可访问引用）",
                 },
                 "size": {
-                    "type": "string",
-                    "description": "图像尺寸（例如 1024x1024）",
+                    **self._build_size_schema_property(
+                        "图像尺寸；若不提供则由底层图像生成工具按当前 provider 能力自动选择"
+                    ),
                 },
                 "persist": {
                     "type": "boolean",
@@ -65,6 +67,27 @@ class ImagePromptComposerTool(AsyncTool):
             },
             "required": ["scene_number", "scene_info_ref"],
         }
+
+    def _build_size_schema_property(self, description: str) -> Dict[str, Any]:
+        prop: Dict[str, Any] = {
+            "type": "string",
+            "description": description,
+        }
+        try:
+            caps = get_vlm_capabilities()
+            size_cap = caps.size if caps else None
+            if size_cap and size_cap.options:
+                prop["enum"] = list(size_cap.options)
+                notes: List[str] = []
+                if size_cap.description_suffix:
+                    notes.append(size_cap.description_suffix)
+                if size_cap.note:
+                    notes.append(size_cap.note)
+                if notes:
+                    prop["description"] = f"{description} {' '.join(notes)}"
+        except Exception:
+            pass
+        return prop
 
     def _validate_action_parameters(self, action: str, parameters: Dict[str, Any]):
         if action != "generate":
@@ -134,7 +157,7 @@ class ImagePromptComposerTool(AsyncTool):
         params = tool_input.parameters or {}
         scene_number = params.get("scene_number")
         scene_info_ref = params.get("scene_info_ref") or ""
-        size = params.get("size") or "1024x1024"
+        size = params.get("size")
         persist = True if "persist" not in params else bool(params.get("persist"))
         destination_key = (params.get("destination_key") or "").strip()
         fallback_prompt = params.get("fallback_prompt") or ""
@@ -200,9 +223,10 @@ class ImagePromptComposerTool(AsyncTool):
         image_params: Dict[str, Any] = {
             "scene_number": scene_number,
             "prompt": prompt_text,
-            "size": size,
             "persist": persist,
         }
+        if size:
+            image_params["size"] = size
         if destination_key:
             image_params["destination_key"] = destination_key
         if style_name:
@@ -246,7 +270,7 @@ class ImagePromptComposerTool(AsyncTool):
             "file_path": gen_payload.get("file_path") or gen_payload.get("local_path") or "",
             "prompt_text": gen_payload.get("generated_prompt") or prompt_text,
             "style": gen_payload.get("style") or style_name or "",
-            "size": gen_payload.get("size") or size,
+            "size": gen_payload.get("size") or "",
             "scene_number": scene_number,
             "prompt_safety": gen_payload.get("prompt_safety") or {},
             "metadata": metadata,

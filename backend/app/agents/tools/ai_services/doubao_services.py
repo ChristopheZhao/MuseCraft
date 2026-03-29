@@ -19,6 +19,7 @@ from .service_interfaces import (
     VLMServiceInterface,
     ServiceProvider,
     VideoCapabilities,
+    ImageGenerationCapabilities,
     EnumCapability,
     PromptCapability,
 )
@@ -611,7 +612,22 @@ class DoubaoVLMService(VLMServiceInterface):
     async def image_understanding(self, image_input: Union[str, bytes], prompt: str, model: str | None = None, **kwargs) -> Dict[str, Any]:
         raise NotImplementedError("Doubao image understanding not implemented")
 
-    async def image_generation(self, prompt: str, model: str | None = None, size: str = "1024x1024", style: str = "vivid", quality: str = "standard", **kwargs) -> Dict[str, Any]:
+    def get_capabilities(self) -> ImageGenerationCapabilities:
+        return ImageGenerationCapabilities(
+            size=EnumCapability(
+                options=["2K"],
+                aliases={
+                    "1024x1024": "2K",
+                    "1024x1792": "2K",
+                    "1792x1024": "2K",
+                    "1K": "2K",
+                },
+                description_suffix="当前 Doubao 图像生成仅暴露 provider-compatible canonical size",
+                note="当前 provider 要求图像尺寸至少满足 3686400 像素，通用 1K/1024 尺寸将规范化到 2K。",
+            )
+        )
+
+    async def image_generation(self, prompt: str, model: str | None = None, size: str | None = None, style: str = "vivid", quality: str = "standard", **kwargs) -> Dict[str, Any]:
         if not self.is_available():
             raise RuntimeError("DoubaoVLMService not available - API key/base_url/model missing")
 
@@ -621,7 +637,7 @@ class DoubaoVLMService(VLMServiceInterface):
         payload: Dict[str, Any] = {
             "model": chosen_model,
             "prompt": prompt,
-            # 接口允许尺寸枚举，如 '2K'/'1K' 或具体分辨率；此处直接透传 size
+            # image_generation_tool 已负责 provider-aware 规范化；adapter 仅映射 payload
             "size": size,
             "sequential_image_generation": "disabled",
             "stream": False,
