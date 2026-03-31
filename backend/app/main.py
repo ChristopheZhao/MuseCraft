@@ -1,6 +1,7 @@
 """
 FastAPI main application
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -52,8 +53,8 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.GENERATED_PATH, exist_ok=True)
     os.makedirs(settings.TEMP_PATH, exist_ok=True)
     
-    # Start periodic cleanup task for WebSocket connections
-    import asyncio
+    # Start API-local maintenance tasks only. Runtime reconcile stays explicit
+    # control-plane maintenance and must not be owned by API startup.
     cleanup_task = asyncio.create_task(periodic_websocket_cleanup())
     
     yield
@@ -169,9 +170,7 @@ if os.path.exists(settings.FINAL_OUTPUT_ROOT):
 # Periodic tasks
 async def periodic_websocket_cleanup():
     """Periodic cleanup of stale WebSocket connections"""
-    
-    import asyncio
-    
+
     while True:
         try:
             await asyncio.sleep(300)  # 5 minutes
@@ -180,6 +179,43 @@ async def periodic_websocket_cleanup():
             break
         except Exception as e:
             logger.error(f"WebSocket cleanup error: {str(e)}")
+
+
+def run_quick_runtime_reconcile_once():
+    """Run the explicit control-plane reconcile entrypoint once."""
+
+    from .core.database import SessionLocal
+    from .services.runtime_session_service import RuntimeSessionService
+
+    db = SessionLocal()
+    try:
+        return RuntimeSessionService.reconcile_irrecoverable_quick_runtimes_sync(
+            db,
+            limit=settings.QUICK_RUNTIME_RECONCILER_BATCH_LIMIT,
+        )
+    finally:
+        db.close()
+
+
+async def periodic_runtime_reconcile():
+    """Periodically reconcile irrecoverable quick runtimes."""
+
+    while True:
+        try:
+            summary = await asyncio.to_thread(run_quick_runtime_reconcile_once)
+            if summary.get("failed", 0) > 0:
+                logger.warning(
+                    "Reconciled stale quick runtimes: inspected=%s failed=%s skipped=%s",
+                    summary.get("inspected", 0),
+                    summary.get("failed", 0),
+                    summary.get("skipped", 0),
+                )
+            await asyncio.sleep(max(1, int(settings.QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS)))
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Quick runtime reconcile loop failed")
+            await asyncio.sleep(max(1, int(settings.QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS)))
 
 
 if __name__ == "__main__":

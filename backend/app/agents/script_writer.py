@@ -345,9 +345,15 @@ class ScriptWriterAgent(BaseAgent):
                         "scene_number": scene.scene_number,
                         "scene_data": {
                             "scene_number": scene.scene_number,
+                            "title": getattr(scene, "title", "") or "",
                             "visual_description": scene.visual_description,
                             "narrative_description": scene.narrative_description,
                             "duration": scene.duration,
+                            "mood_and_atmosphere": getattr(scene, "mood_and_atmosphere", "") or "",
+                            "camera_angle": getattr(scene, "camera_angle", "") or "",
+                            "creative_intent": getattr(scene, "creative_intent", "") or "",
+                            "characters_present": list(getattr(scene, "characters_present", []) or []),
+                            "character_descriptions": list(getattr(scene, "character_descriptions", []) or []),
                         },
                         "intelligent_style_design": intelligent_style,
                         "context": context_payload,
@@ -437,6 +443,11 @@ class ScriptWriterAgent(BaseAgent):
                         script_payload.get("motion_beats"),
                         scene.duration,
                     )
+                    execution_arc = self._normalize_scene_execution_arc(
+                        script_payload,
+                        scene,
+                        motion_beats=motion_beats,
+                    )
                     guidance_payload = voice_guidance_by_scene.get(_scene_key(scene.scene_number), {})
                     is_valid_voice, warning_msg = self._validate_voice_line(
                         scene.scene_number, voice_line, guidance_payload
@@ -459,6 +470,11 @@ class ScriptWriterAgent(BaseAgent):
                         "voice_over_text": voice_line or "",
                         "voice_guidance": guidance_payload,
                         "motion_beats": motion_beats,
+                        "opening_state": execution_arc.get("opening_state", ""),
+                        "event_trigger": execution_arc.get("event_trigger", ""),
+                        "action_phases": execution_arc.get("action_phases", []),
+                        "end_state": execution_arc.get("end_state", ""),
+                        "camera_language": execution_arc.get("camera_language", ""),
                     }
                 except AgentError as ae:
                     _record_failure(scene.scene_number, str(ae))
@@ -532,6 +548,11 @@ class ScriptWriterAgent(BaseAgent):
                                 "narrative_description": scene_script_data.get("narrative_description", scene.narrative_description),
                                 "background_music_style": scene_script_data.get("background_music_style", ""),
                                 "sound_effects": scene_script_data.get("sound_effects", []),
+                                "opening_state": scene_script_data.get("opening_state", ""),
+                                "event_trigger": scene_script_data.get("event_trigger", ""),
+                                "action_phases": scene_script_data.get("action_phases", []),
+                                "end_state": scene_script_data.get("end_state", ""),
+                                "camera_language": scene_script_data.get("camera_language", getattr(scene, "camera_angle", "")),
                                 "pacing_and_timing": {
                                     "pace_tag": voice_guidance.get("pace_tag"),
                                     "target_char_count": voice_guidance.get("target_char_count"),
@@ -1068,24 +1089,6 @@ class ScriptWriterAgent(BaseAgent):
         if not isinstance(beats, list):
             return []
 
-        def _coerce_seconds(value: Any) -> Optional[float]:
-            try:
-                if value is None:
-                    return None
-                if isinstance(value, (int, float)):
-                    return float(value)
-                text = str(value).strip().lower()
-                if not text:
-                    return None
-                text = text.replace('秒', '').replace('s', '').replace('sec', '')
-                text = text.replace('：', ':').replace('，', ',')
-                if '-' in text and text.count('-') == 1 and text.replace('-', '').replace('.', '').isdigit():
-                    parts = text.split('-')
-                    return float(parts[0])
-                return float(text)
-            except Exception:
-                return None
-
         sanitized: List[Dict[str, Any]] = []
         total_duration = float(scene_duration or 0.0)
         fallback_span = total_duration / max(len(beats), 1) if total_duration > 0 else 0.0
@@ -1094,19 +1097,19 @@ class ScriptWriterAgent(BaseAgent):
         for idx, raw in enumerate(beats):
             if not isinstance(raw, dict):
                 continue
-            start = _coerce_seconds(
+            start = self._coerce_timing_seconds(
                 raw.get('start')
                 or raw.get('start_seconds')
                 or raw.get('begin')
                 or raw.get('timecode_start')
             )
-            end = _coerce_seconds(
+            end = self._coerce_timing_seconds(
                 raw.get('end')
                 or raw.get('end_seconds')
                 or raw.get('stop')
                 or raw.get('timecode_end')
             )
-            duration_hint = _coerce_seconds(raw.get('duration'))
+            duration_hint = self._coerce_timing_seconds(raw.get('duration'))
 
             if start is None:
                 start = cursor
@@ -1136,6 +1139,227 @@ class ScriptWriterAgent(BaseAgent):
                 break
 
         return sanitized
+
+    @staticmethod
+    def _coerce_timing_seconds(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).strip().lower()
+            if not text:
+                return None
+            text = text.replace('秒', '').replace('s', '').replace('sec', '')
+            text = text.replace('：', ':').replace('，', ',')
+            if '-' in text and text.count('-') == 1 and text.replace('-', '').replace('.', '').isdigit():
+                parts = text.split('-')
+                return float(parts[0])
+            return float(text)
+        except Exception:
+            return None
+
+    def _sanitize_action_phases(
+        self,
+        phases: Any,
+        scene_duration: float,
+        *,
+        fallback_beats: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(phases, list) or not phases:
+            phases = []
+
+        total_duration = float(scene_duration or 0.0)
+        sanitized: List[Dict[str, Any]] = []
+        raw_phases: List[Dict[str, Any]] = []
+        explicit_timing = False
+        total_weight = 0.0
+
+        for idx, raw in enumerate(phases):
+            if not isinstance(raw, dict):
+                continue
+            start = self._coerce_timing_seconds(
+                raw.get("start") or raw.get("start_seconds") or raw.get("begin")
+            )
+            end = self._coerce_timing_seconds(
+                raw.get("end") or raw.get("end_seconds") or raw.get("stop")
+            )
+            duration_hint = self._coerce_timing_seconds(raw.get("duration"))
+            weight = raw.get("relative_weight") or raw.get("weight")
+            try:
+                relative_weight = float(weight) if weight is not None else None
+            except (TypeError, ValueError):
+                relative_weight = None
+            if relative_weight is not None and relative_weight > 0:
+                total_weight += relative_weight
+            else:
+                relative_weight = None
+
+            if start is not None or end is not None or duration_hint is not None:
+                explicit_timing = True
+
+            raw_phases.append(
+                {
+                    "index": idx + 1,
+                    "phase": str(
+                        raw.get("phase")
+                        or raw.get("label")
+                        or raw.get("intent")
+                        or raw.get("visual_focus")
+                        or f"阶段{idx + 1}"
+                    ).strip(),
+                    "observable_actions": str(
+                        raw.get("observable_actions")
+                        or raw.get("action")
+                        or raw.get("beat_summary")
+                        or raw.get("description")
+                        or ""
+                    ).strip(),
+                    "camera_hint": str(
+                        raw.get("camera_hint")
+                        or raw.get("camera")
+                        or raw.get("shot")
+                        or raw.get("camera_movement")
+                        or ""
+                    ).strip(),
+                    "start": start,
+                    "end": end,
+                    "duration_hint": duration_hint,
+                    "relative_weight": relative_weight,
+                }
+            )
+            if len(raw_phases) >= 6:
+                break
+
+        if not raw_phases and isinstance(fallback_beats, list):
+            for beat in fallback_beats:
+                if not isinstance(beat, dict):
+                    continue
+                sanitized.append(
+                    {
+                        "index": len(sanitized) + 1,
+                        "phase": str(
+                            beat.get("visual_focus")
+                            or beat.get("beat_summary")
+                            or f"阶段{len(sanitized) + 1}"
+                        ).strip(),
+                        "observable_actions": str(
+                            beat.get("beat_summary")
+                            or beat.get("visual_focus")
+                            or ""
+                        ).strip(),
+                        "camera_hint": "",
+                        "start": round(float(beat.get("start") or 0.0), 3),
+                        "end": round(float(beat.get("end") or 0.0), 3),
+                        "duration": round(float(beat.get("duration") or 0.0), 3),
+                    }
+                )
+            return sanitized
+
+        if not raw_phases:
+            return sanitized
+
+        if explicit_timing:
+            fallback_span = total_duration / max(len(raw_phases), 1) if total_duration > 0 else 0.0
+            cursor = 0.0
+            for item in raw_phases:
+                start = item["start"] if item["start"] is not None else cursor
+                end = item["end"]
+                if item["duration_hint"] is not None and end is None:
+                    end = start + max(item["duration_hint"], 0.0)
+                if end is None:
+                    end = start + fallback_span
+                if total_duration > 0:
+                    start = max(0.0, min(float(start), total_duration))
+                    end = max(start, min(float(end), total_duration))
+                if end <= start and total_duration > 0:
+                    end = min(total_duration, start + max(fallback_span, 0.5))
+                sanitized.append(
+                    {
+                        "index": item["index"],
+                        "phase": item["phase"],
+                        "observable_actions": item["observable_actions"],
+                        "camera_hint": item["camera_hint"],
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "duration": round(max(0.0, end - start), 3),
+                    }
+                )
+                cursor = end
+            return sanitized
+
+        cursor = 0.0
+        fallback_span = total_duration / max(len(raw_phases), 1) if total_duration > 0 else 0.0
+        for idx, item in enumerate(raw_phases):
+            if total_duration > 0 and total_weight > 0:
+                span = total_duration * float(item["relative_weight"] or 0.0) / total_weight
+            else:
+                span = fallback_span
+            start = cursor
+            end = total_duration if idx == len(raw_phases) - 1 and total_duration > 0 else start + span
+            sanitized.append(
+                {
+                    "index": item["index"],
+                    "phase": item["phase"],
+                    "observable_actions": item["observable_actions"],
+                    "camera_hint": item["camera_hint"],
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "duration": round(max(0.0, end - start), 3),
+                }
+            )
+            cursor = end
+        return sanitized
+
+    def _normalize_scene_execution_arc(
+        self,
+        script_payload: Dict[str, Any],
+        scene: SceneSnapshot,
+        *,
+        motion_beats: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        opening_state = str(
+            script_payload.get("opening_state")
+            or scene.visual_description
+            or ""
+        ).strip()
+        event_trigger = str(
+            script_payload.get("event_trigger")
+            or (
+                motion_beats[0].get("beat_summary")
+                if motion_beats and isinstance(motion_beats[0], dict)
+                else ""
+            )
+            or ""
+        ).strip()
+        action_phases = self._sanitize_action_phases(
+            script_payload.get("action_phases"),
+            scene.duration,
+            fallback_beats=motion_beats,
+        )
+        end_state = str(
+            script_payload.get("end_state")
+            or (
+                action_phases[-1].get("observable_actions")
+                if action_phases and isinstance(action_phases[-1], dict)
+                else ""
+            )
+            or scene.narrative_description
+            or ""
+        ).strip()
+        camera_language = str(
+            script_payload.get("camera_language")
+            or script_payload.get("camera_plan")
+            or getattr(scene, "camera_angle", "")
+            or ""
+        ).strip()
+        return {
+            "opening_state": opening_state,
+            "event_trigger": event_trigger,
+            "action_phases": action_phases,
+            "end_state": end_state,
+            "camera_language": camera_language,
+        }
 
     def _validate_voice_line(
         self,

@@ -62,6 +62,13 @@ class MemoryWriter:
     ) -> Optional[str]:
         """Write agent outputs back into memory following simple rules/policies.
 
+        Boundary contract:
+        - this writer persists only explicit long-term fact snapshots and lightweight
+          generation metadata;
+        - it must not become a sink for runtime status, gate decisions, queue state,
+          task_specs, or other control-plane/planning authority.
+        Unknown fields are ignored rather than heuristically persisted.
+
         Returns memory_id when a new item is stored; None otherwise.
         """
         if os.getenv("MEMORY_WRITE_ENABLED", "true").lower() == "false":

@@ -193,10 +193,10 @@ def _serialize_quick_run_summary(task: Task) -> QuickRunSummaryResponse:
     )
 
 
-async def _find_unfinished_quick_task_for_session(
+async def _find_current_quick_run_for_session(
     db: AsyncSession,
     session_id: str,
-) -> Tuple[Optional[Task], Optional[WorkflowSession]]:
+) -> Tuple[Optional[Task], Optional[Dict[str, Any]]]:
     logger = logging.getLogger("tasks_api")
     result = await db.execute(
         select(Task)
@@ -207,21 +207,28 @@ async def _find_unfinished_quick_task_for_session(
     candidate_tasks = list(result.scalars().all())
 
     for task in candidate_tasks:
-        runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
-        if runtime_session is not None:
-            if runtime_session.mode != "quick":
-                continue
-            if not is_terminal_runtime_status(runtime_session.status):
-                return task, runtime_session
-            continue
-
-        if not is_terminal_task_status(task.status):
-            logger.warning(
-                "Ignoring quick task without runtime session when discovering current run: task_id=%s session_id=%s status=%s",
+        try:
+            runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+        except ValueError as exc:
+            logger.error(
+                "Aborting quick run discovery after runtime projection integrity error: task_id=%s session_id=%s detail=%s",
                 getattr(task, "task_id", None),
                 session_id,
-                _val(task.status),
+                exc,
             )
+            raise
+        if runtime_view is None:
+            if not is_terminal_task_status(task.status):
+                logger.warning(
+                    "Ignoring quick task without runtime session when discovering current run: task_id=%s session_id=%s status=%s",
+                    getattr(task, "task_id", None),
+                    session_id,
+                    _val(task.status),
+                )
+            continue
+        if is_terminal_runtime_status(runtime_view.get("status")):
+            continue
+        return task, runtime_view
 
     return None, None
 
@@ -264,7 +271,7 @@ async def create_task(
     
     try:
         if request.session_id:
-            existing_task, _existing_session = await _find_unfinished_quick_task_for_session(db, request.session_id)
+            existing_task, _existing_runtime = await _find_current_quick_run_for_session(db, request.session_id)
             if existing_task is not None:
                 logger.info(
                     "Replacing unfinished quick task %s for workspace session %s before creating a new run",
@@ -325,7 +332,9 @@ async def create_task(
         )
         logger.info("Returning response")
         return response
-        
+    except ValueError as e:
+        logger.error(f"Error creating task: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Error creating task: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
@@ -339,26 +348,19 @@ async def get_current_quick_run(
     """Discover the latest unfinished quick run for the current workspace session."""
 
     logger = logging.getLogger("tasks_api")
-    task, _runtime_session = await _find_unfinished_quick_task_for_session(db, session_id)
-    if task is None:
-        return None
-
     try:
-        runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+        task, runtime_view = await _find_current_quick_run_for_session(db, session_id)
     except ValueError as exc:
         logger.error(
-            "Quick current runtime projection integrity error: task_id=%s session_id=%s detail=%s",
-            getattr(task, "task_id", None),
+            "Current quick run discovery failed after runtime projection integrity error: session_id=%s detail=%s",
             session_id,
             exc,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    if runtime_view is None:
-        logger.warning(
-            "Suppressing quick current task without runtime view: task_id=%s session_id=%s",
-            getattr(task, "task_id", None),
-            session_id,
-        )
+    if task is None:
+        return None
+
+    if runtime_view is None or is_terminal_runtime_status(runtime_view.get("status")):
         return None
     return QuickCurrentRunResponse(
         task=_serialize_quick_run_summary(task),

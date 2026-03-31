@@ -89,6 +89,15 @@ class ConsistencyTool(BaseTool):
                             "fields": {
                                 "style": {
                                     "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "style_guidelines": {"max_text": 160},
+                                                "headline": {"max_text": 120},
+                                                "style_tags": {"max_items": 8},
+                                                "color_palette": {"max_items": 8},
+                                                "object_guidelines": {"max_text": 160},
+                                            },
+                                        },
                                         "color_palette": {"max_items": 8},
                                         "mood": {"max_text": 120},
                                         "intelligent_style_design": {
@@ -103,6 +112,18 @@ class ConsistencyTool(BaseTool):
                                 },
                                 "characters": {
                                     "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "guidelines": {"max_text": 160},
+                                                "stable_traits": {"max_items": 12},
+                                            },
+                                        },
+                                        "scene_cast": {
+                                            "fields": {
+                                                "present": {"max_items": 8},
+                                                "descriptions": {"max_items": 8},
+                                            },
+                                        },
                                         "characters": {
                                             "max_items": 8,
                                             "items": {
@@ -120,12 +141,35 @@ class ConsistencyTool(BaseTool):
                                 },
                                 "environment": {
                                     "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "guidelines": {"max_text": 160},
+                                            },
+                                        },
+                                        "opening_anchor": {
+                                            "fields": {
+                                                "opening_state": {"max_text": 240},
+                                                "visual_description": {"max_text": 240},
+                                                "mood_and_atmosphere": {"max_text": 160},
+                                                "camera_angle": {"max_text": 120},
+                                                "reference_image": {"max_text": 240},
+                                            },
+                                        },
                                         "visual_description": {"max_text": 400},
                                         "narrative_description": {"max_text": 240},
                                     },
                                 },
                                 "continuity": {
                                     "fields": {
+                                        "local_continuity": {
+                                            "fields": {
+                                                "enabled": {},
+                                                "depends_on_scene": {},
+                                                "previous_frame_available": {},
+                                                "previous_frame_url": {"max_text": 240},
+                                                "transition_notes": {"max_text": 200},
+                                            },
+                                        },
                                         "motion_guidance": {
                                             "max_text": 400,
                                             "fields": {
@@ -199,8 +243,10 @@ class ConsistencyTool(BaseTool):
             scene_number = int(params.get("scene_number") or 0)
             scene_info_ref = params.get("scene_info_ref") or ""
             # Default to cache-on for idempotent prompt-asset collection
+            # Read path only: prompt asset collection must not mutate continuity state.
             use_cache = True if "use_cache" not in params else bool(params.get("use_cache"))
             payload, diagnostics = await self._collect_assets(
+                wf_id,
                 scene_info_ref,
                 scene_number,
                 use_cache=use_cache,
@@ -215,6 +261,8 @@ class ConsistencyTool(BaseTool):
         if action == "register_reference":
             scene_number = int(params.get("scene_number") or 0)
             ref_value = params.get("reference_value") or ""
+            # Explicit write path only: register the final-frame reference for later
+            # continuity use without taking runtime/planning ownership.
             await self._memory_provider.store_scene_final_frame(scene_number, ref_value)
             for key in list(self._asset_cache.keys()):
                 if isinstance(key, tuple) and len(key) == 2 and key[1] == scene_number:
@@ -225,12 +273,14 @@ class ConsistencyTool(BaseTool):
 
     async def _collect_assets(
         self,
+        workflow_state_id: str,
         scene_info_ref: str,
         scene_number: int,
         *,
         use_cache: bool,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        cache_key = (scene_info_ref, scene_number)
+        cache_scope = workflow_state_id or scene_info_ref
+        cache_key = (cache_scope, scene_number)
         diagnostics: Dict[str, Any] = {
             "cached_full": False,
             "cached_categories": [],
@@ -244,12 +294,21 @@ class ConsistencyTool(BaseTool):
 
         scene_info = self._load_scene_info(scene_info_ref)
         scene_entry = self._extract_scene_entry(scene_info, scene_number) or {}
+        previous_frame_url = await self._memory_provider.retrieve_previous_frame_url(scene_number)
+        continuity_info = await self._memory_provider.get_scene_continuity_info(
+            workflow_state_id,
+            scene_number,
+        )
 
         assets: Dict[str, Any] = {}
         assets["style"] = self._extract_style_assets(scene_info)
         assets["characters"] = self._extract_character_assets(scene_info, scene_entry)
         assets["environment"] = self._extract_environment_assets(scene_info, scene_entry, scene_number)
-        assets["continuity"] = self._extract_continuity_assets(scene_entry)
+        assets["continuity"] = self._extract_continuity_assets(
+            scene_entry,
+            continuity_info=continuity_info,
+            previous_frame_url=previous_frame_url,
+        )
 
         self._asset_cache[cache_key] = assets
         diagnostics["cached_categories"] = list(assets.keys())
@@ -315,15 +374,27 @@ class ConsistencyTool(BaseTool):
     def _extract_style_assets(self, scene_info: Dict[str, Any]) -> Dict[str, Any]:
         style_assets: Dict[str, Any] = {}
         concept_plan = scene_info.get("concept_plan") or {}
+        design = {}
+        guidelines = {}
         if isinstance(concept_plan, dict):
             if concept_plan.get("consistency_guidelines"):
-                style_assets["consistency_guidelines"] = concept_plan.get("consistency_guidelines") or {}
+                guidelines = concept_plan.get("consistency_guidelines") or {}
+                style_assets["consistency_guidelines"] = guidelines
             if concept_plan.get("intelligent_style_design"):
-                style_assets["intelligent_style_design"] = concept_plan.get("intelligent_style_design") or {}
+                design = concept_plan.get("intelligent_style_design") or {}
+                style_assets["intelligent_style_design"] = design
         if scene_info.get("intelligent_style"):
             style_assets["intelligent_style"] = scene_info.get("intelligent_style") or {}
         if scene_info.get("intelligent_style_design") and "intelligent_style_design" not in style_assets:
-            style_assets["intelligent_style_design"] = scene_info.get("intelligent_style_design") or {}
+            design = scene_info.get("intelligent_style_design") or {}
+            style_assets["intelligent_style_design"] = design
+        style_assets["global_lock"] = {
+            "style_guidelines": str((guidelines or {}).get("style_consistency") or "").strip(),
+            "headline": str((design or {}).get("headline") or (design or {}).get("summary") or (design or {}).get("style_name") or "").strip(),
+            "style_tags": list((design or {}).get("style_tags") or (design or {}).get("tags") or []),
+            "color_palette": list((design or {}).get("color_palette") or []),
+            "object_guidelines": str((guidelines or {}).get("object_consistency") or "").strip(),
+        }
         return style_assets
 
     def _extract_character_assets(self, scene_info: Dict[str, Any], scene_entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -338,11 +409,27 @@ class ConsistencyTool(BaseTool):
         guidelines = ""
         if isinstance(concept_plan, dict):
             guidelines = (concept_plan.get("consistency_guidelines") or {}).get("character_consistency", "")
+        stable_traits: List[str] = []
+        for role in characters:
+            if not isinstance(role, dict):
+                continue
+            for key in ("abstract_traits", "key_traits", "traits"):
+                values = role.get(key)
+                if isinstance(values, list):
+                    stable_traits.extend(str(item).strip() for item in values if str(item).strip())
         return {
             "characters": characters,
             "present": present,
             "descriptions": descriptions,
             "guidelines": guidelines,
+            "global_lock": {
+                "guidelines": str(guidelines or "").strip(),
+                "stable_traits": list(dict.fromkeys(stable_traits))[:12],
+            },
+            "scene_cast": {
+                "present": list(present) if isinstance(present, list) else [],
+                "descriptions": list(descriptions) if isinstance(descriptions, list) else [],
+            },
         }
 
     def _extract_environment_assets(
@@ -356,6 +443,16 @@ class ConsistencyTool(BaseTool):
             "visual_description": "",
             "narrative_description": "",
             "guidelines": "",
+            "global_lock": {
+                "guidelines": "",
+            },
+            "opening_anchor": {
+                "opening_state": "",
+                "visual_description": "",
+                "mood_and_atmosphere": "",
+                "camera_angle": "",
+                "reference_image": "",
+            },
         }
         if isinstance(scene_entry, dict) and scene_entry:
             env.update(
@@ -364,14 +461,28 @@ class ConsistencyTool(BaseTool):
                     "narrative_description": scene_entry.get("narrative_description", ""),
                 }
             )
+            env["opening_anchor"] = {
+                "opening_state": scene_entry.get("opening_state") or scene_entry.get("visual_description") or "",
+                "visual_description": scene_entry.get("visual_description", ""),
+                "mood_and_atmosphere": scene_entry.get("mood_and_atmosphere", ""),
+                "camera_angle": scene_entry.get("camera_angle") or scene_entry.get("camera_language") or "",
+                "reference_image": scene_entry.get("image_url") or "",
+            }
         concept_plan = scene_info.get("concept_plan") or {}
         if isinstance(concept_plan, dict):
             guidelines = (concept_plan.get("consistency_guidelines") or {}).get("environment_consistency", "")
             if isinstance(guidelines, str) and guidelines.strip():
                 env["guidelines"] = guidelines.strip()
+                env["global_lock"]["guidelines"] = guidelines.strip()
         return env
 
-    def _extract_continuity_assets(self, scene_entry: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_continuity_assets(
+        self,
+        scene_entry: Dict[str, Any],
+        *,
+        continuity_info: Optional[Dict[str, Any]] = None,
+        previous_frame_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
         depends_on = None
         if isinstance(scene_entry, dict):
             depends_on = scene_entry.get("depends_on_scene") or scene_entry.get("depends_on")
@@ -379,7 +490,30 @@ class ConsistencyTool(BaseTool):
             depends_on = int(depends_on) if depends_on is not None else None
         except Exception:
             depends_on = None
-        return {"depends_on_scene": depends_on}
+        continuity_info = continuity_info or {}
+        previous_frame_url = previous_frame_url or continuity_info.get("previous_frame_path") or continuity_info.get("previous_frame_url")
+        transition_notes = (
+            scene_entry.get("continuity_reason")
+            or continuity_info.get("transition_notes")
+            or continuity_info.get("reason")
+            or ""
+        )
+        enabled = bool(
+            continuity_info.get("requires_continuity")
+            or depends_on is not None
+            or previous_frame_url
+        )
+        return {
+            "depends_on_scene": depends_on,
+            "local_continuity": {
+                "enabled": enabled,
+                "depends_on_scene": depends_on,
+                "previous_frame_available": bool(previous_frame_url),
+                "previous_frame_url": str(previous_frame_url or "").strip(),
+                "transition_notes": str(transition_notes or "").strip(),
+            },
+            "motion_guidance": continuity_info.get("motion_guidance") or {},
+        }
 
     @staticmethod
     def _coerce_int(value: Any) -> Optional[int]:

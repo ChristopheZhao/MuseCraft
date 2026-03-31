@@ -15,6 +15,13 @@ from typing import Any, Dict
 
 from ..core.constants import GenerationMode
 from ..events.provider import reset_event_bus
+from .execution_host_lease import (
+    AttemptLeaseKeepaliveController,
+    ExecutionHostLeaseContext,
+    execution_host_lease_heartbeat_interval_seconds,
+    reset_current_execution_host_lease_context,
+    set_current_execution_host_lease_context,
+)
 
 
 def prepare_queued_execution_host(*, logger: logging.Logger | None = None) -> None:
@@ -49,8 +56,25 @@ def run_generation_in_host(
     logger.info("Setting up queued execution host event loop...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    host_context_token = None
+    attempt_lease_keepalive = None
 
     try:
+        if mode == GenerationMode.QUICK:
+            from ..core.database import SessionLocal
+            from .runtime_session_service import RuntimeSessionService
+
+            attempt_lease_keepalive = AttemptLeaseKeepaliveController(
+                session_factory=SessionLocal,
+                load_session=RuntimeSessionService.get_session_by_id_sync,
+                heartbeat_attempt=RuntimeSessionService.heartbeat_attempt_lease_sync,
+                interval_seconds=execution_host_lease_heartbeat_interval_seconds(),
+                logger=logger,
+            )
+        host_context_token = set_current_execution_host_lease_context(
+            ExecutionHostLeaseContext(attempt_lease_keepalive=attempt_lease_keepalive)
+        )
+
         if mode == GenerationMode.QUICK:
             from ..agents.orchestrator import OrchestratorAgent
 
@@ -97,6 +121,10 @@ def run_generation_in_host(
             "mode": mode.value,
         }
     finally:
+        if host_context_token is not None:
+            reset_current_execution_host_lease_context(host_context_token)
+        if attempt_lease_keepalive is not None:
+            attempt_lease_keepalive.close()
         logger.info("Closing queued execution host event loop...")
         loop.close()
         asyncio.set_event_loop(None)

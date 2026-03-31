@@ -5,6 +5,7 @@ Image Generation Tool - 封装图像生成业务逻辑
 import asyncio
 import json
 import os
+import re
 import tempfile
 from typing import Dict, Any, List, Optional
 
@@ -27,6 +28,7 @@ from ....services.prompt_safety.rewrite import (
     is_sensitive_error as ps_is_sensitive_error,
     rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
 )
+from .. import image_prompt_normalization as prompt_norm
 
 
 class ImageGenerationTool(AsyncTool):
@@ -249,6 +251,100 @@ class ImageGenerationTool(AsyncTool):
             },
         )
 
+    @staticmethod
+    def _clip_text(value: Any, max_len: int = 240) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:
+            return text[:max_len]
+        return text[: max_len - 3] + "..."
+
+    def _extract_provider_error_details(
+        self,
+        exc: Exception,
+        *,
+        provider_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        message = str(exc or "").strip()
+        details: Dict[str, Any] = {
+            "provider": (provider_name or "").strip(),
+            "provider_exception_type": type(exc).__name__,
+            "provider_raw_message": self._clip_text(message, 800),
+        }
+        if isinstance(exc, ToolError):
+            existing = getattr(exc, "details", None)
+            if isinstance(existing, dict):
+                details.update(existing)
+            if getattr(exc, "error_code", None):
+                details.setdefault("provider_error_code", str(exc.error_code))
+            return details
+
+        status_match = re.search(r"failed:\s*(\d+)", message)
+        if status_match:
+            try:
+                details["provider_status_code"] = int(status_match.group(1))
+            except Exception:
+                pass
+
+        json_start = message.find("{")
+        if json_start >= 0:
+            response_text = message[json_start:].strip()
+            details["provider_response_text"] = self._clip_text(response_text, 800)
+            try:
+                payload = json.loads(response_text)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                err_payload = payload.get("error")
+                if isinstance(err_payload, dict):
+                    code = err_payload.get("code")
+                    if code is not None:
+                        details["provider_error_code"] = str(code)
+                    err_msg = err_payload.get("message")
+                    if err_msg is not None:
+                        details["provider_error_message"] = self._clip_text(err_msg, 400)
+                    err_param = err_payload.get("param")
+                    if err_param is not None:
+                        details["provider_error_param"] = str(err_param)
+
+        if "provider_error_message" not in details and message:
+            details["provider_error_message"] = self._clip_text(message, 400)
+        return details
+
+    def _normalize_generation_exception(
+        self,
+        exc: Exception,
+        *,
+        provider_name: Optional[str] = None,
+        scene_number: Any = None,
+        extra_details: Optional[Dict[str, Any]] = None,
+    ) -> ToolError:
+        if isinstance(exc, ToolError):
+            if extra_details:
+                merged = dict(getattr(exc, "details", None) or {})
+                merged.update(extra_details)
+                exc.details = merged
+            return exc
+
+        details = self._extract_provider_error_details(exc, provider_name=provider_name)
+        if scene_number is not None:
+            details["scene_number"] = scene_number
+        if extra_details:
+            details.update(extra_details)
+
+        provider_message = details.get("provider_error_message") or str(exc)
+        return ToolError(
+            f"图像生成异常: {provider_message}",
+            tool_name=self.metadata.name,
+            error_code="image_generation_failed",
+            details=details,
+        )
+
     # 取消阶段语义：工具仅具有执行属性
     
     async def _execute_impl(self, tool_input) -> Dict[str, Any]:
@@ -346,11 +442,11 @@ class ImageGenerationTool(AsyncTool):
             )
         
         advisor_meta: Dict[str, Any] = {}
+        provider_name = None
         try:
             # 通过供应商无关的服务接口生成图像（当前默认Zhipu实现）
             self._get_active_vlm_service()
 
-            provider_name = None
             if self._vlm_service and hasattr(self._vlm_service, "get_provider_name"):
                 try:
                     provider_name = self._vlm_service.get_provider_name()
@@ -423,7 +519,12 @@ class ImageGenerationTool(AsyncTool):
                     "generation_metadata": res,
                     "prompt_safety": advisor_meta,
                 }
-            except ToolError as terr:
+            except Exception as exc:
+                terr = self._normalize_generation_exception(
+                    exc,
+                    provider_name=provider_name,
+                    scene_number=params.get("scene_number"),
+                )
                 # 仅当供应商明确返回“敏感/违规”错误时，触发一次轻量重写
                 try:
                     policy = get_consistency_policy()
@@ -451,13 +552,27 @@ class ImageGenerationTool(AsyncTool):
                         language="zh",
                         metadata={"action": "generate_image", "scene_number": params.get("scene_number"), "tool": self.metadata.name},
                     )
+                    provider_code = (
+                        (getattr(terr, "details", None) or {}).get("provider_error_code")
+                        if isinstance(getattr(terr, "details", None), dict)
+                        else None
+                    )
+                    rewrite_meta = {
+                        "applied": bool(rewritten and rewritten.strip() and rewritten.strip() != prompt),
+                        "reason": "sensitive_error",
+                        "model": rewrite_model,
+                        "provider_error_code": provider_code,
+                        "telemetry": telemetry,
+                    }
                     # 记录事件
                     try:
                         self.logger.info(
-                            "prompt_rewrite(image): applied=%s reason=sensitive_error model=%s tokens=%s",
-                            bool(rewritten),
+                            "prompt_rewrite(image): applied=%s reason=sensitive_error model=%s tokens=%s provider_code=%s result=%s",
+                            rewrite_meta["applied"],
                             telemetry.get("model"),
                             telemetry.get("tokens"),
+                            provider_code,
+                            telemetry.get("result"),
                         )
                     except Exception:
                         pass
@@ -476,11 +591,23 @@ class ImageGenerationTool(AsyncTool):
                         # 重试一次
                         gen_args_retry = dict(gen_args)
                         gen_args_retry["prompt"] = prompt
-                        res2 = await self._vlm_service.image_generation(**gen_args_retry)
-                        image_url2 = res2.get("image_url") or res2.get("url") or ""
-                        if not image_url2:
-                            # 二次仍失败，走原有失败路径
-                            raise terr
+                        try:
+                            res2 = await self._vlm_service.image_generation(**gen_args_retry)
+                            image_url2 = res2.get("image_url") or res2.get("url") or ""
+                            if not image_url2:
+                                raise ToolError("image_generation returned no image_url", self.metadata.name)
+                        except Exception as retry_exc:
+                            raise self._normalize_generation_exception(
+                                retry_exc,
+                                provider_name=provider_name,
+                                scene_number=params.get("scene_number"),
+                                extra_details={
+                                    "prompt_safety_rewrite": {
+                                        **rewrite_meta,
+                                        "retry_outcome": "failed",
+                                    }
+                                },
+                            ) from retry_exc
                         image_url2 = await _maybe_persist(image_url2)
                         return {
                             "image_url": image_url2,
@@ -490,19 +617,30 @@ class ImageGenerationTool(AsyncTool):
                             "generation_metadata": res2,
                             "prompt_safety": advisor_meta,
                             "prompt_safety_rewrite": {
-                                "applied": True,
-                                "reason": "sensitive_error",
-                                "model": rewrite_model,
+                                **rewrite_meta,
+                                "retry_outcome": "success",
                             },
                         }
+                    terr = self._normalize_generation_exception(
+                        terr,
+                        provider_name=provider_name,
+                        scene_number=params.get("scene_number"),
+                        extra_details={
+                            "prompt_safety_rewrite": {
+                                **rewrite_meta,
+                                "retry_outcome": "not_retried",
+                            }
+                        },
+                    )
                 # 非敏感或关闭重写：交由下方 except 统一返回失败
-                raise
+                raise terr
         except ToolError:
             raise
         except Exception as e:
-            raise ToolError(
-                f"图像生成异常: {str(e)}",
-                error_code="image_generation_failed",
+            raise self._normalize_generation_exception(
+                e,
+                provider_name=provider_name,
+                scene_number=params.get("scene_number"),
             )
     
     async def _create_image_prompt_from_scene(
@@ -538,9 +676,41 @@ class ImageGenerationTool(AsyncTool):
                     result.append(item)
             return result
 
-        visual_desc = (sd.get("visual_description") or sd.get("description") or sd.get("title") or "").strip()
+        def _clip_text(value: Any, max_len: int = 120) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if len(text) <= max_len:
+                return text
+            if max_len <= 3:
+                return text[:max_len]
+            return text[: max_len - 3] + "..."
+
+        task_direction = str(
+            sd.get("task_direction")
+            or sd.get("reference_view")
+            or sd.get("reference_kind")
+            or sd.get("reference_type")
+            or ""
+        ).strip().lower()
+        image_purpose = prompt_norm.canonicalize_image_purpose(sd.get("image_purpose"), task_direction=task_direction)
+
         content_focus = (sd.get("content_focus") or "").strip()
-        narrative_desc = (sd.get("narrative_description") or "").strip()
+
+        def _build_reference_root() -> str:
+            names = _as_list(sd.get("characters_present"))
+            subject = names[0] if names else (sd.get("title") or "角色")
+            if task_direction in {"avatar", "headshot", "portrait"}:
+                return f"{subject}角色头像参考图，单人正面，居中构图，背景干净。"
+            if task_direction in {"full_body", "full-body"}:
+                return f"{subject}角色全身参考图，单人正面站立，构图稳定，背景干净。"
+            return f"{subject}角色参考图，单人静态构图，突出稳定造型、服饰与标志道具。"
+
+        scene_description = (
+            _build_reference_root()
+            if image_purpose == "character_reference"
+            else prompt_norm.select_scene_opening_root(sd, fallback_title=(sd.get("title") or "单帧静态画面").strip())
+        )
 
         # 角色结构化描述：优先使用结构化约束，其次角色描述文本
         character_sections: List[str] = []
@@ -561,15 +731,24 @@ class ImageGenerationTool(AsyncTool):
                 traits = _as_list(item.get("key_traits"))
                 if traits:
                     segments.append("特征：" + "、".join(traits[:6]))
-                role = item.get("role")
-                if isinstance(role, str) and role.strip():
-                    segments.append(f"叙事角色：{role.strip()}")
                 if segments:
                     block = f"{name}：" + "；".join(segments) if name else "；".join(segments)
                     character_sections.append(block)
 
         if not character_sections:
-            char_descs = _as_list(sd.get("character_descriptions")) or _as_list(sd.get("characters"))
+            raw_char_descs = _as_list(sd.get("character_descriptions")) or _as_list(sd.get("characters"))
+            char_descs = []
+            for item in raw_char_descs:
+                normalized = prompt_norm.compress_character_description(
+                    item,
+                    segment_max_len=64,
+                    fallback_max_len=80,
+                )
+                if not normalized:
+                    continue
+                if prompt_norm.contains_video_only_language(item) and normalized == item:
+                    continue
+                char_descs.append(normalized)
             if not char_descs:
                 names = _as_list(sd.get("characters_present"))
                 if names:
@@ -582,8 +761,6 @@ class ImageGenerationTool(AsyncTool):
             "style_name": "风格",
             "style_description": "风格说明",
             "visual_approach": "媒介表现",
-            "narrative_style": "叙事方式",
-            "production_taste": "制作风格",
         }
         for key, label in style_map.items():
             val = sg.get(key)
@@ -591,10 +768,13 @@ class ImageGenerationTool(AsyncTool):
                 style_sections.append(f"{label}：{val.strip()}")
 
         mood_sections = []
-        for key in ["emotional_tone", "mood", "mood_and_atmosphere"]:
-            val = sg.get(key) if key in sg else sd.get(key)
-            if isinstance(val, str) and val.strip():
-                mood_sections.append(val.strip())
+        if image_purpose != "character_reference":
+            for key in ["mood_and_atmosphere", "emotional_tone", "mood"]:
+                val = sg.get(key) if key in sg else sd.get(key)
+                if isinstance(val, str) and val.strip():
+                    normalized_mood = _clip_text(prompt_norm.normalize_still_text(val), 80)
+                    if normalized_mood:
+                        mood_sections.append(normalized_mood)
         mood_sections = _dedup(mood_sections)
 
         color_sections = _dedup(
@@ -603,16 +783,38 @@ class ImageGenerationTool(AsyncTool):
 
         props_sections = _dedup(_as_list(sd.get("props_and_objects")))
 
-        # 辅助 bullet：内容焦点/叙事实要
-        scene_focus = _dedup([item for item in [content_focus, narrative_desc] if item])
+        # 辅助 bullet：仍以静态构图为核心，不回流 scene narrative / montage prose
+        scene_focus: List[str] = []
+        if image_purpose == "character_reference":
+            if task_direction in {"avatar", "headshot", "portrait"}:
+                scene_focus.append("参考方向：头像特写，突出面部识别与发型/服饰细节")
+            elif task_direction in {"full_body", "full-body"}:
+                scene_focus.append("参考方向：全身立绘，完整呈现服饰轮廓、站姿与标志道具")
+            else:
+                scene_focus.append("参考方向：单人静态角色参考图，强调稳定身份特征")
+        else:
+            focus_text = prompt_norm.normalize_still_text(content_focus)
+            if focus_text and not prompt_norm.contains_video_only_language(focus_text):
+                scene_focus.append(focus_text)
 
         cautionary_notes: List[str] = []
         anime_hint_sources = style_sections + mood_sections
         if any("动画" in seg or "动漫" in seg for seg in anime_hint_sources):
             cautionary_notes.append("保持动画笔触，避免写实摄影质感")
 
+        render_requirements = (
+            "角色参考图，单人静态构图，背景干净，无文字无水印，细节清晰。"
+            if image_purpose == "character_reference"
+            else "单帧静态画面，主体清晰，构图稳定，无文字无水印，无分镜或剪辑说明。"
+        )
+
         template_payload = {
-            "scene_description": visual_desc or "场景静态画面",
+            "root_label": "角色参考主体" if image_purpose == "character_reference" else "单帧构图",
+            "focus_label": "参考方向" if image_purpose == "character_reference" else "画面焦点",
+            "character_label": "稳定特征" if image_purpose == "character_reference" else "主体锁定",
+            "mood_label": "光线与氛围",
+            "props_label": "关键细节",
+            "scene_description": scene_description or "单帧静态画面",
             "scene_focus": scene_focus,
             "character_sections": _dedup(character_sections),
             "style_sections": _dedup(style_sections),
@@ -620,6 +822,7 @@ class ImageGenerationTool(AsyncTool):
             "color_sections": color_sections,
             "props_sections": props_sections,
             "cautionary_notes": cautionary_notes,
+            "render_requirements": render_requirements,
         }
 
         try:
@@ -630,10 +833,12 @@ class ImageGenerationTool(AsyncTool):
             ).strip()
         except Exception:
             # 回退：延用旧的串接逻辑，确保功能不中断
-            parts = [visual_desc, content_focus, narrative_desc]
+            parts = [scene_description]
+            if scene_focus:
+                parts.append("；".join(scene_focus))
             chars = _dedup(character_sections)
             if chars:
-                parts.append("角色设定：" + "；".join(chars))
+                parts.append(("稳定特征：" if image_purpose == "character_reference" else "主体锁定：") + "；".join(chars))
 
             base = "，".join([p for p in parts if p]) or "场景静态画面"
 
@@ -652,7 +857,7 @@ class ImageGenerationTool(AsyncTool):
             if mood_sections:
                 extra_bits.append("氛围：" + "、".join(mood_sections))
 
-            tail = "高质量，细节清晰，构图平衡"
+            tail = render_requirements
             return f"{base}，{'，'.join(extra_bits)}，{tail}" if extra_bits else f"{base}，{tail}"
 
     async def _generate_with_autoprompt(self, params: Dict[str, Any]) -> Dict[str, Any]:

@@ -149,14 +149,9 @@ def test_get_current_quick_run_returns_existing_task_and_runtime(monkeypatch):
 
     async def _fake_find(db, session_id):
         assert session_id == "quick-session-1"
-        return task, SimpleNamespace(id=88, status="waiting_gate", mode="quick")
+        return task, runtime_view
 
-    async def _fake_runtime_view(db, task_obj):
-        assert task_obj is task
-        return runtime_view
-
-    monkeypatch.setattr(tasks_endpoint, "_find_unfinished_quick_task_for_session", _fake_find)
-    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_runtime_view)
+    monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
 
     payload = asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-1", db=object()))
 
@@ -184,19 +179,45 @@ def test_get_current_quick_run_suppresses_task_without_runtime_truth(monkeypatch
         assert session_id == "quick-session-2"
         return task, None
 
-    async def _fake_runtime_view(db, task_obj):
-        assert task_obj is task
-        return None
-
-    monkeypatch.setattr(tasks_endpoint, "_find_unfinished_quick_task_for_session", _fake_find)
-    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _fake_runtime_view)
+    monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
 
     payload = asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-2", db=object()))
 
     assert payload is None
 
 
-def test_get_current_quick_run_surfaces_runtime_projection_integrity_error(monkeypatch):
+def test_get_current_quick_run_suppresses_terminal_runtime_after_reconciliation(monkeypatch):
+    now = datetime.now(timezone.utc)
+    task = SimpleNamespace(
+        id=30,
+        task_id="task-30",
+        title="Video: stale runtime...",
+        description="demo prompt",
+        status="in_progress",
+        session_id="quick-session-30",
+        input_parameters={"user_prompt": "Demo\n\nRun"},
+        created_at=now,
+        updated_at=now,
+        error_message=None,
+    )
+
+    async def _fake_find(db, session_id):
+        assert session_id == "quick-session-30"
+        return task, {
+            "session_id": 90,
+            "status": "failed",
+            "error_message": "Stale quick runtime detected",
+            "resume_control": None,
+        }
+
+    monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
+
+    payload = asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-30", db=object()))
+
+    assert payload is None
+
+
+def test_find_current_quick_run_surfaces_projection_integrity_error(monkeypatch):
     now = datetime.now(timezone.utc)
     task = SimpleNamespace(
         id=14,
@@ -211,24 +232,40 @@ def test_get_current_quick_run_surfaces_runtime_projection_integrity_error(monke
         error_message=None,
     )
 
-    async def _fake_find(db, session_id):
-        assert session_id == "quick-session-3"
-        return task, SimpleNamespace(id=99, status="running", mode="quick")
+    class _FakeScalarResult:
+        def all(self):
+            return [task]
+
+    class _FakeQueryResult:
+        def scalars(self):
+            return _FakeScalarResult()
+
+    class _FakeDb:
+        async def execute(self, query):
+            return _FakeQueryResult()
 
     async def _broken_runtime_view(db, task_obj):
         assert task_obj is task
-        raise ValueError(
-            "Runtime session 99 missing workflow nodes; read path cannot repair runtime invariants"
-        )
+        raise ValueError("Workflow session 93 missing current attempt anchor for continuation")
 
-    monkeypatch.setattr(tasks_endpoint, "_find_unfinished_quick_task_for_session", _fake_find)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "build_runtime_view_for_task", _broken_runtime_view)
+
+    with pytest.raises(ValueError, match="missing current attempt anchor"):
+        asyncio.run(tasks_endpoint._find_current_quick_run_for_session(_FakeDb(), "quick-session-3"))
+
+
+def test_get_current_quick_run_surfaces_selector_runtime_integrity_error(monkeypatch):
+    async def _fake_find(db, session_id):
+        assert session_id == "quick-session-3"
+        raise ValueError("Workflow session 93 missing current attempt anchor for continuation")
+
+    monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
 
     with pytest.raises(tasks_endpoint.HTTPException) as exc_info:
         asyncio.run(tasks_endpoint.get_current_quick_run("quick-session-3", db=object()))
 
     assert exc_info.value.status_code == 500
-    assert "missing workflow nodes" in str(exc_info.value.detail)
+    assert "missing current attempt anchor" in str(exc_info.value.detail)
 
 
 def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
@@ -264,7 +301,7 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
 
     async def _fake_find(db, session_id):
         assert session_id == "quick-session-2"
-        return existing_task, SimpleNamespace(id=23, mode="quick", status="running")
+        return existing_task, {"session_id": 23, "status": "running"}
 
     async def _fake_cancel(db, task, *, reason):
         queue_calls["cancelled_task_id"] = task.id
@@ -279,7 +316,7 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
     def _fake_schedule(background_tasks, task_db_id):
         queue_calls["scheduled_task_id"] = task_db_id
 
-    monkeypatch.setattr(tasks_endpoint, "_find_unfinished_quick_task_for_session", _fake_find)
+    monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
     monkeypatch.setattr(tasks_endpoint, "_cancel_task_for_replacement", _fake_cancel)
     monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "create_session_for_task", _fake_create_session)
     monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _fake_schedule)
@@ -317,7 +354,7 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
         "resume_control": {
             "state": "view_only_running",
             "can_resume": False,
-            "reason_code": "runtime_recent",
+            "reason_code": "resume_scheduled",
         },
     }
     events = {}
@@ -359,7 +396,7 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
         return {
             "state": "resume_available",
             "can_resume": True,
-            "reason_code": "stalled_runtime_with_checkpoint",
+            "reason_code": "checkpoint_available",
         }
 
     def _fake_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
@@ -464,7 +501,7 @@ def test_resume_task_runtime_rejects_when_resume_control_is_not_available(monkey
         return {
             "state": "view_only_running",
             "can_resume": False,
-            "reason_code": "runtime_recent",
+            "reason_code": "active_execution_lease",
         }
 
     def _forbidden_mark_session_resuming_sync(sync_db, session_obj, *, task=None):
@@ -545,7 +582,7 @@ def test_resume_task_runtime_rejects_when_checkpoint_validation_fails(monkeypatc
         return {
             "state": "resume_available",
             "can_resume": True,
-            "reason_code": "stalled_runtime_with_checkpoint",
+            "reason_code": "checkpoint_available",
         }
 
     def _failing_load_active_continuation_sync(

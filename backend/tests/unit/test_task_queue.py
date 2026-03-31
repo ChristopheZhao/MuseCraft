@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.constants import GenerationMode
 from app.core.database import Base
 from app.models import Task, TaskStatus, TaskType, WorkflowSessionStatus
+from app.services import execution_host_lease
 from app.services import queued_task_execution_host
 from app.services import task_queue
 from app.services.runtime_session_service import RuntimeSessionService
@@ -91,6 +93,88 @@ def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orch
     assert result["status"] == "completed"
     assert orchestrator_calls["task_id"] == task_id
     assert orchestrator_calls["input_data"]["voice_settings"] == {"voice_id": "narrator_a"}
+
+
+def test_run_generation_in_host_exposes_execution_host_lease_context(monkeypatch, session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test prompt"},
+    )
+    seen = {}
+
+    class _FakeOrchestrator:
+        async def execute(self, *, task, input_data, db, execution_order=1):
+            context = execution_host_lease.get_current_execution_host_lease_context()
+            seen["has_context"] = context is not None
+            seen["has_keepalive"] = bool(context and context.attempt_lease_keepalive is not None)
+            return {"status": "completed"}
+
+    monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
+    monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
+    monkeypatch.setattr(
+        "app.agents.orchestrator.OrchestratorAgent.create_default",
+        classmethod(lambda cls: _FakeOrchestrator()),
+    )
+
+    db = session_factory()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).first()
+        queued_task_execution_host.run_generation_in_host(
+            GenerationMode.QUICK,
+            task=task,
+            input_data={"user_prompt": "test prompt"},
+            db=db,
+            route="orchestrator_mainline",
+            execution_order=1,
+        )
+    finally:
+        db.close()
+
+    assert seen == {"has_context": True, "has_keepalive": True}
+    assert execution_host_lease.get_current_execution_host_lease_context() is None
+
+
+def test_attempt_lease_keepalive_controller_heartbeats_with_host_owned_session():
+    events = []
+
+    class _FakeDb:
+        def close(self):
+            events.append(("close",))
+
+    fake_session = SimpleNamespace(id=77)
+
+    def _session_factory():
+        events.append(("open",))
+        return _FakeDb()
+
+    def _load_session(db, session_id):
+        events.append(("load", session_id))
+        return fake_session
+
+    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
+        events.append(("heartbeat", runtime_session.id, attempt_id, lease_token))
+
+    controller = execution_host_lease.AttemptLeaseKeepaliveController(
+        session_factory=_session_factory,
+        load_session=_load_session,
+        heartbeat_attempt=_heartbeat_attempt,
+        interval_seconds=0.05,
+    )
+
+    try:
+        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if any(event[0] == "heartbeat" for event in events):
+                break
+            time.sleep(0.02)
+    finally:
+        controller.close()
+
+    assert ("heartbeat", 77, 11, "lease-11") in events
+    assert ("open",) in events
+    assert ("load", 77) in events
+    assert ("close",) in events
 
 
 def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monkeypatch, session_factory):

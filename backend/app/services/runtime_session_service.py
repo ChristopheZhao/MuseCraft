@@ -3,8 +3,10 @@ DB-backed runtime session service for the single-episode kernel
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +40,6 @@ from .script_review_contract import (
     set_script_review_contract,
 )
 from .orchestration_state_adapter import OrchestrationStateAdapter
-from .task_execution_policy import probe_task_transport_state
 
 
 DEFAULT_NODE_BLUEPRINT = [
@@ -209,21 +210,31 @@ def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
-def _latest_runtime_activity_at(task: Task, session: WorkflowSession) -> Optional[datetime]:
-    candidates = [
-        _normalize_datetime(getattr(task, "updated_at", None)),
-        _normalize_datetime(getattr(session, "updated_at", None)),
-    ]
-    present = [candidate for candidate in candidates if candidate is not None]
-    if not present:
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _resolve_attempt_lease_seconds(lease_timeout_seconds: Optional[int] = None) -> int:
+    if lease_timeout_seconds is not None:
+        return max(1, int(lease_timeout_seconds))
+    return max(1, int(getattr(settings, "RUNTIME_ATTEMPT_LEASE_SECONDS", 300)))
+
+
+def _clear_attempt_lease_fields(attempt: WorkflowNodeAttempt) -> None:
+    attempt.lease_token = None
+    attempt.lease_owner = None
+    attempt.last_heartbeat_at = None
+    attempt.lease_expires_at = None
+
+
+def _normalize_attempt_lease_fields(
+    attempt: Optional[WorkflowNodeAttempt],
+) -> Optional[WorkflowNodeAttempt]:
+    if attempt is None:
         return None
-    return max(present)
-
-
-def _extract_task_queue_handle(task: Task) -> Optional[str]:
-    output_metadata = dict(getattr(task, "output_metadata", None) or {})
-    queue_handle = str(output_metadata.get("celery_task_id") or "").strip()
-    return queue_handle or None
+    attempt.last_heartbeat_at = _normalize_datetime(getattr(attempt, "last_heartbeat_at", None))
+    attempt.lease_expires_at = _normalize_datetime(getattr(attempt, "lease_expires_at", None))
+    return attempt
 
 
 def _build_resume_control_projection(
@@ -248,38 +259,66 @@ def _build_resume_control_projection(
             "reason_code": "awaiting_gate_decision",
         }
 
-    last_activity_at = _latest_runtime_activity_at(task, session)
-    if last_activity_at is not None:
-        inactivity_seconds = max(
-            0,
-            int((datetime.now(timezone.utc) - last_activity_at).total_seconds()),
-        )
-    else:
-        inactivity_seconds = 0
-    stall_threshold_seconds = max(
-        1,
-        int(getattr(settings, "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS", 900)),
-    )
-    transport_probe = probe_task_transport_state(_extract_task_queue_handle(task))
-    if transport_probe.state == "live":
+    attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, session.current_attempt_id)
+    if attempt is None:
+        return {
+            "state": "resume_blocked",
+            "can_resume": False,
+            "reason_code": "missing_current_attempt",
+        }
+
+    if RuntimeSessionService.is_attempt_lease_live(attempt):
         return {
             "state": "view_only_running",
             "can_resume": False,
-            "reason_code": "transport_active",
+            "reason_code": "active_execution_lease",
         }
 
-    if inactivity_seconds < stall_threshold_seconds:
+    if session_status == WorkflowSessionStatus.RESUMING.value:
+        try:
+            checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+                attempt.continuation_checkpoint,
+                require_decision_id=False,
+            )
+        except ValueError:
+            return {
+                "state": "resume_blocked",
+                "can_resume": False,
+                "reason_code": "missing_continuation_checkpoint",
+            }
+        anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
+        if anchor_type == OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION:
+            try:
+                RuntimeSessionService.load_active_script_continuation_sync(
+                    db,
+                    session,
+                    node_key=str(session.current_node_key or "script"),
+                )
+            except ValueError:
+                return {
+                    "state": "resume_blocked",
+                    "can_resume": False,
+                    "reason_code": "missing_continuation_checkpoint",
+                }
+        else:
+            try:
+                RuntimeSessionService.load_active_continuation_sync(
+                    db,
+                    session,
+                    expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+                    require_decision_id=False,
+                    require_resuming=True,
+                )
+            except ValueError:
+                return {
+                    "state": "resume_blocked",
+                    "can_resume": False,
+                    "reason_code": "missing_continuation_checkpoint",
+                }
         return {
             "state": "view_only_running",
             "can_resume": False,
-            "reason_code": "runtime_recent",
-        }
-
-    if transport_probe.state != "not_live":
-        return {
-            "state": "resume_unknown",
-            "can_resume": False,
-            "reason_code": "transport_state_unknown",
+            "reason_code": "resume_scheduled",
         }
 
     try:
@@ -300,7 +339,7 @@ def _build_resume_control_projection(
     return {
         "state": "resume_available",
         "can_resume": True,
-        "reason_code": "stalled_runtime_with_checkpoint",
+        "reason_code": "checkpoint_available",
     }
 
 
@@ -510,6 +549,7 @@ class RuntimeSessionService:
 
     @staticmethod
     async def build_runtime_view_for_task(db: AsyncSession, task: Task) -> Optional[Dict[str, Any]]:
+        # Projection only: explicit stale-runtime reconciliation must stay out of read paths.
         session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
         if session is None:
             return None
@@ -656,6 +696,7 @@ class RuntimeSessionService:
 
     @staticmethod
     def build_runtime_view_for_task_sync(db: Session, task: Task) -> Optional[Dict[str, Any]]:
+        # Projection only: explicit stale-runtime reconciliation must stay out of read paths.
         session = RuntimeSessionService.get_latest_session_for_task_sync(db, task.id)
         if session is None:
             return None
@@ -681,6 +722,99 @@ class RuntimeSessionService:
     ) -> Optional[Dict[str, Any]]:
         active_gate = RuntimeSessionService.get_latest_gate_for_session_sync(db, session.id)
         return _build_resume_control_projection(db, task, session, active_gate=active_gate)
+
+    @staticmethod
+    def reconcile_irrecoverable_quick_runtime_sync(
+        db: Session,
+        task: Optional[Task],
+        session: Optional[WorkflowSession],
+    ) -> Optional[WorkflowSession]:
+        if task is None or session is None:
+            return session
+        if str(session.mode or "").strip().lower() != GenerationMode.QUICK.value:
+            return session
+        if str(session.status or "").strip().lower() in {
+            WorkflowSessionStatus.COMPLETED.value,
+            WorkflowSessionStatus.FAILED.value,
+            WorkflowSessionStatus.CANCELLED.value,
+        }:
+            return session
+
+        resume_control = RuntimeSessionService.get_resume_control_sync(db, task, session)
+        if not resume_control:
+            return session
+        if (
+            str(resume_control.get("state") or "").strip().lower() != "resume_blocked"
+            or str(resume_control.get("reason_code") or "").strip().lower()
+            != "missing_continuation_checkpoint"
+        ):
+            return session
+
+        error_message = (
+            "Stale quick runtime detected: execution lease is no longer active and continuation checkpoint is missing"
+        )
+        logging.getLogger("runtime_session_service").warning(
+            "Marking irrecoverable stale quick runtime failed: task_id=%s session_id=%s node=%s",
+            getattr(task, "task_id", None),
+            session.id,
+            getattr(session, "current_node_key", None),
+        )
+        RuntimeSessionService.mark_session_failed_sync(
+            db,
+            session,
+            error_message=error_message,
+            task=task,
+        )
+        return session
+
+    @staticmethod
+    def reconcile_irrecoverable_quick_runtimes_sync(
+        db: Session,
+        *,
+        limit: int = 100,
+    ) -> Dict[str, int]:
+        non_terminal_statuses = [
+            WorkflowSessionStatus.RUNNING.value,
+            WorkflowSessionStatus.RESUMING.value,
+        ]
+        sessions = (
+            db.query(WorkflowSession)
+            .filter(
+                WorkflowSession.mode == GenerationMode.QUICK.value,
+                WorkflowSession.status.in_(non_terminal_statuses),
+            )
+            .order_by(WorkflowSession.updated_at.asc(), WorkflowSession.id.asc())
+            .limit(max(1, int(limit)))
+            .all()
+        )
+
+        inspected = 0
+        failed = 0
+        skipped = 0
+        for session in sessions:
+            inspected += 1
+            task = session.task
+            if task is None:
+                skipped += 1
+                continue
+            before_status = str(session.status or "").strip().lower()
+            RuntimeSessionService.reconcile_irrecoverable_quick_runtime_sync(
+                db,
+                task,
+                session,
+            )
+            db.refresh(session)
+            after_status = str(session.status or "").strip().lower()
+            if before_status != WorkflowSessionStatus.FAILED.value and after_status == WorkflowSessionStatus.FAILED.value:
+                failed += 1
+            else:
+                skipped += 1
+
+        return {
+            "inspected": inspected,
+            "failed": failed,
+            "skipped": skipped,
+        }
 
     @staticmethod
     def get_node_by_key_sync(
@@ -748,7 +882,7 @@ class RuntimeSessionService:
     ) -> Optional[WorkflowNodeAttempt]:
         if attempt_id is None:
             return None
-        return (
+        attempt = (
             db.query(WorkflowNodeAttempt)
             .filter(
                 WorkflowNodeAttempt.id == attempt_id,
@@ -756,6 +890,150 @@ class RuntimeSessionService:
             )
             .first()
         )
+        return _normalize_attempt_lease_fields(attempt)
+
+    @staticmethod
+    def is_attempt_lease_live(
+        attempt: Optional[WorkflowNodeAttempt],
+        *,
+        as_of: Optional[datetime] = None,
+    ) -> bool:
+        if attempt is None:
+            return False
+        lease_token = str(getattr(attempt, "lease_token", "") or "").strip()
+        lease_owner = str(getattr(attempt, "lease_owner", "") or "").strip()
+        lease_expires_at = _normalize_datetime(getattr(attempt, "lease_expires_at", None))
+        if not lease_token or not lease_owner or lease_expires_at is None:
+            return False
+        effective_as_of = _normalize_datetime(as_of) or _now_utc()
+        return lease_expires_at > effective_as_of
+
+    @staticmethod
+    def grant_attempt_lease_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        lease_owner: str,
+        lease_timeout_seconds: Optional[int] = None,
+        lease_token: Optional[str] = None,
+    ) -> WorkflowNodeAttempt:
+        # lease_owner identifies the control-plane issuer of the live execution lease.
+        # Execution hosts renew that lease later via lease_token only.
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+
+        owner_value = str(lease_owner or "").strip()
+        if not owner_value:
+            raise ValueError("lease_owner is required when granting an execution lease")
+
+        token_value = str(lease_token or uuid4().hex).strip()
+        if not token_value:
+            raise ValueError("A non-empty lease token is required when granting an execution lease")
+
+        lease_started_at = _now_utc()
+        attempt.lease_token = token_value
+        attempt.lease_owner = owner_value
+        attempt.last_heartbeat_at = lease_started_at
+        attempt.lease_expires_at = lease_started_at + timedelta(
+            seconds=_resolve_attempt_lease_seconds(lease_timeout_seconds)
+        )
+
+        db.commit()
+        db.refresh(attempt)
+        db.refresh(session)
+        return _normalize_attempt_lease_fields(attempt)
+
+    @staticmethod
+    def assert_attempt_lease_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        lease_token: str,
+        allow_expired: bool = False,
+    ) -> WorkflowNodeAttempt:
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+
+        expected_token = str(lease_token or "").strip()
+        if not expected_token:
+            raise ValueError("lease_token is required for execution lease validation")
+
+        actual_token = str(getattr(attempt, "lease_token", "") or "").strip()
+        if not actual_token:
+            raise ValueError(
+                f"Workflow attempt {attempt_id} does not have an active execution lease"
+            )
+        if actual_token != expected_token:
+            raise ValueError(
+                f"Workflow attempt {attempt_id} execution lease token mismatch"
+            )
+        if not allow_expired and not RuntimeSessionService.is_attempt_lease_live(attempt):
+            raise ValueError(
+                f"Workflow attempt {attempt_id} execution lease expired"
+            )
+        return attempt
+
+    @staticmethod
+    def heartbeat_attempt_lease_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        lease_token: str,
+        lease_timeout_seconds: Optional[int] = None,
+    ) -> WorkflowNodeAttempt:
+        # Heartbeat is host-side liveness reporting for an already-issued lease.
+        attempt = RuntimeSessionService.assert_attempt_lease_sync(
+            db,
+            session,
+            attempt_id=attempt_id,
+            lease_token=lease_token,
+            allow_expired=False,
+        )
+        heartbeat_at = _now_utc()
+        attempt.last_heartbeat_at = heartbeat_at
+        attempt.lease_expires_at = heartbeat_at + timedelta(
+            seconds=_resolve_attempt_lease_seconds(lease_timeout_seconds)
+        )
+
+        db.commit()
+        db.refresh(attempt)
+        db.refresh(session)
+        return _normalize_attempt_lease_fields(attempt)
+
+    @staticmethod
+    def release_attempt_lease_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        lease_token: Optional[str] = None,
+    ) -> WorkflowNodeAttempt:
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        if lease_token is not None:
+            RuntimeSessionService.assert_attempt_lease_sync(
+                db,
+                session,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                allow_expired=True,
+            )
+
+        attempt.lease_token = None
+        attempt.lease_owner = None
+        attempt.last_heartbeat_at = None
+        attempt.lease_expires_at = None
+
+        db.commit()
+        db.refresh(attempt)
+        db.refresh(session)
+        return _normalize_attempt_lease_fields(attempt)
 
     @staticmethod
     def load_active_script_continuation_sync(
@@ -925,6 +1203,7 @@ class RuntimeSessionService:
         *,
         node_key: str,
         attempt_id: int,
+        lease_token: Optional[str] = None,
         output_artifacts: Optional[List[Dict[str, Any]]] = None,
         metrics: Optional[Dict[str, Any]] = None,
         artifact_refs: Optional[List[Dict[str, Any]]] = None,
@@ -944,8 +1223,17 @@ class RuntimeSessionService:
         )
         if attempt is None:
             raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        if lease_token is not None:
+            RuntimeSessionService.assert_attempt_lease_sync(
+                db,
+                session,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                allow_expired=False,
+            )
 
         attempt.status = WorkflowAttemptStatus.SUCCEEDED.value
+        _clear_attempt_lease_fields(attempt)
         attempt.output_artifacts = output_artifacts or []
         attempt.metrics = metrics or {}
         if artifact_refs is not None:
@@ -970,6 +1258,7 @@ class RuntimeSessionService:
         node_key: str,
         attempt_id: int,
         error_message: str,
+        lease_token: Optional[str] = None,
         output_artifacts: Optional[List[Dict[str, Any]]] = None,
         metrics: Optional[Dict[str, Any]] = None,
         artifact_refs: Optional[List[Dict[str, Any]]] = None,
@@ -989,8 +1278,17 @@ class RuntimeSessionService:
         )
         if attempt is None:
             raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        if lease_token is not None:
+            RuntimeSessionService.assert_attempt_lease_sync(
+                db,
+                session,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                allow_expired=False,
+            )
 
         attempt.status = WorkflowAttemptStatus.FAILED.value
+        _clear_attempt_lease_fields(attempt)
         attempt.output_artifacts = output_artifacts or []
         attempt.metrics = metrics or {}
         if artifact_refs is not None:
@@ -1017,6 +1315,7 @@ class RuntimeSessionService:
         gate_name: str,
         gate_type: str,
         attempt_id: Optional[int] = None,
+        lease_token: Optional[str] = None,
         scope: Optional[Dict[str, Any]] = None,
         artifact_refs: Optional[List[Dict[str, Any]]] = None,
         facts: Optional[Dict[str, Any]] = None,
@@ -1032,6 +1331,19 @@ class RuntimeSessionService:
         node = RuntimeSessionService.get_node_by_key_sync(db, session.id, node_key)
         if node is None:
             raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt_id is not None and attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        if lease_token is not None:
+            if attempt_id is None:
+                raise ValueError("attempt_id is required when validating a gate-opening execution lease")
+            RuntimeSessionService.assert_attempt_lease_sync(
+                db,
+                session,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                allow_expired=False,
+            )
 
         gate = WorkflowGate(
             session_id=session.id,
@@ -1052,6 +1364,8 @@ class RuntimeSessionService:
         db.add(gate)
         db.flush()
 
+        if attempt is not None:
+            _clear_attempt_lease_fields(attempt)
         node.last_gate_id = gate.id
         node.status = WorkflowNodeStatus.PENDING_GATE.value
         session.status = WorkflowSessionStatus.WAITING_GATE.value
@@ -1081,6 +1395,7 @@ class RuntimeSessionService:
         script_output: Dict[str, Any],
         artifact_ref: Dict[str, Any],
         script_preview_text: str,
+        lease_token: Optional[str] = None,
         continuation_checkpoint: Optional[Dict[str, Any]] = None,
     ) -> WorkflowGate:
         node = RuntimeSessionService.get_node_by_key_sync(db, session.id, "script")
@@ -1089,6 +1404,14 @@ class RuntimeSessionService:
         attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
         if attempt is None:
             raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        if lease_token is not None:
+            RuntimeSessionService.assert_attempt_lease_sync(
+                db,
+                session,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                allow_expired=False,
+            )
 
         review_contract = get_script_review_contract(session.input_payload) or {}
         payload = set_script_review_contract(session.input_payload, None)
@@ -1100,6 +1423,7 @@ class RuntimeSessionService:
 
         artifact_refs = [dict(artifact_ref or {})]
         attempt.status = WorkflowAttemptStatus.SUCCEEDED.value
+        _clear_attempt_lease_fields(attempt)
         attempt.output_artifacts = artifact_refs
         attempt.metrics = {
             "trigger_reason": trigger_reason,
@@ -1319,6 +1643,7 @@ class RuntimeSessionService:
         )
         if attempt is not None and attempt.status == WorkflowAttemptStatus.RUNNING.value:
             attempt.status = WorkflowAttemptStatus.ABORTED.value
+            _clear_attempt_lease_fields(attempt)
             node = RuntimeSessionService.get_node_by_key_sync(
                 db,
                 session.id,
@@ -1349,6 +1674,13 @@ class RuntimeSessionService:
     ) -> WorkflowSession:
         session.status = WorkflowSessionStatus.COMPLETED.value
         session.summary_output = summary_output or {}
+        current_attempt = RuntimeSessionService.get_attempt_by_id_sync(
+            db,
+            session.id,
+            session.current_attempt_id,
+        )
+        if current_attempt is not None:
+            _clear_attempt_lease_fields(current_attempt)
         nodes = (
             db.query(WorkflowNodeState)
             .filter(WorkflowNodeState.session_id == session.id)
@@ -1391,6 +1723,17 @@ class RuntimeSessionService:
     ) -> WorkflowSession:
         session.status = WorkflowSessionStatus.FAILED.value
         session.error_message = error_message
+        if session.current_attempt_id is not None:
+            current_attempt = RuntimeSessionService.get_attempt_by_id_sync(
+                db,
+                session.id,
+                session.current_attempt_id,
+            )
+            if current_attempt is not None:
+                _clear_attempt_lease_fields(current_attempt)
+                if current_attempt.status == WorkflowAttemptStatus.RUNNING.value:
+                    current_attempt.status = WorkflowAttemptStatus.FAILED.value
+                    current_attempt.error_message = error_message
         if session.current_node_key:
             current_node = (
                 db.query(WorkflowNodeState)

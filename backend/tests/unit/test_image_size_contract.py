@@ -33,15 +33,19 @@ def test_zhipu_vlm_capabilities_preserve_existing_size_set():
 
 
 def test_image_prompt_composer_does_not_invent_size_default(monkeypatch):
-    tool = ImagePromptComposerTool()
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
     captured = {}
 
     monkeypatch.setattr(tool, "_load_scene_info", lambda ref: {"scenes": [{"scene_number": 1}]})
     monkeypatch.setattr(tool, "_extract_scene_entry", lambda scene_info, scene_number: {"scene_number": scene_number})
-    monkeypatch.setattr(tool, "_build_scene_data", lambda scene_entry, scene_number: {"title": f"scene-{scene_number}"})
+    monkeypatch.setattr(
+        tool,
+        "_build_scene_data",
+        lambda scene_entry, scene_number, **_kwargs: {"title": f"scene-{scene_number}", "image_purpose": "scene_opening_anchor"},
+    )
     monkeypatch.setattr(tool, "_build_style_guidance", lambda scene_info: {})
     monkeypatch.setattr(tool, "_resolve_style_name", lambda style_guidance: "")
-    monkeypatch.setattr(tool, "_build_consistency_block", lambda assets: ("", []))
+    monkeypatch.setattr(tool, "_build_consistency_block", lambda assets, **_kwargs: ("", [], []))
 
     class FakeImageTool:
         async def _create_image_prompt_from_scene(self, scene_data, style_name, style_guidance):

@@ -2,8 +2,20 @@
 
 场景信息：
 - 场景编号：{{ scene_number }}
+{% if title %}- 场景标题：{{ title }}
+{% endif %}
 - 视觉描述：{{ visual_description }}
 - 叙事描述：{{ narrative_description }}
+{% if mood_and_atmosphere %}- 氛围基调：{{ mood_and_atmosphere }}
+{% endif %}
+{% if camera_angle %}- 镜头起点：{{ camera_angle }}
+{% endif %}
+{% if creative_intent %}- 创作意图：{{ creative_intent }}
+{% endif %}
+{% if characters_present %}- 出现角色：{{ characters_present | join('、') }}
+{% endif %}
+{% if character_descriptions %}- 角色特征：{{ character_descriptions | join('；') }}
+{% endif %}
 - 风格上下文：{{ style_context }}
 - 配音要求：
 {% if should_narrate %}{% if voice_expectations %}{% for item in voice_expectations %}- {{ item }}
@@ -18,16 +30,26 @@
 
 要求：
 1. 根据场景复杂度选择合适的时长（仅可从{{ duration_capabilities }}中选择）；
-2. 输出脚本文本与可选的叙事/音乐/音效字段；
-3. 用 `motion_beats` 数组划分场景的时间推进，每个分段需给出 `start`、`end`（秒）、`visual_focus` 与 `beat_summary`，覆盖整段时长；
-4. 若需旁白，生成 1-2 句成品旁白，严禁出现“镜头”“画面”“场景”等制作说明词；
-5. 直接返回 JSON，不要解释性文本。
+2. 先明确 `opening_state`、`event_trigger`、`end_state`，它们都必须是观众能直接看到的内容，不要只写“铺垫、成长、紧张感”这类抽象功能词；
+3. 用 `action_phases` 数组表达 2-4 个动作阶段，每段写清 `phase`、`observable_actions`、`camera_hint`；允许使用 `relative_weight` 表达相对时序，不必把每段都写成机械秒表；
+4. 同时输出 `motion_beats` 作为兼容层：若场景适合明确节拍，则给出 `start`、`end`（秒）、`visual_focus` 与 `beat_summary`，覆盖整段时长；若不适合机械切分，也要保持 beats 与 `action_phases` 语义一致；
+5. 输出脚本文本与可选的叙事/音乐/音效字段；`script_text` 必须补充角色做了什么、环境如何响应，而不是只重复主题摘要；
+6. 若需旁白，生成 1-2 句成品旁白，严禁出现“镜头”“画面”“场景”等制作说明词；
+7. 直接返回 JSON，不要解释性文本。
 
 JSON 模板示例：
 {
   "duration": 5,
   "script_text": "……",
+  "opening_state": "韩立半跪稳住身形，剑尖擦地拖出石屑",
+  "event_trigger": "黑袍修士逼近施压，迫使韩立强行起身聚气",
+  "action_phases": [
+    {"phase": "起势", "relative_weight": 1.0, "observable_actions": "韩立压低重心稳住身形，衣摆被气流扯动", "camera_hint": "中景跟随，先稳后推近"},
+    {"phase": "爆发", "relative_weight": 1.4, "observable_actions": "金光骤然爆开，碎石和尘浪向外掀开，黑袍修士被震退", "camera_hint": "镜头快速推进后定住"}
+  ],
   "narrative_description": "……",
+  "end_state": "镜头停在韩立抬头定格，金光未散",
+  "camera_language": "以中景建立人物受压状态，随后推近到爆发定格",
   "background_music_style": "……",
   "sound_effects": ["……"],
   "voice_over_text": "……",

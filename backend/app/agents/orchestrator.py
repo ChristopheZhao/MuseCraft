@@ -35,6 +35,10 @@ from ..services.orchestration_runtime_controller import (
 from ..services.orchestration_state_adapter import OrchestrationStateAdapter
 from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
 from ..services.runtime_session_service import RuntimeSessionService
+from ..services.execution_host_lease import (
+    activate_current_attempt_keepalive,
+    deactivate_current_attempt_keepalive,
+)
 from ..services.published_deliverable_service import get_published_deliverable_ref
 from ..services.script_review_contract import (
     get_script_review_contract,
@@ -435,6 +439,7 @@ class OrchestratorAgent(BaseAgent):
         db: Session,
         workflow_id: str,
         script_attempt_id: int,
+        lease_token: Optional[str],
         trigger_reason: str,
         script_output: Dict[str, Any],
         task_specs: Dict[AgentType, Dict[str, Any]],
@@ -467,6 +472,7 @@ class OrchestratorAgent(BaseAgent):
             script_output=script_output,
             artifact_ref=dict(boundary.get("artifact_ref") or {}),
             script_preview_text=str(boundary.get("script_preview_text") or ""),
+            lease_token=lease_token,
             continuation_checkpoint=continuation_checkpoint,
         )
         return {
@@ -757,12 +763,12 @@ class OrchestratorAgent(BaseAgent):
             current_agent_type: AgentType,
             *,
             trigger_reason_override: Optional[str] = None,
-        ) -> Tuple[Optional[str], Optional[int], str]:
+        ) -> Tuple[Optional[str], Optional[int], str, Optional[str]]:
             if runtime_session is None:
-                return None, None, ""
+                return None, None, "", None
             runtime_node_key = self._runtime_node_key_for_agent(current_agent_type)
             if runtime_node_key is None:
-                return None, None, ""
+                return None, None, "", None
 
             if trigger_reason_override is not None:
                 effective_trigger_reason = str(trigger_reason_override or "").strip().lower() or "retry"
@@ -804,7 +810,18 @@ class OrchestratorAgent(BaseAgent):
                 attempt_id=attempt.id,
                 continuation_checkpoint=continuation_checkpoint,
             )
-            return runtime_node_key, attempt.id, effective_trigger_reason
+            leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
+                db,
+                runtime_session,
+                attempt_id=attempt.id,
+                lease_owner=f"orchestrator:{wf_id}:{runtime_node_key}",
+            )
+            return (
+                runtime_node_key,
+                attempt.id,
+                effective_trigger_reason,
+                str(leased_attempt.lease_token or "").strip() or None,
+            )
         
         try:
             for step_index, agent_type in enumerate(execution_queue):
@@ -813,6 +830,8 @@ class OrchestratorAgent(BaseAgent):
                 current_runtime_node_key: Optional[str] = None
                 current_attempt_id: Optional[int] = None
                 current_attempt_trigger_reason = ""
+                current_attempt_lease_token: Optional[str] = None
+                current_attempt_keepalive_active = False
                 if agent_type in skip_agents:
                     self.logger.info("⏭️ Skipping %s due to runtime skip_agents", agent.agent_name)
                     continue
@@ -856,7 +875,13 @@ class OrchestratorAgent(BaseAgent):
                         current_runtime_node_key,
                         current_attempt_id,
                         current_attempt_trigger_reason,
+                        current_attempt_lease_token,
                     ) = _start_runtime_attempt(agent_type)
+                    current_attempt_keepalive_active = activate_current_attempt_keepalive(
+                        runtime_session_id=runtime_session.id,
+                        attempt_id=current_attempt_id,
+                        lease_token=current_attempt_lease_token,
+                    )
                 
                 # Update progress
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
@@ -907,7 +932,7 @@ class OrchestratorAgent(BaseAgent):
                         task=task,
                         input_data=agent_input,
                         db=db,
-                        execution_order=step_index + 1
+                        execution_order=step_index + 1,
                     )
                     
                     # Store results and prepare input for next agent
@@ -928,6 +953,7 @@ class OrchestratorAgent(BaseAgent):
                             runtime_session,
                             node_key=current_runtime_node_key,
                             attempt_id=current_attempt_id,
+                            lease_token=current_attempt_lease_token,
                             node_status=WorkflowNodeStatus.COMPLETED.value,
                         )
 
@@ -942,6 +968,7 @@ class OrchestratorAgent(BaseAgent):
                             db=db,
                             workflow_id=wf_id,
                             script_attempt_id=current_attempt_id,
+                            lease_token=current_attempt_lease_token,
                             trigger_reason=current_attempt_trigger_reason or script_trigger_reason,
                             script_output=dict(agent_output or {}),
                             task_specs=task_specs,
@@ -1060,6 +1087,7 @@ class OrchestratorAgent(BaseAgent):
                             node_key=current_runtime_node_key,
                             attempt_id=current_attempt_id,
                             error_message=str(e),
+                            lease_token=current_attempt_lease_token,
                             diagnostics=[
                                 {
                                     "code": f"{current_runtime_node_key}_stage_failed",
@@ -1085,9 +1113,15 @@ class OrchestratorAgent(BaseAgent):
                                 current_runtime_node_key,
                                 current_attempt_id,
                                 current_attempt_trigger_reason,
+                                current_attempt_lease_token,
                             ) = _start_runtime_attempt(
                                 agent_type,
                                 trigger_reason_override=retry_trigger_reason,
+                            )
+                            current_attempt_keepalive_active = activate_current_attempt_keepalive(
+                                runtime_session_id=runtime_session.id,
+                                attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
                             )
                         agent_input = await self._prepare_scheduled_agent_input(
                             workflow_data=workflow_data,
@@ -1100,7 +1134,7 @@ class OrchestratorAgent(BaseAgent):
                             task=task,
                             input_data=agent_input,
                             db=db,
-                            execution_order=step_index + 1
+                            execution_order=step_index + 1,
                         )
                         workflow_results[agent_type.value] = agent_output
                         workflow_data.update(agent_output)
@@ -1121,6 +1155,7 @@ class OrchestratorAgent(BaseAgent):
                                 runtime_session,
                                 node_key=current_runtime_node_key,
                                 attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
                                 node_status=WorkflowNodeStatus.COMPLETED.value,
                             )
                         if (
@@ -1134,6 +1169,7 @@ class OrchestratorAgent(BaseAgent):
                                 db=db,
                                 workflow_id=wf_id,
                                 script_attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
                                 trigger_reason=current_attempt_trigger_reason or retry_trigger_reason,
                                 script_output=dict(agent_output or {}),
                                 task_specs=task_specs,
@@ -1144,6 +1180,10 @@ class OrchestratorAgent(BaseAgent):
 
                     # 不重试：标记失败并通知
                     raise AgentError(error_msg) from e
+                finally:
+                    if current_attempt_keepalive_active:
+                        deactivate_current_attempt_keepalive()
+                        current_attempt_keepalive_active = False
             
             # Workflow completed successfully
             await self._update_progress(90, "Workflow completed, dispatching completion event", db)

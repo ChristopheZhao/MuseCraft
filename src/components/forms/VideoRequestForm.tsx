@@ -358,22 +358,17 @@ const VideoRequestForm: React.FC = () => {
               </p>
               {existingRunResumeControl?.state === 'resume_available' && (
                 <p className="mt-2 text-xs text-amber-700">
-                  检测结果：当前 run 已无活动 transport，control-plane 允许显式恢复执行。
-                </p>
-              )}
-              {existingRunResumeControl?.state === 'resume_unknown' && (
-                <p className="mt-2 text-xs text-amber-700">
-                  检测结果：当前只能恢复工作台视图，transport 活性暂时无法判定，尚不能直接恢复执行。
+                  检测结果：当前 run 存在合法 continuation checkpoint，control-plane 允许显式恢复执行。
                 </p>
               )}
               {existingRunResumeControl?.state === 'resume_blocked' && (
                 <p className="mt-2 text-xs text-amber-700">
-                  检测结果：当前 run 已判定停滞，但 control-plane 缺少可消费的 continuation checkpoint，不能把“查看当前任务”当成恢复执行。
+                  检测结果：当前 run 缺少可消费的 continuation checkpoint，不能把“查看当前任务”当成恢复执行。
                 </p>
               )}
               {existingRunResumeControl?.state === 'view_only_running' && (
                 <p className="mt-2 text-xs text-amber-700">
-                  检测结果：当前 run 仍被视为运行中，“查看当前任务”只会重新附着工作台视图，不会触发新的后端执行。
+                  检测结果：当前 run 仍被 control-plane 视为活跃，或恢复已进入调度中；“查看当前任务”只会重新附着工作台视图，不会触发新的后端执行。
                 </p>
               )}
               <div className="mt-3 flex flex-wrap gap-3">

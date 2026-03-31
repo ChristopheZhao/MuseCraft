@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
+from . import video_prompt_normalization as prompt_norm
 
 
 class VideoPromptComposerTool(AsyncTool):
@@ -193,28 +194,23 @@ class VideoPromptComposerTool(AsyncTool):
 
         style_line = self._format_style(assets.get("style") or {})
         if style_line:
-            categories.append("style")
-            lines.append(f"- 画风：{style_line}")
+            categories.append("global_style_lock")
+            lines.append(f"- 全局画风锁定：{style_line}")
 
         character_line = self._format_characters(assets.get("characters") or {})
         if character_line:
-            categories.append("characters")
-            lines.append(f"- 角色：{character_line}")
+            categories.append("character_lock")
+            lines.append(f"- 角色锁定：{character_line}")
 
         environment_line = self._format_environment(assets.get("environment") or {})
         if environment_line:
-            categories.append("environment")
-            lines.append(f"- 场景氛围：{environment_line}")
-
-        object_line = self._format_objects(assets.get("style") or {})
-        if object_line:
-            categories.append("objects")
-            lines.append(f"- 道具：{object_line}")
+            categories.append("opening_anchor")
+            lines.append(f"- 开场锚点：{environment_line}")
 
         continuity_line = self._format_continuity(assets.get("continuity") or {})
         if continuity_line:
-            categories.append("continuity")
-            lines.append(f"- 连续性：{continuity_line}")
+            categories.append("local_continuity")
+            lines.append(f"- 局部连续性：{continuity_line}")
 
         if not lines:
             return "", []
@@ -224,62 +220,94 @@ class VideoPromptComposerTool(AsyncTool):
     def _format_style(self, style_assets: Dict[str, Any]) -> str:
         if not isinstance(style_assets, dict):
             return ""
+        lock = style_assets.get("global_lock") or {}
         guidelines = style_assets.get("consistency_guidelines") or {}
-        style_consistency = self._clip_text(guidelines.get("style_consistency"), 160)
+        style_consistency = prompt_norm.compact_lock_text(
+            lock.get("style_guidelines") or guidelines.get("style_consistency"),
+            max_len=56,
+            max_clauses=1,
+        )
 
         design = (
             style_assets.get("intelligent_style_design")
             or style_assets.get("intelligent_style")
             or {}
         )
-        headline = self._clip_text(design.get("headline") or design.get("summary") or design.get("style_name"), 120)
-        color_palette = self._join_items(design.get("color_palette") or [], max_items=6)
-        style_tags = self._join_items(design.get("style_tags") or design.get("tags") or [], max_items=6)
+        headline = prompt_norm.compact_lock_text(
+            lock.get("headline") or design.get("headline") or design.get("summary") or design.get("style_name"),
+            max_len=40,
+            max_clauses=1,
+        )
+        color_palette = self._join_items(lock.get("color_palette") or design.get("color_palette") or [], max_items=3)
+        style_tags = self._join_items(lock.get("style_tags") or design.get("style_tags") or design.get("tags") or [], max_items=3)
 
         parts: List[str] = []
-        if style_consistency:
-            parts.append(style_consistency)
-        if headline and headline not in parts:
+        if headline:
             parts.append(headline)
-        if style_tags:
+        if style_consistency and not any(prompt_norm.is_similar(style_consistency, part) for part in parts):
+            parts.append(style_consistency)
+        if style_tags and len(parts) < 3:
             parts.append(f"风格标签：{style_tags}")
-        if color_palette:
+        elif color_palette and len(parts) < 3:
             parts.append(f"色彩：{color_palette}")
         return "；".join([p for p in parts if p])
 
     def _format_characters(self, character_assets: Dict[str, Any]) -> str:
         if not isinstance(character_assets, dict):
             return ""
-        present = self._join_items(character_assets.get("present") or [], max_items=6)
-        descriptions = self._join_items(character_assets.get("descriptions") or [], max_items=4, sep="；")
+        lock = character_assets.get("global_lock") or {}
+        scene_cast = character_assets.get("scene_cast") or {}
+        present = self._join_items(scene_cast.get("present") or character_assets.get("present") or [], max_items=3)
+        descriptions = self._compact_scene_descriptions(
+            scene_cast.get("descriptions") or character_assets.get("descriptions") or []
+        )
+        stable_traits = self._join_items(lock.get("stable_traits") or [], max_items=3)
 
         guideline = ""
-        if isinstance(character_assets.get("guidelines"), str):
-            guideline = self._clip_text(character_assets.get("guidelines"), 140)
+        if isinstance(lock.get("guidelines"), str) and lock.get("guidelines"):
+            guideline = prompt_norm.compact_lock_text(lock.get("guidelines"), max_len=48, max_clauses=1)
+        elif isinstance(character_assets.get("guidelines"), str):
+            guideline = prompt_norm.compact_lock_text(character_assets.get("guidelines"), max_len=48, max_clauses=1)
 
         parts = []
-        if guideline:
-            parts.append(guideline)
         if present:
             parts.append(f"出现角色：{present}")
+        if stable_traits and not any(prompt_norm.is_similar(stable_traits, part) for part in parts):
+            parts.append(f"稳定特征：{stable_traits}")
         if descriptions:
-            parts.append(f"特征：{descriptions}")
+            parts.append(f"场景特征：{descriptions}")
+        if guideline and not parts:
+            parts.append(guideline)
         return "；".join([p for p in parts if p])
 
     def _format_environment(self, environment_assets: Dict[str, Any]) -> str:
         if not isinstance(environment_assets, dict):
             return ""
-        guideline = self._clip_text(environment_assets.get("guidelines"), 140)
-        visual = self._clip_text(environment_assets.get("visual_description"), 160)
-        narrative = self._clip_text(environment_assets.get("narrative_description"), 120)
+        opening_anchor = environment_assets.get("opening_anchor") or {}
+        global_lock = environment_assets.get("global_lock") or {}
+        guideline = prompt_norm.compact_lock_text(
+            global_lock.get("guidelines") or environment_assets.get("guidelines"),
+            max_len=40,
+            max_clauses=1,
+        )
+        opening_state = prompt_norm.compact_lock_text(
+            opening_anchor.get("opening_state"),
+            max_len=56,
+            max_clauses=1,
+        )
+        visual = prompt_norm.compact_lock_text(
+            opening_anchor.get("visual_description") or environment_assets.get("visual_description"),
+            max_len=56,
+            max_clauses=1,
+        )
 
         parts: List[str] = []
-        if guideline:
-            parts.append(guideline)
-        if visual:
+        if opening_state:
+            parts.append(f"开场状态：{opening_state}")
+        elif visual:
             parts.append(visual)
-        if narrative:
-            parts.append(narrative)
+        if guideline and not any(prompt_norm.is_similar(guideline, part) for part in parts):
+            parts.append(f"环境基调：{guideline}")
         return "；".join([p for p in parts if p])
 
     def _format_objects(self, style_assets: Dict[str, Any]) -> str:
@@ -291,10 +319,44 @@ class VideoPromptComposerTool(AsyncTool):
     def _format_continuity(self, continuity_assets: Dict[str, Any]) -> str:
         if not isinstance(continuity_assets, dict):
             return ""
-        depends_on = continuity_assets.get("depends_on_scene")
+        local = continuity_assets.get("local_continuity") or {}
+        depends_on = local.get("depends_on_scene") if isinstance(local, dict) else continuity_assets.get("depends_on_scene")
         if isinstance(depends_on, int):
+            notes = prompt_norm.compact_lock_text(local.get("transition_notes"), max_len=48, max_clauses=1) if isinstance(local, dict) else ""
+            if notes:
+                return f"承接场景 {depends_on}；{notes}"
             return f"承接场景 {depends_on}"
         return ""
+
+    def _compact_scene_descriptions(self, descriptions: Any) -> str:
+        if isinstance(descriptions, str):
+            descriptions = [descriptions]
+        if not isinstance(descriptions, list):
+            return ""
+
+        metadata_markers = ("原型：", "物种：", "role:", "archetype", "species")
+        ranked: List[tuple[int, int, str]] = []
+        for raw in descriptions:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            segments = [
+                segment.strip()
+                for segment in text.replace("；", ";").split(";")
+                if segment.strip() and not any(marker in segment for marker in metadata_markers)
+            ]
+            source_text = "；".join(segments) if segments else text
+            compact = prompt_norm.compact_lock_text(text, max_len=40, max_clauses=2, drop_meta=True)
+            if not compact or any(marker in compact for marker in metadata_markers):
+                compact = prompt_norm.compact_lock_text(source_text, max_len=40, max_clauses=2, drop_meta=True)
+            if not compact:
+                continue
+            separator_weight = text.count("；") + text.count(";") + text.count("：")
+            ranked.append((separator_weight, len(text), compact))
+
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        selected = prompt_norm.dedupe_clauses([item[2] for item in ranked])[:2]
+        return "；".join(selected)
 
     @staticmethod
     def _join_items(items: Any, *, max_items: int = 6, sep: str = "、") -> str:

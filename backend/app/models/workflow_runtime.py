@@ -3,7 +3,7 @@ Workflow runtime models for single-episode control-plane state
 """
 import enum
 
-from sqlalchemy import Column, String, Text, JSON, Integer, ForeignKey, Boolean
+from sqlalchemy import Column, String, Text, JSON, Integer, ForeignKey, Boolean, DateTime
 from sqlalchemy.orm import relationship
 
 from .base import BaseModel
@@ -116,6 +116,10 @@ class WorkflowNodeAttempt(BaseModel):
     status = Column(String(20), nullable=False, default=WorkflowAttemptStatus.RUNNING.value)
     error_code = Column(String(100), nullable=True)
     error_message = Column(Text, nullable=True)
+    lease_token = Column(String(64), nullable=True)
+    lease_owner = Column(String(100), nullable=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
 
     session = relationship("WorkflowSession", back_populates="attempts")
     node = relationship("WorkflowNodeState", back_populates="attempts")

@@ -21,6 +21,7 @@ from .base_tool import (
     ToolType,
     ToolValidationError,
 )
+from . import video_prompt_normalization as prompt_norm
 
 
 class VideoPromptBuilderTool(AsyncTool):
@@ -103,7 +104,7 @@ class VideoPromptBuilderTool(AsyncTool):
         style_assets = self._extract_style_assets(scene_info)
         character_assets = self._extract_character_assets(scene_info)
         continuity_assets = self._extract_continuity_assets(scene_info, scene_number)
-        creative_intent = ""
+        creative_intent = self._clip_text(scene_facts.get("creative_intent"), 140)
         negative_guidance: List[str] = []
 
         lines: List[str] = []
@@ -116,29 +117,74 @@ class VideoPromptBuilderTool(AsyncTool):
         _append(f"{header}：")
 
         visual = scene_facts.get("visual_description") or scene_facts.get("description")
-        if visual:
-            _append(f"- 视觉重点：{visual}")
-
-        narrative = scene_facts.get("narrative_description") or scene_facts.get("story")
+        narrative = self._clip_text(scene_facts.get("narrative_description") or scene_facts.get("story"), 180)
         if narrative:
-            _append(f"- 叙事要点：{narrative}")
+            narrative = narrative.strip()
 
         duration = scene_facts.get("duration")
         if duration:
             _append(f"- 目标时长：{duration}s")
 
+        prompt_mode = self._resolve_prompt_mode(scene_facts, continuity_assets)
+        if prompt_mode == "continuity":
+            _append("- 创作重点：延续上一场尾帧状态与动作趋势，不重新建立角色造型。")
+        elif prompt_mode == "image_to_video":
+            _append("- 创作重点：基于当前首帧向后推进动作，不重复静态复述整张首帧。")
+        else:
+            _append("- 创作重点：先建立角色与环境，再推进关键动作变化。")
+
+        opening_state = self._resolve_opening_state(scene_facts, visual)
+        if opening_state:
+            _append(f"- 开场状态：{opening_state}")
+
+        event_trigger = self._clip_text(scene_facts.get("event_trigger"), 160)
+        if event_trigger:
+            _append(f"- 触发动作：{event_trigger}")
+
+        action_phases = self._normalize_action_phases(scene_facts)
+        action_arc = self._format_action_arc(action_phases)
+        if action_arc:
+            _append(f"- 动作推进：{action_arc}")
+
+        camera_language = self._clip_text(
+            scene_facts.get("camera_language") or scene_facts.get("camera_angle"),
+            140,
+        )
+        if camera_language:
+            _append(f"- 镜头语言：{camera_language}")
+        else:
+            phase_camera = self._format_phase_camera_hints(action_phases)
+            if phase_camera:
+                _append(f"- 镜头语言：{phase_camera}")
+
+        end_state = self._clip_text(scene_facts.get("end_state"), 160)
+        if not end_state:
+            end_state = self._infer_end_state(action_phases)
+        if end_state:
+            _append(f"- 收束画面：{end_state}")
+
+        script_text = prompt_norm.compact_story_detail(
+            scene_facts.get("script_text"),
+            action_text=action_arc,
+            max_len=90,
+        )
+        if script_text:
+            _append(f"- 剧情细节：{script_text}")
+        else:
+            narrative_detail = prompt_norm.compact_story_detail(
+                narrative,
+                action_text=action_arc,
+                max_len=90,
+            )
+            if narrative_detail:
+                _append(f"- 剧情细节：{narrative_detail}")
+
+        mood = self._clip_text(scene_facts.get("mood_and_atmosphere"), 120)
+        if mood:
+            _append(f"- 氛围控制：{mood}")
+
         if creative_intent:
             _append(f"- 创作意图：{creative_intent}")
-
-        motion_beats = scene_facts.get("motion_beats") or []
-        if isinstance(motion_beats, list) and motion_beats:
-            beats_preview = "; ".join(
-                f"{beat.get('label','beat')}: {beat.get('description','')}"
-                for beat in motion_beats
-                if isinstance(beat, dict)
-            )
-            if beats_preview:
-                _append(f"- 运动节奏：{beats_preview}")
 
         continuity_lines = self._format_continuity(continuity_assets)
         if continuity_lines:
@@ -162,6 +208,9 @@ class VideoPromptBuilderTool(AsyncTool):
         metadata = {
             "scene_number": scene_number,
             "has_continuity": bool(continuity_assets),
+            "prompt_mode": prompt_mode,
+            "action_phase_count": len(action_phases),
+            "action_source": self._detect_action_source(scene_facts),
             "references": {
                 "style_assets": bool(style_assets),
                 "character_assets": bool(character_assets),
@@ -282,6 +331,129 @@ class VideoPromptBuilderTool(AsyncTool):
                 return candidate
         return {}
 
+    def _resolve_prompt_mode(self, scene_facts: Dict[str, Any], continuity_assets: Dict[str, Any]) -> str:
+        if isinstance(continuity_assets, dict) and continuity_assets:
+            return "continuity"
+        image_url = scene_facts.get("image_url") if isinstance(scene_facts, dict) else ""
+        if isinstance(image_url, str) and image_url.strip():
+            return "image_to_video"
+        return "text_to_video"
+
+    def _resolve_opening_state(self, scene_facts: Dict[str, Any], visual: str) -> str:
+        if isinstance(scene_facts.get("opening_state"), str) and scene_facts.get("opening_state").strip():
+            return self._clip_text(scene_facts.get("opening_state"), 160)
+        return prompt_norm.compact_lock_text(visual, max_len=120, max_clauses=2)
+
+    def _normalize_action_phases(self, scene_facts: Dict[str, Any]) -> List[Dict[str, Any]]:
+        phases = scene_facts.get("action_phases") or []
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(phases, list) and phases:
+            for idx, raw in enumerate(phases):
+                if not isinstance(raw, dict):
+                    continue
+                normalized.append(
+                    {
+                        "index": idx + 1,
+                        "phase": str(raw.get("phase") or raw.get("label") or "").strip(),
+                        "observable_actions": str(
+                            raw.get("observable_actions")
+                            or raw.get("action")
+                            or raw.get("description")
+                            or raw.get("beat_summary")
+                            or ""
+                        ).strip(),
+                        "camera_hint": str(
+                            raw.get("camera_hint")
+                            or raw.get("camera")
+                            or raw.get("shot")
+                            or ""
+                        ).strip(),
+                    }
+                )
+            if normalized:
+                return normalized
+
+        motion_beats = scene_facts.get("motion_beats") or []
+        if isinstance(motion_beats, list):
+            for idx, raw in enumerate(motion_beats):
+                if not isinstance(raw, dict):
+                    continue
+                visual_focus = str(raw.get("visual_focus") or raw.get("focus") or "").strip()
+                beat_summary = str(
+                    raw.get("beat_summary")
+                    or raw.get("description")
+                    or raw.get("action")
+                    or ""
+                ).strip()
+                normalized.append(
+                    {
+                        "index": idx + 1,
+                        "phase": visual_focus,
+                        "observable_actions": beat_summary or visual_focus,
+                        "camera_hint": str(raw.get("camera_hint") or "").strip(),
+                    }
+                )
+        return normalized
+
+    def _format_action_arc(self, action_phases: List[Dict[str, Any]]) -> str:
+        if not isinstance(action_phases, list) or not action_phases:
+            return ""
+        lead_ins = ["先", "随后", "接着", "最后"]
+        parts: List[str] = []
+        for idx, phase in enumerate(action_phases[:4]):
+            if not isinstance(phase, dict):
+                continue
+            phase_name, observable = prompt_norm.compact_action_pair(
+                phase.get("phase"),
+                phase.get("observable_actions"),
+            )
+            if not phase_name and not observable:
+                continue
+            lead_in = lead_ins[idx] if idx < len(lead_ins) else "随后"
+            if observable and phase_name and phase_name not in observable:
+                segment = f"{lead_in}{phase_name}，{observable}"
+            else:
+                segment = f"{lead_in}{observable or phase_name}"
+            camera_hint = str(phase.get("camera_hint") or "").strip()
+            if camera_hint:
+                segment += f"，镜头{camera_hint}"
+            parts.append(segment)
+        return "；".join(parts)
+
+    def _infer_end_state(self, action_phases: List[Dict[str, Any]]) -> str:
+        if not isinstance(action_phases, list) or not action_phases:
+            return ""
+        for phase in reversed(action_phases):
+            if not isinstance(phase, dict):
+                continue
+            phase_name, observable = prompt_norm.compact_action_pair(
+                phase.get("phase"),
+                phase.get("observable_actions"),
+                phase_max_len=56,
+                extra_max_len=56,
+            )
+            end_state = "，".join([part for part in (phase_name, observable) if part])
+            if end_state:
+                return self._clip_text(end_state, 100)
+        return ""
+
+    def _format_phase_camera_hints(self, action_phases: List[Dict[str, Any]]) -> str:
+        hints: List[str] = []
+        for phase in action_phases:
+            if not isinstance(phase, dict):
+                continue
+            hint = str(phase.get("camera_hint") or "").strip()
+            if hint and hint not in hints:
+                hints.append(hint)
+        return "；".join(hints[:3])
+
+    def _detect_action_source(self, scene_facts: Dict[str, Any]) -> str:
+        if isinstance(scene_facts.get("action_phases"), list) and scene_facts.get("action_phases"):
+            return "action_phases"
+        if isinstance(scene_facts.get("motion_beats"), list) and scene_facts.get("motion_beats"):
+            return "motion_beats"
+        return "summary_only"
+
     @staticmethod
     def _coerce_int(value: Any) -> Optional[int]:
         try:
@@ -385,3 +557,16 @@ class VideoPromptBuilderTool(AsyncTool):
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
         return []
+
+    @staticmethod
+    def _clip_text(text: Any, max_len: int) -> str:
+        if not isinstance(text, str):
+            return ""
+        text = text.strip()
+        if not text:
+            return ""
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:
+            return text[:max_len]
+        return text[: max_len - 3] + "..."

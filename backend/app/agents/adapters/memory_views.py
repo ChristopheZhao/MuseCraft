@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
+from ...services.scene_contract import annotate_scene_info_payload
 from ...services.video_composer_execution_contract import get_video_composer_compose_mode
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
@@ -511,11 +512,22 @@ def build_image_generation_context(
             "visual_description": scene.get("visual_description", ""),
             "narrative_description": scene.get("narrative_description", ""),
             "duration": scene.get("duration", 0.0),
+            "mood_and_atmosphere": scene.get("mood_and_atmosphere") or concept_entry.get("mood_and_atmosphere") or "",
+            "camera_angle": scene.get("camera_angle") or concept_entry.get("camera_angle") or "",
+            "creative_intent": scene.get("creative_intent") or concept_entry.get("creative_intent") or "",
             "motion_beats": list(
                 (script_entry or {}).get("motion_beats")
                 or concept_entry.get("motion_beats")
                 or scene.get("motion_beats", [])
             ),
+            "opening_state": (script_entry or {}).get("opening_state", "") or scene.get("opening_state", "") or "",
+            "event_trigger": (script_entry or {}).get("event_trigger", "") or scene.get("event_trigger", "") or "",
+            "action_phases": list(
+                (script_entry or {}).get("action_phases")
+                or scene.get("action_phases", [])
+            ),
+            "end_state": (script_entry or {}).get("end_state", "") or scene.get("end_state", "") or "",
+            "camera_language": (script_entry or {}).get("camera_language", "") or scene.get("camera_language", "") or "",
             "characters_present": list((script_entry or {}).get("characters_present") or concept_entry.get("characters_present") or []),
             "character_descriptions": list((script_entry or {}).get("character_descriptions") or concept_entry.get("character_descriptions") or []),
             "script_text": (script_entry or {}).get("script_text", ""),
@@ -537,7 +549,7 @@ def build_image_generation_context(
         "intelligent_style": concept_plan.get("intelligent_style_design") or {},
     }
 
-    scene_info_payload = {
+    scene_info_payload = annotate_scene_info_payload({
         "task_type": "batch_image_generation",
         "workflow_state_id": workflow_id,
         "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
@@ -546,7 +558,7 @@ def build_image_generation_context(
         "concept_plan": concept_plan,
         "intelligent_style": concept_plan.get("intelligent_style_design") or {},
         "scene_overview": overview,
-    }
+    }, mode="image_generation")
 
     return {
         "context": context,
@@ -645,12 +657,23 @@ def build_video_generation_context(
             "visual_description": scene.get("visual_description", ""),
             "narrative_description": scene.get("narrative_description", ""),
             "duration": scene.get("duration", 0.0),
+            "mood_and_atmosphere": scene.get("mood_and_atmosphere") or concept_entry.get("mood_and_atmosphere") or "",
+            "camera_angle": scene.get("camera_angle") or concept_entry.get("camera_angle") or "",
+            "creative_intent": scene.get("creative_intent") or concept_entry.get("creative_intent") or "",
             "image_url": image_url,
             "motion_beats": list(
                 (script_entry or {}).get("motion_beats")
                 or concept_entry.get("motion_beats")
                 or scene.get("motion_beats", [])
             ),
+            "opening_state": (script_entry or {}).get("opening_state", "") or scene.get("opening_state", "") or "",
+            "event_trigger": (script_entry or {}).get("event_trigger", "") or scene.get("event_trigger", "") or "",
+            "action_phases": list(
+                (script_entry or {}).get("action_phases")
+                or scene.get("action_phases", [])
+            ),
+            "end_state": (script_entry or {}).get("end_state", "") or scene.get("end_state", "") or "",
+            "camera_language": (script_entry or {}).get("camera_language", "") or scene.get("camera_language", "") or "",
             "characters_present": list(
                 (script_entry or {}).get("characters_present")
                 or concept_entry.get("characters_present")
@@ -719,7 +742,7 @@ def build_video_generation_context(
         "scene_image_refs": scene_image_refs,
     }
 
-    scene_info_payload = {
+    scene_info_payload = annotate_scene_info_payload({
         "task_type": "batch_video_generation",
         "workflow_state_id": workflow_id,
         "total_scenes": len(scenes_source or []),
@@ -727,7 +750,7 @@ def build_video_generation_context(
         "concept_plan": concept_plan,
         "intelligent_style": concept_plan.get("intelligent_style_design") or {},
         "scene_overview": overview,
-    }
+    }, mode="video_generation")
 
     context = {
         "task_overview": task_overview,

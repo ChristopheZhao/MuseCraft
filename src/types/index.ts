@@ -227,7 +227,6 @@ export interface RuntimeResumeControl {
     | 'view_only_running'
     | 'resume_blocked'
     | 'resume_available'
-    | 'resume_unknown'
     | string;
   can_resume: boolean;
   reason_code: string;

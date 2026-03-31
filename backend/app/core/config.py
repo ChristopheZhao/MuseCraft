@@ -336,6 +336,31 @@ class Settings(BaseSettings):
         default=900,
         cast=int,
     )
+    RUNTIME_ATTEMPT_LEASE_SECONDS: int = config(
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        default=300,
+        cast=int,
+    )
+    RUNTIME_ATTEMPT_HEARTBEAT_INTERVAL_SECONDS: int = config(
+        "RUNTIME_ATTEMPT_HEARTBEAT_INTERVAL_SECONDS",
+        default=60,
+        cast=int,
+    )
+    QUICK_RUNTIME_RECONCILER_ENABLED: bool = config(
+        "QUICK_RUNTIME_RECONCILER_ENABLED",
+        default=True,
+        cast=bool,
+    )
+    QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS: int = config(
+        "QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS",
+        default=60,
+        cast=int,
+    )
+    QUICK_RUNTIME_RECONCILER_BATCH_LIMIT: int = config(
+        "QUICK_RUNTIME_RECONCILER_BATCH_LIMIT",
+        default=100,
+        cast=int,
+    )
     
     # WebSocket Settings
     WEBSOCKET_PATH: str = config("WEBSOCKET_PATH", default="/ws")

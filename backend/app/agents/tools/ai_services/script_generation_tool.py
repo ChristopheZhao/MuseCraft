@@ -64,9 +64,15 @@ class ScriptGenerationTool(AsyncTool):
                     "description": "场景数据，包含视觉描述、内容重点等",
                     "properties": {
                         "script_text": {"type": "string"},
+                        "title": {"type": "string"},
                         "visual_description": {"type": "string"},
                         "narrative_description": {"type": "string"},
-                        "duration": {"type": "number"}
+                        "duration": {"type": "number"},
+                        "mood_and_atmosphere": {"type": "string"},
+                        "camera_angle": {"type": "string"},
+                        "creative_intent": {"type": "string"},
+                        "characters_present": {"type": "array", "items": {"type": "string"}},
+                        "character_descriptions": {"type": "array", "items": {"type": "string"}},
                     }
                 },
                 "video_style": {
@@ -111,9 +117,15 @@ class ScriptGenerationTool(AsyncTool):
                                 "description": "场景数据，包含视觉描述、内容重点等",
                                 "properties": {
                                     "script_text": {"type": "string"},
+                                    "title": {"type": "string"},
                                     "visual_description": {"type": "string"},
                                     "narrative_description": {"type": "string"},
-                                    "duration": {"type": "number"}
+                                    "duration": {"type": "number"},
+                                    "mood_and_atmosphere": {"type": "string"},
+                                    "camera_angle": {"type": "string"},
+                                    "creative_intent": {"type": "string"},
+                                    "characters_present": {"type": "array", "items": {"type": "string"}},
+                                    "character_descriptions": {"type": "array", "items": {"type": "string"}},
                                 }
                             },
                             "video_style": {"type": "string"},
@@ -267,8 +279,14 @@ class ScriptGenerationTool(AsyncTool):
             "scene_script_generation",
             {
                 "scene_number": scene_data.get("scene_number", 1),
+                "title": scene_data.get("title", ""),
                 "visual_description": scene_data.get("visual_description", ""),
                 "narrative_description": scene_data.get("narrative_description", ""),
+                "mood_and_atmosphere": scene_data.get("mood_and_atmosphere", ""),
+                "camera_angle": scene_data.get("camera_angle", ""),
+                "creative_intent": scene_data.get("creative_intent", ""),
+                "characters_present": scene_data.get("characters_present", []) or [],
+                "character_descriptions": scene_data.get("character_descriptions", []) or [],
                 "style_context": style_context,
                 "duration_capabilities": duration_caps_str,
                 "voice_expectations": voice_expectations,

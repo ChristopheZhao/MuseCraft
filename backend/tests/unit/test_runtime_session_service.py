@@ -163,6 +163,228 @@ def test_mark_session_running_and_completed_updates_projection(sync_db):
     )
 
 
+def test_grant_attempt_lease_sync_assigns_control_plane_lease(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        120,
+    )
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="concept",
+        task=task,
+    )
+
+    leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:test",
+        lease_token="lease-token-1",
+    )
+
+    assert leased_attempt.lease_token == "lease-token-1"
+    assert leased_attempt.lease_owner == "orchestrator:test"
+    assert leased_attempt.last_heartbeat_at == lease_started_at
+    assert leased_attempt.lease_expires_at == lease_started_at + timedelta(seconds=120)
+    assert RuntimeSessionService.is_attempt_lease_live(
+        leased_attempt,
+        as_of=lease_started_at + timedelta(seconds=119),
+    )
+    assert not RuntimeSessionService.is_attempt_lease_live(
+        leased_attempt,
+        as_of=lease_started_at + timedelta(seconds=120),
+    )
+
+
+def test_heartbeat_attempt_lease_sync_renews_expiry(sync_db, monkeypatch):
+    initial_now = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    renewed_now = initial_now + timedelta(seconds=45)
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        180,
+    )
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: initial_now)
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:image",
+        lease_token="lease-token-2",
+    )
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: renewed_now)
+    renewed_attempt = RuntimeSessionService.heartbeat_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_token="lease-token-2",
+    )
+
+    assert renewed_attempt.last_heartbeat_at == renewed_now
+    assert renewed_attempt.lease_expires_at == renewed_now + timedelta(seconds=180)
+
+
+def test_assert_attempt_lease_sync_rejects_mismatch_and_expiry(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    expired_now = lease_started_at + timedelta(seconds=301)
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        300,
+    )
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        task=task,
+    )
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:video",
+        lease_token="lease-token-3",
+    )
+
+    with pytest.raises(ValueError, match="token mismatch"):
+        RuntimeSessionService.assert_attempt_lease_sync(
+            sync_db,
+            session,
+            attempt_id=attempt.id,
+            lease_token="wrong-token",
+        )
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: expired_now)
+    with pytest.raises(ValueError, match="lease expired"):
+        RuntimeSessionService.assert_attempt_lease_sync(
+            sync_db,
+            session,
+            attempt_id=attempt.id,
+            lease_token="lease-token-3",
+        )
+
+
+def test_release_attempt_lease_sync_clears_lease_fields(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="audio",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:audio",
+        lease_token="lease-token-4",
+    )
+
+    released_attempt = RuntimeSessionService.release_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_token="lease-token-4",
+    )
+
+    assert released_attempt.lease_token is None
+    assert released_attempt.lease_owner is None
+    assert released_attempt.last_heartbeat_at is None
+    assert released_attempt.lease_expires_at is None
+    assert not RuntimeSessionService.is_attempt_lease_live(released_attempt)
+
+
+def test_complete_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:image",
+        lease_token="lease-token-complete",
+    )
+
+    completed_attempt = RuntimeSessionService.complete_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        attempt_id=attempt.id,
+        lease_token="lease-token-complete",
+        node_status=WorkflowNodeStatus.COMPLETED.value,
+    )
+
+    assert completed_attempt.status == "succeeded"
+    assert completed_attempt.lease_token is None
+    assert completed_attempt.lease_owner is None
+    assert completed_attempt.lease_expires_at is None
+
+
+def test_fail_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:video",
+        lease_token="lease-token-fail",
+    )
+
+    failed_attempt = RuntimeSessionService.fail_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        attempt_id=attempt.id,
+        lease_token="lease-token-fail",
+        error_message="boom",
+    )
+
+    assert failed_attempt.status == "failed"
+    assert failed_attempt.lease_token is None
+    assert failed_attempt.lease_owner is None
+    assert failed_attempt.lease_expires_at is None
+
+
 def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
@@ -217,67 +439,57 @@ def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
 
 
 def test_running_runtime_exposes_view_only_recent_resume_control(sync_db, monkeypatch):
-    monkeypatch.setattr(
-        runtime_session_service_module.settings,
-        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
-        900,
-    )
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="concept",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:concept",
+        lease_token="lease-token-running",
+    )
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
     assert view["resume_control"] == {
         "state": "view_only_running",
         "can_resume": False,
-        "reason_code": "runtime_recent",
+        "reason_code": "active_execution_lease",
     }
 
 
 def test_running_runtime_exposes_transport_active_before_freshness(sync_db, monkeypatch):
-    monkeypatch.setattr(
-        runtime_session_service_module.settings,
-        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
-        900,
-    )
-    monkeypatch.setattr(
-        runtime_session_service_module,
-        "probe_task_transport_state",
-        lambda celery_task_id: SimpleNamespace(state="live", reason_code="transport_active"),
-    )
     task = _create_task(sync_db)
-    task.output_metadata = {"celery_task_id": "celery-task-live"}
-    sync_db.commit()
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:image",
+        lease_token="lease-token-live",
+    )
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
     assert view["resume_control"] == {
         "state": "view_only_running",
         "can_resume": False,
-        "reason_code": "transport_active",
+        "reason_code": "active_execution_lease",
     }
 
 
 def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(sync_db, monkeypatch):
-    monkeypatch.setattr(
-        runtime_session_service_module.settings,
-        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
-        60,
-    )
-    probe_calls = {}
-
-    def _fake_probe(celery_task_id):
-        probe_calls["celery_task_id"] = celery_task_id
-        return SimpleNamespace(state="not_live", reason_code="missing_queue_handle")
-
-    monkeypatch.setattr(runtime_session_service_module, "probe_task_transport_state", _fake_probe)
-
     task = _create_task(sync_db)
-    task.output_metadata = {"celery_task_id": "celery-task-1"}
-    sync_db.commit()
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
     attempt = RuntimeSessionService.start_node_attempt_sync(
         sync_db,
@@ -295,75 +507,100 @@ def test_stalled_runtime_exposes_resume_available_when_transport_is_not_live(syn
             attempt_id=attempt.id,
         ),
     )
-    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
-    task.updated_at = stale_at
-    session.updated_at = stale_at
-    sync_db.commit()
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
-    assert probe_calls["celery_task_id"] == "celery-task-1"
     assert view["resume_control"] == {
         "state": "resume_available",
         "can_resume": True,
-        "reason_code": "stalled_runtime_with_checkpoint",
+        "reason_code": "checkpoint_available",
     }
 
 
-def test_stalled_runtime_exposes_resume_unknown_when_transport_state_is_unknown(sync_db, monkeypatch):
-    monkeypatch.setattr(
-        runtime_session_service_module.settings,
-        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
-        60,
-    )
-    monkeypatch.setattr(
-        runtime_session_service_module,
-        "probe_task_transport_state",
-        lambda celery_task_id: SimpleNamespace(state="unknown", reason_code="transport_probe_unavailable"),
-    )
-
+def test_resuming_runtime_exposes_view_only_resume_scheduled(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
-    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
-    task.updated_at = stale_at
-    session.updated_at = stale_at
-    sync_db.commit()
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+    RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        continuation_checkpoint=_build_continuation_checkpoint(
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="image",
+            attempt_id=attempt.id,
+        ),
+    )
+    RuntimeSessionService.mark_session_resuming_sync(sync_db, session, task=task)
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
     assert view["resume_control"] == {
-        "state": "resume_unknown",
+        "state": "view_only_running",
         "can_resume": False,
-        "reason_code": "transport_state_unknown",
+        "reason_code": "resume_scheduled",
     }
 
 
-def test_stalled_runtime_exposes_resume_blocked_when_checkpoint_is_missing(sync_db, monkeypatch):
-    monkeypatch.setattr(
-        runtime_session_service_module.settings,
-        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
-        60,
-    )
-    monkeypatch.setattr(
-        runtime_session_service_module,
-        "probe_task_transport_state",
-        lambda celery_task_id: SimpleNamespace(state="not_live", reason_code="missing_queue_handle"),
-    )
-
+def test_running_runtime_without_checkpoint_is_resume_blocked(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
-    RuntimeSessionService.mark_session_running_sync(sync_db, session, task=task)
-    stale_at = datetime.now(timezone.utc) - timedelta(minutes=30)
-    task.updated_at = stale_at
-    session.updated_at = stale_at
-    sync_db.commit()
+    RuntimeSessionService.start_node_attempt_sync(sync_db, session, node_key="concept", task=task)
+
+    resume_control = RuntimeSessionService.get_resume_control_sync(sync_db, task, session)
+
+    assert resume_control == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "missing_continuation_checkpoint",
+    }
+
+
+def test_build_runtime_view_keeps_irrecoverable_stale_quick_runtime_read_only(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+        progress_step="Generating script",
+        progress_percentage=15,
+    )
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+    sync_db.refresh(task)
+    sync_db.refresh(session)
+    sync_db.refresh(attempt)
 
+    assert view["status"] == WorkflowSessionStatus.RUNNING.value
     assert view["resume_control"] == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "missing_continuation_checkpoint",
+    }
+    assert view["error_message"] is None
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert session.status == WorkflowSessionStatus.RUNNING.value
+    assert attempt.status == "running"
+    assert attempt.error_message is None
+
+
+def test_stalled_runtime_exposes_resume_blocked_when_checkpoint_is_missing(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+    RuntimeSessionService.start_node_attempt_sync(sync_db, session, node_key="voice", task=task)
+
+    resume_control = RuntimeSessionService.get_resume_control_sync(sync_db, task, session)
+
+    assert resume_control == {
         "state": "resume_blocked",
         "can_resume": False,
         "reason_code": "missing_continuation_checkpoint",
@@ -401,6 +638,13 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
         progress_step="Generating script",
         progress_percentage=15,
     )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:script",
+        lease_token="lease-token-script-review",
+    )
     artifact_ref = {
         "type": "published_deliverable",
         "deliverable_id": 9,
@@ -425,6 +669,7 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
         script_output={"scenes_generated": 1, "total_scenes": 1},
         artifact_ref=artifact_ref,
         script_preview_text="draft preview",
+        lease_token="lease-token-script-review",
         continuation_checkpoint=_build_continuation_checkpoint(
             anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
             node_key="script",
@@ -440,6 +685,7 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
     assert gate.gate_name == "script_review"
     assert gate.result_code == WorkflowGateStatus.AWAITING_HUMAN.value
     assert gate.reason_code == "replan"
+    assert refreshed_attempt.lease_token is None
     assert gate.scope == {"scope_type": "episode", "scope_ref": "wf-script-review"}
     assert view["status"] == WorkflowSessionStatus.WAITING_GATE.value
     assert view["active_gate"]["gate_name"] == "script_review"
@@ -784,6 +1030,50 @@ def test_build_runtime_view_async_returns_none_without_bootstrapping_session(mon
 
     assert view is None
     assert calls == {"create": 0, "ensure": 0}
+
+
+def test_build_runtime_view_async_does_not_call_reconcile_helper(sync_db, monkeypatch):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    RuntimeSessionService.start_node_attempt_sync(sync_db, session, node_key="script", task=task)
+    calls = {"reconcile": 0}
+
+    class _FakeAsyncDb:
+        async def run_sync(self, fn):
+            return fn(sync_db)
+
+    async def _fake_get_latest_session(db, task_db_id):
+        assert task_db_id == task.id
+        return RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task_db_id)
+
+    async def _fake_load_runtime_nodes(db, session_id):
+        return list(RuntimeSessionService._load_runtime_nodes_sync(sync_db, session_id))
+
+    async def _fake_get_latest_gate(db, session_id):
+        return None
+
+    def _forbidden_reconcile(*args, **kwargs):
+        calls["reconcile"] += 1
+        raise AssertionError("runtime view builder must not reconcile or fail runtimes")
+
+    monkeypatch.setattr(
+        RuntimeSessionService,
+        "reconcile_irrecoverable_quick_runtime_sync",
+        staticmethod(_forbidden_reconcile),
+    )
+    monkeypatch.setattr(RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
+    monkeypatch.setattr(RuntimeSessionService, "_load_runtime_nodes_async", _fake_load_runtime_nodes)
+    monkeypatch.setattr(RuntimeSessionService, "_get_latest_gate_for_session_async", _fake_get_latest_gate)
+
+    view = asyncio.run(RuntimeSessionService.build_runtime_view_for_task(_FakeAsyncDb(), task))
+
+    assert calls["reconcile"] == 0
+    assert view["status"] == WorkflowSessionStatus.RUNNING.value
+    assert view["resume_control"] == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "missing_continuation_checkpoint",
+    }
 
 
 def test_create_session_for_task_refreshes_task_after_commit(monkeypatch):

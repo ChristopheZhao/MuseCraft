@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from .ai_services.service_interfaces import get_vlm_capabilities
+from . import image_prompt_normalization as prompt_norm
 
 
 class ImagePromptComposerTool(AsyncTool):
@@ -63,6 +64,14 @@ class ImagePromptComposerTool(AsyncTool):
                 "fallback_prompt": {
                     "type": "string",
                     "description": "可选：生成提示词为空时的备用提示词",
+                },
+                "image_purpose": {
+                    "type": "string",
+                    "description": "可选：图像用途提示（例如 scene_opening_anchor、character_reference）",
+                },
+                "task_direction": {
+                    "type": "string",
+                    "description": "可选：图像方向提示（例如 avatar、full_body）",
                 },
             },
             "required": ["scene_number", "scene_info_ref"],
@@ -161,6 +170,8 @@ class ImagePromptComposerTool(AsyncTool):
         persist = True if "persist" not in params else bool(params.get("persist"))
         destination_key = (params.get("destination_key") or "").strip()
         fallback_prompt = params.get("fallback_prompt") or ""
+        image_purpose = str(params.get("image_purpose") or "").strip()
+        task_direction = str(params.get("task_direction") or "").strip()
 
         if scene_number is None or not scene_info_ref:
             raise ToolValidationError("scene_number and scene_info_ref are required", self.metadata.name)
@@ -170,7 +181,12 @@ class ImagePromptComposerTool(AsyncTool):
         if not scene_entry:
             raise ToolValidationError("scene_number not found in scene_info_ref", self.metadata.name)
 
-        scene_data = self._build_scene_data(scene_entry, scene_number)
+        scene_data = self._build_scene_data(
+            scene_entry,
+            scene_number,
+            image_purpose=image_purpose,
+            task_direction=task_direction,
+        )
         style_guidance = self._build_style_guidance(scene_info)
         style_name = self._resolve_style_name(style_guidance)
 
@@ -214,7 +230,11 @@ class ImagePromptComposerTool(AsyncTool):
             caller_tool=self.metadata.name,
         )
         assets = consistency_payload.get("assets") if isinstance(consistency_payload, dict) else {}
-        consistency_block, categories = self._build_consistency_block(assets)
+        consistency_block, categories, locked_segments = self._build_consistency_block(
+            assets,
+            image_purpose=scene_data.get("image_purpose") or image_purpose,
+            task_direction=scene_data.get("task_direction") or task_direction,
+        )
 
         if consistency_block:
             prompt_text = prompt_text.rstrip()
@@ -231,6 +251,8 @@ class ImagePromptComposerTool(AsyncTool):
             image_params["destination_key"] = destination_key
         if style_name:
             image_params["style"] = style_name
+        if locked_segments:
+            image_params["consistency_locks"] = locked_segments
 
         gen_input = ToolInput(
             action="generate_image",
@@ -253,7 +275,11 @@ class ImagePromptComposerTool(AsyncTool):
         metadata = dict(gen_payload.get("metadata") or {})
         metadata["consistency_injected"] = bool(consistency_block)
         metadata["consistency_categories"] = categories
+        metadata["consistency_lock_count"] = len(locked_segments)
         metadata["consistency_source"] = "scene_info_ref"
+        metadata["image_purpose"] = scene_data.get("image_purpose") or self._canonicalize_image_purpose(image_purpose)
+        if scene_data.get("task_direction"):
+            metadata["task_direction"] = scene_data.get("task_direction")
 
         try:
             self.logger.info(
@@ -333,9 +359,30 @@ class ImagePromptComposerTool(AsyncTool):
                     return scene
         return {}
 
-    def _build_scene_data(self, scene_entry: Dict[str, Any], scene_number: Any) -> Dict[str, Any]:
+    def _build_scene_data(
+        self,
+        scene_entry: Dict[str, Any],
+        scene_number: Any,
+        *,
+        image_purpose: str = "",
+        task_direction: str = "",
+    ) -> Dict[str, Any]:
         scene_data = dict(scene_entry or {})
         scene_data.setdefault("scene_number", scene_number)
+        normalized_task_direction = str(
+            task_direction
+            or scene_data.get("task_direction")
+            or scene_data.get("reference_view")
+            or scene_data.get("reference_kind")
+            or scene_data.get("reference_type")
+            or ""
+        ).strip()
+        scene_data["image_purpose"] = self._canonicalize_image_purpose(
+            image_purpose or scene_data.get("image_purpose"),
+            task_direction=normalized_task_direction.lower(),
+        )
+        if normalized_task_direction:
+            scene_data["task_direction"] = normalized_task_direction
 
         visual_description = scene_data.get("visual_description") or scene_data.get("description") or ""
         narrative_description = scene_data.get("narrative_description") or scene_data.get("story") or ""
@@ -386,102 +433,182 @@ class ImagePromptComposerTool(AsyncTool):
                 return value.strip()
         return ""
 
-    def _build_consistency_block(self, assets: Any) -> Tuple[str, List[str]]:
-        if not isinstance(assets, dict):
-            return "", []
+    @staticmethod
+    def _canonicalize_image_purpose(value: Any, *, task_direction: str = "") -> str:
+        return prompt_norm.canonicalize_image_purpose(value, task_direction=task_direction)
 
+    def _compress_character_description(self, value: Any, *, max_len: int = 100) -> str:
+        return prompt_norm.compress_character_description(
+            value,
+            segment_max_len=72,
+            fallback_max_len=max_len,
+            output_max_len=max_len,
+        )
+
+    def _build_consistency_block(
+        self,
+        assets: Any,
+        *,
+        image_purpose: Any = "",
+        task_direction: Any = "",
+    ) -> Tuple[str, List[str], List[str]]:
+        if not isinstance(assets, dict):
+            return "", [], []
+
+        purpose = self._canonicalize_image_purpose(image_purpose)
         categories: List[str] = []
         lines: List[str] = []
+        locked_segments: List[str] = []
 
         style_line = self._format_style(assets.get("style") or {})
         if style_line:
-            categories.append("style")
-            lines.append(f"- 画风：{style_line}")
+            categories.append("global_style_lock")
+            lines.append(f"- 全局画风锁定：{style_line}")
+            locked_segments.append(style_line)
 
-        character_line = self._format_characters(assets.get("characters") or {})
+        character_line = self._format_characters(
+            assets.get("characters") or {},
+            image_purpose=purpose,
+            task_direction=task_direction,
+        )
         if character_line:
-            categories.append("characters")
-            lines.append(f"- 角色：{character_line}")
+            categories.append("character_lock")
+            lines.append(f"- 角色锁定：{character_line}")
+            locked_segments.append(character_line)
 
-        environment_line = self._format_environment(assets.get("environment") or {})
+        environment_line = self._format_environment(
+            assets.get("environment") or {},
+            image_purpose=purpose,
+        )
         if environment_line:
-            categories.append("environment")
-            lines.append(f"- 场景氛围：{environment_line}")
+            categories.append("opening_anchor")
+            lines.append(f"- 开场锚点：{environment_line}")
+            locked_segments.append(environment_line)
 
-        object_line = self._format_objects(assets.get("style") or {})
-        if object_line:
-            categories.append("objects")
-            lines.append(f"- 道具：{object_line}")
-
-        continuity_line = self._format_continuity(assets.get("continuity") or {})
+        continuity_line = self._format_continuity(
+            assets.get("continuity") or {},
+            image_purpose=purpose,
+        )
         if continuity_line:
-            categories.append("continuity")
-            lines.append(f"- 连续性：{continuity_line}")
+            categories.append("local_continuity")
+            lines.append(f"- 局部连续性：{continuity_line}")
+            locked_segments.append(continuity_line)
 
         if not lines:
-            return "", []
+            return "", [], []
 
-        return "一致性要求：\n" + "\n".join(lines), categories
+        return "一致性要求：\n" + "\n".join(lines), categories, locked_segments
 
     def _format_style(self, style_assets: Dict[str, Any]) -> str:
         if not isinstance(style_assets, dict):
             return ""
+        lock = style_assets.get("global_lock") or {}
         guidelines = style_assets.get("consistency_guidelines") or {}
-        style_consistency = self._clip_text(guidelines.get("style_consistency"), 160)
+        style_consistency = self._clip_text(
+            lock.get("style_guidelines") or guidelines.get("style_consistency"),
+            120,
+        )
 
         design = (
             style_assets.get("intelligent_style_design")
             or style_assets.get("intelligent_style")
             or {}
         )
-        headline = self._clip_text(design.get("headline") or design.get("summary") or design.get("style_name"), 120)
-        color_palette = self._join_items(design.get("color_palette") or [], max_items=6)
-        style_tags = self._join_items(design.get("style_tags") or design.get("tags") or [], max_items=6)
+        headline = self._clip_text(
+            lock.get("headline") or design.get("headline") or design.get("summary") or design.get("style_name"),
+            100,
+        )
+        color_palette = self._join_items(lock.get("color_palette") or design.get("color_palette") or [], max_items=4)
+        style_tags = self._join_items(lock.get("style_tags") or design.get("style_tags") or design.get("tags") or [], max_items=4)
+        object_guidelines = self._clip_text(lock.get("object_guidelines"), 100)
 
         parts: List[str] = []
-        if style_consistency:
-            parts.append(style_consistency)
-        if headline and headline not in parts:
+        if headline:
             parts.append(headline)
         if style_tags:
             parts.append(f"风格标签：{style_tags}")
         if color_palette:
-            parts.append(f"色彩：{color_palette}")
+            parts.append(f"主色：{color_palette}")
+        if object_guidelines:
+            parts.append(f"关键道具：{object_guidelines}")
+        if style_consistency and not parts:
+            parts.append(style_consistency)
         return "；".join([p for p in parts if p])
 
-    def _format_characters(self, character_assets: Dict[str, Any]) -> str:
+    def _format_characters(
+        self,
+        character_assets: Dict[str, Any],
+        *,
+        image_purpose: str,
+        task_direction: Any = "",
+    ) -> str:
         if not isinstance(character_assets, dict):
             return ""
-        present = self._join_items(character_assets.get("present") or [], max_items=6)
-        descriptions = self._join_items(character_assets.get("descriptions") or [], max_items=4, sep="；")
+        lock = character_assets.get("global_lock") or {}
+        scene_cast = character_assets.get("scene_cast") or {}
+        present = self._join_items(scene_cast.get("present") or character_assets.get("present") or [], max_items=4)
+        descriptions_raw = scene_cast.get("descriptions") or character_assets.get("descriptions") or []
+        descriptions_list: List[str] = []
+        if isinstance(descriptions_raw, list):
+            for item in descriptions_raw:
+                normalized = self._compress_character_description(item, max_len=100)
+                if not normalized:
+                    continue
+                if prompt_norm.contains_video_only_language(item) and normalized == str(item).strip():
+                    continue
+                descriptions_list.append(normalized)
+        descriptions = self._join_items(descriptions_list, max_items=2, sep="；")
+        stable_traits = self._join_items(lock.get("stable_traits") or [], max_items=6)
 
         guideline = ""
-        if isinstance(character_assets.get("guidelines"), str):
-            guideline = self._clip_text(character_assets.get("guidelines"), 140)
+        if isinstance(lock.get("guidelines"), str) and lock.get("guidelines"):
+            guideline = self._clip_text(lock.get("guidelines"), 120)
+        elif isinstance(character_assets.get("guidelines"), str):
+            guideline = self._clip_text(character_assets.get("guidelines"), 120)
 
         parts = []
-        if guideline:
-            parts.append(guideline)
+        if image_purpose == "character_reference" and task_direction:
+            parts.append(f"参考方向：{str(task_direction).strip()}")
         if present:
-            parts.append(f"出现角色：{present}")
+            parts.append(f"角色：{present}")
+        if stable_traits:
+            parts.append(f"稳定特征：{stable_traits}")
         if descriptions:
-            parts.append(f"特征：{descriptions}")
+            parts.append(f"场景特征：{descriptions}")
+        elif guideline:
+            parts.append(guideline)
         return "；".join([p for p in parts if p])
 
-    def _format_environment(self, environment_assets: Dict[str, Any]) -> str:
+    def _format_environment(self, environment_assets: Dict[str, Any], *, image_purpose: str) -> str:
         if not isinstance(environment_assets, dict):
             return ""
-        guideline = self._clip_text(environment_assets.get("guidelines"), 140)
-        visual = self._clip_text(environment_assets.get("visual_description"), 160)
-        narrative = self._clip_text(environment_assets.get("narrative_description"), 120)
+        if image_purpose == "character_reference":
+            return ""
+        opening_anchor = environment_assets.get("opening_anchor") or {}
+        raw_opening_state = str(opening_anchor.get("opening_state") or "").strip()
+        opening_state = prompt_norm.normalize_still_text(raw_opening_state, max_len=120)
+        end_state = prompt_norm.normalize_still_text(
+            opening_anchor.get("end_state") or environment_assets.get("end_state"),
+            max_len=120,
+        )
+        visual = prompt_norm.normalize_still_text(
+            opening_anchor.get("visual_description") or environment_assets.get("visual_description"),
+            max_len=120,
+        )
+        guideline = prompt_norm.normalize_still_text(
+            (environment_assets.get("global_lock") or {}).get("guidelines") or environment_assets.get("guidelines"),
+            max_len=80,
+        )
 
         parts: List[str] = []
-        if guideline:
-            parts.append(guideline)
-        if visual:
-            parts.append(visual)
-        if narrative:
-            parts.append(narrative)
+        if opening_state and not prompt_norm.contains_high_risk_action_language(raw_opening_state):
+            parts.append(f"开场状态：{opening_state}")
+        elif end_state:
+            parts.append(f"静态落点：{end_state}")
+        elif visual:
+            parts.append(f"场景主体：{visual}")
+        if guideline and guideline not in parts:
+            parts.append(f"环境基调：{guideline}")
         return "；".join([p for p in parts if p])
 
     def _format_objects(self, style_assets: Dict[str, Any]) -> str:
@@ -490,12 +617,18 @@ class ImagePromptComposerTool(AsyncTool):
         guidelines = style_assets.get("consistency_guidelines") or {}
         return self._clip_text(guidelines.get("object_consistency"), 140)
 
-    def _format_continuity(self, continuity_assets: Dict[str, Any]) -> str:
+    def _format_continuity(self, continuity_assets: Dict[str, Any], *, image_purpose: str) -> str:
         if not isinstance(continuity_assets, dict):
             return ""
-        depends_on = continuity_assets.get("depends_on_scene")
+        if image_purpose == "character_reference":
+            return ""
+        local = continuity_assets.get("local_continuity") or {}
+        depends_on = local.get("depends_on_scene") if isinstance(local, dict) else continuity_assets.get("depends_on_scene")
         if isinstance(depends_on, int):
-            return f"承接场景 {depends_on}"
+            notes = prompt_norm.normalize_still_text(local.get("transition_notes"), max_len=80) if isinstance(local, dict) else ""
+            if notes:
+                return f"承接场景{depends_on}：{notes}"
+            return f"承接场景{depends_on}"
         return ""
 
     @staticmethod
