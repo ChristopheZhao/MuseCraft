@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "plans": [
+    {
+      "id": "DP-20260331-001",
+      "title": "Converge media authority toward obs-ledger SoT",
+      "status": "active",
+      "owner": "architecture",
+      "file_path": "docs/deferred-plans/active/DP-20260331-001.md",
+      "scope_tags": [
+        "backend",
+        "agents",
+        "memory",
+        "media",
+        "image"
+      ],
+      "topic_tags": [
+        "authority",
+        "obs-ledger",
+        "event-sourcing",
+        "read-model",
+        "dual-write"
+      ],
+      "plan_kinds": [
+        "architecture",
+        "guardrail"
+      ],
+      "goal": "Freeze obs-ledger as the target authority direction for media generation and prevent further expansion of scene_outputs.* as a co-authority surface while the migration remains deferred.",
+      "why_not_now": "A full authority inversion requires a cross-cutting migration of write paths, reducers/materializers, recovery semantics, and downstream consumers; that is larger than the current bugfix and follow-up slices.",
+      "current_deviation": "The current image flow writes same-source outputs into scene_outputs.image while also recording execution trajectory in obs_records, so media completion truth is still spread across sibling surfaces instead of flowing from an obs-ledger authority.",
+      "do_not": [
+        "Do not add new authority semantics, completion truth, or correctness ownership to direct scene_outputs.* write paths.",
+        "Do not introduce planner-owned completed-scene projections or any second completed-state authority.",
+        "Do not promote audit or statistics views into active planning authority."
+      ],
+      "allowed_now": [
+        "Keep scene_outputs.* only as transitional compatibility reads or materialized-view style surfaces; do not treat them as the long-horizon authority target.",
+        "Implement narrow contract, precedence, lease, and execution-boundary fixes needed for current failures without expanding dual-write ownership.",
+        "Prepare event schema, reducers, and migration slices that move future authority toward an obs-ledger without forcing a repo-wide rewrite in the same change."
+      ],
+      "reopen_trigger": [
+        "Before any new work extends scene_outputs.* semantics, write paths, or ownership beyond compatibility/read-model needs.",
+        "When scheduling the first dedicated authority-inversion slice for image or media generation."
+      ],
+      "evidence_refs": [
+        "docs/architecture/scene_contract_v2_freeze_20260329.md",
+        "backend/app/agents/image_generator.py:176",
+        "backend/app/agents/utils/artifacts.py:83",
+        "backend/app/agents/react_agent.py:355"
+      ],
+      "review_after": "2026-06-30",
+      "supersedes": null,
+      "superseded_by": null,
+      "created_at": "2026-03-31T06:17:30Z",
+      "updated_at": "2026-03-31T06:17:30Z",
+      "activated_at": "2026-03-31T06:17:30Z",
+      "completed_at": null,
+      "archived_at": null
+    }
+  ]
+}

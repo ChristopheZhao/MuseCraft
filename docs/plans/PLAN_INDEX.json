@@ -91,7 +91,7 @@
       "id": "PLAN-20260308-003",
       "title": "MAS 编排边界解耦与单 Episode Runtime Kernel 重构",
       "kind": "fix",
-      "status": "blocked",
+      "status": "draft",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260308-003.md",
@@ -1826,7 +1826,7 @@
       "id": "PLAN-20260329-036",
       "title": "Quick current-run explicit resume semantics and stalled recovery path",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260329-036.md",
@@ -1893,6 +1893,217 @@
         {
           "at": "2026-03-29T08:38:41Z",
           "text": "User confirmed the repaired result, so 037 is now completed. Accepted closure remains unchanged: generic stale resume is owned by control-plane continuation checkpoints on a single canonical path, queue/worker stay transport-only, and the frontend continues to consume read-model projections only."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260329-038",
+      "title": "Narrative-scalable scene contract and consistency boundary convergence",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260329-038.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-29T14:22:18Z",
+      "updated_at": "2026-03-30T04:35:58Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-29T14:22:18Z",
+          "text": "Created a managed five-sprint plan after discussion converged on a single root-cause chain: current video quality issues come from scene-granularity drift, weak script-to-action projection, overgrown consistency prose, and loose orchestration/context/memory boundaries. The plan freezes explicit sprint acceptance contracts and a bounded generator/evaluator QC gate per stage."
+        },
+        {
+          "at": "2026-03-29T14:29:32Z",
+          "text": "Completed a pre-implementation architecture review of the plan and tightened three guardrails without changing lifecycle state: owner/SoT freeze is now a Sprint 1 pre-gate, all v2 contracts are constrained to authoritative in-place evolution with no parallel carrier, and generator/evaluator outputs are limited to validation/review surfaces rather than runtime or memory mainlines."
+        },
+        {
+          "at": "2026-03-29T14:41:13Z",
+          "text": "Started Sprint 1 on the authoritative media carrier only: added a pure scene-contract helper, annotated the existing scene_info_payload path with explicit scene_contract_meta, and wrote the architecture freeze note with owner/SoT matrix plus positive/negative examples. Validation currently includes py_compile and direct backend/.venv smoke runs for both image and video builders; the generator/evaluator gate remains open before Sprint 1 can close."
+        },
+        {
+          "at": "2026-03-29T14:44:20Z",
+          "text": "Closed Sprint 1 after a validation-surface-only generator/evaluator gate. The accepted result freezes scene semantics as local_event on the existing scene_info_payload carrier, keeps all v2 growth in place with no parallel runtime or memory mainline, and defers upstream action_phases serialization plus downstream prompt rewrites to Sprint 2."
+        },
+        {
+          "at": "2026-03-29T15:00:03Z",
+          "text": "Closed Sprint 2 on the existing carriers only: script generation now requests and normalizes opening_state/event_trigger/action_phases/end_state/camera_language into project.scene_scripts, scene_info_payload projects those fields in place for media agents, and video_prompt_builder now prioritizes visible action arcs plus mode-specific guidance over summary prose. Validation passed via py_compile and targeted backend tests (8 passed)."
+        },
+        {
+          "at": "2026-03-29T15:14:38Z",
+          "text": "Closed Sprint 3 on the same prompt-asset path: consistency_tool now emits explicit global locks, scene opening anchors, and local continuity layers in place, while image/video composers consume the same structured labels rather than flattening consistency into long prose blocks. Validation passed via dedicated consistency tests (3 passed) and the combined Sprint 2+3 suite (11 passed)."
+        },
+        {
+          "at": "2026-03-30T02:19:04Z",
+          "text": "User confirmed that the newly discovered runtime-boundary deviations are a separate high-risk governance theme. PLAN-20260329-038 now stays focused on the video-quality mainline, remains blocked, and waits on external remediation plan PLAN-20260330-039 before Sprint 4 can resume."
+        },
+        {
+          "at": "2026-03-30T04:22:16Z",
+          "text": "PLAN-20260330-039 is now completed and its blocker conditions are satisfied, so PLAN-20260329-038 resumes into Sprint 4. The mainline scope remains unchanged: owner-boundary inventory, read/write mapping, and boundary hardening continue without reabsorbing runtime remediation."
+        },
+        {
+          "at": "2026-03-30T04:31:53Z",
+          "text": "Closed Sprint 4 on the content mainline without reopening runtime remediation. The plan now has an explicit orchestration/context/memory owner matrix, forbidden fallback inventory, and boundary evidence based on py_compile plus direct backend smokes; local pytest instability was recorded as an environment limitation rather than overstated as passing verification."
+        },
+        {
+          "at": "2026-03-30T04:35:58Z",
+          "text": "Closed Sprint 5 on validation surfaces only: the plan now has an explicit extension-proof document covering 10s, 15s, and 20s scene projections plus continuity/global-consistency scene pairs, and a direct backend smoke confirmed that video_prompt_builder still consumes the same action_phases contract for a 20s scene. Lifecycle remains in_progress only until the user confirms closure."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260330-039",
+      "title": "Quick runtime boundary remediation and reconcile ownership hardening",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260330-039.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-30T02:19:04Z",
+      "updated_at": "2026-03-30T04:22:16Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-30T02:19:04Z",
+          "text": "Created a dedicated remediation plan after PLAN-20260329-038 Phase 3 / Phase 4 pre-review surfaced high-risk runtime-boundary deviations: mutate-on-read in runtime projection, selector suppression of projection integrity errors, and API-process default reconcile ownership. This plan is now the sole implementation owner for the remediation while 038 remains blocked."
+        },
+        {
+          "at": "2026-03-30T02:24:36Z",
+          "text": "Governance review changed PLAN-20260330-039 to draft/review-first. The next window must review and, if needed, amend the plan/validation pair before implementation so the remediation stays narrow and does not grow a second mainline."
+        },
+        {
+          "at": "2026-03-30T02:31:45Z",
+          "text": "Review/amend gate completed. PLAN-20260330-039 is now in progress with a frozen implementation envelope limited to the runtime-boundary files and targeted regression tests; PLAN-20260329-038 remains blocked until this remediation validates cleanly."
+        },
+        {
+          "at": "2026-03-30T02:46:23Z",
+          "text": "Implementation completed inside the frozen runtime-boundary slice. Verification covered projection purity, selector transparency, API lifespan owner removal, explicit reconcile entrypoint preservation, and execution-host heartbeat semantics. Plan stays in progress pending user review instead of auto-closing."
+        },
+        {
+          "at": "2026-03-30T02:54:19Z",
+          "text": "User confirmed PLAN-20260330-039 as the active remediation plan. Lifecycle remains in_progress because start authorization, implementation closeout, and final completion confirmation are tracked separately."
+        },
+        {
+          "at": "2026-03-30T03:46:56Z",
+          "text": "User approved a narrow amendment after independent review found that the ownership-freeze implementation had legitimately crossed the original frozen envelope into orchestrator, queued execution host, config, and queue-test files. PLAN-20260330-039 now explicitly covers only that ownership handoff path, and prior closeout-strength claims are downgraded pending post-amendment revalidation."
+        },
+        {
+          "at": "2026-03-30T03:54:23Z",
+          "text": "Post-amendment revalidation confirmed that the amended envelope matches the actual ownership handoff code path and did not introduce a second reconcile mainline. PLAN-20260329-038 remains blocked because lease_owner semantics are still not fully closed in service-level test vocabulary."
+        },
+        {
+          "at": "2026-03-30T04:05:57Z",
+          "text": "Final semantic closeout aligned the remaining service-level lease vocabulary with the amended contract by removing worker-scoped lease_owner fixtures from runtime_session_service lease tests and documenting issuer-vs-heartbeat responsibilities in the service layer. The runtime-boundary blocker conditions for PLAN-20260329-038 are now satisfied, while PLAN-20260330-039 remains in_progress pending user closeout."
+        },
+        {
+          "at": "2026-03-30T04:16:30Z",
+          "text": "User accepted closeout under a conservative evidence statement. PLAN-20260330-039 is now completed because the amended contract, implementation, and service-level test vocabulary are aligned and the runtime-boundary blocker conditions for PLAN-20260329-038 are satisfied, while the closure record explicitly notes that evidence strength relied on static audit, direct assertions, and compile checks rather than a stable independent pytest rerun."
+        },
+        {
+          "at": "2026-03-30T04:22:16Z",
+          "text": "PLAN-20260329-038 resumed immediately after PLAN-20260330-039 closeout. Governance split remains intact: 039 stays completed as the runtime-boundary remediation record, while 038 returns to content-mainline Sprint 4 boundary hardening."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260330-040",
+      "title": "Image-agent prompt safety closure and image-purpose-aware still/reference contract remediation",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260330-040.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-30T06:56:56Z",
+      "updated_at": "2026-03-30T10:17:56Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-30T06:56:56Z",
+          "text": "Created a dedicated image-agent remediation plan after rerun analysis showed two coupled follow-up defects outside the completed 038 mainline: provider-sensitive image failures are not closed by the current prompt-safety rewrite path, and image prompts still emit scene-outline prose instead of first-frame still-image compositions. This plan is review-first and must be handed off to a new window for implementation."
+        },
+        {
+          "at": "2026-03-30T06:56:56Z",
+          "text": "User review clarified that image generation is not permanently equivalent to scene first-frame generation because the repo already includes character reference image flows and reference_assets surfaces. The plan was amended in-governance to require a purpose-aware image contract while staying inside the same image-agent narrow remediation boundary."
+        },
+        {
+          "at": "2026-03-30T07:05:30Z",
+          "text": "Governance review kept the plan boundary but downgraded lifecycle posture from in_progress to draft so the next window must first pass the review/amend gate before any implementation begins. This preserves review-first behavior and avoids implying execution has already started."
+        },
+        {
+          "at": "2026-03-30T09:11:48Z",
+          "text": "Functional remediation inside the frozen 040 envelope is complete: targeted regressions passed, provider rerun for scenes 1/2/3/5 succeeded, and the original sensitive-error and still-prompt defects are closed without reopening 038 or introducing a second image mainline."
+        },
+        {
+          "at": "2026-03-30T09:11:48Z",
+          "text": "Post-implementation architecture review found remaining duplicated content-level still/reference hardcoding across image_generation_tool and image_prompt_composer_tool. PLAN-20260330-040 is therefore blocked from final acceptance pending dedicated hardening plan PLAN-20260330-041 or an explicit user waiver."
+        },
+        {
+          "at": "2026-03-30T10:10:02Z",
+          "text": "PLAN-20260330-041 is now completed, so the duplicated-hardcoding blocker on 040 is cleared. The plan moves from blocked to awaiting_user_confirmation because the remediation itself is done and validated, but final lifecycle closeout still requires a separate explicit user acceptance of 040."
+        },
+        {
+          "at": "2026-03-30T10:17:56Z",
+          "text": "User confirmed closeout. PLAN-20260330-040 is now completed because the original image-agent remediation behavior is validated, the 041 hardening blocker is cleared, and no residual blocker remains within this plan boundary."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260330-041",
+      "title": "Image still/reference contract de-hardcoding and boundary consolidation",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260330-041.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-30T09:11:48Z",
+      "updated_at": "2026-03-30T10:10:02Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-30T09:11:48Z",
+          "text": "Created a review-first follow-up hardening plan after post-040 architecture review found medium-risk duplicated still/reference hardcoding across the image tool/composer boundary. The plan is intentionally narrow: keep the same image mainline, restore a single contract-boundary owner, and unblock 040 closeout without expanding into broader image architecture."
+        },
+        {
+          "at": "2026-03-30T09:27:32Z",
+          "text": "Review-first amendment passed and execution started. The plan stays inside the 040 hardening envelope, but acceptance is now tightened so prompt-root and consistency-lock consumers must share one normalization owner rather than keep two disguised rule centers."
+        },
+        {
+          "at": "2026-03-30T10:10:02Z",
+          "text": "Implemented the shared still/reference normalization owner, validated the consolidation with focused regressions (28 passed), and closed the plan with user approval. Remaining centralized lexical guards are explicitly deferred as a separate non-blocking future TODO rather than kept as a blocker on 041."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260330-042",
+      "title": "Video prompt surface quality follow-up for weak time narrative and over-heavy consistency prose",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260330-042.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-03-30T14:14:09Z",
+      "updated_at": "2026-03-30T15:08:11Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-30T14:14:09Z",
+          "text": "Created a review-first follow-up plan after live rerun verification confirmed that image-agent remediation is effective and image-to-video chaining works again, but scene 1/2 still show weak time narrative and over-heavy prompt prose on the video side. This plan intentionally targets only the obvious video prompt-surface issues and should be handed off to a new window for review-first implementation."
+        },
+        {
+          "at": "2026-03-30T14:26:57Z",
+          "text": "Review-first governance amendment corrected the 038 lifecycle wording and froze the implementation baseline: the active rerun sample remained legacy-only at the scene carrier, while scene 1/2 composer prompts were still dominated by duplicated motion-beat summaries and oversized consistency prose."
+        },
+        {
+          "at": "2026-03-30T15:05:00Z",
+          "text": "Completed the frozen 042 implementation inside the builder/composer boundary: legacy scene payloads now project into a shorter local-event arc, duplicate summary prose is compacted, consistency locks are compressed, and focused regressions passed without introducing a second prompt mainline."
+        },
+        {
+          "at": "2026-03-30T15:08:11Z",
+          "text": "Scene 2 focused rerun succeeded with the updated prompt surface; the protagonist remained the dominant subject through 0.5s/5.0s/8.5s while chain success stayed intact. User confirmed closeout, so the plan is completed."
         }
       ]
     }
