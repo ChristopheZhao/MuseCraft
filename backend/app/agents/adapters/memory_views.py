@@ -473,11 +473,7 @@ def build_image_generation_context(
         purpose="image generation context assembly",
     )
     concept_plan = published_payload.get("concept_plan") or {}
-    overview = _merge_image_bucket_into_overview(
-        published_payload.get("scene_overview") or {},
-        workflow_id=workflow_id,
-        service=service,
-    )
+    overview = published_payload.get("scene_overview") or {}
     scripts = _normalize_scene_dict(published_payload.get("scene_scripts") or {})
 
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
@@ -504,8 +500,7 @@ def build_image_generation_context(
             continue
         script_entry = scripts.get(sn) if isinstance(scripts, dict) else {}
         concept_entry = concept_scene_index.get(sn, {})
-        image_url = scene.get("image_url", "")
-        mode = target_map.get(sn) or ("reuse" if image_url else "generate")
+        mode = target_map.get(sn) or "generate"
         payload = {
             "scene_number": sn,
             "title": concept_entry.get("title", ""),
@@ -534,7 +529,7 @@ def build_image_generation_context(
             "voice_over_text": (script_entry or {}).get("voice_over_text", ""),
             "background_music_style": (script_entry or {}).get("background_music_style", ""),
         }
-        if mode in {"skip", "reuse"} or image_url:
+        if mode in {"skip", "reuse"}:
             scenes_to_skip.append({"scene_number": sn, "reason": mode, "reuse_from": None})
         else:
             scenes_to_generate.append(payload)

@@ -8,7 +8,8 @@
 
 当前实现（迭代上下文 iteration_context）：
 - 仅从 Agent WM 读取：`facts`、`obs_records`；
-- 不注入派生统计视图（如 `agent_iteration_view`）；LLM 直接基于 `obs_records` 推理，派生视图仅用于日志/接口返回。
+- 不注入派生统计视图（如 `agent_iteration_view`）或 MAS state view；这类视图不直接来自本 builder。
+- planner-visible derived projections（例如 `progress_read_model`）走单独的 plan-input builder 路径，而不是在这里混入 iteration_context。
 - 不注入 MASStateView（仅用于 orchestrator/UI 展示，避免双轨统计进入 LLM 输入）。
 
 参数说明：
@@ -40,6 +41,7 @@ def build_agent_context(
     说明：
     - 该方法只从“Agent WM”构建迭代上下文（iteration_context），不注入 MAS 级状态视图。
       MASStateView 仅用于 orchestrator/UI 展示，不进入 ReAct 规划输入，避免双轨统计。
+    - planner 侧若需要 derived projection，应由 plan-context builder 显式注入，而不是在这里从 state view/统计视图侧路混入。
     """
     ctx: Dict[str, Any] = {}
     if not workflow_id or not agent_name:

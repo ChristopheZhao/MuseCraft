@@ -1,13 +1,15 @@
 """Image Prompt Composer Tool - combine prompt, consistency assets, and generation."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from .ai_services.service_interfaces import get_vlm_capabilities
 from . import image_prompt_normalization as prompt_norm
+from ...services.scene_info_reference_service import (
+    SceneInfoReferenceResolutionError,
+    load_scene_info_payload,
+)
 
 
 class ImagePromptComposerTool(AsyncTool):
@@ -303,43 +305,10 @@ class ImagePromptComposerTool(AsyncTool):
         }
 
     def _load_scene_info(self, ref: str) -> Dict[str, Any]:
-        if not isinstance(ref, str) or not ref.strip():
-            raise ToolValidationError("scene_info_ref is empty", self.metadata.name)
-        path = ref.strip()
-        if path.startswith("file://"):
-            path = path[len("file://"):]
-        candidate_paths: List[Path] = []
         try:
-            candidate = Path(path)
-        except Exception as exc:
-            raise ToolValidationError(f"scene_info_ref parse failed: {exc}", self.metadata.name) from exc
-        if candidate is not None:
-            if candidate.is_absolute():
-                candidate_paths.append(candidate)
-            else:
-                candidate_paths.append(candidate)
-                try:
-                    backend_root = Path(__file__).resolve().parents[3]
-                    candidate_paths.append(backend_root / candidate)
-                except Exception:
-                    pass
-        resolved_path = None
-        for cand in candidate_paths:
-            try:
-                if cand and cand.exists():
-                    resolved_path = cand
-                    break
-            except Exception:
-                continue
-        if resolved_path is None:
-            raise ToolValidationError(f"scene_info_ref not found: {path}", self.metadata.name)
-        try:
-            payload = json.loads(resolved_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ToolValidationError(f"scene_info_ref load failed: {exc}", self.metadata.name) from exc
-        if not isinstance(payload, dict):
-            raise ToolValidationError("scene_info_ref must be a JSON object", self.metadata.name)
-        return payload
+            return load_scene_info_payload(ref)
+        except SceneInfoReferenceResolutionError as exc:
+            raise ToolValidationError(str(exc), self.metadata.name) from exc
 
     def _extract_scene_entry(self, scene_info: Dict[str, Any], scene_number: Any) -> Dict[str, Any]:
         sn = self._coerce_int(scene_number)

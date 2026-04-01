@@ -351,6 +351,61 @@ def test_complete_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypa
     assert completed_attempt.lease_expires_at is None
 
 
+def test_complete_node_attempt_sync_fresh_reads_cross_session_lease(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    heartbeat_at = lease_started_at + timedelta(seconds=45)
+    assert_at = lease_started_at + timedelta(seconds=100)
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        60,
+    )
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:image",
+        lease_token="lease-token-cross-session-complete",
+    )
+
+    SessionLocal = sessionmaker(bind=sync_db.get_bind(), autocommit=False, autoflush=False)
+    other_db = SessionLocal()
+    try:
+        other_session = RuntimeSessionService.get_session_by_id_sync(other_db, session.id)
+        monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: heartbeat_at)
+        RuntimeSessionService.heartbeat_attempt_lease_sync(
+            other_db,
+            other_session,
+            attempt_id=attempt.id,
+            lease_token="lease-token-cross-session-complete",
+        )
+    finally:
+        other_db.close()
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: assert_at)
+    completed_attempt = RuntimeSessionService.complete_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="image",
+        attempt_id=attempt.id,
+        lease_token="lease-token-cross-session-complete",
+        node_status=WorkflowNodeStatus.COMPLETED.value,
+    )
+
+    assert completed_attempt.status == "succeeded"
+    assert completed_attempt.lease_token is None
+
+
 def test_fail_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypatch):
     lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
@@ -383,6 +438,73 @@ def test_fail_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypatch)
     assert failed_attempt.lease_token is None
     assert failed_attempt.lease_owner is None
     assert failed_attempt.lease_expires_at is None
+
+
+def test_fail_node_attempt_sync_preserves_lease_snapshot_after_cross_session_heartbeat(sync_db, monkeypatch):
+    lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+    heartbeat_at = lease_started_at + timedelta(seconds=45)
+    assert_at = lease_started_at + timedelta(seconds=100)
+    monkeypatch.setattr(
+        runtime_session_service_module.settings,
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        60,
+    )
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: lease_started_at)
+
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        task=task,
+    )
+    RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:video",
+        lease_token="lease-token-cross-session-fail",
+    )
+
+    SessionLocal = sessionmaker(bind=sync_db.get_bind(), autocommit=False, autoflush=False)
+    other_db = SessionLocal()
+    try:
+        other_session = RuntimeSessionService.get_session_by_id_sync(other_db, session.id)
+        monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: heartbeat_at)
+        RuntimeSessionService.heartbeat_attempt_lease_sync(
+            other_db,
+            other_session,
+            attempt_id=attempt.id,
+            lease_token="lease-token-cross-session-fail",
+        )
+    finally:
+        other_db.close()
+
+    monkeypatch.setattr(runtime_session_service_module, "_now_utc", lambda: assert_at)
+    failed_attempt = RuntimeSessionService.fail_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        attempt_id=attempt.id,
+        lease_token="lease-token-cross-session-fail",
+        error_message="boom",
+        diagnostics=[{"code": "video_stage_failed", "message": "boom"}],
+    )
+
+    node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "video")
+    snapshot = next(
+        item for item in (node.diagnostics or [])
+        if item.get("code") == "execution_lease_snapshot"
+    )
+
+    assert failed_attempt.status == "failed"
+    assert failed_attempt.lease_token is None
+    assert any(item.get("code") == "video_stage_failed" for item in (node.diagnostics or []))
+    assert snapshot["reason_code"] == "node_attempt_failed"
+    assert snapshot["lease_owner"] == "orchestrator:video"
+    assert snapshot["lease_live"] is True
+    assert snapshot["lease_expires_at"] == (heartbeat_at + timedelta(seconds=60)).isoformat()
 
 
 def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):

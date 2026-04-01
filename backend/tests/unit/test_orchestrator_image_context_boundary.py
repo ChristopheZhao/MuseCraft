@@ -156,6 +156,48 @@ def test_prepare_agent_context_prefers_runtime_input_published_deliverable_witho
     assert static_context["scenes_to_generate"][0]["scene_number"] == 1
 
 
+def test_image_generator_context_does_not_rewrite_membership_from_scene_outputs(tmp_path):
+    service = _build_service()
+    workflow_id = "wf-image-membership-boundary"
+    _seed_stale_script_facts(service, workflow_id)
+    script_ref = _build_script_deliverable_ref(tmp_path, workflow_id)
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.image",
+        {
+            "1": {
+                "scene_number": 1,
+                "image_url": "https://example.com/already-generated.png",
+            }
+        },
+        service=service,
+    )
+
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=service)
+    agent.logger = logging.getLogger("test_orchestrator_image_membership_boundary")
+    agent._context_contract_assembler = ContextContractAssembler(
+        memory_services=SimpleNamespace(short_term=service)
+    )
+    agent._context_contract_assembler._persist_scene_info_ref = (
+        lambda **kwargs: "/tmp/image-membership-scene-info.json"
+    )
+
+    agent_input = asyncio.run(
+        agent._prepare_agent_context(
+            {},
+            AgentType.IMAGE_GENERATOR,
+            workflow_id,
+            runtime_input_payload={"published_deliverables": {"script": script_ref}},
+        )
+    )
+
+    static_context = agent_input["static_context"]
+    assert static_context["scene_info_ref"] == "/tmp/image-membership-scene-info.json"
+    assert [item["scene_number"] for item in static_context["scenes_to_generate"]] == [1]
+    assert static_context["scenes_to_skip"] == []
+
+
 def test_audio_generator_context_prefers_published_script_payload(tmp_path):
     service = _build_service()
     workflow_id = "wf-audio-boundary"

@@ -2,10 +2,10 @@
 Image Generator ReAct Agent - 正确的批量处理迭代逻辑
 """
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
-from .react_agent import ReActAgent, AgentError
+from .react_agent import ReActAgent
 from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.artifacts import (
     persist_scene_outputs,
@@ -14,8 +14,6 @@ from .utils.artifacts import (
 from .utils.memory_helpers import get_mas_working_memory
 from ..models import Task, AgentType
 from ..core.config import settings
-from .adapters.memory_views import build_image_generation_context
-from .adapters.state.scene_iteration import SceneIterationStateBuilder
 
 
 class ImageGeneratorAgent(ReActAgent):
@@ -38,7 +36,6 @@ class ImageGeneratorAgent(ReActAgent):
             llms=llms,
             memory_services=memory_services,
         )
-        self._scene_state_builder = SceneIterationStateBuilder()
     # 覆盖基类的上下文注入：本 Agent 交给通用 FC 逻辑处理上下文提示
     def build_react_context_messages(self) -> List[Dict[str, Any]]:
         return []
@@ -150,28 +147,6 @@ class ImageGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
             "obs_event": obs_event,
         }
-    
-    @staticmethod
-    def _coerce_int_list(values: Any) -> List[int]:
-        if not values:
-            return []
-        result: List[int] = []
-        candidates = values if isinstance(values, list) else list(values)
-        for item in candidates:
-            try:
-                result.append(int(item))
-            except Exception:
-                continue
-        return sorted(set(result))
-
-    @staticmethod
-    def _coerce_int(value: Any) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except Exception:
-            return None
 
     async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         wf_id = str(self.workflow_state_id or "")

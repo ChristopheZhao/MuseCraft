@@ -15,6 +15,10 @@ class SceneInfoReferencePersistenceError(RuntimeError):
     """Raised when scene-info reference persistence cannot produce a usable ref."""
 
 
+class SceneInfoReferenceResolutionError(RuntimeError):
+    """Raised when a scene-info reference cannot be resolved or loaded."""
+
+
 def persist_scene_info_ref(
     *,
     workflow_id: str,
@@ -50,3 +54,56 @@ def persist_scene_info_ref(
         return str(ref_path.relative_to(backend_root))
     except ValueError:
         return str(ref_path)
+
+
+def resolve_scene_info_ref_path(ref: str) -> Path:
+    """Resolve a scene-info reference to a readable local JSON path."""
+    if not isinstance(ref, str) or not ref.strip():
+        raise SceneInfoReferenceResolutionError("scene_info_ref is empty")
+
+    path = ref.strip()
+    if path.startswith("file://"):
+        path = path[len("file://"):]
+
+    try:
+        candidate = Path(path)
+    except Exception as exc:
+        raise SceneInfoReferenceResolutionError(
+            f"scene_info_ref parse failed: {exc}"
+        ) from exc
+
+    candidate_paths = []
+    if candidate.is_absolute():
+        candidate_paths.append(candidate)
+    else:
+        candidate_paths.append(candidate)
+        try:
+            backend_root = Path(__file__).resolve().parents[2]
+            candidate_paths.append(backend_root / candidate)
+        except Exception:
+            pass
+
+    for cand in candidate_paths:
+        try:
+            if cand.exists():
+                return cand
+        except Exception:
+            continue
+
+    raise SceneInfoReferenceResolutionError(f"scene_info_ref not found: {path}")
+
+
+def load_scene_info_payload(ref: str) -> Dict[str, Any]:
+    """Load a scene-info payload from a persisted local reference."""
+    resolved_path = resolve_scene_info_ref_path(ref)
+    try:
+        payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SceneInfoReferenceResolutionError(
+            f"scene_info_ref load failed: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SceneInfoReferenceResolutionError(
+            "scene_info_ref must be a JSON object"
+        )
+    return payload

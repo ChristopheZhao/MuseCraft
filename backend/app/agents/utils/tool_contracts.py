@@ -213,7 +213,23 @@ def extract_contract_slot_writes(
     return writes
 
 
-__all__ = ["ContractSlotWrite", "extract_contract_slot_writes"]
+def plan_contract_conflicts_with_actions(
+    contract: Dict[str, Any],
+    planned_calls: Optional[List[Any]],
+) -> bool:
+    """Return True when a plan simultaneously claims completion and schedules ACT."""
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("task_complete") is not True:
+        return False
+    return bool(planned_calls)
+
+
+__all__ = [
+    "ContractSlotWrite",
+    "extract_contract_slot_writes",
+    "plan_contract_conflicts_with_actions",
+]
 
 
 def overlay_contract_on_reflection(reflection: Dict[str, Any], contract: Dict[str, Any], ignore_complete: bool = False) -> Dict[str, Any]:

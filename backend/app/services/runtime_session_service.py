@@ -237,6 +237,96 @@ def _normalize_attempt_lease_fields(
     return attempt
 
 
+def _fresh_session_node_attempt_sync(
+    db: Session,
+    session: WorkflowSession,
+    *,
+    node_key: str,
+    attempt_id: int,
+) -> tuple[WorkflowSession, WorkflowNodeState, WorkflowNodeAttempt]:
+    try:
+        db.expire_all()
+    except Exception:
+        pass
+
+    fresh_session = (
+        db.query(WorkflowSession)
+        .filter(WorkflowSession.id == session.id)
+        .first()
+    )
+    if fresh_session is None:
+        raise ValueError(f"Workflow session {session.id} not found")
+
+    node = (
+        db.query(WorkflowNodeState)
+        .filter(
+            WorkflowNodeState.session_id == fresh_session.id,
+            WorkflowNodeState.node_key == node_key,
+        )
+        .first()
+    )
+    if node is None:
+        raise ValueError(f"Workflow node {node_key} not found for session {fresh_session.id}")
+
+    attempt = (
+        db.query(WorkflowNodeAttempt)
+        .filter(
+            WorkflowNodeAttempt.id == attempt_id,
+            WorkflowNodeAttempt.session_id == fresh_session.id,
+        )
+        .first()
+    )
+    if attempt is None:
+        raise ValueError(f"Workflow attempt {attempt_id} not found for session {fresh_session.id}")
+    return fresh_session, node, _normalize_attempt_lease_fields(attempt)
+
+
+def _merge_failure_diagnostics(
+    node: WorkflowNodeState,
+    diagnostics: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    existing = getattr(node, "diagnostics", None)
+    if isinstance(existing, list):
+        merged.extend(item for item in existing if isinstance(item, dict))
+    if isinstance(diagnostics, list):
+        merged.extend(item for item in diagnostics if isinstance(item, dict))
+    return merged
+
+
+def _build_attempt_lease_diagnostic(
+    *,
+    attempt: WorkflowNodeAttempt,
+    node_key: str,
+    reason_code: str,
+    validation_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    captured_at = _now_utc()
+    last_heartbeat_at = _normalize_datetime(getattr(attempt, "last_heartbeat_at", None))
+    lease_expires_at = _normalize_datetime(getattr(attempt, "lease_expires_at", None))
+    lease_owner = str(getattr(attempt, "lease_owner", "") or "").strip() or None
+    lease_token_present = bool(str(getattr(attempt, "lease_token", "") or "").strip())
+    lease_live = bool(
+        lease_token_present
+        and lease_owner
+        and lease_expires_at is not None
+        and lease_expires_at > captured_at
+    )
+    return {
+        "code": "execution_lease_snapshot",
+        "node_key": node_key,
+        "attempt_id": attempt.id,
+        "reason_code": reason_code,
+        "lease_owner": lease_owner,
+        "lease_token_present": lease_token_present,
+        "lease_live": lease_live,
+        "last_heartbeat_at": last_heartbeat_at.isoformat() if last_heartbeat_at else None,
+        "lease_expires_at": lease_expires_at.isoformat() if lease_expires_at else None,
+        "captured_at": captured_at.isoformat(),
+        "validation_error": validation_error,
+    }
+
+
 def _build_resume_control_projection(
     db: Session,
     task: Task,
@@ -1210,23 +1300,16 @@ class RuntimeSessionService:
         diagnostics: Optional[List[Dict[str, Any]]] = None,
         node_status: Optional[str] = None,
     ) -> WorkflowNodeAttempt:
-        node = RuntimeSessionService.get_node_by_key_sync(db, session.id, node_key)
-        if node is None:
-            raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
-        attempt = (
-            db.query(WorkflowNodeAttempt)
-            .filter(
-                WorkflowNodeAttempt.id == attempt_id,
-                WorkflowNodeAttempt.session_id == session.id,
-            )
-            .first()
+        fresh_session, node, attempt = _fresh_session_node_attempt_sync(
+            db,
+            session,
+            node_key=node_key,
+            attempt_id=attempt_id,
         )
-        if attempt is None:
-            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
         if lease_token is not None:
             RuntimeSessionService.assert_attempt_lease_sync(
                 db,
-                session,
+                fresh_session,
                 attempt_id=attempt_id,
                 lease_token=lease_token,
                 allow_expired=False,
@@ -1243,11 +1326,11 @@ class RuntimeSessionService:
         if node_status is not None:
             node.status = node_status
 
-        session.current_attempt_id = attempt.id
+        fresh_session.current_attempt_id = attempt.id
         db.commit()
         db.refresh(attempt)
         db.refresh(node)
-        db.refresh(session)
+        db.refresh(fresh_session)
         return attempt
 
     @staticmethod
@@ -1265,45 +1348,61 @@ class RuntimeSessionService:
         diagnostics: Optional[List[Dict[str, Any]]] = None,
         node_status: Optional[str] = None,
     ) -> WorkflowNodeAttempt:
-        node = RuntimeSessionService.get_node_by_key_sync(db, session.id, node_key)
-        if node is None:
-            raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
-        attempt = (
-            db.query(WorkflowNodeAttempt)
-            .filter(
-                WorkflowNodeAttempt.id == attempt_id,
-                WorkflowNodeAttempt.session_id == session.id,
-            )
-            .first()
+        fresh_session, node, attempt = _fresh_session_node_attempt_sync(
+            db,
+            session,
+            node_key=node_key,
+            attempt_id=attempt_id,
         )
-        if attempt is None:
-            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+        failure_diagnostics = _merge_failure_diagnostics(node, diagnostics)
         if lease_token is not None:
-            RuntimeSessionService.assert_attempt_lease_sync(
-                db,
-                session,
-                attempt_id=attempt_id,
-                lease_token=lease_token,
-                allow_expired=False,
-            )
+            try:
+                RuntimeSessionService.assert_attempt_lease_sync(
+                    db,
+                    fresh_session,
+                    attempt_id=attempt_id,
+                    lease_token=lease_token,
+                    allow_expired=False,
+                )
+            except ValueError as exc:
+                failure_diagnostics.append(
+                    _build_attempt_lease_diagnostic(
+                        attempt=attempt,
+                        node_key=node_key,
+                        reason_code="lease_validation_failed",
+                        validation_error=str(exc),
+                    )
+                )
+                node.diagnostics = failure_diagnostics
+                db.commit()
+                db.refresh(attempt)
+                db.refresh(node)
+                db.refresh(fresh_session)
+                raise
 
+        failure_diagnostics.append(
+            _build_attempt_lease_diagnostic(
+                attempt=attempt,
+                node_key=node_key,
+                reason_code="node_attempt_failed",
+            )
+        )
         attempt.status = WorkflowAttemptStatus.FAILED.value
         _clear_attempt_lease_fields(attempt)
         attempt.output_artifacts = output_artifacts or []
         attempt.metrics = metrics or {}
         if artifact_refs is not None:
             node.artifact_refs = artifact_refs
-        if diagnostics is not None:
-            node.diagnostics = diagnostics
+        node.diagnostics = failure_diagnostics
         node.status = node_status or WorkflowNodeStatus.FAILED.value
-        session.current_node_key = node.node_key
-        session.current_attempt_id = attempt.id
-        session.error_message = str(error_message or "")
+        fresh_session.current_node_key = node.node_key
+        fresh_session.current_attempt_id = attempt.id
+        fresh_session.error_message = str(error_message or "")
 
         db.commit()
         db.refresh(attempt)
         db.refresh(node)
-        db.refresh(session)
+        db.refresh(fresh_session)
         return attempt
 
     @staticmethod

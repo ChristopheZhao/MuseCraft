@@ -127,24 +127,83 @@ class ReActAgent(BaseAgent, ABC):
                     return []
 
                 planned_calls = _planned_calls(action_plan)
+                raw_plan_text = self._extract_plan_contract_source_text(action_plan)
+                plan_contract: Dict[str, Any] = {}
+                if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
+                    plan_contract = dict(action_plan.get("plan_contract") or {})
+
                 if planned_calls:
+                    if not plan_contract and raw_plan_text:
+                        self.logger.info(
+                            "PLAN_CONTRACT_NORMALIZE agent=%s iter=%d (tool_calls present)",
+                            self.agent_name,
+                            iteration + 1,
+                        )
+                        plan_contract = await self._normalize_plan_contract_from_text(raw_plan_text)
+                    if isinstance(action_plan, dict) and plan_contract:
+                        action_plan["plan_contract"] = plan_contract
+                    try:
+                        from .utils.tool_contracts import plan_contract_conflicts_with_actions
+
+                        conflict = plan_contract_conflicts_with_actions(plan_contract, planned_calls)
+                    except Exception:
+                        conflict = False
+                    if conflict:
+                        completed_reason = plan_contract.get("completed_reason")
+                        completed_reason_str = (
+                            completed_reason.strip() if isinstance(completed_reason, str) else ""
+                        )
+                        plan_summary = plan_contract.get("plan_summary")
+                        plan_summary_str = (
+                            plan_summary.strip() if isinstance(plan_summary, str) else ""
+                        )
+                        self.logger.error(
+                            "PLAN_CONTRACT_CONFLICT agent=%s iter=%d planned_calls=%d completed_reason=%s",
+                            self.agent_name,
+                            iteration + 1,
+                            len(planned_calls),
+                            completed_reason_str or None,
+                        )
+                        try:
+                            from .utils.wm_obs import append_obs_to_wm
+
+                            wf_id = str(input_data.get("workflow_state_id") or self.workflow_state_id or "")
+                            append_obs_to_wm(
+                                workflow_id=wf_id,
+                                agent_name=self.agent_name,
+                                obs_record={
+                                    "iteration": iteration,
+                                    "event": {
+                                        "type": "loop_end",
+                                        "reason": "plan_contract_conflict",
+                                        "subtask_state": "error",
+                                        "completed_reason": completed_reason_str or None,
+                                        "plan_summary": plan_summary_str or None,
+                                        "planned_call_count": len(planned_calls),
+                                    },
+                                },
+                                service=self.short_term_service,
+                            )
+                        except Exception:
+                            pass
+                        final_result = await self._finalize_incomplete_results(
+                            {
+                                "total_iterations": iteration + 1,
+                                "workflow_state_id": input_data.get("workflow_state_id") or self.workflow_state_id,
+                                "subtask_state": "error",
+                                "loop_end_reason": "plan_contract_conflict",
+                                "completed_reason": completed_reason_str or "plan_contract_conflict",
+                                "plan_summary": plan_summary_str or None,
+                            },
+                            task,
+                        )
+                        await self._update_progress(90, "processing", db)
+                        return final_result
                     no_tool_calls_streak = 0
                 else:
                     # 无 tool_calls：将 PLAN 的自然语言回执规整为最小退出合同（不做二次规划决策）。
-                    plan_contract: Dict[str, Any] = {}
-
-                    if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
-                        plan_contract = dict(action_plan.get("plan_contract") or {})
-
                     if not plan_contract:
-                        raw_text = ""
-                        if isinstance(action_plan, dict):
-                            plan_llm = action_plan.get("plan_llm")
-                            if isinstance(plan_llm, dict):
-                                raw_text = str(plan_llm.get("content") or "")
-                            elif isinstance(action_plan.get("content"), str):
-                                raw_text = action_plan.get("content") or ""
-                        if not raw_text.strip():
+                        if not raw_plan_text.strip():
                             # 风险1修复（轻量）：PLAN 空输出属于模型/供应商异常，不应误判为业务 blocked；
                             # 且需要落一条终止事实到 Agent WM 便于审计。
                             self.logger.warning(
@@ -206,7 +265,7 @@ class ReActAgent(BaseAgent, ABC):
                             self.agent_name,
                             iteration + 1,
                         )
-                        plan_contract = await self._normalize_plan_contract_from_text(raw_text)
+                        plan_contract = await self._normalize_plan_contract_from_text(raw_plan_text)
 
                     if isinstance(action_plan, dict) and plan_contract:
                         action_plan["plan_contract"] = plan_contract
@@ -836,6 +895,19 @@ class ReActAgent(BaseAgent, ABC):
             {"role": "system", "content": sys_text},
             {"role": "user", "content": facts_json},
         ]
+
+    def _extract_plan_contract_source_text(self, action_plan: Any) -> str:
+        if not isinstance(action_plan, dict):
+            return ""
+        plan_llm = action_plan.get("plan_llm")
+        if isinstance(plan_llm, dict):
+            content = plan_llm.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+        content = action_plan.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        return ""
 
     async def _normalize_plan_contract_from_text(self, raw_plan_text: str) -> Dict[str, Any]:
         """将 PLAN 的自然语言输出规整为最小退出合同 JSON。
