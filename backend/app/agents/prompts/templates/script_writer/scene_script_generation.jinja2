@@ -4,11 +4,13 @@
 - 场景编号：{{ scene_number }}
 {% if title %}- 场景标题：{{ title }}
 {% endif %}
+{% if scene_thesis %}- 场景主命题：{{ scene_thesis }}
+{% endif %}
 - 视觉描述：{{ visual_description }}
 - 叙事描述：{{ narrative_description }}
 {% if mood_and_atmosphere %}- 氛围基调：{{ mood_and_atmosphere }}
 {% endif %}
-{% if camera_angle %}- 镜头起点：{{ camera_angle }}
+{% if camera_angle %}- 可选镜头参考：{{ camera_angle }}
 {% endif %}
 {% if creative_intent %}- 创作意图：{{ creative_intent }}
 {% endif %}
@@ -22,6 +24,16 @@
 {% endfor %}{% else %}- 保持与剧情契合的自然旁白
 {% endif %}{% else %}- 无旁白需求
 {% endif %}
+{% if story_context_block %}
+
+全局叙事上下文：
+{{ story_context_block }}
+{% endif %}
+{% if duration_guidance %}
+
+时长约束：
+- {{ duration_guidance }}
+{% endif %}
 
 {% if review_guidance %}
 当前审阅反馈：
@@ -29,32 +41,35 @@
 {% endif %}
 
 要求：
-1. 根据场景复杂度选择合适的时长（仅可从{{ duration_capabilities }}中选择）；
-2. 先明确 `opening_state`、`event_trigger`、`end_state`，它们都必须是观众能直接看到的内容，不要只写“铺垫、成长、紧张感”这类抽象功能词；
-3. 用 `action_phases` 数组表达 2-4 个动作阶段，每段写清 `phase`、`observable_actions`、`camera_hint`；允许使用 `relative_weight` 表达相对时序，不必把每段都写成机械秒表；
-4. 同时输出 `motion_beats` 作为兼容层：若场景适合明确节拍，则给出 `start`、`end`（秒）、`visual_focus` 与 `beat_summary`，覆盖整段时长；若不适合机械切分，也要保持 beats 与 `action_phases` 语义一致；
-5. 输出脚本文本与可选的叙事/音乐/音效字段；`script_text` 必须补充角色做了什么、环境如何响应，而不是只重复主题摘要；
-6. 若需旁白，生成 1-2 句成品旁白，严禁出现“镜头”“画面”“场景”等制作说明词；
-7. 直接返回 JSON，不要解释性文本。
+1. 根据场景复杂度选择合适的时长（仅可从{{ duration_capabilities }}中选择），并尽量贴合本场目标时长；
+2. 必须输出 `scene_thesis`，用一句话说明这段视频到底在表现什么局部事件、局势变化或观看重点；
+3. 先明确 `opening_state`、`event_trigger`、`end_state`，它们都必须是观众能直接看到的内容，不要只写“铺垫、成长、紧张感”这类抽象功能词；
+4. 用 `action_phases` 数组表达 2-4 个事件阶段，每段写清 `phase`、`observable_actions`；`camera_hint` 仅在确有必要时提供，不能让镜头描述取代动作推进；
+5. 若场景时长在 8s 及以上，`action_phases` 中至少体现 2 个以上可见状态变化或局势推进，不能只写凝视、定格、觉醒、对视等静态展示；
+6. 同时输出 `motion_beats` 作为兼容层：若场景适合明确节拍，则给出 `start`、`end`（秒）、`visual_focus` 与 `beat_summary`，覆盖整段时长；若不适合机械切分，也要保持 beats 与 `action_phases` 语义一致；
+7. 输出脚本文本与可选的叙事/音乐/音效字段；`script_text` 必须补充角色做了什么、环境如何响应、局势如何变化，而不是只重复主题摘要；
+8. 若需旁白，生成 1-2 句成品旁白，严禁出现“镜头”“画面”“场景”等制作说明词；
+9. 直接返回 JSON，不要解释性文本。
 
 JSON 模板示例：
 {
   "duration": 5,
+  "scene_thesis": "主角在被压制中强行反击，局势从失衡迅速转向爆发",
   "script_text": "……",
-  "opening_state": "韩立半跪稳住身形，剑尖擦地拖出石屑",
-  "event_trigger": "黑袍修士逼近施压，迫使韩立强行起身聚气",
+  "opening_state": "主角半跪稳住身形，武器擦地拖出碎屑",
+  "event_trigger": "敌方逼近施压，迫使主角强行起身聚气",
   "action_phases": [
-    {"phase": "起势", "relative_weight": 1.0, "observable_actions": "韩立压低重心稳住身形，衣摆被气流扯动", "camera_hint": "中景跟随，先稳后推近"},
-    {"phase": "爆发", "relative_weight": 1.4, "observable_actions": "金光骤然爆开，碎石和尘浪向外掀开，黑袍修士被震退", "camera_hint": "镜头快速推进后定住"}
+    {"phase": "起势", "relative_weight": 1.0, "observable_actions": "主角压低重心稳住身形，衣摆被气流扯动"},
+    {"phase": "爆发", "relative_weight": 1.4, "observable_actions": "能量骤然爆开，碎石和尘浪向外掀开，敌方被震退", "camera_hint": "中景跟随冲击中心"}
   ],
   "narrative_description": "……",
-  "end_state": "镜头停在韩立抬头定格，金光未散",
-  "camera_language": "以中景建立人物受压状态，随后推近到爆发定格",
+  "end_state": "主角抬头站稳，余光未散，敌方被逼退半步",
+  "camera_language": "镜头服务于动作可读性，优先看清反击与冲击扩散",
   "background_music_style": "……",
   "sound_effects": ["……"],
   "voice_over_text": "……",
   "motion_beats": [
-    {"start": 0.0, "end": 2.5, "visual_focus": "赵子龙闯入敌阵", "beat_summary": "从远景进入战场"},
-    {"start": 2.5, "end": 5.0, "visual_focus": "刘备家眷陷入包围", "beat_summary": "突出紧张态势"}
+    {"start": 0.0, "end": 2.5, "visual_focus": "主角冲入冲突区域", "beat_summary": "从远景进入对抗现场"},
+    {"start": 2.5, "end": 5.0, "visual_focus": "敌方压迫升级", "beat_summary": "突出局势迅速收紧"}
   ]
 }

@@ -1244,6 +1244,7 @@ class ConceptPlannerAgent(BaseAgent):
                 scene_type=scene_data.get("scene_type", "main_content"),
                 title=scene_data.get("title", f"Scene {len(scenes_data) + 1}"),
                 description=scene_data.get("description", ""),
+                scene_thesis=scene_data.get("scene_thesis", ""),
                 narrative_description=scene_data.get("narrative_description", ""),
                 visual_description=scene_data.get("visual_description", ""),
                 duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),

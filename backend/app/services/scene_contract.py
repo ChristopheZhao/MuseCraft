@@ -56,6 +56,7 @@ def build_scene_contract_meta(*, mode: str) -> Dict[str, Any]:
             "hardcoded_seconds_template_forbidden": True,
         },
         "scene_v2_fields": [
+            "scene_thesis",
             "opening_state",
             "event_trigger",
             "action_phases",

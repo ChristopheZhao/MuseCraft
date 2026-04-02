@@ -14,6 +14,7 @@ import logging
 
 import httpx
 
+from ....services.execution_host_lease import ExecutionHostKeepaliveLostError
 from .service_interfaces import (
     VideoModelServiceInterface,
     VLMServiceInterface,
@@ -364,6 +365,16 @@ class DoubaoVideoService(VideoModelServiceInterface):
         elif not isinstance(requested_generate_audio, bool):
             requested_generate_audio = None
 
+        requested_frames = kwargs.get("frames")
+        if isinstance(requested_frames, str):
+            requested_frames = requested_frames.strip()
+        try:
+            requested_frames = int(requested_frames) if requested_frames not in (None, "") else None
+        except Exception:
+            requested_frames = None
+
+        execution_liveness_probe = kwargs.get("execution_liveness_probe")
+
         # 组装请求头与URL
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -376,12 +387,6 @@ class DoubaoVideoService(VideoModelServiceInterface):
             if "contents/generations" in self.create_path:
                 content_items: List[Dict[str, Any]] = []
                 text_prompt = (prompt or "").strip()
-                if duration and duration not in (None, ""):
-                    text_prompt = f"{text_prompt} --dur {int(duration)}".strip()
-                if resolution_for_api:
-                    text_prompt = f"{text_prompt} --rs {resolution_for_api}".strip()
-                if ratio_for_api:
-                    text_prompt = f"{text_prompt} --rt {ratio_for_api}".strip()
                 if text_prompt:
                     content_items.append({"type": "text", "text": text_prompt})
                 if images_payload:
@@ -391,6 +396,14 @@ class DoubaoVideoService(VideoModelServiceInterface):
                             continue
                         content_items.append({"type": "image_url", "image_url": {"url": url}})
                 payload = {"model": model_name, "content": content_items}
+                if requested_frames is not None:
+                    payload["frames"] = requested_frames
+                elif duration not in (None, ""):
+                    payload["duration"] = int(duration)
+                if resolution_for_api:
+                    payload["resolution"] = resolution_for_api
+                if ratio_for_api:
+                    payload["ratio"] = ratio_for_api
                 if isinstance(requested_generate_audio, bool):
                     payload["generate_audio"] = requested_generate_audio
                 return payload
@@ -413,6 +426,9 @@ class DoubaoVideoService(VideoModelServiceInterface):
             return pay
 
         async def _create_and_poll(model_name: str) -> Dict[str, Any]:
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 payload = await _build_payload(model_name)
                 resp = await client.post(create_url, headers=headers, json=payload)
@@ -424,7 +440,11 @@ class DoubaoVideoService(VideoModelServiceInterface):
             task_id_local = data.get("id") or data.get("task_id") or data.get("data", {}).get("task_id")
             if not task_id_local:
                 raise RuntimeError(f"Doubao create video did not return task id: {data}")
-            poll_res = await self._poll_video_result(task_id_local, headers)
+            poll_res = await self._poll_video_result(
+                task_id_local,
+                headers,
+                execution_liveness_probe=execution_liveness_probe,
+            )
             return {
                 "task_id": task_id_local,
                 "video_url": poll_res.get("video_url"),
@@ -529,7 +549,13 @@ class DoubaoVideoService(VideoModelServiceInterface):
         )
         return {"task_id": task_id, "status": task_status, "video_url": video_url}
 
-    async def _poll_video_result(self, task_id: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    async def _poll_video_result(
+        self,
+        task_id: str,
+        headers: Dict[str, str],
+        *,
+        execution_liveness_probe=None,
+    ) -> Dict[str, Any]:
         # Poll up to ~3 minutes by default
         max_attempts = int(getattr(self, 'poll_attempts', 36))
         interval = int(getattr(self, 'poll_interval', 5))
@@ -539,6 +565,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
             success_status = {"SUCCESS", "SUCCEEDED", "COMPLETED", "DONE"}
             failed_status = {"FAIL", "FAILED", "ERROR", "CANCELLED", "CANCELED"}
             for attempt in range(max_attempts):
+                if callable(execution_liveness_probe):
+                    execution_liveness_probe()
                 try:
                     resp = await client.get(query_url, headers=headers)
                     if resp.status_code >= 400:
@@ -572,6 +600,8 @@ class DoubaoVideoService(VideoModelServiceInterface):
                             "video_url": "",
                             "provider_error": provider_error,
                         }
+                except ExecutionHostKeepaliveLostError:
+                    raise
                 except Exception as e:
                     self.logger.warning(f"Doubao poll error: {e}")
                 await asyncio.sleep(interval)

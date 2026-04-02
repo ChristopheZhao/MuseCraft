@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app.agents.script_writer import ScriptWriterAgent
+from app.agents.memory.short_term import SceneSnapshot
 
 
 def test_sanitize_motion_beats_normalizes_segments():
@@ -67,3 +68,32 @@ def test_sanitize_action_phases_falls_back_to_motion_beats():
     assert len(sanitized) == 2
     assert sanitized[0]["phase"] == "韩立起势"
     assert sanitized[1]["observable_actions"] == "黑袍修士被逼退"
+
+
+def test_normalize_scene_execution_arc_preserves_scene_thesis():
+    agent = object.__new__(ScriptWriterAgent)
+    agent.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
+
+    scene = SceneSnapshot(
+        scene_number=3,
+        duration=10.0,
+        scene_thesis="韩立被压制后正面反击，局势迅速升级为爆炸失控",
+        visual_description="黑袍修士悬空压制，韩立在碎石间迎战",
+        narrative_description="这一幕负责把正邪对抗推向高峰",
+    )
+
+    payload = {
+        "opening_state": "黑袍修士悬空压制，韩立提剑迎战",
+        "event_trigger": "黑袍修士率先释放紫黑法术洪流",
+        "action_phases": [
+            {"phase": "交锋", "observable_actions": "韩立飞剑迎击法术洪流"},
+            {"phase": "爆发", "observable_actions": "能量对撞失控，山石与气浪一同炸裂"},
+        ],
+        "end_state": "爆炸强光吞没画面，余波仍在震颤",
+    }
+
+    execution_arc = agent._normalize_scene_execution_arc(payload, scene, motion_beats=[])
+
+    assert execution_arc["scene_thesis"].startswith("韩立被压制后正面反击")
+    assert execution_arc["opening_state"] == "黑袍修士悬空压制，韩立提剑迎战"
+    assert execution_arc["end_state"] == "爆炸强光吞没画面，余波仍在震颤"

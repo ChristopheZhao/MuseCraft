@@ -13,6 +13,7 @@ class SceneSnapshot:
     scene_number: int
     depends_on_scene: Optional[int] = None
     duration: float = 0.0
+    scene_thesis: str = ""
     visual_description: str = ""
     narrative_description: str = ""
     image_url: str = ""
@@ -23,6 +24,7 @@ class SceneSnapshot:
             "scene_number": self.scene_number,
             "depends_on_scene": self.depends_on_scene,
             "duration": self.duration,
+            "scene_thesis": self.scene_thesis,
             "visual_description": self.visual_description,
             "narrative_description": self.narrative_description,
             "image_url": self.image_url,

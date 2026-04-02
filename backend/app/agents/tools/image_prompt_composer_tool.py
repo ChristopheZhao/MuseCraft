@@ -1,6 +1,7 @@
 """Image Prompt Composer Tool - combine prompt, consistency assets, and generation."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
@@ -69,7 +70,7 @@ class ImagePromptComposerTool(AsyncTool):
                 },
                 "image_purpose": {
                     "type": "string",
-                    "description": "可选：图像用途提示（例如 scene_opening_anchor、character_reference）",
+                    "description": "可选：图像用途提示（例如 scene_opening_anchor、action_keyframe、continuity_bridge、character_reference）",
                 },
                 "task_direction": {
                     "type": "string",
@@ -239,8 +240,12 @@ class ImagePromptComposerTool(AsyncTool):
         )
 
         if consistency_block:
-            prompt_text = prompt_text.rstrip()
-            prompt_text = prompt_text + ("\n" if prompt_text else "") + consistency_block
+            prompt_text = self._merge_prompt_text_with_consistency(
+                prompt_text,
+                assets,
+                image_purpose=scene_data.get("image_purpose") or image_purpose,
+                task_direction=scene_data.get("task_direction") or task_direction,
+            )
 
         image_params: Dict[str, Any] = {
             "scene_number": scene_number,
@@ -280,6 +285,7 @@ class ImagePromptComposerTool(AsyncTool):
         metadata["consistency_lock_count"] = len(locked_segments)
         metadata["consistency_source"] = "scene_info_ref"
         metadata["image_purpose"] = scene_data.get("image_purpose") or self._canonicalize_image_purpose(image_purpose)
+        metadata["frame_thesis"] = scene_data.get("frame_thesis") or ""
         if scene_data.get("task_direction"):
             metadata["task_direction"] = scene_data.get("task_direction")
 
@@ -346,10 +352,19 @@ class ImagePromptComposerTool(AsyncTool):
             or scene_data.get("reference_type")
             or ""
         ).strip()
-        scene_data["image_purpose"] = self._canonicalize_image_purpose(
-            image_purpose or scene_data.get("image_purpose"),
+        scene_data["image_purpose"] = prompt_norm.infer_image_purpose(
+            scene_data,
+            explicit_value=image_purpose or scene_data.get("image_purpose"),
             task_direction=normalized_task_direction.lower(),
         )
+        scene_data["frame_thesis"] = str(
+            scene_data.get("frame_thesis")
+            or prompt_norm.select_frame_thesis(
+                scene_data,
+                image_purpose=scene_data["image_purpose"],
+                fallback_title=(scene_data.get("title") or "单帧静态画面").strip(),
+            )
+        ).strip()
         if normalized_task_direction:
             scene_data["task_direction"] = normalized_task_direction
 
@@ -421,18 +436,42 @@ class ImagePromptComposerTool(AsyncTool):
         image_purpose: Any = "",
         task_direction: Any = "",
     ) -> Tuple[str, List[str], List[str]]:
-        if not isinstance(assets, dict):
+        sections, categories, locked_segments = self._build_consistency_sections(
+            assets,
+            image_purpose=image_purpose,
+            task_direction=task_direction,
+        )
+        if not sections:
             return "", [], []
+
+        ordered_lines: List[str] = []
+        for entries in sections.values():
+            ordered_lines.extend(f"- {entry}" for entry in entries if entry)
+        if not ordered_lines:
+            return "", [], []
+        return "一致性要求：\n" + "\n".join(ordered_lines), categories, locked_segments
+
+    def _build_consistency_sections(
+        self,
+        assets: Any,
+        *,
+        image_purpose: Any = "",
+        task_direction: Any = "",
+    ) -> Tuple[Dict[str, List[str]], List[str], List[str]]:
+        if not isinstance(assets, dict):
+            return {}, [], []
 
         purpose = self._canonicalize_image_purpose(image_purpose)
         categories: List[str] = []
-        lines: List[str] = []
+        sections: "OrderedDict[str, List[str]]" = OrderedDict()
         locked_segments: List[str] = []
+        focus_label = "参考方向" if purpose == "character_reference" else "画面焦点"
+        character_label = "稳定特征" if purpose == "character_reference" else "主体锁定"
 
         style_line = self._format_style(assets.get("style") or {})
         if style_line:
             categories.append("global_style_lock")
-            lines.append(f"- 全局画风锁定：{style_line}")
+            sections.setdefault("风格指导", []).append(f"全局画风锁定：{style_line}")
             locked_segments.append(style_line)
 
         character_line = self._format_characters(
@@ -442,7 +481,7 @@ class ImagePromptComposerTool(AsyncTool):
         )
         if character_line:
             categories.append("character_lock")
-            lines.append(f"- 角色锁定：{character_line}")
+            sections.setdefault(character_label, []).append(f"角色锁定：{character_line}")
             locked_segments.append(character_line)
 
         environment_line = self._format_environment(
@@ -451,7 +490,7 @@ class ImagePromptComposerTool(AsyncTool):
         )
         if environment_line:
             categories.append("opening_anchor")
-            lines.append(f"- 开场锚点：{environment_line}")
+            sections.setdefault(focus_label, []).append(f"开场锚点：{environment_line}")
             locked_segments.append(environment_line)
 
         continuity_line = self._format_continuity(
@@ -460,13 +499,73 @@ class ImagePromptComposerTool(AsyncTool):
         )
         if continuity_line:
             categories.append("local_continuity")
-            lines.append(f"- 局部连续性：{continuity_line}")
+            sections.setdefault("连续性提示", []).append(f"局部连续性：{continuity_line}")
             locked_segments.append(continuity_line)
 
-        if not lines:
-            return "", [], []
+        if not sections:
+            return {}, [], []
 
-        return "一致性要求：\n" + "\n".join(lines), categories, locked_segments
+        normalized_sections: Dict[str, List[str]] = OrderedDict()
+        for label, entries in sections.items():
+            normalized_entries = self._dedupe_prompt_entries(entries)
+            if normalized_entries:
+                normalized_sections[label] = normalized_entries
+        return normalized_sections, categories, locked_segments
+
+    def _merge_prompt_text_with_consistency(
+        self,
+        prompt_text: str,
+        assets: Any,
+        *,
+        image_purpose: Any = "",
+        task_direction: Any = "",
+    ) -> str:
+        sections, _categories, _locked = self._build_consistency_sections(
+            assets,
+            image_purpose=image_purpose,
+            task_direction=task_direction,
+        )
+        if not sections:
+            return (prompt_text or "").strip()
+
+        prompt_sections, render_requirements = self._parse_prompt_sections(prompt_text)
+        if not prompt_sections:
+            return (prompt_text or "").strip()
+
+        merged_sections: "OrderedDict[str, List[str]]" = OrderedDict(
+            (label, list(entries)) for label, entries in prompt_sections
+        )
+        root_label = next(iter(merged_sections.keys()), "单帧构图")
+        preferred_order = [
+            root_label,
+            "画面焦点",
+            "参考方向",
+            "主体锁定",
+            "稳定特征",
+            "风格指导",
+            "光线与氛围",
+            "色彩提示",
+            "关键细节",
+            "连续性提示",
+            "注意事项",
+        ]
+
+        for label, entries in sections.items():
+            bucket = merged_sections.setdefault(label, [])
+            for entry in entries:
+                self._append_unique_entry(bucket, entry)
+            if label not in preferred_order:
+                preferred_order.append(label)
+
+        ordered_labels = [label for label in preferred_order if label in merged_sections]
+        for label in merged_sections.keys():
+            if label not in ordered_labels:
+                ordered_labels.append(label)
+
+        return self._render_prompt_sections(
+            [(label, merged_sections[label]) for label in ordered_labels],
+            render_requirements=render_requirements,
+        )
 
     def _format_style(self, style_assets: Dict[str, Any]) -> str:
         if not isinstance(style_assets, dict):
@@ -599,6 +698,89 @@ class ImagePromptComposerTool(AsyncTool):
                 return f"承接场景{depends_on}：{notes}"
             return f"承接场景{depends_on}"
         return ""
+
+    def _parse_prompt_sections(self, prompt_text: str) -> Tuple[List[Tuple[str, List[str]]], str]:
+        sections: List[Tuple[str, List[str]]] = []
+        current_label = ""
+        current_entries: List[str] = []
+        render_requirements = ""
+
+        for raw_line in str(prompt_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("画面要求："):
+                render_requirements = line[len("画面要求：") :].strip()
+                continue
+            if line.endswith("：") and not line.startswith("- "):
+                if current_label:
+                    sections.append((current_label, current_entries))
+                current_label = line[:-1].strip()
+                current_entries = []
+                continue
+            if not current_label:
+                continue
+            if line.startswith("- "):
+                current_entries.append(line[2:].strip())
+            else:
+                current_entries.append(line)
+
+        if current_label:
+            sections.append((current_label, current_entries))
+        return sections, render_requirements
+
+    def _render_prompt_sections(
+        self,
+        sections: List[Tuple[str, List[str]]],
+        *,
+        render_requirements: str,
+    ) -> str:
+        lines: List[str] = []
+        for index, (label, entries) in enumerate(sections):
+            normalized_entries = self._dedupe_prompt_entries(entries)
+            if not label or not normalized_entries:
+                continue
+            if lines:
+                lines.append("")
+            lines.append(f"{label}：")
+            if index == 0:
+                lines.extend(normalized_entries)
+            else:
+                lines.extend(f"- {entry}" for entry in normalized_entries)
+        if render_requirements:
+            if lines:
+                lines.append("")
+            lines.append(f"画面要求：{render_requirements}")
+        return "\n".join(lines).strip()
+
+    def _append_unique_entry(self, bucket: List[str], entry: str) -> None:
+        normalized_entry = str(entry or "").strip()
+        if not normalized_entry:
+            return
+        entry_core = self._entry_core(normalized_entry)
+        for existing in bucket:
+            existing_core = self._entry_core(existing)
+            if (
+                normalized_entry == existing
+                or entry_core == existing_core
+                or (entry_core and entry_core in existing_core)
+                or (existing_core and existing_core in entry_core)
+            ):
+                return
+        bucket.append(normalized_entry)
+
+    def _dedupe_prompt_entries(self, entries: List[str]) -> List[str]:
+        deduped: List[str] = []
+        for entry in entries:
+            self._append_unique_entry(deduped, entry)
+        return deduped
+
+    @staticmethod
+    def _entry_core(entry: str) -> str:
+        text = str(entry or "").strip()
+        if "：" in text:
+            text = text.split("：", 1)[1].strip()
+        return text
 
     @staticmethod
     def _join_items(items: Any, *, max_items: int = 6, sep: str = "、") -> str:

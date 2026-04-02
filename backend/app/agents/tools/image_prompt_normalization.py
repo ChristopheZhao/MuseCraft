@@ -54,8 +54,8 @@ APPEARANCE_MARKERS = (
     "光影",
     "线条",
     "剑",
-    "法器",
-    "储物袋",
+    "武器",
+    "随身物件",
     "道具",
     "站姿",
     "站立",
@@ -75,8 +75,8 @@ STRONG_APPEARANCE_MARKERS = (
     "光影",
     "线条",
     "剑",
-    "法器",
-    "储物袋",
+    "武器",
+    "随身物件",
     "道具",
     "纹样",
     "面庞",
@@ -90,6 +90,15 @@ PURPOSE_ALIASES = {
     "opening_state": "scene_opening_anchor",
     "scene_still": "scene_opening_anchor",
     "still": "scene_opening_anchor",
+    "action_keyframe": "action_keyframe",
+    "action_frame": "action_keyframe",
+    "action_peak": "action_keyframe",
+    "climax_peak": "climax_peak",
+    "peak_frame": "climax_peak",
+    "continuity_bridge": "continuity_bridge",
+    "bridge_frame": "continuity_bridge",
+    "emotional_lock": "emotional_lock",
+    "emotion_lock": "emotional_lock",
     "character_reference": "character_reference",
     "character_ref": "character_reference",
     "reference": "character_reference",
@@ -134,6 +143,55 @@ def canonicalize_image_purpose(value: Any, *, task_direction: str = "") -> str:
     return PURPOSE_ALIASES.get(normalized, "scene_opening_anchor")
 
 
+def infer_image_purpose(
+    scene_data: Dict[str, Any],
+    *,
+    explicit_value: Any = "",
+    task_direction: str = "",
+) -> str:
+    explicit = str(explicit_value or scene_data.get("image_purpose") or "").strip()
+    if explicit:
+        return canonicalize_image_purpose(explicit, task_direction=task_direction)
+
+    normalized_direction = str(task_direction or "").strip().lower()
+    if normalized_direction in REFERENCE_TASK_DIRECTIONS:
+        return "character_reference"
+
+    action_phases = scene_data.get("action_phases") or []
+    motion_beats = scene_data.get("motion_beats") or []
+    depends_on_scene = scene_data.get("depends_on_scene") or scene_data.get("depends_on")
+    duration = scene_data.get("duration")
+    try:
+        duration_value = float(duration or 0)
+    except Exception:
+        duration_value = 0.0
+
+    action_candidates = [
+        scene_data.get("scene_thesis"),
+        scene_data.get("frame_thesis"),
+        scene_data.get("event_trigger"),
+        scene_data.get("end_state"),
+        *(phase.get("observable_actions") for phase in action_phases if isinstance(phase, dict)),
+        *(beat.get("beat_summary") for beat in motion_beats if isinstance(beat, dict)),
+    ]
+    strong_action = any(contains_high_risk_action_language(candidate) for candidate in action_candidates)
+    multi_beat_scene = len([phase for phase in action_phases if isinstance(phase, dict)]) >= 2
+
+    if strong_action:
+        if contains_high_risk_action_language(scene_data.get("end_state")):
+            return "climax_peak"
+        return "action_keyframe"
+    if multi_beat_scene and duration_value >= 8:
+        return "action_keyframe"
+    if depends_on_scene is not None and (
+        multi_beat_scene
+        or len([beat for beat in motion_beats if isinstance(beat, dict)]) >= 2
+        or str(scene_data.get("end_state") or "").strip()
+    ):
+        return "continuity_bridge"
+    return canonicalize_image_purpose("", task_direction=normalized_direction)
+
+
 def contains_video_only_language(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -171,7 +229,6 @@ def soften_still_language(value: Any) -> str:
         "崩碎": "震裂",
         "吞噬": "笼罩",
         "腥风": "劲风",
-        "敌对修仙者": "远处修仙者身影",
         "水墨风格闪现": "水墨风格呈现",
         "特写镜头": "特写",
         "镜头特写": "特写",
@@ -325,3 +382,55 @@ def select_scene_opening_root(scene_data: Dict[str, Any], *, fallback_title: str
     if content_focus:
         return normalize_still_text(content_focus) or content_focus
     return str(fallback_title or "单帧静态画面").strip()
+
+
+def select_frame_thesis(
+    scene_data: Dict[str, Any],
+    *,
+    image_purpose: str,
+    fallback_title: str = "单帧静态画面",
+) -> str:
+    explicit = normalize_still_text(scene_data.get("frame_thesis"))
+    if explicit:
+        return explicit
+
+    purpose = canonicalize_image_purpose(image_purpose)
+    if purpose == "scene_opening_anchor":
+        return select_scene_opening_root(scene_data, fallback_title=fallback_title)
+
+    action_phases = scene_data.get("action_phases") or []
+    motion_beats = scene_data.get("motion_beats") or []
+    candidates: List[Any] = []
+
+    if purpose in {"action_keyframe", "climax_peak"}:
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                *(phase.get("observable_actions") for phase in reversed(action_phases) if isinstance(phase, dict)),
+                *(beat.get("visual_focus") for beat in reversed(motion_beats) if isinstance(beat, dict)),
+                scene_data.get("event_trigger"),
+            ]
+        )
+    elif purpose == "continuity_bridge":
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                scene_data.get("opening_state"),
+                scene_data.get("event_trigger"),
+            ]
+        )
+    elif purpose == "emotional_lock":
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                scene_data.get("opening_state"),
+                scene_data.get("content_focus"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = normalize_still_text(candidate)
+        if normalized:
+            return normalized
+
+    return select_scene_opening_root(scene_data, fallback_title=fallback_title)

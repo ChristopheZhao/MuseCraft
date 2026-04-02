@@ -14,6 +14,7 @@ async def test_video_prompt_builder_uses_action_phases_as_prompt_body(tmp_path):
                 "scene_number": 4,
                 "duration": 10,
                 "image_url": "https://example.com/scene4.png",
+                "scene_thesis": "韩立在受压中强行起身反击，局势迅速从僵持转向爆发",
                 "opening_state": "韩立半跪稳住身形，剑尖擦地拖出石屑",
                 "event_trigger": "黑袍修士逼近施压，迫使韩立强行起身聚气",
                 "action_phases": [
@@ -49,15 +50,24 @@ async def test_video_prompt_builder_uses_action_phases_as_prompt_body(tmp_path):
     assert result.success is True
     payload = result.result
     prompt_text = payload["prompt_text"]
-    assert "开场状态" in prompt_text
+    assert "主生成目标" in prompt_text
+    assert "韩立在受压中强行起身反击" in prompt_text
+    assert "事件骨架" in prompt_text
     assert "动作推进" in prompt_text
     assert "韩立压低重心稳住身形" in prompt_text
     assert "金光骤然爆开" in prompt_text
-    assert "镜头语言" in prompt_text
+    assert "运动与表现" in prompt_text
+    assert "镜头原则" in prompt_text
     assert "收束画面" in prompt_text
-    assert "叙事要点" not in prompt_text
+    assert "创作重点" not in prompt_text
+    assert "一致性要求" not in prompt_text
+    assert "中景缓推" not in prompt_text
+    assert "推进后定住" not in prompt_text
     assert payload["metadata"]["prompt_mode"] == "image_to_video"
     assert payload["metadata"]["action_source"] == "action_phases"
+    assert payload["metadata"]["has_scene_thesis"] is True
+    assert payload["metadata"]["scene_strategy"] == "climax_peak"
+    assert "diagnostics" not in payload["metadata"]
 
 
 @pytest.mark.asyncio
@@ -91,6 +101,7 @@ async def test_video_prompt_builder_reads_legacy_motion_beats_schema(tmp_path):
     assert result.success is True
     payload = result.result
     prompt_text = payload["prompt_text"]
+    assert "主生成目标" in prompt_text
     assert "剑尖擦地拖出石屑" in prompt_text
     assert "黑袍修士被冲击逼退" in prompt_text
     assert "beat: ; beat:" not in prompt_text
@@ -139,6 +150,7 @@ async def test_video_prompt_builder_prefers_action_phases_over_legacy_motion_bea
 
     assert result.success is True
     prompt_text = result.result["prompt_text"]
+    assert "主生成目标" in prompt_text
     assert "试探推进" in prompt_text
     assert "警觉收束" in prompt_text
     assert "旧版描述不应进入 prompt" not in prompt_text
@@ -186,6 +198,7 @@ async def test_video_prompt_builder_compacts_legacy_motion_beats_and_summary_pro
 
     assert result.success is True
     prompt_text = result.result["prompt_text"]
+    assert "主生成目标" in prompt_text
     assert prompt_text.count("符文闪烁") == 1
     assert "营造神秘感" not in prompt_text
     assert "增强奇幻氛围" not in prompt_text
@@ -250,11 +263,13 @@ async def test_video_prompt_builder_keeps_duration_scalable_action_arc_for_20s_s
     assert result.success is True
     payload = result.result
     prompt_text = payload["prompt_text"]
-    assert "- 目标时长：20s" in prompt_text
+    assert "技术说明" in prompt_text
+    assert "目标时长：20s" in prompt_text
     assert "先建立压迫" in prompt_text
     assert "随后接近试探" in prompt_text
     assert "接着对峙升级" in prompt_text
     assert "最后爆发前收束" in prompt_text
     assert "0-3s" not in prompt_text
+    assert "远景缓慢前推" not in prompt_text
     assert payload["metadata"]["prompt_mode"] == "text_to_video"
     assert payload["metadata"]["action_source"] == "action_phases"

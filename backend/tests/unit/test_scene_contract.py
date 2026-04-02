@@ -75,7 +75,12 @@ def test_build_image_generation_context_attaches_scene_contract_meta():
     meta = result["scene_info_payload"]["scene_contract_meta"]
     assert meta["mode"] == "image_generation"
     assert meta["semantic_unit"] == "local_event"
-    assert result["scene_info_payload"]["scenes_to_generate"][0]["scene_number"] == 1
+    scene_payload = result["scene_info_payload"]["scenes_to_generate"][0]
+    assert scene_payload["scene_number"] == 1
+    assert "generation_diagnostics" not in result["scene_info_payload"]
+    assert "generation_diagnostics" not in result["context"]
+    assert scene_payload["image_purpose"] == "scene_opening_anchor"
+    assert scene_payload["frame_thesis"]
 
 
 def test_build_video_generation_context_attaches_scene_contract_meta():
@@ -110,4 +115,9 @@ def test_build_video_generation_context_attaches_scene_contract_meta():
     meta = result["scene_info_payload"]["scene_contract_meta"]
     assert meta["mode"] == "video_generation"
     assert meta["owner_matrix"]["carrier_evolution"] == "in_place_only"
-    assert result["scene_info_payload"]["scenes_to_generate"][0]["image_url"] == "https://example.com/scene_1.jpg"
+    scene_payload = result["scene_info_payload"]["scenes_to_generate"][0]
+    assert scene_payload["image_url"] == "https://example.com/scene_1.jpg"
+    assert "generation_diagnostics" not in result["scene_info_payload"]
+    assert "generation_diagnostics" not in result["context"]
+    assert scene_payload["image_purpose"] == "scene_opening_anchor"
+    assert scene_payload["frame_thesis"]

@@ -2,7 +2,8 @@ import asyncio
 import httpx
 import pytest
 
-from app.agents.tools.ai_services.zhipu_services import ZhipuLLMService
+from app.agents.tools.ai_services.zhipu_services import ZhipuLLMService, ZhipuVideoService
+from app.services.execution_host_lease import ExecutionHostKeepaliveLostError
 from app.core.config import settings
 
 
@@ -183,3 +184,17 @@ def test_chat_completion_fails_when_no_remaining_budget_for_direct_fallback(monk
     assert TimeoutThenSuccessAsyncClient.call_log == [
         {"trust_env": True, "timeout": 5.0},
     ]
+
+
+@pytest.mark.asyncio
+async def test_zhipu_video_poll_propagates_keepalive_loss():
+    service = ZhipuVideoService({"api_key": "test", "base_url": "https://fake", "timeout": 5})
+
+    def _probe():
+        raise ExecutionHostKeepaliveLostError(
+            "Execution host keepalive lost",
+            diagnostic={"reason_code": "heartbeat_validation_failed", "state": "stopped"},
+        )
+
+    with pytest.raises(ExecutionHostKeepaliveLostError):
+        await service._poll_video_result("video-1", execution_liveness_probe=_probe)

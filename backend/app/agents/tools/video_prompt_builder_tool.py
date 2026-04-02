@@ -21,6 +21,7 @@ from .base_tool import (
     ToolType,
     ToolValidationError,
 )
+from . import image_prompt_normalization as image_prompt_norm
 from . import video_prompt_normalization as prompt_norm
 
 
@@ -107,103 +108,78 @@ class VideoPromptBuilderTool(AsyncTool):
         creative_intent = self._clip_text(scene_facts.get("creative_intent"), 140)
         negative_guidance: List[str] = []
 
-        lines: List[str] = []
-
-        def _append(text: Optional[str]):
-            if isinstance(text, str) and text.strip():
-                lines.append(text.strip())
-
         header = f"场景 {scene_number}" if scene_number is not None else "目标场景"
-        _append(f"{header}：")
 
         visual = scene_facts.get("visual_description") or scene_facts.get("description")
         narrative = self._clip_text(scene_facts.get("narrative_description") or scene_facts.get("story"), 180)
         if narrative:
             narrative = narrative.strip()
-
         duration = scene_facts.get("duration")
-        if duration:
-            _append(f"- 目标时长：{duration}s")
 
         prompt_mode = self._resolve_prompt_mode(scene_facts, continuity_assets)
-        if prompt_mode == "continuity":
-            _append("- 创作重点：延续上一场尾帧状态与动作趋势，不重新建立角色造型。")
-        elif prompt_mode == "image_to_video":
-            _append("- 创作重点：基于当前首帧向后推进动作，不重复静态复述整张首帧。")
-        else:
-            _append("- 创作重点：先建立角色与环境，再推进关键动作变化。")
-
         opening_state = self._resolve_opening_state(scene_facts, visual)
-        if opening_state:
-            _append(f"- 开场状态：{opening_state}")
-
         event_trigger = self._clip_text(scene_facts.get("event_trigger"), 160)
-        if event_trigger:
-            _append(f"- 触发动作：{event_trigger}")
-
         action_phases = self._normalize_action_phases(scene_facts)
         action_arc = self._format_action_arc(action_phases)
-        if action_arc:
-            _append(f"- 动作推进：{action_arc}")
 
         camera_language = self._clip_text(
             scene_facts.get("camera_language") or scene_facts.get("camera_angle"),
             140,
         )
-        if camera_language:
-            _append(f"- 镜头语言：{camera_language}")
-        else:
+        phase_camera = ""
+        if not camera_language:
             phase_camera = self._format_phase_camera_hints(action_phases)
-            if phase_camera:
-                _append(f"- 镜头语言：{phase_camera}")
 
         end_state = self._clip_text(scene_facts.get("end_state"), 160)
         if not end_state:
             end_state = self._infer_end_state(action_phases)
-        if end_state:
-            _append(f"- 收束画面：{end_state}")
 
         script_text = prompt_norm.compact_story_detail(
             scene_facts.get("script_text"),
             action_text=action_arc,
-            max_len=90,
+            max_len=120,
         )
-        if script_text:
-            _append(f"- 剧情细节：{script_text}")
-        else:
+        narrative_detail = ""
+        if not script_text:
             narrative_detail = prompt_norm.compact_story_detail(
                 narrative,
                 action_text=action_arc,
-                max_len=90,
+                max_len=120,
             )
-            if narrative_detail:
-                _append(f"- 剧情细节：{narrative_detail}")
 
         mood = self._clip_text(scene_facts.get("mood_and_atmosphere"), 120)
-        if mood:
-            _append(f"- 氛围控制：{mood}")
+        scene_thesis = self._resolve_scene_thesis(
+            scene_facts,
+            narrative=narrative,
+            action_arc=action_arc,
+            event_trigger=event_trigger,
+            end_state=end_state,
+            opening_state=opening_state,
+            visual=visual,
+        )
 
-        if creative_intent:
-            _append(f"- 创作意图：{creative_intent}")
-
-        continuity_lines = self._format_continuity(continuity_assets)
-        if continuity_lines:
-            _append("连续性提示：\n" + "\n".join(continuity_lines))
-
-        style_lines = self._format_style(style_assets)
-        if style_lines:
-            _append("风格指导：\n" + "\n".join(style_lines))
-
-        character_lines = self._format_characters(character_assets)
-        if character_lines:
-            _append("角色一致性：\n" + "\n".join(character_lines))
-
-        prompt_text = "\n".join(lines).strip()
+        prompt_outline = self._build_prompt_outline(
+            scene_thesis=scene_thesis,
+            duration=duration,
+            prompt_mode=prompt_mode,
+            opening_state=opening_state,
+            event_trigger=event_trigger,
+            action_arc=action_arc,
+            end_state=end_state,
+            story_detail=script_text or narrative_detail,
+            camera_language=camera_language,
+            phase_camera=phase_camera,
+            mood=mood,
+            creative_intent=creative_intent,
+        )
+        prompt_text = self._render_prompt_outline(header, prompt_outline)
         positive_tokens = self._collect_tokens(style_assets, "positive_tokens")
         if isinstance(negative_guidance, list) and negative_guidance:
             negative_tokens = [str(t).strip() for t in negative_guidance if str(t).strip()]
         else:
             negative_tokens = self._collect_tokens(style_assets, "negative_tokens")
+
+        scene_strategy = image_prompt_norm.infer_image_purpose(scene_facts)
 
         metadata = {
             "scene_number": scene_number,
@@ -211,6 +187,8 @@ class VideoPromptBuilderTool(AsyncTool):
             "prompt_mode": prompt_mode,
             "action_phase_count": len(action_phases),
             "action_source": self._detect_action_source(scene_facts),
+            "has_scene_thesis": bool(scene_thesis),
+            "scene_strategy": scene_strategy,
             "references": {
                 "style_assets": bool(style_assets),
                 "character_assets": bool(character_assets),
@@ -219,10 +197,143 @@ class VideoPromptBuilderTool(AsyncTool):
 
         return {
             "prompt_text": prompt_text,
+            "prompt_outline": prompt_outline,
             "positive_tokens": positive_tokens,
             "negative_tokens": negative_tokens,
             "metadata": metadata,
         }
+
+    def _build_prompt_outline(
+        self,
+        *,
+        scene_thesis: str,
+        duration: Any,
+        prompt_mode: str,
+        opening_state: str,
+        event_trigger: str,
+        action_arc: str,
+        end_state: str,
+        story_detail: str,
+        camera_language: str,
+        phase_camera: str,
+        mood: str,
+        creative_intent: str,
+    ) -> Dict[str, Any]:
+        outline: Dict[str, Any] = {
+            "main_key": scene_thesis,
+            "event_arc": [],
+            "motion_guidance": [],
+            "style_continuity": [],
+            "technical_note": [],
+        }
+        if duration:
+            outline["technical_note"].append(f"目标时长：{duration}s")
+        generation_note = self._resolve_generation_note(prompt_mode)
+        if generation_note:
+            outline["technical_note"].append(generation_note)
+
+        if opening_state:
+            outline["event_arc"].append(f"开场状态：{opening_state}")
+        if event_trigger:
+            outline["event_arc"].append(f"触发动作：{event_trigger}")
+        if action_arc:
+            outline["event_arc"].append(f"动作推进：{action_arc}")
+        if end_state:
+            outline["event_arc"].append(f"收束画面：{end_state}")
+
+        if story_detail:
+            outline["motion_guidance"].append(f"动作补充：{story_detail}")
+        if camera_language:
+            outline["motion_guidance"].append(f"镜头原则：{camera_language}")
+        elif phase_camera:
+            outline["motion_guidance"].append(f"镜头原则：{phase_camera}")
+
+        if mood:
+            outline["style_continuity"].append(f"氛围控制：{mood}")
+        if creative_intent:
+            outline["style_continuity"].append(f"创作意图：{creative_intent}")
+
+        for key in ("event_arc", "motion_guidance", "style_continuity", "technical_note"):
+            outline[key] = self._dedupe_lines(outline.get(key) or [])
+        return outline
+
+    def _render_prompt_outline(self, header: str, outline: Dict[str, Any]) -> str:
+        lines: List[str] = [f"{header}："]
+        main_key = self._clip_text((outline or {}).get("main_key"), 180)
+        if main_key:
+            lines.append("主生成目标：")
+            lines.append(f"- {main_key}")
+        section_labels = [
+            ("event_arc", "事件骨架"),
+            ("motion_guidance", "运动与表现"),
+            ("style_continuity", "风格与连续性"),
+            ("technical_note", "技术说明"),
+        ]
+        for key, label in section_labels:
+            entries = self._dedupe_lines((outline or {}).get(key) or [])
+            if not entries:
+                continue
+            lines.append(f"{label}：")
+            for entry in entries:
+                lines.append(f"- {entry}")
+        return "\n".join(lines).strip()
+
+    def _resolve_scene_thesis(
+        self,
+        scene_facts: Dict[str, Any],
+        *,
+        narrative: str,
+        action_arc: str,
+        event_trigger: str,
+        end_state: str,
+        opening_state: str,
+        visual: str,
+    ) -> str:
+        direct = self._clip_text(scene_facts.get("scene_thesis"), 140)
+        if direct:
+            return direct
+        candidates = [
+            scene_facts.get("script_text"),
+            narrative,
+            scene_facts.get("narrative_description"),
+            scene_facts.get("creative_intent"),
+        ]
+        for candidate in candidates:
+            compact = prompt_norm.compact_story_detail(
+                candidate,
+                action_text="",
+                max_len=120,
+                max_clauses=2,
+            )
+            if compact:
+                return compact
+        fallback_parts = [
+            self._clip_text(event_trigger, 56),
+            self._clip_text(end_state, 56),
+            self._clip_text(opening_state or visual, 56),
+        ]
+        compact_parts = [part for part in fallback_parts if part]
+        if compact_parts:
+            return "，".join(prompt_norm.dedupe_clauses(compact_parts[:2]))
+        return self._clip_text(action_arc, 120)
+
+    def _resolve_generation_note(self, prompt_mode: str) -> str:
+        if prompt_mode == "continuity":
+            return "生成方式：延续上一场尾帧动作趋势与空间关系，不重新建立人物造型。"
+        if prompt_mode == "image_to_video":
+            return "生成方式：以首帧为连续性参考，重点补全后续动作与局势变化，不重复静态复述首帧。"
+        return "生成方式：从文字建立场景，再围绕主事件推进关键变化。"
+
+    def _dedupe_lines(self, values: List[str]) -> List[str]:
+        deduped: List[str] = []
+        for raw in values:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if any(prompt_norm.is_similar(text, existing) for existing in deduped):
+                continue
+            deduped.append(text)
+        return deduped
 
     def _load_scene_info(self, ref: str) -> Dict[str, Any]:
         if not isinstance(ref, str) or not ref.strip():
@@ -414,9 +525,6 @@ class VideoPromptBuilderTool(AsyncTool):
                 segment = f"{lead_in}{phase_name}，{observable}"
             else:
                 segment = f"{lead_in}{observable or phase_name}"
-            camera_hint = str(phase.get("camera_hint") or "").strip()
-            if camera_hint:
-                segment += f"，镜头{camera_hint}"
             parts.append(segment)
         return "；".join(parts)
 

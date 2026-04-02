@@ -816,13 +816,85 @@ class OrchestratorAgent(BaseAgent):
                 attempt_id=attempt.id,
                 lease_owner=f"orchestrator:{wf_id}:{runtime_node_key}",
             )
+            try:
+                RuntimeSessionService.clear_node_diagnostic_codes_sync(
+                    db,
+                    runtime_session,
+                    node_key=runtime_node_key,
+                    codes=["execution_host_keepalive"],
+                )
+            except Exception as diag_err:
+                self.logger.warning(
+                    "Failed to clear execution host keepalive diagnostics for session=%s node=%s: %s",
+                    runtime_session.id,
+                    runtime_node_key,
+                    diag_err,
+                )
             return (
                 runtime_node_key,
                 attempt.id,
                 effective_trigger_reason,
                 str(leased_attempt.lease_token or "").strip() or None,
             )
-        
+
+        def _build_execution_host_keepalive_diagnostic(
+            *,
+            node_key: str,
+            attempt_id: int,
+            state: str,
+            reason_code: str,
+            message: str,
+        ) -> Dict[str, Any]:
+            return {
+                "code": "execution_host_keepalive",
+                "node_key": str(node_key or "").strip() or None,
+                "attempt_id": int(attempt_id),
+                "state": str(state or "").strip().lower() or "failed",
+                "reason_code": str(reason_code or "").strip().lower() or "unknown",
+                "message": str(message or "").strip(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        def _activate_runtime_attempt_keepalive_or_fail() -> bool:
+            nonlocal current_runtime_node_key, current_attempt_id, current_attempt_lease_token
+
+            if runtime_session is None or current_runtime_node_key is None or current_attempt_id is None:
+                return False
+
+            activated = activate_current_attempt_keepalive(
+                runtime_session_id=runtime_session.id,
+                attempt_id=current_attempt_id,
+                lease_token=current_attempt_lease_token,
+            )
+            if activated:
+                return True
+
+            message = "Execution host keepalive unavailable for leased runtime attempt"
+            try:
+                RuntimeSessionService.fail_node_attempt_sync(
+                    db,
+                    runtime_session,
+                    node_key=current_runtime_node_key,
+                    attempt_id=current_attempt_id,
+                    error_message=message,
+                    lease_token=current_attempt_lease_token,
+                    diagnostics=[
+                        _build_execution_host_keepalive_diagnostic(
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            state="activation_failed",
+                            reason_code="keepalive_unavailable",
+                            message=message,
+                        )
+                    ],
+                )
+            finally:
+                current_runtime_node_key = None
+                current_attempt_id = None
+                current_attempt_lease_token = None
+
+            raise AgentError(message)
+
         try:
             for step_index, agent_type in enumerate(execution_queue):
                 total_steps = max(len(execution_queue), 1)
@@ -877,11 +949,7 @@ class OrchestratorAgent(BaseAgent):
                         current_attempt_trigger_reason,
                         current_attempt_lease_token,
                     ) = _start_runtime_attempt(agent_type)
-                    current_attempt_keepalive_active = activate_current_attempt_keepalive(
-                        runtime_session_id=runtime_session.id,
-                        attempt_id=current_attempt_id,
-                        lease_token=current_attempt_lease_token,
-                    )
+                    current_attempt_keepalive_active = _activate_runtime_attempt_keepalive_or_fail()
                 
                 # Update progress
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
@@ -1118,11 +1186,7 @@ class OrchestratorAgent(BaseAgent):
                                 agent_type,
                                 trigger_reason_override=retry_trigger_reason,
                             )
-                            current_attempt_keepalive_active = activate_current_attempt_keepalive(
-                                runtime_session_id=runtime_session.id,
-                                attempt_id=current_attempt_id,
-                                lease_token=current_attempt_lease_token,
-                            )
+                            current_attempt_keepalive_active = _activate_runtime_attempt_keepalive_or_fail()
                         agent_input = await self._prepare_scheduled_agent_input(
                             workflow_data=workflow_data,
                             agent_type=agent_type,

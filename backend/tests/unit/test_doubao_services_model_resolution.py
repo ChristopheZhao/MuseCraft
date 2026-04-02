@@ -1,3 +1,5 @@
+import types
+
 import pytest
 
 from app.agents.tools.ai_services import doubao_services as doubao_module
@@ -50,7 +52,7 @@ async def test_generate_video_i2v_does_not_require_t2v_or_fallback_model(monkeyp
             raise RuntimeError("fallback model is intentionally unset")
         raise AssertionError(f"unexpected mode: {mode}")
 
-    async def _poll_video_result(_task_id, _headers):
+    async def _poll_video_result(_task_id, _headers, *, execution_liveness_probe=None):
         return {"video_url": "https://unit.test/video.mp4", "status": "SUCCESS", "provider_error": None}
 
     monkeypatch.setattr(service, "_resolve_mode_model", _resolve_mode_model)
@@ -85,7 +87,7 @@ async def test_generate_video_i2v_explicit_model_skips_optional_fallback_resolut
             raise AssertionError("explicit i2v request should not resolve text_to_video")
         raise AssertionError(f"unexpected mode: {mode}")
 
-    async def _poll_video_result(_task_id, _headers):
+    async def _poll_video_result(_task_id, _headers, *, execution_liveness_probe=None):
         return {"video_url": "https://unit.test/video.mp4", "status": "SUCCESS", "provider_error": None}
 
     monkeypatch.setattr(service, "_resolve_mode_model", _resolve_mode_model)
@@ -101,3 +103,90 @@ async def test_generate_video_i2v_explicit_model_skips_optional_fallback_resolut
     assert result["model"] == "doubao-i2v-explicit"
     assert resolve_calls == ["image_to_video"]
     assert len(post_payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_video_passes_execution_liveness_probe_to_poll(monkeypatch):
+    post_payloads = []
+    _patch_async_client(monkeypatch, post_payloads)
+
+    service = DoubaoVideoService(config={"api_key": "k", "base_url": "https://unit.test"})
+    observed = {}
+
+    async def _poll_video_result(_task_id, _headers, *, execution_liveness_probe=None):
+        observed["probe"] = execution_liveness_probe
+        return {"video_url": "https://unit.test/video.mp4", "status": "SUCCESS", "provider_error": None}
+
+    monkeypatch.setattr(service, "_poll_video_result", _poll_video_result)
+
+    def _probe():
+        return None
+
+    result = await service.generate_video(
+        prompt="test text-to-video",
+        execution_liveness_probe=_probe,
+    )
+
+    assert result["video_url"] == "https://unit.test/video.mp4"
+    assert observed["probe"] is _probe
+    assert len(post_payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_contents_generations_uses_top_level_control_fields(monkeypatch):
+    post_payloads = []
+    _patch_async_client(monkeypatch, post_payloads)
+
+    service = DoubaoVideoService(
+        config={
+            "api_key": "k",
+            "base_url": "https://unit.test",
+            "video_create_path": "/api/v3/contents/generations/tasks",
+            "video_query_path_tpl": "/api/v3/contents/generations/tasks/{task_id}",
+        }
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_get_provider_config",
+        lambda: types.SimpleNamespace(
+            resolution_aliases={},
+            resolution_options=["720p"],
+            ratio_aliases={},
+            ratio_options=["16:9"],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_resolve_mode_model",
+        lambda **kwargs: "doubao-seedance-1-5-pro-251215",
+    )
+
+    async def _poll_video_result(_task_id, _headers, *, execution_liveness_probe=None):
+        return {"video_url": "https://unit.test/video.mp4", "status": "SUCCESS", "provider_error": None}
+
+    monkeypatch.setattr(service, "_poll_video_result", _poll_video_result)
+
+    result = await service.generate_video(
+        prompt="场景 4：\n主生成目标：\n- 黑袍修士先手压制，韩立被迫迎击",
+        duration=10,
+        image_url="https://unit.test/scene4.jpg",
+        resolution="720p",
+        ratio="16:9",
+        generate_audio=True,
+    )
+
+    assert result["generation_mode"] == "image_to_video"
+    assert len(post_payloads) == 1
+    payload = post_payloads[0]["json"]
+    assert payload["duration"] == 10
+    assert payload["resolution"] == "720p"
+    assert payload["ratio"] == "16:9"
+    assert payload["generate_audio"] is True
+    assert payload["content"][0]["type"] == "text"
+    assert payload["content"][0]["text"] == "场景 4：\n主生成目标：\n- 黑袍修士先手压制，韩立被迫迎击"
+    assert "--dur" not in payload["content"][0]["text"]
+    assert "--rs" not in payload["content"][0]["text"]
+    assert "--rt" not in payload["content"][0]["text"]
+    assert payload["content"][1]["type"] == "image_url"
+    assert payload["content"][1]["image_url"]["url"] == "https://unit.test/scene4.jpg"

@@ -22,6 +22,7 @@
     {
       "scene_number": 1,
       "title": "保持骨架中的标题，可根据需要微调",
+      "scene_thesis": "一句话说明本场视频的核心事件与观看重点",
       "description": "叙述场景发生的事件，突出剧情",
       "visual_description": "场景语境与关键视觉锚点（环境、主体、氛围等高层描述，避免写死具体镜头/构图/光影）",
       "narrative_description": "该幕在故事中的作用及情感推进",
@@ -33,7 +34,7 @@
         "key_objects": ["重要道具"],
         "concepts_visualized": ["体现的抽象概念"]
       },
-      "camera_angle": "推荐的机位或运动",
+      "camera_angle": "可选：若确有必要，可提供辅助理解动作的镜头参考",
       "mood_and_atmosphere": "情绪与氛围说明",
       "creative_intent": "观众应获得的感受或洞察",
       "voiceover": {
@@ -52,5 +53,8 @@
 ### 规则
 1. 仅生成批次中列出的场景，保持 `scene_number` 与骨架一致；`duration`/`final_duration` 必须使用 {{ duration_capabilities | map('string') | join('、') }} 秒可选值，并尽量贴合骨架的 `duration_hint`。
 2. 所有角色、环境、道具的命名要与风格/内容要素保持一致；如需新增，请在 `notes.consistency` 中说明。
-3. 若某场景无需旁白，将 `voiceover.should_narrate` 设为 false 并简述理由。
-4. 输出必须是合法 JSON，不要额外注释或说明。
+3. 每个场景都必须是可支撑目标时长的 `local_event`：要写清开场局面、触发动作、局势推进和收束状态，不能只写情绪、姿态或章节概述。
+4. `scene_thesis` 必须直接概括该幕最重要的事件推进，不得写成“突出氛围/表现成长/制造悬念”这类抽象功能句。
+5. `camera_angle` 仅作弱提示，不能成为场景定义主轴；`visual_description` 与 `description` 应优先服务剧情和状态变化。
+6. 若某场景无需旁白，将 `voiceover.should_narrate` 设为 false 并简述理由。
+7. 输出必须是合法 JSON，不要额外注释或说明。

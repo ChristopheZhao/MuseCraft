@@ -64,11 +64,32 @@ def run_generation_in_host(
             from ..core.database import SessionLocal
             from .runtime_session_service import RuntimeSessionService
 
+            def _publish_keepalive_diagnostic(*, runtime_session_id: int, attempt_id: int, diagnostic: Dict[str, Any]) -> None:
+                runtime_db = SessionLocal()
+                try:
+                    runtime_session = RuntimeSessionService.get_session_by_id_sync(runtime_db, runtime_session_id)
+                    if runtime_session is None:
+                        logger.warning(
+                            "Dropping execution host keepalive diagnostic for missing session=%s attempt=%s",
+                            runtime_session_id,
+                            attempt_id,
+                        )
+                        return
+                    RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
+                        runtime_db,
+                        runtime_session,
+                        attempt_id=attempt_id,
+                        diagnostic=diagnostic,
+                    )
+                finally:
+                    runtime_db.close()
+
             attempt_lease_keepalive = AttemptLeaseKeepaliveController(
                 session_factory=SessionLocal,
                 load_session=RuntimeSessionService.get_session_by_id_sync,
                 heartbeat_attempt=RuntimeSessionService.heartbeat_attempt_lease_sync,
                 interval_seconds=execution_host_lease_heartbeat_interval_seconds(),
+                publish_diagnostic=_publish_keepalive_diagnostic,
                 logger=logger,
             )
         host_context_token = set_current_execution_host_lease_context(

@@ -156,15 +156,13 @@ class VideoPromptComposerTool(AsyncTool):
         )
 
         assets = consistency_payload.get("assets") if isinstance(consistency_payload, dict) else {}
-        prompt_text = builder_payload.get("prompt_text") or ""
-        consistency_block, categories = self._build_consistency_block(assets)
-
-        if consistency_block:
-            prompt_text = prompt_text.rstrip()
-            prompt_text = prompt_text + ("\n" if prompt_text else "") + consistency_block
+        prompt_outline = self._normalize_prompt_outline(builder_payload)
+        consistency_sections, categories = self._build_consistency_sections(assets)
+        prompt_outline = self._merge_prompt_outline(prompt_outline, consistency_sections)
+        prompt_text = self._render_prompt_outline(scene_number, prompt_outline)
 
         metadata = dict(builder_payload.get("metadata") or {})
-        metadata["consistency_injected"] = bool(consistency_block)
+        metadata["consistency_injected"] = any(bool(entries) for entries in consistency_sections.values())
         metadata["consistency_categories"] = categories
         metadata["consistency_source"] = "scene_info_ref"
 
@@ -172,7 +170,7 @@ class VideoPromptComposerTool(AsyncTool):
             self.logger.info(
                 "CONSISTENCY_INJECT scene=%s injected=%s categories=%s",
                 scene_number,
-                bool(consistency_block),
+                any(bool(entries) for entries in consistency_sections.values()),
                 categories,
             )
         except Exception:
@@ -180,42 +178,113 @@ class VideoPromptComposerTool(AsyncTool):
 
         return {
             "prompt_text": prompt_text,
+            "prompt_outline": prompt_outline,
             "positive_tokens": builder_payload.get("positive_tokens") or [],
             "negative_tokens": builder_payload.get("negative_tokens") or [],
             "metadata": metadata,
         }
 
-    def _build_consistency_block(self, assets: Any) -> Tuple[str, List[str]]:
+    def _normalize_prompt_outline(self, builder_payload: Dict[str, Any]) -> Dict[str, Any]:
+        outline = builder_payload.get("prompt_outline")
+        if not isinstance(outline, dict):
+            raise ToolError("video_prompt_builder returned invalid prompt_outline", self.metadata.name)
+        normalized = {
+            "main_key": str(outline.get("main_key") or "").strip(),
+            "event_arc": self._normalize_outline_entries(outline.get("event_arc")),
+            "motion_guidance": self._normalize_outline_entries(outline.get("motion_guidance")),
+            "style_continuity": self._normalize_outline_entries(outline.get("style_continuity")),
+            "technical_note": self._normalize_outline_entries(outline.get("technical_note")),
+        }
+        return normalized
+
+    def _build_consistency_sections(self, assets: Any) -> Tuple[Dict[str, List[str]], List[str]]:
         if not isinstance(assets, dict):
-            return "", []
+            return {"event_arc": [], "motion_guidance": [], "style_continuity": [], "technical_note": []}, []
 
         categories: List[str] = []
-        lines: List[str] = []
+        sections: Dict[str, List[str]] = {
+            "event_arc": [],
+            "motion_guidance": [],
+            "style_continuity": [],
+            "technical_note": [],
+        }
 
         style_line = self._format_style(assets.get("style") or {})
         if style_line:
             categories.append("global_style_lock")
-            lines.append(f"- 全局画风锁定：{style_line}")
+            sections["style_continuity"].append(f"全局画风锁定：{style_line}")
 
         character_line = self._format_characters(assets.get("characters") or {})
         if character_line:
             categories.append("character_lock")
-            lines.append(f"- 角色锁定：{character_line}")
+            sections["style_continuity"].append(f"角色锁定：{character_line}")
 
         environment_line = self._format_environment(assets.get("environment") or {})
         if environment_line:
             categories.append("opening_anchor")
-            lines.append(f"- 开场锚点：{environment_line}")
+            sections["style_continuity"].append(f"开场锚点：{environment_line}")
 
         continuity_line = self._format_continuity(assets.get("continuity") or {})
         if continuity_line:
             categories.append("local_continuity")
-            lines.append(f"- 局部连续性：{continuity_line}")
+            sections["style_continuity"].append(f"局部连续性：{continuity_line}")
 
-        if not lines:
-            return "", []
+        for key in sections:
+            sections[key] = self._normalize_outline_entries(sections[key])
+        return sections, categories
 
-        return "一致性要求：\n" + "\n".join(lines), categories
+    def _merge_prompt_outline(
+        self,
+        base_outline: Dict[str, Any],
+        consistency_sections: Dict[str, List[str]],
+    ) -> Dict[str, Any]:
+        merged = {
+            "main_key": str(base_outline.get("main_key") or "").strip(),
+            "event_arc": self._normalize_outline_entries(base_outline.get("event_arc")),
+            "motion_guidance": self._normalize_outline_entries(base_outline.get("motion_guidance")),
+            "style_continuity": self._normalize_outline_entries(base_outline.get("style_continuity")),
+            "technical_note": self._normalize_outline_entries(base_outline.get("technical_note")),
+        }
+        for key in ("event_arc", "motion_guidance", "style_continuity", "technical_note"):
+            extras = self._normalize_outline_entries((consistency_sections or {}).get(key))
+            merged[key] = self._normalize_outline_entries([*merged.get(key, []), *extras])
+        return merged
+
+    def _render_prompt_outline(self, scene_number: Any, outline: Dict[str, Any]) -> str:
+        header = f"场景 {scene_number}" if scene_number is not None else "目标场景"
+        lines: List[str] = [f"{header}："]
+        main_key = self._clip_text((outline or {}).get("main_key"), 180)
+        if main_key:
+            lines.append("主生成目标：")
+            lines.append(f"- {main_key}")
+        for key, label in (
+            ("event_arc", "事件骨架"),
+            ("motion_guidance", "运动与表现"),
+            ("style_continuity", "风格与连续性"),
+            ("technical_note", "技术说明"),
+        ):
+            entries = self._normalize_outline_entries((outline or {}).get(key))
+            if not entries:
+                continue
+            lines.append(f"{label}：")
+            for entry in entries:
+                lines.append(f"- {entry}")
+        return "\n".join(lines).strip()
+
+    def _normalize_outline_entries(self, values: Any) -> List[str]:
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            return []
+        normalized: List[str] = []
+        for raw in values:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if any(prompt_norm.is_similar(text, existing) for existing in normalized):
+                continue
+            normalized.append(text)
+        return normalized
 
     def _format_style(self, style_assets: Dict[str, Any]) -> str:
         if not isinstance(style_assets, dict):
@@ -323,9 +392,10 @@ class VideoPromptComposerTool(AsyncTool):
         depends_on = local.get("depends_on_scene") if isinstance(local, dict) else continuity_assets.get("depends_on_scene")
         if isinstance(depends_on, int):
             notes = prompt_norm.compact_lock_text(local.get("transition_notes"), max_len=48, max_clauses=1) if isinstance(local, dict) else ""
-            if notes:
+            base = f"承接场景 {depends_on}"
+            if notes and not prompt_norm.is_similar(notes, base):
                 return f"承接场景 {depends_on}；{notes}"
-            return f"承接场景 {depends_on}"
+            return base
         return ""
 
     def _compact_scene_descriptions(self, descriptions: Any) -> str:

@@ -103,13 +103,26 @@ def test_video_prompt_composer_uses_structured_consistency_labels():
     }
 
     composer = VideoPromptComposerTool(metadata=VideoPromptComposerTool.get_metadata())
-    block, categories = composer._build_consistency_block(assets)
+    sections, categories = composer._build_consistency_sections(assets)
+    outline = composer._merge_prompt_outline(
+        {
+            "main_key": "韩立稳住身形后准备反击黑袍修士",
+            "event_arc": ["开场状态：韩立半跪稳住身形"],
+            "motion_guidance": ["动作补充：韩立压低重心准备反击"],
+            "style_continuity": [],
+            "technical_note": ["目标时长：10s"],
+        },
+        sections,
+    )
+    prompt_text = composer._render_prompt_outline(4, outline)
 
-    assert "全局画风锁定" in block
-    assert "角色锁定" in block
-    assert "开场锚点" in block
-    assert "局部连续性" in block
-    assert "道具" not in block
+    assert "风格与连续性" in prompt_text
+    assert "全局画风锁定" in prompt_text
+    assert "角色锁定" in prompt_text
+    assert "开场锚点" in prompt_text
+    assert "局部连续性" in prompt_text
+    assert "一致性要求" not in prompt_text
+    assert "道具" not in prompt_text
     assert categories == ["global_style_lock", "character_lock", "opening_anchor", "local_continuity"]
 
 
@@ -145,17 +158,29 @@ def test_video_prompt_composer_compresses_consistency_block_to_short_locks():
     }
 
     composer = VideoPromptComposerTool(metadata=VideoPromptComposerTool.get_metadata())
-    block, categories = composer._build_consistency_block(assets)
+    sections, categories = composer._build_consistency_sections(assets)
+    outline = composer._merge_prompt_outline(
+        {
+            "main_key": "韩立接住前冲势能，继续推进对抗",
+            "event_arc": ["开场状态：韩立在秘境入口前警惕前行"],
+            "motion_guidance": [],
+            "style_continuity": [],
+            "technical_note": ["目标时长：10s"],
+        },
+        sections,
+    )
+    prompt_text = composer._render_prompt_outline(4, outline)
 
-    assert "全局画风锁定" in block
-    assert "角色锁定" in block
-    assert "开场锚点" in block
-    assert "局部连续性" in block
-    assert "原型：" not in block
-    assert "物种：" not in block
-    assert "镜头起点" not in block
-    assert "氛围：" not in block
-    assert len(block) < 260
+    assert "全局画风锁定" in prompt_text
+    assert "角色锁定" in prompt_text
+    assert "开场锚点" in prompt_text
+    assert "局部连续性" in prompt_text
+    assert "原型：" not in prompt_text
+    assert "物种：" not in prompt_text
+    assert "镜头起点" not in prompt_text
+    assert "氛围：" not in prompt_text
+    assert "一致性要求" not in prompt_text
+    assert len(prompt_text) < 360
     assert categories == ["global_style_lock", "character_lock", "opening_anchor", "local_continuity"]
 
 
@@ -188,6 +213,109 @@ def test_image_prompt_composer_uses_opening_anchor_label():
         "角色：画魂师；场景特征：白发苍苍，素色长袍",
         "开场状态：月光洒在空白画卷上；环境基调：画室保持月光与墨色对比",
     ]
+
+
+def test_image_prompt_composer_merges_consistency_into_structured_sections(monkeypatch):
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+    captured = {}
+
+    monkeypatch.setattr(tool, "_load_scene_info", lambda ref: {"scenes_to_generate": [{"scene_number": 3}]})
+    monkeypatch.setattr(tool, "_extract_scene_entry", lambda scene_info, scene_number: {"scene_number": scene_number})
+    monkeypatch.setattr(
+        tool,
+        "_build_scene_data",
+        lambda scene_entry, scene_number, **_kwargs: {
+            "scene_number": scene_number,
+            "image_purpose": "action_keyframe",
+            "frame_thesis": "韩立挥剑迎击黑袍修士的关键瞬间",
+        },
+    )
+    monkeypatch.setattr(tool, "_build_style_guidance", lambda scene_info: {})
+    monkeypatch.setattr(tool, "_resolve_style_name", lambda style_guidance: "")
+
+    class FakeImageTool:
+        async def _create_image_prompt_from_scene(self, scene_data, style_name, style_guidance):
+            return (
+                "关键帧构图：\n"
+                "韩立挥剑迎击黑袍修士的关键瞬间\n\n"
+                "画面焦点：\n"
+                "- 飞剑与紫黑法术正面对撞\n\n"
+                "主体锁定：\n"
+                "- 韩立青衫持剑，黑袍修士悬空施压\n\n"
+                "风格指导：\n"
+                "- 非写实仙侠水墨，能量粒子清晰\n\n"
+                "画面要求：关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
+            )
+
+        async def execute(self, tool_input):
+            captured["prompt"] = tool_input.parameters["prompt"]
+            return {"success": True, "result": {"image_url": "https://img.example.com/keyframe.jpg"}}
+
+    class FakeConsistencyTool:
+        async def execute(self, tool_input):
+            return {
+                "success": True,
+                "result": {
+                    "assets": {
+                        "style": {
+                            "global_lock": {
+                                "headline": "修仙水墨风暴",
+                                "style_guidelines": "保持冷暖对撞与水墨粒子质感",
+                            }
+                        },
+                        "characters": {
+                            "scene_cast": {
+                                "present": ["韩立", "黑袍修士"],
+                                "descriptions": ["韩立青衫持剑", "黑袍修士操控紫黑法器"],
+                            }
+                        },
+                        "environment": {
+                            "global_lock": {"guidelines": "废墟空间保持冲击后的碎裂压迫感"},
+                            "opening_anchor": {"opening_state": "碎石与尘浪向外掀开，空间仍在震颤"},
+                        },
+                        "continuity": {
+                            "local_continuity": {
+                                "depends_on_scene": 2,
+                                "transition_notes": "接住上一场法术对撞后的前冲势能",
+                            }
+                        },
+                    }
+                },
+            }
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            if name == "image_generation":
+                return FakeImageTool()
+            if name == "consistency_tool":
+                return FakeConsistencyTool()
+            raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.agents.tools.tool_registry.get_tool_registry", lambda: FakeRegistry())
+
+    result = asyncio.run(
+        tool._execute_impl(
+            ToolInput(
+                action="generate",
+                parameters={"scene_number": 3, "scene_info_ref": "unused.json"},
+                context={},
+            )
+        )
+    )
+
+    prompt_text = captured["prompt"]
+    assert result["image_url"] == "https://img.example.com/keyframe.jpg"
+    assert "一致性要求" not in prompt_text
+    assert "风格指导" in prompt_text
+    assert "主体锁定" in prompt_text
+    assert "画面焦点" in prompt_text
+    assert "连续性提示" in prompt_text
+    assert "全局画风锁定：修仙水墨风暴" in prompt_text
+    assert "局部连续性：承接场景2：接住上一场法术对撞后的前冲势能" in prompt_text
+    assert prompt_text.count("风格指导：") == 1
+    assert "画面要求：" in prompt_text
+    assert result["metadata"]["frame_thesis"] == "韩立挥剑迎击黑袍修士的关键瞬间"
+    assert "diagnostics" not in result["metadata"]
 
 
 def test_image_prompt_composer_filters_montage_language_from_still_consistency():

@@ -507,6 +507,56 @@ def test_fail_node_attempt_sync_preserves_lease_snapshot_after_cross_session_hea
     assert snapshot["lease_expires_at"] == (heartbeat_at + timedelta(seconds=60)).isoformat()
 
 
+def test_upsert_attempt_node_diagnostic_sync_replaces_keepalive_entry_for_same_attempt(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        task=task,
+    )
+
+    RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        diagnostic={
+            "code": "execution_host_keepalive",
+            "attempt_id": attempt.id,
+            "state": "failed",
+            "reason_code": "heartbeat_error",
+            "message": "boom",
+            "captured_at": "2026-04-01T00:00:00+00:00",
+        },
+    )
+    RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        diagnostic={
+            "code": "execution_host_keepalive",
+            "attempt_id": attempt.id,
+            "state": "stopped",
+            "reason_code": "heartbeat_validation_failed",
+            "message": "lease expired",
+            "captured_at": "2026-04-01T00:01:00+00:00",
+        },
+    )
+
+    node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "video")
+    keepalive_diagnostics = [
+        item
+        for item in (node.diagnostics or [])
+        if item.get("code") == "execution_host_keepalive"
+    ]
+
+    assert len(keepalive_diagnostics) == 1
+    assert keepalive_diagnostics[0]["attempt_id"] == attempt.id
+    assert keepalive_diagnostics[0]["state"] == "stopped"
+    assert keepalive_diagnostics[0]["reason_code"] == "heartbeat_validation_failed"
+
+
 def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")

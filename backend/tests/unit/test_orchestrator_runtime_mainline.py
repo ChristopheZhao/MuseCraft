@@ -172,6 +172,8 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
     )
     monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop, raising=False)
+    monkeypatch.setattr(orchestrator_module, "activate_current_attempt_keepalive", lambda **kwargs: True)
+    monkeypatch.setattr(orchestrator_module, "deactivate_current_attempt_keepalive", lambda: True)
 
     agent = object.__new__(OrchestratorAgent)
     agent.agent_type = AgentType.ORCHESTRATOR
@@ -280,6 +282,8 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
     )
     monkeypatch.setattr(orchestrator_module, "publish_event", _async_noop, raising=False)
+    monkeypatch.setattr(orchestrator_module, "activate_current_attempt_keepalive", lambda **kwargs: True)
+    monkeypatch.setattr(orchestrator_module, "deactivate_current_attempt_keepalive", lambda: True)
 
     agent = object.__new__(OrchestratorAgent)
     agent.agent_type = AgentType.ORCHESTRATOR
@@ -393,6 +397,47 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert call_log["image_generator"] == []
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailable(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        monkeypatch.setattr(orchestrator_module, "activate_current_attempt_keepalive", lambda **kwargs: False)
+
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        with pytest.raises(AgentError, match="Execution host keepalive unavailable"):
+            asyncio.run(
+                agent._execute_impl(
+                    task=task,
+                    input_data={"user_prompt": "test prompt"},
+                    db=sync_db,
+                )
+            )
+
+        sync_db.refresh(task)
+        sync_db.refresh(session)
+        node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
+        keepalive_diagnostic = next(
+            item
+            for item in (node.diagnostics or [])
+            if item.get("code") == "execution_host_keepalive"
+        )
+
+        assert call_log["concept_planner"] == []
+        assert session.status == WorkflowSessionStatus.FAILED.value
+        assert task.status == TaskStatus.FAILED.value
+        assert node.status == WorkflowNodeStatus.FAILED.value
+        assert keepalive_diagnostic["state"] == "activation_failed"
+        assert keepalive_diagnostic["reason_code"] == "keepalive_unavailable"
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

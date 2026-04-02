@@ -1,12 +1,15 @@
 import asyncio
+import json
 import types
 
 import pytest
 
 from app.agents.tools.ai_services import video_generation_tool_v2 as vgt_module
 from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
+from app.services.execution_host_lease import ExecutionHostKeepaliveLostError
 from app.core.consistency_policy import ConsistencyPolicy, PromptSafetyPolicy
 from app.agents.tools.base_tool import ToolError
+import app.agents.tools.tool_registry as tool_registry_module
 
 
 def test_prompt_safety_preserves_locked_segments(monkeypatch):
@@ -27,7 +30,7 @@ def test_prompt_safety_preserves_locked_segments(monkeypatch):
 
     captured_prompts: list[str] = []
 
-    async def fake_generate_video(self, params):
+    async def fake_generate_video(self, params, *, execution_liveness_probe=None):
         captured_prompts.append(params.get("prompt", ""))
         return {
             "video_url": "https://stub.example/video.mp4",
@@ -93,7 +96,7 @@ def test_sensitive_error_triggers_prompt_rewrite(monkeypatch):
 
     call_prompts: list[str] = []
 
-    async def fake_generate_video(self, params):
+    async def fake_generate_video(self, params, *, execution_liveness_probe=None):
         call_prompts.append(params.get("prompt", ""))
         if len(call_prompts) == 1:
             raise ToolError(
@@ -184,6 +187,51 @@ def test_generate_video_propagates_sensitive_error_code(monkeypatch):
     assert excinfo.value.error_code == "OutputVideoSensitiveContentDetected"
 
 
+def test_generate_video_maps_keepalive_loss_to_tool_error(monkeypatch):
+    tool = VideoGenerationTool()
+    tool._functional = True
+
+    class _StubVideoService:
+        async def generate_video(self, **kwargs):
+            raise ExecutionHostKeepaliveLostError(
+                "Execution host keepalive lost",
+                diagnostic={"reason_code": "heartbeat_validation_failed", "state": "stopped"},
+            )
+
+    class _StubVideoConfig:
+        def __init__(self):
+            self._config = types.SimpleNamespace(
+                resolution_options=[],
+                resolution_aliases={},
+                ratio_options=[],
+                ratio_aliases={},
+                duration_capabilities=[10],
+                provider_name="stub-provider",
+                supports_native_audio=False,
+                native_audio_default_enabled=False,
+            )
+
+        def get_current_provider_config(self):
+            return self._config
+
+    tool.video_service = _StubVideoService()
+    tool.video_config = _StubVideoConfig()
+    tool._fetch_capabilities = lambda: None
+
+    params = {
+        "prompt": "安全提示词",
+        "duration": 10,
+        "scene_number": 1,
+        "workflow_state_id": "wf-keepalive",
+    }
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(tool._generate_video(dict(params)))
+
+    assert excinfo.value.error_code == "execution_host_keepalive_lost"
+    assert excinfo.value.details["reason_code"] == "heartbeat_validation_failed"
+
+
 def test_get_capabilities_filters_blank_supported_models():
     tool = object.__new__(VideoGenerationTool)
     tool.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
@@ -219,3 +267,124 @@ def test_get_capabilities_filters_blank_supported_models():
 
     result = asyncio.run(tool._get_capabilities())
     assert result["supported_models"] == ["doubao-seedance-1-5-pro"]
+
+
+def test_determine_generation_mode_prefers_factual_image_inputs():
+    tool = object.__new__(VideoGenerationTool)
+
+    assert (
+        tool._determine_generation_mode(
+            "https://example.com/keyframe.png",
+            "",
+            "",
+        )
+        == "image_to_video"
+    )
+
+
+def test_generate_with_continuity_hydrates_image_url_from_scene_info_ref(tmp_path, monkeypatch):
+    monkeypatch.setattr(vgt_module, "get_consistency_policy", lambda: ConsistencyPolicy())
+
+    scene_info = {
+        "scenes_to_generate": [
+            {
+                "scene_number": 2,
+                "duration": 10,
+                "image_url": "https://example.com/scene2.png",
+                "depends_on_scene": 1,
+            }
+        ]
+    }
+    scene_path = tmp_path / "scene_info.json"
+    scene_path.write_text(json.dumps(scene_info, ensure_ascii=False), encoding="utf-8")
+
+    class _FakeComposer:
+        async def execute(self, tool_input):
+            return types.SimpleNamespace(
+                result={
+                    "prompt_text": "场景 2：\n主生成目标：\n- 测试场景",
+                    "metadata": {},
+                }
+            )
+
+    class _FakeRegistry:
+        def get_tool(self, name):
+            if name == "video_prompt_composer":
+                return _FakeComposer()
+            raise AssertionError(f"unexpected tool lookup: {name}")
+
+    monkeypatch.setattr(tool_registry_module, "get_tool_registry", lambda: _FakeRegistry())
+
+    tool = VideoGenerationTool()
+    tool._functional = True
+
+    class _StubVideoService:
+        async def generate_video(self, **kwargs):
+            return {
+                "status": "SUCCEEDED",
+                "video_url": "https://stub.example/video.mp4",
+                "provider": "stub",
+                "model": kwargs.get("model", "stub-model"),
+            }
+
+    class _StubVideoConfig:
+        def __init__(self):
+            self._config = types.SimpleNamespace(
+                provider_name="stub-provider",
+                model_name="stub-model",
+                duration_capabilities=[5, 10],
+                max_duration=10,
+                default_duration=5,
+                supports_first_last_frame=True,
+                resolution_options=[],
+                resolution_aliases={},
+                ratio_options=[],
+                ratio_aliases={},
+                supports_native_audio=True,
+                native_audio_default_enabled=True,
+                native_audio_param_name="generate_audio",
+                amplification_ratio=1.0,
+            )
+
+        def get_current_provider_config(self):
+            return self._config
+
+        def get_system_duration_capability(self):
+            return {"min_duration": 5, "max_duration": 10}
+
+    tool.video_service = _StubVideoService()
+    tool.video_config = _StubVideoConfig()
+    tool._fetch_capabilities = lambda: None
+
+    result = asyncio.run(
+        tool._generate_with_continuity(
+            {
+                "scene_number": 2,
+                "scene_info_ref": str(scene_path),
+                "duration": 10,
+                "workflow_state_id": "wf-hydrate",
+            }
+        )
+    )
+
+    exec_params = result["execution_params"]
+    assert exec_params["has_reference_image"] is True
+    assert exec_params["generation_mode"] == "image_to_video"
+    assert exec_params["image_input_url"] == "https://example.com/scene2.png"
+    assert (
+        tool._determine_generation_mode(
+            "https://example.com/opening.png",
+            "",
+            "",
+        )
+        == "image_to_video"
+    )
+    assert (
+        tool._determine_generation_mode(
+            "https://example.com/continuity.png",
+            "",
+            "",
+            image_from_continuity=True,
+        )
+        == "image_to_video"
+    )

@@ -20,6 +20,7 @@ from .service_interfaces import (
     EnumCapability,
 )
 from ....core.config import settings
+from ....services.execution_host_lease import ExecutionHostKeepaliveLostError
 
 
 class ZhipuLLMService(LLMServiceInterface):
@@ -929,8 +930,12 @@ class ZhipuVideoService(VideoModelServiceInterface):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        execution_liveness_probe = kwargs.get("execution_liveness_probe")
         
         try:
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.base_url}/videos/generations", 
@@ -952,7 +957,10 @@ class ZhipuVideoService(VideoModelServiceInterface):
                 self.logger.info(f"Video generation task started: {video_id}")
                 
                 # 轮询获取视频生成结果
-                video_url = await self._poll_video_result(video_id)
+                video_url = await self._poll_video_result(
+                    video_id,
+                    execution_liveness_probe=execution_liveness_probe,
+                )
                 
                 # 处理轮询结果
                 if video_url:
@@ -974,6 +982,8 @@ class ZhipuVideoService(VideoModelServiceInterface):
                     "provider": self.get_provider_name()
                 }
                 
+        except ExecutionHostKeepaliveLostError:
+            raise
         except httpx.TimeoutException:
             raise RuntimeError("Zhipu video generation API request timeout")
         except Exception as e:
@@ -1026,13 +1036,15 @@ class ZhipuVideoService(VideoModelServiceInterface):
         except Exception as e:
             raise RuntimeError(f"Failed to get video status: {str(e)}")
     
-    async def _poll_video_result(self, video_id: str) -> str:
+    async def _poll_video_result(self, video_id: str, *, execution_liveness_probe=None) -> str:
         """轮询视频生成结果"""
         
         max_attempts = 18  # 最多轮询3分钟 (18次 * 10秒)
         attempt = 0
         
         while attempt < max_attempts:
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
             try:
                 status_info = await self.get_generation_status(video_id)
                 
@@ -1053,6 +1065,8 @@ class ZhipuVideoService(VideoModelServiceInterface):
                 await asyncio.sleep(10)  # 等待10秒
                 attempt += 1
                 
+            except ExecutionHostKeepaliveLostError:
+                raise
             except Exception as e:
                 self.logger.error(f"Error polling video result: {e}")
                 await asyncio.sleep(10)

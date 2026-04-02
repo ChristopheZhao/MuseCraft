@@ -294,6 +294,38 @@ def _merge_failure_diagnostics(
     return merged
 
 
+def _upsert_node_diagnostic(
+    node: WorkflowNodeState,
+    diagnostic: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged = _merge_failure_diagnostics(node, None)
+    if not isinstance(diagnostic, dict):
+        return merged
+
+    code = str(diagnostic.get("code") or "").strip()
+    attempt_id = diagnostic.get("attempt_id")
+    if not code:
+        merged.append(diagnostic)
+        return merged
+
+    updated: List[Dict[str, Any]] = []
+    replaced = False
+    for item in merged:
+        item_code = str(item.get("code") or "").strip()
+        same_code = item_code == code
+        same_attempt = attempt_id is None or item.get("attempt_id") == attempt_id
+        if same_code and same_attempt:
+            if not replaced:
+                updated.append(diagnostic)
+                replaced = True
+            continue
+        updated.append(item)
+
+    if not replaced:
+        updated.append(diagnostic)
+    return updated
+
+
 def _build_attempt_lease_diagnostic(
     *,
     attempt: WorkflowNodeAttempt,
@@ -518,6 +550,75 @@ class RuntimeSessionService:
         if diagnostics is not None:
             node.diagnostics = diagnostics
 
+        db.commit()
+        db.refresh(node)
+        db.refresh(session)
+        return node
+
+    @staticmethod
+    def clear_node_diagnostic_codes_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        node_key: str,
+        codes: List[str],
+    ) -> WorkflowNodeState:
+        node = RuntimeSessionService.get_node_by_key_sync(db, session.id, node_key)
+        if node is None:
+            raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
+
+        normalized_codes = {
+            str(code or "").strip()
+            for code in (codes or [])
+            if str(code or "").strip()
+        }
+        if normalized_codes:
+            existing = getattr(node, "diagnostics", None)
+            filtered: List[Dict[str, Any]] = []
+            if isinstance(existing, list):
+                filtered = [
+                    item
+                    for item in existing
+                    if not (
+                        isinstance(item, dict)
+                        and str(item.get("code") or "").strip() in normalized_codes
+                    )
+                ]
+            node.diagnostics = filtered
+            db.commit()
+        db.refresh(node)
+        db.refresh(session)
+        return node
+
+    @staticmethod
+    def upsert_attempt_node_diagnostic_sync(
+        db: Session,
+        session: WorkflowSession,
+        *,
+        attempt_id: int,
+        diagnostic: Dict[str, Any],
+    ) -> WorkflowNodeState:
+        if not isinstance(diagnostic, dict):
+            raise ValueError("diagnostic must be a dict")
+
+        attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
+
+        node = (
+            db.query(WorkflowNodeState)
+            .filter(
+                WorkflowNodeState.id == attempt.node_id,
+                WorkflowNodeState.session_id == session.id,
+            )
+            .first()
+        )
+        if node is None:
+            raise ValueError(
+                f"Workflow node for attempt {attempt_id} not found in session {session.id}"
+            )
+
+        node.diagnostics = _upsert_node_diagnostic(node, diagnostic)
         db.commit()
         db.refresh(node)
         db.refresh(session)

@@ -77,6 +77,7 @@ class ScriptWriterAgent(BaseAgent):
                             scene_number=int(entry.get("scene_number")),
                             depends_on_scene=entry.get("depends_on_scene"),
                             duration=float(entry.get("duration") or 0.0),
+                            scene_thesis=entry.get("scene_thesis", "") or "",
                             visual_description=entry.get("visual_description", "") or "",
                             narrative_description=entry.get("narrative_description", "") or "",
                             image_url=entry.get("image_url", "") or "",
@@ -345,6 +346,7 @@ class ScriptWriterAgent(BaseAgent):
                         "scene_number": scene.scene_number,
                         "scene_data": {
                             "scene_number": scene.scene_number,
+                            "scene_thesis": getattr(scene, "scene_thesis", "") or "",
                             "title": getattr(scene, "title", "") or "",
                             "visual_description": scene.visual_description,
                             "narrative_description": scene.narrative_description,
@@ -463,6 +465,7 @@ class ScriptWriterAgent(BaseAgent):
                             warning_msg,
                         )
                     scripts_map[str(scene.scene_number)] = {
+                        "scene_thesis": execution_arc.get("scene_thesis", ""),
                         "script_text": script_payload.get("script_text", script_payload.get("content", "") or script_section.get("script_text", "")),
                         "narrative_description": script_payload.get("narrative_description", scene.narrative_description),
                         "background_music_style": script_payload.get("background_music_style", ""),
@@ -543,6 +546,7 @@ class ScriptWriterAgent(BaseAgent):
                             existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
                             entry = dict(existing_scripts.get(str(scene.scene_number), {}))
                             entry.update({
+                                "scene_thesis": scene_script_data.get("scene_thesis", getattr(scene, "scene_thesis", "")),
                                 "script_text": scene_script_data.get("script_text", ""),
                                 "voice_over_text": scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
                                 "narrative_description": scene_script_data.get("narrative_description", scene.narrative_description),
@@ -1318,6 +1322,12 @@ class ScriptWriterAgent(BaseAgent):
         *,
         motion_beats: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        scene_thesis = str(
+            script_payload.get("scene_thesis")
+            or getattr(scene, "scene_thesis", "")
+            or scene.narrative_description
+            or ""
+        ).strip()
         opening_state = str(
             script_payload.get("opening_state")
             or scene.visual_description
@@ -1354,6 +1364,7 @@ class ScriptWriterAgent(BaseAgent):
             or ""
         ).strip()
         return {
+            "scene_thesis": scene_thesis,
             "opening_state": opening_state,
             "event_trigger": event_trigger,
             "action_phases": action_phases,

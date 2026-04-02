@@ -709,7 +709,11 @@ class ImageGenerationTool(AsyncTool):
         scene_description = (
             _build_reference_root()
             if image_purpose == "character_reference"
-            else prompt_norm.select_scene_opening_root(sd, fallback_title=(sd.get("title") or "单帧静态画面").strip())
+            else prompt_norm.select_frame_thesis(
+                sd,
+                image_purpose=image_purpose,
+                fallback_title=(sd.get("title") or "单帧静态画面").strip(),
+            )
         )
 
         # 角色结构化描述：优先使用结构化约束，其次角色描述文本
@@ -802,14 +806,19 @@ class ImageGenerationTool(AsyncTool):
         if any("动画" in seg or "动漫" in seg for seg in anime_hint_sources):
             cautionary_notes.append("保持动画笔触，避免写实摄影质感")
 
-        render_requirements = (
-            "角色参考图，单人静态构图，背景干净，无文字无水印，细节清晰。"
-            if image_purpose == "character_reference"
-            else "单帧静态画面，主体清晰，构图稳定，无文字无水印，无分镜或剪辑说明。"
-        )
+        if image_purpose == "character_reference":
+            render_requirements = "角色参考图，单人静态构图，背景干净，无文字无水印，细节清晰。"
+        elif image_purpose in {"action_keyframe", "climax_peak", "continuity_bridge"}:
+            render_requirements = "关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
+        else:
+            render_requirements = "单帧静态画面，主体清晰，构图稳定，无文字无水印，无分镜或剪辑说明。"
 
         template_payload = {
-            "root_label": "角色参考主体" if image_purpose == "character_reference" else "单帧构图",
+            "root_label": (
+                "角色参考主体"
+                if image_purpose == "character_reference"
+                else ("关键帧构图" if image_purpose in {"action_keyframe", "climax_peak", "continuity_bridge"} else "单帧构图")
+            ),
             "focus_label": "参考方向" if image_purpose == "character_reference" else "画面焦点",
             "character_label": "稳定特征" if image_purpose == "character_reference" else "主体锁定",
             "mood_label": "光线与氛围",

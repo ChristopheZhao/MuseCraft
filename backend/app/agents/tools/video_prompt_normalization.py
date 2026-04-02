@@ -26,7 +26,6 @@ _META_SUMMARY_MARKERS = (
     "期待",
 )
 
-
 def clip_text(value: Any, max_len: int) -> str:
     text = str(value or "").strip()
     if not text:

@@ -63,6 +63,7 @@ class ScriptGenerationTool(AsyncTool):
                     "type": "object",
                     "description": "场景数据，包含视觉描述、内容重点等",
                     "properties": {
+                        "scene_thesis": {"type": "string"},
                         "script_text": {"type": "string"},
                         "title": {"type": "string"},
                         "visual_description": {"type": "string"},
@@ -116,6 +117,7 @@ class ScriptGenerationTool(AsyncTool):
                                 "type": "object",
                                 "description": "场景数据，包含视觉描述、内容重点等",
                                 "properties": {
+                                    "scene_thesis": {"type": "string"},
                                     "script_text": {"type": "string"},
                                     "title": {"type": "string"},
                                     "visual_description": {"type": "string"},
@@ -201,6 +203,80 @@ class ScriptGenerationTool(AsyncTool):
             return await self._analyze_script_continuity(parameters)
         else:
             raise ValueError(f"Unknown action: {action}")
+
+    @staticmethod
+    def _clip_text(value: Any, max_len: int = 180) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:
+            return text[:max_len]
+        return text[: max_len - 3] + "..."
+
+    def _build_context_blocks(self, context: Dict[str, Any], scene_data: Dict[str, Any]) -> Dict[str, str]:
+        if not isinstance(context, dict):
+            context = {}
+        if not isinstance(scene_data, dict):
+            scene_data = {}
+
+        lines: List[str] = []
+
+        narrative_arc = self._clip_text(context.get("narrative_arc"), 140)
+        if narrative_arc:
+            lines.append(f"- 全片主线：{narrative_arc}")
+
+        episode_context = context.get("episode_context")
+        if isinstance(episode_context, dict):
+            title = self._clip_text(episode_context.get("title"), 60)
+            summary = self._clip_text(episode_context.get("summary"), 120)
+            purpose = self._clip_text(episode_context.get("narrative_purpose"), 100)
+            if title or summary or purpose:
+                segments = [seg for seg in [title, summary, purpose] if seg]
+                lines.append("- 所属篇章：" + "；".join(segments))
+
+        project_context = context.get("project_context")
+        if isinstance(project_context, dict):
+            project_brief = self._clip_text(
+                project_context.get("project_brief") or project_context.get("summary"),
+                120,
+            )
+            global_theme = self._clip_text(project_context.get("global_theme"), 80)
+            if project_brief or global_theme:
+                segments = [seg for seg in [project_brief, global_theme] if seg]
+                lines.append("- 项目基线：" + "；".join(segments))
+
+        approved_script = self._clip_text(context.get("approved_script"), 160)
+        if approved_script:
+            lines.append(f"- 已确认脚本片段：{approved_script}")
+
+        previous_scene = self._clip_text(context.get("previous_scene"), 120)
+        if previous_scene:
+            lines.append(f"- 上一场承接：{previous_scene}")
+
+        target_duration = scene_data.get("duration")
+        try:
+            target_duration = float(target_duration)
+        except (TypeError, ValueError):
+            target_duration = None
+
+        duration_guidance = ""
+        if target_duration and target_duration > 0:
+            duration_text = (
+                str(int(target_duration))
+                if float(target_duration).is_integer()
+                else f"{target_duration:g}"
+            )
+            duration_guidance = (
+                f"本场目标时长为 {duration_text}s。脚本必须产出能支撑该时长的局部事件弧线，"
+                "不要只写人物状态、情绪说明或镜头展示。"
+            )
+
+        return {
+            "story_context_block": "\n".join(lines).strip(),
+            "duration_guidance": duration_guidance,
+        }
     
     async def _generate_scene_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成场景脚本 - 使用专业提示词模板和LLM智能决策"""
@@ -275,10 +351,12 @@ class ScriptGenerationTool(AsyncTool):
 
         template_manager = get_template_manager("script_writer")
         duration_caps_str = "、".join(str(int(cap)) for cap in _vcaps)
+        context_blocks = self._build_context_blocks(context, scene_data)
         prompt = template_manager.render_template(
             "scene_script_generation",
             {
                 "scene_number": scene_data.get("scene_number", 1),
+                "scene_thesis": scene_data.get("scene_thesis", ""),
                 "title": scene_data.get("title", ""),
                 "visual_description": scene_data.get("visual_description", ""),
                 "narrative_description": scene_data.get("narrative_description", ""),
@@ -295,6 +373,8 @@ class ScriptGenerationTool(AsyncTool):
                 "pace_tag": pace_tag,
                 "video_style": video_style,
                 "review_guidance": review_guidance,
+                "story_context_block": context_blocks.get("story_context_block", ""),
+                "duration_guidance": context_blocks.get("duration_guidance", ""),
             },
         )
 

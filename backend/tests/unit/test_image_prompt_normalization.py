@@ -52,6 +52,42 @@ def test_compress_character_description_strips_role_card_prose():
     assert "青竹剑" in compressed
 
 
+def test_infer_image_purpose_promotes_action_scene_to_action_keyframe():
+    purpose = norm_module.infer_image_purpose(
+        {
+            "scene_thesis": "黑袍修士先手压制，韩立正面迎击，冲突迅速升级为失控爆炸",
+            "event_trigger": "黑袍修士释放紫黑法术洪流直冲韩立",
+            "action_phases": [
+                {"phase": "交锋", "observable_actions": "韩立飞剑出鞘正面撞击紫黑法术"},
+                {"phase": "爆发", "observable_actions": "巨大的爆炸引发雷电与火焰交织，周围山石瞬间粉碎"},
+            ],
+            "end_state": "爆炸强光吞没画面，余波仍在震颤",
+            "duration": 10,
+        }
+    )
+
+    assert purpose == "climax_peak"
+
+
+def test_select_frame_thesis_prefers_late_event_for_action_keyframe():
+    thesis = norm_module.select_frame_thesis(
+        {
+            "opening_state": "黑袍修士悬浮半空，韩立于破碎山石间迎战",
+            "event_trigger": "黑袍修士释放紫黑法术洪流",
+            "action_phases": [
+                {"phase": "交锋", "observable_actions": "韩立飞剑出鞘正面撞击紫黑法术"},
+                {"phase": "爆发", "observable_actions": "巨大的爆炸引发雷电与火焰交织，周围山石瞬间粉碎"},
+            ],
+            "end_state": "爆炸强光吞没画面，余波仍在震颤",
+        },
+        image_purpose="action_keyframe",
+    )
+
+    assert "吞没画面" in thesis
+    assert "余波仍在震颤" in thesis
+    assert "悬浮半空" not in thesis
+
+
 def test_prompt_root_and_consistency_block_share_normalization_owner(monkeypatch):
     calls = []
     original = norm_module.normalize_still_text

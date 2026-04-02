@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ...core.config import settings
 from ...services.scene_contract import annotate_scene_info_payload
 from ...services.video_composer_execution_contract import get_video_composer_compose_mode
+from ..tools import image_prompt_normalization as image_prompt_norm
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
 
@@ -504,6 +505,7 @@ def build_image_generation_context(
         payload = {
             "scene_number": sn,
             "title": concept_entry.get("title", ""),
+            "scene_thesis": (script_entry or {}).get("scene_thesis", "") or scene.get("scene_thesis", "") or concept_entry.get("scene_thesis", "") or "",
             "visual_description": scene.get("visual_description", ""),
             "narrative_description": scene.get("narrative_description", ""),
             "duration": scene.get("duration", 0.0),
@@ -529,6 +531,12 @@ def build_image_generation_context(
             "voice_over_text": (script_entry or {}).get("voice_over_text", ""),
             "background_music_style": (script_entry or {}).get("background_music_style", ""),
         }
+        payload["image_purpose"] = image_prompt_norm.infer_image_purpose(payload)
+        payload["frame_thesis"] = image_prompt_norm.select_frame_thesis(
+            payload,
+            image_purpose=payload["image_purpose"],
+            fallback_title=(payload.get("title") or "单帧静态画面").strip(),
+        )
         if mode in {"skip", "reuse"}:
             scenes_to_skip.append({"scene_number": sn, "reason": mode, "reuse_from": None})
         else:
@@ -582,7 +590,10 @@ def build_video_generation_context(
     )
     scripts = _normalize_scene_dict(published_payload.get("scene_scripts") or {})
 
-    wm = _get_mas_working_memory(workflow_id, service=service)
+    try:
+        wm = _get_mas_working_memory(workflow_id, service=service)
+    except Exception:
+        wm = None
     video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
 
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
@@ -649,6 +660,7 @@ def build_video_generation_context(
         payload = {
             "scene_number": sn,
             "title": concept_entry.get("title", ""),
+            "scene_thesis": (script_entry or {}).get("scene_thesis", "") or scene.get("scene_thesis", "") or concept_entry.get("scene_thesis", "") or "",
             "visual_description": scene.get("visual_description", ""),
             "narrative_description": scene.get("narrative_description", ""),
             "duration": scene.get("duration", 0.0),
@@ -682,6 +694,12 @@ def build_video_generation_context(
             "script_text": (script_entry or {}).get("script_text", ""),
             "voice_over_text": (script_entry or {}).get("voice_over_text", ""),
         }
+        payload["image_purpose"] = image_prompt_norm.infer_image_purpose(payload)
+        payload["frame_thesis"] = image_prompt_norm.select_frame_thesis(
+            payload,
+            image_purpose=payload["image_purpose"],
+            fallback_title=(payload.get("title") or "单帧静态画面").strip(),
+        )
         if depends_on_scene is not None:
             payload["depends_on_scene"] = depends_on_scene
 

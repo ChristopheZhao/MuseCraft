@@ -177,6 +177,103 @@ def test_attempt_lease_keepalive_controller_heartbeats_with_host_owned_session()
     assert ("close",) in events
 
 
+def test_attempt_lease_keepalive_controller_marks_unhealthy_on_heartbeat_error():
+    published = []
+
+    class _FakeDb:
+        def close(self):
+            return None
+
+    fake_session = SimpleNamespace(id=77)
+
+    def _session_factory():
+        return _FakeDb()
+
+    def _load_session(db, session_id):
+        return fake_session
+
+    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
+        raise RuntimeError("db write failed")
+
+    controller = execution_host_lease.AttemptLeaseKeepaliveController(
+        session_factory=_session_factory,
+        load_session=_load_session,
+        heartbeat_attempt=_heartbeat_attempt,
+        interval_seconds=0.05,
+        publish_diagnostic=lambda **payload: published.append(payload),
+    )
+
+    try:
+        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if published:
+                break
+            time.sleep(0.02)
+
+        with pytest.raises(execution_host_lease.ExecutionHostKeepaliveLostError) as excinfo:
+            controller.assert_healthy()
+    finally:
+        controller.close()
+
+    assert published
+    diagnostic = published[0]["diagnostic"]
+    assert diagnostic["reason_code"] == "heartbeat_error"
+    assert excinfo.value.diagnostic["reason_code"] == "heartbeat_error"
+
+
+def test_attempt_lease_keepalive_controller_publishes_diagnostic_when_validation_stops():
+    events = []
+    published = []
+
+    class _FakeDb:
+        def close(self):
+            events.append(("close",))
+
+    fake_session = SimpleNamespace(id=77)
+
+    def _session_factory():
+        events.append(("open",))
+        return _FakeDb()
+
+    def _load_session(db, session_id):
+        events.append(("load", session_id))
+        return fake_session
+
+    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
+        raise ValueError("lease expired")
+
+    controller = execution_host_lease.AttemptLeaseKeepaliveController(
+        session_factory=_session_factory,
+        load_session=_load_session,
+        heartbeat_attempt=_heartbeat_attempt,
+        interval_seconds=0.05,
+        publish_diagnostic=lambda **payload: published.append(payload),
+    )
+
+    try:
+        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if published:
+                break
+            time.sleep(0.02)
+    finally:
+        controller.close()
+
+    assert published
+    assert ("open",) in events
+    assert ("load", 77) in events
+    event = published[0]
+    diagnostic = event["diagnostic"]
+    assert event["runtime_session_id"] == 77
+    assert event["attempt_id"] == 11
+    assert diagnostic["code"] == "execution_host_keepalive"
+    assert diagnostic["state"] == "stopped"
+    assert diagnostic["reason_code"] == "heartbeat_validation_failed"
+    assert diagnostic["message"] == "lease expired"
+
+
 def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monkeypatch, session_factory):
     task_id = _create_task(
         session_factory,
