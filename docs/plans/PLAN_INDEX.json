@@ -1,8 +1,8 @@
 {
   "version": 1,
   "plans": [
-        {
-            "id": "PLAN-20260306-001",
+    {
+      "id": "PLAN-20260306-001",
       "title": "音频编排边界收敛与 Orchestrator 计划化修复",
       "kind": "fix",
       "status": "archived",
@@ -91,7 +91,7 @@
       "id": "PLAN-20260308-003",
       "title": "MAS 编排边界解耦与单 Episode Runtime Kernel 重构",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260308-003.md",
@@ -1900,7 +1900,7 @@
       "id": "PLAN-20260329-038",
       "title": "Narrative-scalable scene contract and consistency boundary convergence",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260329-038.md",
@@ -2104,6 +2104,194 @@
         {
           "at": "2026-03-30T15:08:11Z",
           "text": "Scene 2 focused rerun succeeded with the updated prompt surface; the protagonist remained the dominant subject through 0.5s/5.0s/8.5s while chain success stayed intact. User confirmed closeout, so the plan is completed."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260331-043",
+      "title": "image repeat / runtime lease follow-up drift correction",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260331-043.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-03-31T07:24:56Z",
+      "updated_at": "2026-03-31T12:54:52Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-03-31T07:25:14Z",
+          "text": "Review-first correction plan created after implementation drift was found: contract precedence and runtime lease remain directionally valid, but duplicate guard crossed owner/truth-surface boundaries and must be re-baselined before further coding."
+        },
+        {
+          "at": "2026-03-31T07:46:25Z",
+          "text": "The correction plan now uses explicit stage gates: Stage 1 removal, Stage 2 corrected duplicate-guard implementation, and Stage 3 integrated closeout each require their own validation pass before the next stage may begin."
+        },
+        {
+          "at": "2026-03-31T08:15:39Z",
+          "text": "All correction stages validated. Duplicate-guard drift was removed from BaseAgent, the corrected image-side guard now reads the formal scene_info_ref -> scenes_to_generate[] carrier, and targeted regressions passed for contract precedence, duplicate guard, and runtime lease diagnostics."
+        },
+        {
+          "at": "2026-03-31T09:26:32Z",
+          "text": "Deeper architecture review and user discussion downgraded the duplicate slice from claimed closeout back to review-first design freeze. The retained contract-precedence and runtime-lease slices remain valid, but duplicate control is now frozen as a leaf-agent execution-review problem rather than a MAS gate-layer problem, scene_info_ref is reaffirmed as input carrier only, and 043 stays draft until owner/contract/behavior gates pass again."
+        },
+        {
+          "at": "2026-03-31T12:54:52Z",
+          "text": "A later amendment superseded duplicate gate as the accepted mainline and replaced it with a planner-visible progress read-model direction. The design rationale and single-SoT mapping were split into a dedicated supplement note so the main plan and validation ledger can stay concise and execution-focused."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260401-044",
+      "title": "视频去幻灯片化的 scene semantics 与 prompt synthesis 联动整改",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260401-044.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-01T03:40:06Z",
+      "updated_at": "2026-04-02T08:07:24Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-01T03:40:06Z",
+          "text": "Drafted managed remediation plan for slideshow/close-up drift across concept, script, image, video prompt synthesis, and mode policy"
+        },
+        {
+          "at": "2026-04-01T03:40:06Z",
+          "text": "Plan scope explicitly includes append-only PROMPT_COMBINED synthesis and image opening-anchor defaults as first-class root-cause streams"
+        },
+        {
+          "at": "2026-04-01T04:20:00Z",
+          "text": "Started Stage 1 implementation: scene_thesis contract/path wiring, script prompt context+duration guidance, and concept de-bias away from camera-first scene planning"
+        },
+        {
+          "at": "2026-04-01T07:17:58Z",
+          "text": "Amendment A1 re-scoped Stage 4 away from runtime heuristic diagnostics and back to boundary correction plus validation-surface-only evidence; derived slideshow-risk judgments are explicitly out of bounds for payload/context mainline use."
+        },
+        {
+          "at": "2026-04-01T07:27:20Z",
+          "text": "Executed Stage 4 boundary correction: removed runtime/context generation_diagnostics surfaces and per-tool diagnostics metadata while preserving factual scene_thesis/frame_thesis/image_purpose fields; targeted regression suite passed (19 passed, 5 skipped)."
+        },
+        {
+          "at": "2026-04-01T07:35:51Z",
+          "text": "Recorded validation-surface prompt diff for the preserved scene 3 sample from workflow 46766c83-a414-44aa-a13f-5940e3841adb: current video prompt is scene_thesis-led with no consistency tail or duplicated camera noise and now selects text_to_video via climax_peak strategy; current image prompt roots on a climax keyframe with no append-only consistency tail."
+        },
+        {
+          "at": "2026-04-01T07:43:18Z",
+          "text": "Expanded validation-surface evidence to the contract and script-authoring layers: scene_contract carrier remains factual with no runtime heuristic diagnostics, and a rendered single-scene script prompt sample now proves explicit scene_thesis, global story context, and duration guidance are present in the current template flow."
+        },
+        {
+          "at": "2026-04-01T07:51:30Z",
+          "text": "Recorded multi-scene validation evidence on the preserved workflow contexts: image-purpose selection no longer defaults to opening anchors, builder/composer mode selection no longer collapses to image_to_video on the same inputs, and prompt-level scene ordering now reads as a teaser arc; media-level coherence is still pending regenerated output review."
+        },
+        {
+          "at": "2026-04-01T08:02:29Z",
+          "text": "Added historical media-baseline review proving the currently available local mp4 set belongs to the original problematic workflow run, so it can only be used as failure-baseline evidence. Sampled-frame SSIM aligns with the prior diagnosis, but end-to-end story coherence stays open until a fresh post-fix mp4 set exists."
+        },
+        {
+          "at": "2026-04-01T08:22:00Z",
+          "text": "Focused post-fix provider probing exposed a new blocker on the repaired mainline: one real scene-4 Doubao text-to-video call failed with InvalidParameter/Invalid content.text, and the nearby repaired prompts have similar prompt lengths. The plan now needs review/amendment before more implementation because the open issue has shifted to provider text-contract compatibility for the new hierarchical prompt shape."
+        },
+        {
+          "at": "2026-04-01T08:22:00Z",
+          "text": "Amendment A2 was added to freeze the new blocker as a provider text-contract compatibility review item. The accepted next action is review-first plan amendment, not direct prompt-shape patching or runtime fallback insertion."
+        },
+        {
+          "at": "2026-04-01T09:54:15Z",
+          "text": "Follow-up content.text probes narrowed the blocker. On the active contents/generations endpoint, structured_with_flags and natural_with_flags both succeeded while structured_no_flags reproduced the same InvalidParameter/Invalid content.text failure asynchronously. The remaining issue is provider-specific content.text serialization, not a blanket incompatibility with hierarchical structured prompts."
+        },
+        {
+          "at": "2026-04-01T10:23:50Z",
+          "text": "A direct i2v/t2v comparison further narrowed the blocker: the same failing scene-4 hierarchical prompt succeeded once the original image reference was reintroduced on the same model and endpoint. The plan now treats the recent action_keyframe/climax_peak => text_to_video mode-policy change as the primary review target before more implementation."
+        },
+        {
+          "at": "2026-04-01T10:29:46Z",
+          "text": "Amendment A4 froze the mode-policy issue as a boundary correction. The accepted execution default is now explicitly '有图走图，tool 不丢图', and the prior action_keyframe/climax_peak => text_to_video behavior is recorded as a proven-erroneous anti-hardcoding design rather than a compatibility path."
+        },
+        {
+          "at": "2026-04-01T10:36:27Z",
+          "text": "Implemented A4 boundary correction: removed tool-layer semantic overrides that forced action_keyframe/climax_peak scenes onto text_to_video and stripped image inputs. Factual image-backed execution mapping is restored, and the old override markers are gone from source and tests."
+        },
+        {
+          "at": "2026-04-01T11:33:57Z",
+          "text": "Validation now includes a focused post-A4 provider recovery proof: the restored scene-4 image-backed path succeeded on Doubao (`task_id=cgt-20260401192830-rfdjg`, `duration=10`), reinforcing that the prior blocker was the erroneous tool-layer mode override rather than the hierarchical prompt design."
+        },
+        {
+          "at": "2026-04-01T11:48:25Z",
+          "text": "New slice-level validation exposed a remaining boundary gap on the ordinary mainline: scenes 2-4 succeed through `generate_with_continuity`, but `scene_info_ref` still fails to hydrate factual `image_url` into execution params, so all three scenes ran as `text_to_video` despite carrying image facts. The next correction is explicit factual media mapping, not another semantic mode policy."
+        },
+        {
+          "at": "2026-04-01T12:01:42Z",
+          "text": "A5 corrected the remaining factual mapping gap. The ordinary `generate_with_continuity` mainline now hydrates `image_url` from `scene_info_ref`, and a fresh scenes 2-4 rerun on Doubao succeeded entirely on the image-backed path (`scene2=cgt-20260401195351-9gt48`, `scene3=cgt-20260401195556-h94wc`, `scene4=cgt-20260401195736-g5c9b`)."
+        },
+        {
+          "at": "2026-04-02T07:17:48Z",
+          "text": "Closed after A6 provider-contract cleanup and a fresh full 1-5 corrected-mainline rerun on Doubao. All five scenes succeeded image-backed (`scene1=cgt-20260402145948-6d7rg`, `scene2=cgt-20260402150119-97nnt`, `scene3=cgt-20260402150423-ms7l5`, `scene4=cgt-20260402150711-mznnm`, `scene5=cgt-20260402150852-lflkr`), and validation now includes a full-trailer contact-sheet review."
+        },
+        {
+          "at": "2026-04-02T08:07:24Z",
+          "text": "All implementation and validation evidence are present; waiting only for closeout confirmation already given in-session."
+        },
+        {
+          "at": "2026-04-02T08:07:24Z",
+          "text": "User agreed to close the slideshow/prompt-synthesis stream after full rerun validation and boundary review."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260401-045",
+      "title": "quick runtime lease keepalive bridge correction",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260401-045.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-01T03:59:42Z",
+      "updated_at": "2026-04-01T08:26:00Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-01T03:59:42Z",
+          "text": "Drafted a separate managed plan for quick-runtime lease and keepalive bridge correction after runtime evidence converged on execution-host liveness failure rather than media-agent business failure"
+        },
+        {
+          "at": "2026-04-01T03:59:42Z",
+          "text": "Plan scope explicitly preserves runtime SoT ownership in RuntimeSessionService and keeps 044 as a separate parallel slideshow/prompt-synthesis stream"
+        },
+        {
+          "at": "2026-04-01T08:00:47Z",
+          "text": "Stage 1/2 implemented: keepalive activation fail-fast and runtime diagnostics landed; Stage 3 host renewal root-cause fix remains pending."
+        },
+        {
+          "at": "2026-04-01T08:26:00Z",
+          "text": "Clarified the Stage 3 root-cause target: queue remains transport-only, the execution host owns heartbeat-stop detection, orchestrator owns the bridge contract, and RuntimeSessionService remains the lease-truth authority."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260402-046",
+      "title": "Image helper boundary restoration",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260402-046.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-02T07:59:21Z",
+      "updated_at": "2026-04-02T08:07:12Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-02T07:59:29Z",
+          "text": "Started owner-boundary correction after subagent audit confirmed helper/composer overreach in image mainline"
+        },
+        {
+          "at": "2026-04-02T08:07:12Z",
+          "text": "Session handoff prepared; next window should start from owner-boundary cleanup on image mainline, not repeat diagnosis."
         }
       ]
     }
