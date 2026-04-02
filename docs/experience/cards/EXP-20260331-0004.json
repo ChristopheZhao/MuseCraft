@@ -1,0 +1,55 @@
+{
+  "id": "EXP-20260331-0004",
+  "created_at": "2026-03-31T07:43:28Z",
+  "updated_at": "2026-03-31T07:43:28Z",
+  "title": "跨窗口继续实现时，handoff 不能替代 implementation plan gate",
+  "problem_signature": "对一个其实不复杂的 follow-up 任务，如果切新窗口时只有 handoff 和方向性约束、没有先冻结本次实现计划，新的编码窗口就会在局部真实修复的同时自然沿最短路径扩张，最终把领域逻辑放进共享基类、把统计投影视图抬升为执行真值。",
+  "problem_signature_norm": "对一个其实不复杂的 follow-up 任务，如果切新窗口时只有 handoff 和方向性约束、没有先冻结本次实现计划，新的编码窗口就会在局部真实修复的同时自然沿最短路径扩张，最终把领域逻辑放进共享基类、把统计投影视图抬升为执行真值。",
+  "decision_rules": [
+    "跨窗口继续实现前，必须先形成本次 implementation plan；handoff 只能做上下文卸载，不能代替实现前治理。",
+    "对每个修复切片，计划里必须显式冻结 owner 层、authority source、禁止落点和验收项；没有这四项，不进入编码。",
+    "deferred architecture anchor 只约束长期方向，不能代替当前切片计划；有 deferred guardrail 仍然必须有当前 implementation gate。",
+    "review 顺序固定为 owner -> truth surface -> contract -> behavior，先验落点和真相来源，再看问题是否看似被修到。"
+  ],
+  "review_checklist": [
+    "新窗口开始编码前，是否已经有正式实现计划，而不是只有 handoff 或口头切片？",
+    "每个修复点的 owner 是否被明确限定在正确层级，而不是默认挂进共享基类或通用 helper？",
+    "执行边界读取的是否是正式 authority，而不是统计视图、projection 或轨迹摘要？",
+    "这次修复是否把 deferred anchor 当成了 implementation plan 的替代品？",
+    "handoff/prompt 是否错误地暗示了‘读完直接改代码’？"
+  ],
+  "source_event_refs": [
+    "docs/experience/sources/2026-03-31-handoff-without-plan-gate-thread.md#problem",
+    "docs/experience/sources/2026-03-31-handoff-without-plan-gate-thread.md#decision-rules"
+  ],
+  "doc_refs": [
+    "docs/session-handoff/SHO-20260331-0018.md",
+    "docs/deferred-plans/active/DP-20260331-001.md",
+    "AGENTS.md"
+  ],
+  "tags": [
+    "handoff-governance",
+    "implementation-planning",
+    "authority-boundary",
+    "cross-window",
+    "review-discipline"
+  ],
+  "context_constraints": [
+    "适用于跨窗口继续实现、且当前任务仍带有架构边界要求的 coding-agent 工作流。",
+    "适用于已经存在 deferred architecture guardrail，但本次实现仍需要独立计划冻结的场景。"
+  ],
+  "anti_patterns": [
+    "把 session handoff 当成 implementation plan 使用。",
+    "有 deferred guardrail 就默认可以直接实现，不再为本次切片立计划。",
+    "在未冻结 owner/truth surface 时，让修复自然落入共享基类或统计投影视图。"
+  ],
+  "outcome": "将这次‘任务不复杂却连续偏航’重新识别为实现前治理缺失问题：handoff 能保留上下文，但不能替代 implementation plan gate。",
+  "confidence": "high",
+  "owner": "codex",
+  "capture_meta": {
+    "trigger_mode": "manual-explicit",
+    "confirmed_by_user": true,
+    "confirmation_note": "用户明确要求将本轮关于 handoff、plan gate 与架构漂移的教训整理为经验沉淀卡。",
+    "confirmed_at": "2026-03-31T07:43:28Z"
+  }
+}

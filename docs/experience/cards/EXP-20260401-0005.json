@@ -1,0 +1,59 @@
+{
+  "id": "EXP-20260401-0005",
+  "created_at": "2026-04-01T07:34:16Z",
+  "updated_at": "2026-04-01T07:34:16Z",
+  "title": "先修 source contract/read-model，不要引入 runtime heuristic gate",
+  "problem_signature": "当 agent 输出质量或重复决策问题的根因其实在 planner continuity、scene semantics、prompt synthesis 或上游 contract 时，如果在运行期引入 duplicate gate、slideshow detector、risk flags、ratio 阈值等派生判断，会把代码写死的语义裁决塞进 agent 主链，逐渐长成影子控制面。",
+  "problem_signature_norm": "当 agent 输出质量或重复决策问题的根因其实在 planner continuity、scene semantics、prompt synthesis 或上游 contract 时，如果在运行期引入 duplicate gate、slideshow detector、risk flags、ratio 阈值等派生判断，会把代码写死的语义裁决塞进 agent 主链，逐渐长成影子控制面。",
+  "decision_rules": [
+    "如果问题根因在 planner continuity、scene semantics、prompt synthesis 或上游 contract，优先修 source contract、prompt 和 planner-visible read-model，不要先加 runtime heuristic gate。",
+    "只有源事实可以进入 authoritative payload、agent planning context、WorkingMemory 主消费槽位；camera_term_ratio、slideshow_risk、duplicate_risk 这类派生判断不得进入这些主链面。",
+    "derived projection 只能是 source-mapped、可重建、non-authoritative 的 read-model；它不能携带代码代写的语义裁决。",
+    "需要阈值、比例或风险统计时，只允许放在 test、validation note、prompt diff evidence 或显式 review 面，不得反向进入 runtime 决策链。"
+  ],
+  "review_checklist": [
+    "提议加入的字段或检测器是源事实，还是代码派生判断？",
+    "它进入的是 validation surface，还是 runtime payload/context/稳定日志面？",
+    "这个问题是否可以通过修上游 contract、prompt synthesis 或 planner-visible read-model 解决，而不是加 gate？",
+    "该设计是否会在 agent 决策前先贴上 quality/risk 标签，从而削弱自主语义判断？",
+    "这层结构以后是否很容易继续吸附 fallback、exception 或 consumer-specific 字段，长成并列主路？"
+  ],
+  "source_event_refs": [
+    "docs/experience/sources/2026-04-01-derived-heuristic-gate-drift-thread.md#problem",
+    "docs/experience/sources/2026-04-01-derived-heuristic-gate-drift-thread.md#decision-rules"
+  ],
+  "doc_refs": [
+    "docs/plans/active/PLAN-20260331-043.md",
+    "docs/plans/active/PLAN-20260331-043-progress-read-model-note.md",
+    "docs/plans/active/PLAN-20260401-044.md",
+    "docs/architecture/scene_contract_v2_freeze_20260329.md",
+    "docs/plans/active/PLAN-20260329-038.md",
+    "AGENTS.md"
+  ],
+  "tags": [
+    "heuristic-gate",
+    "root-cause-first",
+    "agent-autonomy",
+    "single-sot",
+    "read-model",
+    "prompt-contract"
+  ],
+  "context_constraints": [
+    "适用于长程 ReAct/agent 工作流中，问题根因位于 planner continuity、scene semantics、prompt synthesis 或上游 contract 的场景。",
+    "适用于有人提议把 ratio、risk flag、warning diagnostics、duplicate advisory 等派生判断放回 runtime/context 主链时的设计评审。"
+  ],
+  "anti_patterns": [
+    "用 duplicate gate、slideshow detector、risk flags 或 ratio 阈值替 agent 先做语义裁决。",
+    "把派生质量判断写进 payload、WorkingMemory 主消费槽位或稳定日志面，等待下游自然把它当事实消费。",
+    "明明是 contract/prompt/read-model 问题，却先用运行期 heuristic control 补丁收口。"
+  ],
+  "outcome": "把 image repeat 与 video slideshow 两条线收敛到同一条可复用规则：主解应是 root-cause repair 与 planner-visible read-model，runtime heuristic gate 应被视为架构漂移信号而不是默认修复手段。",
+  "confidence": "high",
+  "owner": "codex",
+  "capture_meta": {
+    "trigger_mode": "manual-explicit",
+    "confirmed_by_user": true,
+    "confirmation_note": "用户明确要求把 image duplicate gate -> progress read-model 与 video slideshow heuristic rollback 这两条线总结为经验卡，避免后续再次引入同类设计。",
+    "confirmed_at": "2026-04-01T07:34:16Z"
+  }
+}
