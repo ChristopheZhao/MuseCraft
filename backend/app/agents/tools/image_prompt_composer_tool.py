@@ -207,6 +207,8 @@ class ImagePromptComposerTool(AsyncTool):
                 style_name=style_name,
                 style_guidance=style_guidance,
             )
+        except ToolError:
+            raise
         except Exception as exc:
             raise ToolError(f"compose prompt failed: {exc}", self.metadata.name) from exc
         prompt_text = (prompt_text or "").strip()
@@ -362,15 +364,13 @@ class ImagePromptComposerTool(AsyncTool):
         if normalized_task_direction:
             scene_data["task_direction"] = normalized_task_direction
 
-        visual_description = scene_data.get("visual_description") or scene_data.get("description") or ""
+        visual_description = scene_data.get("visual_description") or ""
         narrative_description = scene_data.get("narrative_description") or scene_data.get("story") or ""
         scene_data["visual_description"] = str(visual_description) if visual_description is not None else ""
         scene_data["narrative_description"] = str(narrative_description) if narrative_description is not None else ""
 
         content_elements = scene_data.get("content_elements") or {}
         if isinstance(content_elements, dict):
-            if not scene_data.get("characters_present") and content_elements.get("characters_present"):
-                scene_data["characters_present"] = content_elements.get("characters_present")
             if not scene_data.get("props_and_objects") and content_elements.get("key_objects"):
                 scene_data["props_and_objects"] = content_elements.get("key_objects")
 
@@ -434,9 +434,41 @@ class ImagePromptComposerTool(AsyncTool):
     def _canonicalize_image_purpose(value: Any, *, task_direction: str = "") -> str:
         return prompt_norm.canonicalize_image_purpose(value, task_direction=task_direction)
 
+    def _raise_missing_owner_fields(
+        self,
+        scene_data: Dict[str, Any],
+        *,
+        owner_boundary: str,
+        required_any_of: List[str],
+        image_purpose: str = "",
+        task_direction: str = "",
+    ) -> None:
+        scene_number = self._coerce_int((scene_data or {}).get("scene_number"))
+        fields_text = ", ".join(required_any_of)
+        raise ToolError(
+            f"scene {scene_number} missing owner fields for {owner_boundary}: expected at least one of {fields_text}",
+            self.metadata.name,
+            error_code="missing_owner_fields",
+            details={
+                "scene_number": scene_number,
+                "owner_boundary": owner_boundary,
+                "required_any_of": list(required_any_of),
+                "image_purpose": image_purpose or "",
+                "task_direction": task_direction or "",
+            },
+        )
+
     def _build_reference_root(self, scene_data: Dict[str, Any], *, task_direction: str) -> str:
         names = self._coerce_list(scene_data.get("characters_present"))
-        subject = names[0] if names else (str(scene_data.get("title") or "").strip() or "角色")
+        subject = names[0] if names else str(scene_data.get("title") or "").strip()
+        if not subject:
+            self._raise_missing_owner_fields(
+                scene_data,
+                owner_boundary="character_reference_subject",
+                required_any_of=["characters_present", "title"],
+                image_purpose="character_reference",
+                task_direction=task_direction,
+            )
         if task_direction in {"avatar", "headshot", "portrait"}:
             return f"{subject}角色头像参考图，单人正面，居中构图，背景干净。"
         if task_direction in {"full_body", "full-body"}:
@@ -451,7 +483,13 @@ class ImagePromptComposerTool(AsyncTool):
             normalized = prompt_norm.normalize_still_text(scene_data.get(key), max_len=180)
             if normalized:
                 return normalized
-        return "单帧静态画面"
+        self._raise_missing_owner_fields(
+            scene_data,
+            owner_boundary="scene_root",
+            required_any_of=["opening_state", "visual_description", "title"],
+            image_purpose=image_purpose,
+            task_direction=task_direction,
+        )
 
     def _build_scene_character_sections(self, scene_data: Dict[str, Any]) -> List[str]:
         sections: List[str] = []

@@ -1,4 +1,7 @@
+import pytest
+
 from app.agents.tools import image_prompt_normalization as norm_module
+from app.agents.tools.base_tool import ToolError
 from app.agents.tools.image_prompt_composer_tool import ImagePromptComposerTool
 
 
@@ -154,3 +157,65 @@ def test_image_prompt_composer_ignores_scene_payload_owner_overrides():
 
     assert "image_purpose" not in scene_data
     assert "frame_thesis" not in scene_data
+
+
+def test_image_prompt_composer_reports_missing_non_reference_owner_fields():
+    composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+    scene_data = composer._build_scene_data({"scene_number": 9}, 9)
+
+    with pytest.raises(ToolError) as excinfo:
+        composer._compose_prompt_text(scene_data, style_name="", style_guidance={})
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["scene_number"] == 9
+    assert excinfo.value.details["owner_boundary"] == "scene_root"
+    assert excinfo.value.details["required_any_of"] == ["opening_state", "visual_description", "title"]
+    assert "opening_state" in str(excinfo.value)
+    assert "visual_description" in str(excinfo.value)
+    assert "title" in str(excinfo.value)
+
+
+def test_image_prompt_composer_reports_missing_character_reference_owner_fields():
+    composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+    scene_data = composer._build_scene_data(
+        {"scene_number": 10, "task_direction": "avatar"},
+        10,
+        image_purpose="character_reference",
+        task_direction="avatar",
+    )
+
+    with pytest.raises(ToolError) as excinfo:
+        composer._compose_prompt_text(scene_data, style_name="", style_guidance={})
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["scene_number"] == 10
+    assert excinfo.value.details["owner_boundary"] == "character_reference_subject"
+    assert excinfo.value.details["required_any_of"] == ["characters_present", "title"]
+    assert excinfo.value.details["task_direction"] == "avatar"
+    assert "characters_present" in str(excinfo.value)
+    assert "title" in str(excinfo.value)
+
+
+def test_image_prompt_composer_does_not_promote_description_into_visual_description():
+    composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+    scene_data = composer._build_scene_data(
+        {"scene_number": 11, "description": "仅有旧字段 description 的场景描述"},
+        11,
+    )
+
+    assert scene_data["visual_description"] == ""
+
+
+def test_image_prompt_composer_does_not_promote_nested_character_alias():
+    composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+    scene_data = composer._build_scene_data(
+        {
+            "scene_number": 12,
+            "content_elements": {"characters_present": ["韩立"]},
+        },
+        12,
+        image_purpose="character_reference",
+        task_direction="avatar",
+    )
+
+    assert scene_data["characters_present"] == []

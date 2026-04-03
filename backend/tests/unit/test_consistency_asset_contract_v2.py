@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.agents.tools.base_tool import ToolInput
+from app.agents.tools.base_tool import ToolError, ToolInput
 from app.agents.tools.consistency_tool import ConsistencyTool
 from app.agents.tools.image_prompt_composer_tool import ImagePromptComposerTool
 from app.agents.tools.video_prompt_composer_tool import VideoPromptComposerTool
@@ -317,6 +317,209 @@ def test_image_prompt_composer_merges_consistency_into_structured_sections(monke
     assert "画面要求：" in prompt_text
     assert "frame_thesis" not in result["metadata"]
     assert "diagnostics" not in result["metadata"]
+
+
+def test_image_prompt_composer_execute_reports_missing_scene_root_fields(monkeypatch):
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+
+    monkeypatch.setattr(
+        tool,
+        "_load_scene_info",
+        lambda ref: {"scenes_to_generate": [{"scene_number": 31}]},
+    )
+
+    class FakeImageTool:
+        async def execute(self, tool_input):
+            raise AssertionError("image_generation should not run when owner fields are missing")
+
+    class FakeConsistencyTool:
+        async def execute(self, tool_input):
+            raise AssertionError("consistency tool should not run when owner fields are missing")
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            if name == "image_generation":
+                return FakeImageTool()
+            if name == "consistency_tool":
+                return FakeConsistencyTool()
+            raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.agents.tools.tool_registry.get_tool_registry", lambda: FakeRegistry())
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(
+            tool._execute_impl(
+                ToolInput(
+                    action="generate",
+                    parameters={
+                        "scene_number": 31,
+                        "scene_info_ref": "unused.json",
+                        "fallback_prompt": "不应掩盖缺失 owner fields",
+                    },
+                    context={},
+                )
+            )
+        )
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["scene_number"] == 31
+    assert excinfo.value.details["owner_boundary"] == "scene_root"
+    assert excinfo.value.details["required_any_of"] == ["opening_state", "visual_description", "title"]
+    assert "expected at least one of opening_state, visual_description, title" in str(excinfo.value)
+
+
+def test_image_prompt_composer_execute_reports_missing_character_reference_subject(monkeypatch):
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+
+    monkeypatch.setattr(
+        tool,
+        "_load_scene_info",
+        lambda ref: {"scenes_to_generate": [{"scene_number": 32}]},
+    )
+
+    class FakeImageTool:
+        async def execute(self, tool_input):
+            raise AssertionError("image_generation should not run when character reference subject is missing")
+
+    class FakeConsistencyTool:
+        async def execute(self, tool_input):
+            raise AssertionError("consistency tool should not run when character reference subject is missing")
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            if name == "image_generation":
+                return FakeImageTool()
+            if name == "consistency_tool":
+                return FakeConsistencyTool()
+            raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.agents.tools.tool_registry.get_tool_registry", lambda: FakeRegistry())
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(
+            tool._execute_impl(
+                ToolInput(
+                    action="generate",
+                    parameters={
+                        "scene_number": 32,
+                        "scene_info_ref": "unused.json",
+                        "image_purpose": "character_reference",
+                        "task_direction": "avatar",
+                    },
+                    context={},
+                )
+            )
+        )
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["scene_number"] == 32
+    assert excinfo.value.details["owner_boundary"] == "character_reference_subject"
+    assert excinfo.value.details["required_any_of"] == ["characters_present", "title"]
+    assert excinfo.value.details["image_purpose"] == "character_reference"
+    assert excinfo.value.details["task_direction"] == "avatar"
+
+
+def test_image_prompt_composer_execute_rejects_description_only_scene_root(monkeypatch):
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+
+    monkeypatch.setattr(
+        tool,
+        "_load_scene_info",
+        lambda ref: {
+            "scenes_to_generate": [
+                {
+                    "scene_number": 33,
+                    "description": "仅有旧字段 description 的场景描述",
+                }
+            ]
+        },
+    )
+
+    class FakeImageTool:
+        async def execute(self, tool_input):
+            raise AssertionError("image_generation should not run when scene root only arrives via description alias")
+
+    class FakeConsistencyTool:
+        async def execute(self, tool_input):
+            raise AssertionError("consistency tool should not run when scene root only arrives via description alias")
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            if name == "image_generation":
+                return FakeImageTool()
+            if name == "consistency_tool":
+                return FakeConsistencyTool()
+            raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.agents.tools.tool_registry.get_tool_registry", lambda: FakeRegistry())
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(
+            tool._execute_impl(
+                ToolInput(
+                    action="generate",
+                    parameters={"scene_number": 33, "scene_info_ref": "unused.json"},
+                    context={},
+                )
+            )
+        )
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["owner_boundary"] == "scene_root"
+
+
+def test_image_prompt_composer_execute_rejects_nested_character_alias(monkeypatch):
+    tool = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+
+    monkeypatch.setattr(
+        tool,
+        "_load_scene_info",
+        lambda ref: {
+            "scenes_to_generate": [
+                {
+                    "scene_number": 34,
+                    "content_elements": {"characters_present": ["韩立"]},
+                }
+            ]
+        },
+    )
+
+    class FakeImageTool:
+        async def execute(self, tool_input):
+            raise AssertionError("image_generation should not run when character subject only arrives via nested alias")
+
+    class FakeConsistencyTool:
+        async def execute(self, tool_input):
+            raise AssertionError("consistency tool should not run when character subject only arrives via nested alias")
+
+    class FakeRegistry:
+        def get_tool(self, name):
+            if name == "image_generation":
+                return FakeImageTool()
+            if name == "consistency_tool":
+                return FakeConsistencyTool()
+            raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.agents.tools.tool_registry.get_tool_registry", lambda: FakeRegistry())
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(
+            tool._execute_impl(
+                ToolInput(
+                    action="generate",
+                    parameters={
+                        "scene_number": 34,
+                        "scene_info_ref": "unused.json",
+                        "image_purpose": "character_reference",
+                        "task_direction": "avatar",
+                    },
+                    context={},
+                )
+            )
+        )
+
+    assert excinfo.value.error_code == "missing_owner_fields"
+    assert excinfo.value.details["owner_boundary"] == "character_reference_subject"
 
 
 def test_image_prompt_composer_filters_montage_language_from_still_consistency():
