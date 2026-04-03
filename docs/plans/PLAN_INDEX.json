@@ -2245,13 +2245,13 @@
       "id": "PLAN-20260401-045",
       "title": "quick runtime lease keepalive bridge correction",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260401-045.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-01T03:59:42Z",
-      "updated_at": "2026-04-01T08:26:00Z",
+      "updated_at": "2026-04-03T05:18:46Z",
       "archived_at": null,
       "notes": [
         {
@@ -2269,6 +2269,10 @@
         {
           "at": "2026-04-01T08:26:00Z",
           "text": "Clarified the Stage 3 root-cause target: queue remains transport-only, the execution host owns heartbeat-stop detection, orchestrator owns the bridge contract, and RuntimeSessionService remains the lease-truth authority."
+        },
+        {
+          "at": "2026-04-03T05:18:46Z",
+          "text": "Plan closed after live replay validation confirmed the stale repeatable-read completion snapshot bug was fixed; follow-on runtime-control-plane governance is split into PLAN-20260403-049."
         }
       ]
     },
@@ -2276,13 +2280,13 @@
       "id": "PLAN-20260402-046",
       "title": "Image helper boundary restoration",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260402-046.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-04-02T07:59:21Z",
-      "updated_at": "2026-04-02T08:07:12Z",
+      "updated_at": "2026-04-02T09:56:22Z",
       "archived_at": null,
       "notes": [
         {
@@ -2292,6 +2296,66 @@
         {
           "at": "2026-04-02T08:07:12Z",
           "text": "Session handoff prepared; next window should start from owner-boundary cleanup on image mainline, not repeat diagnosis."
+        },
+        {
+          "at": "2026-04-02T09:56:22Z",
+          "text": "Implementation complete; direct boundary/manual validation recorded, workspace pytest still environment-blocked, and user chose external integration validation as non-blocking for plan closure."
+        },
+        {
+          "at": "2026-04-02T09:56:22Z",
+          "text": "User approved closure after owner-boundary restoration; direct composer/manual validation passed, external automated/integration validation deferred and non-blocking for this plan."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260402-047",
+      "title": "Missing owner-field diagnostics for image composer",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260402-047.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-02T10:00:59Z",
+      "updated_at": "2026-04-02T10:02:40Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-02T10:02:40Z",
+          "text": "Follow-on governance plan opened after PLAN-20260402-046 closure to add explicit diagnostics when accepted image owner fields are absent, without reopening helper debt or scene-contract expansion."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260402-048",
+      "title": "Video generator execution-boundary and progress-authority repair",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260402-048.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-02T13:02:50Z",
+      "updated_at": "2026-04-02T13:02:50Z",
+      "archived_at": null,
+      "notes": []
+    },
+    {
+      "id": "PLAN-20260403-049",
+      "title": "Runtime control-plane boundary slimming after lease RCA",
+      "kind": "refactor",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260403-049.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-03T05:18:46Z",
+      "updated_at": "2026-04-03T05:18:46Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-03T05:18:46Z",
+          "text": "Drafted a dedicated governance/refactor successor after PLAN-20260401-045 closure to review runtime-control-plane SoT clarity, orchestrator thickness, lease-surface reduction, and MySQL-vs-SQLite boundary policy without absorbing PLAN-20260402-047."
         }
       ]
     }
