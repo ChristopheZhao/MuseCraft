@@ -10,7 +10,8 @@ Video Generator Agent - 基于 ReAct 的自主迭代实现。
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from .react_agent import ReActAgent
 from .base import AgentError
@@ -252,6 +253,10 @@ class VideoGeneratorAgent(ReActAgent):
                 planned_calls,
                 execution_contract=execution_contract,
             )
+            planned_calls = self._bind_execution_context_to_planned_calls(
+                planned_calls,
+                execution_contract=execution_contract,
+            )
 
             # 执行规划好的调用序列（顺序执行，不做阶段过滤）
             executed_calls = await self.execute_tool_calls(planned_calls)
@@ -277,6 +282,10 @@ class VideoGeneratorAgent(ReActAgent):
                 shared_memory=shared_wm,
                 include_prompt=True,
             )
+            delivery_receipts = self._build_delivery_receipts(
+                normalized_results,
+                workflow_state_id=wf_id,
+            )
             try:
                 local_count = sum(1 for r in normalized_results if r.get("video_path"))
                 url_only = sum(1 for r in normalized_results if r.get("video_url") and not r.get("video_path"))
@@ -301,6 +310,7 @@ class VideoGeneratorAgent(ReActAgent):
                 "action_performed": "batch_video_generation",
                 "generation_results": normalized_results,
                 "executed_calls": executed_calls,
+                "delivery_receipts": delivery_receipts,
                 "plan_llm": plan_llm,
             }
 
@@ -331,6 +341,135 @@ class VideoGeneratorAgent(ReActAgent):
             workflow_state_id=str(workflow_id or ""),
         )
 
+    def _build_execution_context(
+        self,
+        execution_contract: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
+        if not isinstance(storage, dict):
+            storage = {}
+        workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
+        context: Dict[str, Any] = {
+            "execution_contract": dict(execution_contract or {}),
+        }
+        if workflow_state_id:
+            context["workflow_state_id"] = workflow_state_id
+        return context
+
+    def _bind_execution_context_to_planned_calls(
+        self,
+        planned_calls: List[Dict[str, Any]],
+        *,
+        execution_contract: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        bound_calls: List[Dict[str, Any]] = []
+        execution_context = self._build_execution_context(execution_contract)
+        for call in planned_calls:
+            if not isinstance(call, dict):
+                bound_calls.append(call)
+                continue
+            call_copy = dict(call)
+            fn_meta = dict(call_copy.get("function") or {})
+            fn_name = str(fn_meta.get("name") or "")
+            if not fn_name.startswith("video_generation."):
+                bound_calls.append(call_copy)
+                continue
+
+            raw_args = fn_meta.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except Exception as exc:
+                    raise AgentError(f"视频生成工具参数不是合法 JSON: {exc}") from exc
+            elif isinstance(raw_args, dict):
+                args = dict(raw_args)
+            else:
+                args = {}
+            if not isinstance(args, dict):
+                raise AgentError("视频生成工具参数必须是对象")
+
+            stripped_fields: List[str] = []
+            if "workflow_state_id" in args:
+                args.pop("workflow_state_id", None)
+                stripped_fields.append("workflow_state_id")
+            if "generate_audio" in args:
+                args.pop("generate_audio", None)
+                stripped_fields.append("generate_audio")
+            if stripped_fields:
+                self.logger.warning(
+                    "VIDEO_EXECUTION_BINDING_NORMALIZED fn=%s stripped_fields=%s",
+                    fn_name,
+                    stripped_fields,
+                )
+            fn_meta["arguments"] = args
+            call_copy["function"] = fn_meta
+            call_copy["execution_context"] = dict(execution_context)
+            bound_calls.append(call_copy)
+        return bound_calls
+
+    def _build_delivery_receipts(
+        self,
+        results: List[Dict[str, Any]],
+        *,
+        workflow_state_id: str,
+    ) -> List[Dict[str, Any]]:
+        receipts: List[Dict[str, Any]] = []
+        accepted_at = datetime.now(timezone.utc).isoformat()
+        for item in results or []:
+            if not isinstance(item, dict) or not item.get("success"):
+                continue
+            scene_number = item.get("scene_number")
+            try:
+                scene_number = int(scene_number)
+            except Exception:
+                continue
+            video_url = str(item.get("video_url") or "").strip()
+            video_path = str(item.get("video_path") or "").strip()
+            if not video_url and not video_path:
+                continue
+            receipts.append(
+                {
+                    "scene_number": scene_number,
+                    "status": "accepted",
+                    "artifact_kind": "video",
+                    "delivery_surface": "scene_outputs.video",
+                    "delivery_ref": f"scene_outputs.video.{scene_number}",
+                    "workflow_state_id": str(workflow_state_id or ""),
+                    "accepted_at": accepted_at,
+                }
+            )
+        return receipts
+
+    def _collect_accepted_video_scene_numbers(
+        self,
+        workflow_state_id: str,
+    ) -> List[int]:
+        agent_memory = None
+        if workflow_state_id and getattr(self, "workflow_state_id", None):
+            try:
+                agent_memory = self.wm
+            except Exception:
+                agent_memory = None
+        completed, _failed = finalize_scene_outputs(
+            kind="video",
+            workflow_id=workflow_state_id or None,
+            agent_memory=agent_memory,
+            service=self.short_term_service,
+        )
+        accepted: List[int] = []
+        for item in completed:
+            if not isinstance(item, dict):
+                continue
+            scene_number = item.get("scene_number")
+            try:
+                scene_number = int(scene_number)
+            except Exception:
+                continue
+            if not (item.get("video_path") or item.get("video_url")):
+                continue
+            accepted.append(scene_number)
+        return sorted(set(accepted))
+
     def _validate_video_generation_calls_against_contract(
         self,
         planned_calls: List[Dict[str, Any]],
@@ -347,7 +486,6 @@ class VideoGeneratorAgent(ReActAgent):
         if not isinstance(constraints, dict):
             constraints = {}
 
-        required_workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
         required_generate_audio = constraints.get("generate_audio")
 
         for call in planned_calls:
@@ -373,22 +511,24 @@ class VideoGeneratorAgent(ReActAgent):
             if not isinstance(args, dict):
                 raise AgentError("视频生成工具参数必须是对象")
 
-            if required_workflow_state_id:
-                actual_workflow_state_id = str(args.get("workflow_state_id") or "").strip()
-                if actual_workflow_state_id != required_workflow_state_id:
-                    raise AgentError(
-                        "视频生成调用缺少或违背 execution_contract.storage.workflow_state_id"
-                    )
+            expected_workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
+            explicit_workflow_state_id = str(args.get("workflow_state_id") or "").strip()
+            if explicit_workflow_state_id and expected_workflow_state_id and explicit_workflow_state_id != expected_workflow_state_id:
+                raise AgentError(
+                    "视频生成调用提供了与 execution context 冲突的 workflow_state_id"
+                )
 
             if isinstance(required_generate_audio, bool):
                 actual_generate_audio = args.get("generate_audio")
+                if actual_generate_audio is None:
+                    continue
                 if not isinstance(actual_generate_audio, bool):
                     raise AgentError(
-                        "视频生成调用缺少 execution_contract.constraints.generate_audio"
+                        "视频生成调用的 generate_audio 必须为 boolean"
                     )
                 if bool(actual_generate_audio) != bool(required_generate_audio):
                     raise AgentError(
-                        "视频生成调用的 generate_audio 与 execution_contract 不一致"
+                        "视频生成调用提供了与 execution context 冲突的 generate_audio"
                     )
 
     def _get_video_uploader(self):
@@ -408,6 +548,60 @@ class VideoGeneratorAgent(ReActAgent):
             source_tag=f"{self.agent_name}_persist",
         )
         return self._video_uploader
+
+    def _get_plan_progress_kind(self) -> Optional[str]:
+        return "video"
+
+    def _include_execution_contract_in_plan_context(self) -> bool:
+        return False
+
+    def _accept_completion_request(
+        self,
+        *,
+        stage: str,
+        input_data: Dict[str, Any],
+        plan_context: Dict[str, Any],
+        iteration_context: Optional[Dict[str, Any]],
+        iteration: int,
+        plan_contract: Optional[Dict[str, Any]] = None,
+        reflection: Optional[Dict[str, Any]] = None,
+        action_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        progress_read_model = plan_context.get("progress_read_model") if isinstance(plan_context, dict) else {}
+        if not isinstance(progress_read_model, dict):
+            progress_read_model = {}
+        planned_scene_numbers = _coerce_int_list(progress_read_model.get("planned_scene_numbers"))
+        workflow_state_id = str(
+            input_data.get("workflow_state_id") or self.workflow_state_id or ""
+        ).strip()
+        accepted_scene_numbers = self._collect_accepted_video_scene_numbers(workflow_state_id)
+        if planned_scene_numbers:
+            accepted_set = set(accepted_scene_numbers)
+            missing_scene_numbers = [
+                scene_number
+                for scene_number in planned_scene_numbers
+                if scene_number not in accepted_set
+            ]
+            if not missing_scene_numbers:
+                return {
+                    "accepted": True,
+                    "accepted_scene_numbers": accepted_scene_numbers,
+                }
+            return {
+                "accepted": False,
+                "reason": "missing_delivery_acceptance",
+                "planned_scene_numbers": planned_scene_numbers,
+                "accepted_scene_numbers": accepted_scene_numbers,
+                "missing_scene_numbers": missing_scene_numbers,
+                "stage": stage,
+            }
+        return {
+            "accepted": False,
+            "reason": "planned_scene_membership_missing",
+            "planned_scene_numbers": planned_scene_numbers,
+            "accepted_scene_numbers": accepted_scene_numbers,
+            "stage": stage,
+        }
 
     # === REFLECT ==========================================================
     @emit_progress_snapshot

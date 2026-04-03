@@ -1,7 +1,4 @@
-import asyncio
-
 from app.agents.tools import image_prompt_normalization as norm_module
-from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
 from app.agents.tools.image_prompt_composer_tool import ImagePromptComposerTool
 
 
@@ -40,16 +37,12 @@ def test_select_scene_opening_root_prefers_end_state_for_high_risk_opening():
     assert "巨口" not in root
 
 
-def test_compress_character_description_strips_role_card_prose():
-    compressed = norm_module.compress_character_description(
-        "韩立：原型：成长者；物种：人类；从凡人蜕变的修仙者，坚毅沉稳，成长型主角，手持法器，神秘气质；青灰色长袍，水墨线条勾勒，动态光影效果；青竹剑，储物袋；主角，展现从平凡到超凡的成长历程",
-        segment_max_len=64,
-        fallback_max_len=80,
-    )
+def test_normalize_still_text_does_not_semantically_rewrite_scene_text():
+    text = "蓝绿色幽光笼罩残垣，巨蟒张开巨口扑向镜头"
 
-    assert "成长历程" not in compressed
-    assert "青灰色长袍" in compressed
-    assert "青竹剑" in compressed
+    normalized = norm_module.normalize_still_text(text)
+
+    assert normalized == text
 
 
 def test_infer_image_purpose_promotes_action_scene_to_action_keyframe():
@@ -88,7 +81,7 @@ def test_select_frame_thesis_prefers_late_event_for_action_keyframe():
     assert "悬浮半空" not in thesis
 
 
-def test_prompt_root_and_consistency_block_share_normalization_owner(monkeypatch):
+def test_image_prompt_composer_keeps_owner_fields_explicit_only(monkeypatch):
     calls = []
     original = norm_module.normalize_still_text
 
@@ -98,26 +91,27 @@ def test_prompt_root_and_consistency_block_share_normalization_owner(monkeypatch
 
     monkeypatch.setattr(norm_module, "normalize_still_text", spy)
 
-    image_tool = ImageGenerationTool()
     composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
 
+    scene_data = composer._build_scene_data(
+        {
+            "scene_number": 5,
+            "title": "终极预告",
+            "visual_description": "场景以快速切换的剪辑呈现，最终定格于韩立特写镜头，标题与上映日期闪现。",
+            "opening_state": "韩立在古朴村落中沐浴神秘光芒",
+            "action_phases": [
+                {"phase": "极速混剪", "observable_actions": "画面在韩立持剑战巨蟒、施法斗修仙者之间快速切换"},
+                {"phase": "水墨定格", "observable_actions": "韩立特写镜头定格，背景化作动态水墨晕染，标题与上映日期闪现"},
+            ],
+            "character_descriptions": ["韩立：青灰色长袍，青竹剑，坚毅沉稳"],
+        },
+        5,
+    )
     before_prompt = len(calls)
-    prompt = asyncio.run(
-        image_tool._create_image_prompt_from_scene(
-            {
-                "scene_number": 5,
-                "title": "终极预告",
-                "visual_description": "场景以快速切换的剪辑呈现，最终定格于韩立特写镜头，标题与上映日期闪现。",
-                "opening_state": "韩立在古朴村落中沐浴神秘光芒",
-                "action_phases": [
-                    {"phase": "极速混剪", "observable_actions": "画面在韩立持剑战巨蟒、施法斗修仙者之间快速切换"},
-                    {"phase": "水墨定格", "observable_actions": "韩立特写镜头定格，背景化作动态水墨晕染，标题与上映日期闪现"},
-                ],
-                "character_descriptions": ["韩立：青灰色长袍，青竹剑，坚毅沉稳"],
-            },
-            "动态水墨奇幻",
-            {"style_name": "动态水墨奇幻", "visual_approach": "动画"},
-        )
+    prompt = composer._compose_prompt_text(
+        scene_data,
+        style_name="动态水墨奇幻",
+        style_guidance={"style_name": "动态水墨奇幻", "visual_approach": "动画"},
     )
     after_prompt = len(calls)
 
@@ -135,7 +129,28 @@ def test_prompt_root_and_consistency_block_share_normalization_owner(monkeypatch
     )
     after_block = len(calls)
 
+    assert "image_purpose" not in scene_data
+    assert "frame_thesis" not in scene_data
     assert after_prompt > before_prompt
     assert after_block > after_prompt
-    assert "韩立特写" in prompt
+    assert "韩立在古朴村落中沐浴神秘光芒" in prompt
     assert "标题" not in block
+
+
+def test_image_prompt_composer_ignores_scene_payload_owner_overrides():
+    composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
+
+    scene_data = composer._build_scene_data(
+        {
+            "scene_number": 6,
+            "title": "失控爆发",
+            "opening_state": "韩立压低重心，剑锋前指",
+            "visual_description": "灵光与碎石在身前激荡",
+            "image_purpose": "climax_peak",
+            "frame_thesis": "爆炸强光吞没画面",
+        },
+        6,
+    )
+
+    assert "image_purpose" not in scene_data
+    assert "frame_thesis" not in scene_data

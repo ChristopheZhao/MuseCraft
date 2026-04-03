@@ -227,26 +227,27 @@ def test_image_prompt_composer_merges_consistency_into_structured_sections(monke
         lambda scene_entry, scene_number, **_kwargs: {
             "scene_number": scene_number,
             "image_purpose": "action_keyframe",
-            "frame_thesis": "韩立挥剑迎击黑袍修士的关键瞬间",
         },
     )
     monkeypatch.setattr(tool, "_build_style_guidance", lambda scene_info: {})
     monkeypatch.setattr(tool, "_resolve_style_name", lambda style_guidance: "")
+    monkeypatch.setattr(
+        tool,
+        "_compose_prompt_text",
+        lambda scene_data, **_kwargs: (
+            "关键帧构图：\n"
+            "韩立挥剑迎击黑袍修士的关键瞬间\n\n"
+            "画面焦点：\n"
+            "- 飞剑与紫黑法术正面对撞\n\n"
+            "主体锁定：\n"
+            "- 韩立青衫持剑，黑袍修士悬空施压\n\n"
+            "风格指导：\n"
+            "- 非写实仙侠水墨，能量粒子清晰\n\n"
+            "画面要求：关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
+        ),
+    )
 
     class FakeImageTool:
-        async def _create_image_prompt_from_scene(self, scene_data, style_name, style_guidance):
-            return (
-                "关键帧构图：\n"
-                "韩立挥剑迎击黑袍修士的关键瞬间\n\n"
-                "画面焦点：\n"
-                "- 飞剑与紫黑法术正面对撞\n\n"
-                "主体锁定：\n"
-                "- 韩立青衫持剑，黑袍修士悬空施压\n\n"
-                "风格指导：\n"
-                "- 非写实仙侠水墨，能量粒子清晰\n\n"
-                "画面要求：关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
-            )
-
         async def execute(self, tool_input):
             captured["prompt"] = tool_input.parameters["prompt"]
             return {"success": True, "result": {"image_url": "https://img.example.com/keyframe.jpg"}}
@@ -314,7 +315,7 @@ def test_image_prompt_composer_merges_consistency_into_structured_sections(monke
     assert "局部连续性：承接场景2：接住上一场法术对撞后的前冲势能" in prompt_text
     assert prompt_text.count("风格指导：") == 1
     assert "画面要求：" in prompt_text
-    assert result["metadata"]["frame_thesis"] == "韩立挥剑迎击黑袍修士的关键瞬间"
+    assert "frame_thesis" not in result["metadata"]
     assert "diagnostics" not in result["metadata"]
 
 
@@ -381,7 +382,7 @@ def test_image_prompt_composer_character_reference_omits_environment_and_continu
     ]
 
 
-def test_image_prompt_composer_prefers_static_end_state_for_high_risk_anchor():
+def test_image_prompt_composer_uses_opening_anchor_without_semantic_fallback():
     assets = {
         "style": {"global_lock": {"headline": "动态水墨奇幻"}},
         "characters": {
@@ -391,7 +392,6 @@ def test_image_prompt_composer_prefers_static_end_state_for_high_risk_anchor():
             "global_lock": {"guidelines": "幽暗遗迹保持蓝绿冷光与静态压迫感"},
             "opening_anchor": {
                 "opening_state": "蓝绿色幽光笼罩残垣，巨蟒张开巨口扑向镜头",
-                "end_state": "青竹剑光映亮韩立坚毅面庞，巨蟒盘踞在后方阴影中",
                 "visual_description": "幽暗遗迹与苔藓残垣",
             },
         },
@@ -401,23 +401,27 @@ def test_image_prompt_composer_prefers_static_end_state_for_high_risk_anchor():
     composer = ImagePromptComposerTool(metadata=ImagePromptComposerTool.get_metadata())
     block, categories, locked_segments = composer._build_consistency_block(assets)
 
-    assert "静态落点：青竹剑光映亮韩立坚毅面庞" in block
-    assert "扑向镜头" not in block
-    assert "巨口" not in block
+    assert "开场状态：蓝绿色幽光笼罩残垣，巨蟒张开巨口扑向镜头" in block
     assert categories == ["global_style_lock", "character_lock", "opening_anchor"]
-    assert any("静态落点" in item for item in locked_segments)
+    assert any("开场状态" in item for item in locked_segments)
 
 
-def test_image_prompt_composer_compresses_role_card_character_lock():
+def test_image_prompt_composer_prefers_structured_character_assets():
     assets = {
         "style": {"global_lock": {"headline": "动态水墨奇幻"}},
         "characters": {
             "global_lock": {"stable_traits": ["青灰长袍", "青竹剑"]},
+            "characters": [
+                {
+                    "name": "韩立",
+                    "prompt_snippet": "青年修士，青灰长袍，佩青竹剑，神情坚毅",
+                    "key_traits": ["青灰长袍", "青竹剑"],
+                }
+            ],
             "scene_cast": {
-                "present": ["韩立", "阴影人物"],
+                "present": ["韩立"],
                 "descriptions": [
                     "韩立：原型：成长者；物种：人类；从凡人蜕变的修仙者，坚毅沉稳，成长型主角，手持法器，神秘气质；青灰色长袍，水墨线条勾勒，动态光影效果；青竹剑，储物袋；主角，展现从平凡到超凡的成长历程",
-                    "阴影人物：原型：挑战者；物种：人类；神秘莫测，反派势力代表，阴影笼罩，未知威胁；深紫色调，模糊轮廓，低光环境；暗纹长袍；反派或神秘势力，制造悬念与冲突",
                 ],
             },
         },
@@ -429,9 +433,7 @@ def test_image_prompt_composer_compresses_role_card_character_lock():
     block, _categories, locked_segments = composer._build_consistency_block(assets)
 
     assert "成长历程" not in block
-    assert "未知威胁" not in block
-    assert "悬念与冲突" not in block
-    assert "青灰色长袍" in block
+    assert "青年修士，青灰长袍，佩青竹剑，神情坚毅" in block
+    assert "青灰长袍" in block
     assert "青竹剑" in block
-    assert "暗纹长袍" in block
     assert all("成长历程" not in item for item in locked_segments)

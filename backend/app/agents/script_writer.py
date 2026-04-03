@@ -39,6 +39,103 @@ class ScriptWriterAgent(BaseAgent):
             llms=llms,
             memory_services=memory_services,
         )
+
+    @staticmethod
+    def _normalize_scene_snapshot_payloads(raw_scenes: Any) -> List[SceneSnapshot]:
+        if not isinstance(raw_scenes, list):
+            return []
+
+        scenes: List[SceneSnapshot] = []
+        for entry in raw_scenes:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                scene_number = int(entry.get("scene_number") or 0)
+            except Exception:
+                scene_number = 0
+            if scene_number <= 0:
+                continue
+            try:
+                duration = float(
+                    entry.get("final_duration", entry.get("duration", 0.0)) or 0.0
+                )
+            except Exception:
+                duration = 0.0
+            motion_beats = entry.get("motion_beats")
+            scenes.append(
+                SceneSnapshot(
+                    scene_number=scene_number,
+                    depends_on_scene=entry.get("depends_on_scene"),
+                    duration=duration,
+                    visual_description=str(entry.get("visual_description", "") or ""),
+                    narrative_description=str(entry.get("narrative_description", "") or ""),
+                    image_url=str(entry.get("image_url", "") or ""),
+                    motion_beats=motion_beats if isinstance(motion_beats, list) else [],
+                )
+            )
+        return scenes
+
+    def _load_execution_scene_inputs(
+        self,
+        workflow_state_id: str,
+        input_data: Dict[str, Any],
+    ) -> Tuple[List[SceneSnapshot], Dict[str, Any], Optional[str]]:
+        fallback_reason: Optional[str] = None
+        concept_plan: Dict[str, Any] = {}
+
+        try:
+            concept_plan = load_concept_plan(workflow_state_id, service=self.short_term_service) or {}
+        except Exception as exc:
+            fallback_reason = f"wm_concept_plan_unavailable:{type(exc).__name__}"
+            concept_plan = {}
+
+        try:
+            overview = load_scene_overview(workflow_state_id, service=self.short_term_service)
+        except Exception as exc:
+            if fallback_reason:
+                fallback_reason = f"{fallback_reason};wm_scene_overview_unavailable:{type(exc).__name__}"
+            else:
+                fallback_reason = f"wm_scene_overview_unavailable:{type(exc).__name__}"
+            overview = {}
+
+        scenes = self._normalize_scene_snapshot_payloads(
+            overview.get("scenes") if isinstance(overview, dict) else []
+        )
+        if scenes:
+            return scenes, concept_plan, fallback_reason
+
+        static_context = input_data.get("static_context")
+        if not isinstance(static_context, dict):
+            static_context = {}
+
+        input_concept_plan = input_data.get("concept_plan")
+        if not isinstance(input_concept_plan, dict):
+            input_concept_plan = static_context.get("concept_plan")
+        if isinstance(input_concept_plan, dict) and input_concept_plan and not concept_plan:
+            concept_plan = dict(input_concept_plan)
+
+        direct_overview = input_data.get("scene_overview")
+        if not isinstance(direct_overview, dict):
+            direct_overview = static_context.get("scene_overview")
+        scenes = self._normalize_scene_snapshot_payloads(
+            direct_overview.get("scenes") if isinstance(direct_overview, dict) else []
+        )
+        if scenes:
+            if fallback_reason:
+                fallback_reason = f"{fallback_reason};input_scene_overview"
+            else:
+                fallback_reason = "input_scene_overview"
+            return scenes, concept_plan, fallback_reason
+
+        scenes = self._normalize_scene_snapshot_payloads(
+            input_concept_plan.get("scenes") if isinstance(input_concept_plan, dict) else []
+        )
+        if scenes:
+            if fallback_reason:
+                fallback_reason = f"{fallback_reason};input_concept_plan"
+            else:
+                fallback_reason = "input_concept_plan"
+        return scenes, concept_plan, fallback_reason
         
     async def _execute_impl(
         self,
@@ -64,28 +161,16 @@ class ScriptWriterAgent(BaseAgent):
             if not wf_id_str:
                 raise AgentError("workflow_state_id missing")
 
-            # 读取 MAS WM 作为上下文
-            overview = load_scene_overview(wf_id_str, service=self.short_term_service)
-            scenes_payload = overview.get("scenes") if isinstance(overview, dict) else []
-            scenes: List[SceneSnapshot] = []
-            for entry in scenes_payload or []:
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    scenes.append(
-                        SceneSnapshot(
-                            scene_number=int(entry.get("scene_number")),
-                            depends_on_scene=entry.get("depends_on_scene"),
-                            duration=float(entry.get("duration") or 0.0),
-                            scene_thesis=entry.get("scene_thesis", "") or "",
-                            visual_description=entry.get("visual_description", "") or "",
-                            narrative_description=entry.get("narrative_description", "") or "",
-                            image_url=entry.get("image_url", "") or "",
-                            motion_beats=entry.get("motion_beats") or [],
-                        )
-                    )
-                except Exception:
-                    continue
+            scenes, concept_plan, scene_input_fallback = self._load_execution_scene_inputs(
+                wf_id_str,
+                input_data,
+            )
+            if scene_input_fallback:
+                self.logger.warning(
+                    "SCRIPT_INPUT_FALLBACK workflow_id=%s fallback=%s",
+                    wf_id_str,
+                    scene_input_fallback,
+                )
 
             episode_context = input_data.get("episode_context")
             if episode_context is None:
@@ -110,8 +195,6 @@ class ScriptWriterAgent(BaseAgent):
                     for cid in episode_context.get("character_ids", []) or []
                     if str(cid).strip()
                 ]
-
-            concept_plan = load_concept_plan(wf_id_str, service=self.short_term_service) or {}
 
             if not scenes:
                 raise AgentError("No scenes available for script generation")

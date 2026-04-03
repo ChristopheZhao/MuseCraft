@@ -79,8 +79,8 @@ def test_build_image_generation_context_attaches_scene_contract_meta():
     assert scene_payload["scene_number"] == 1
     assert "generation_diagnostics" not in result["scene_info_payload"]
     assert "generation_diagnostics" not in result["context"]
-    assert scene_payload["image_purpose"] == "scene_opening_anchor"
-    assert scene_payload["frame_thesis"]
+    assert "image_purpose" not in scene_payload
+    assert "frame_thesis" not in scene_payload
 
 
 def test_build_video_generation_context_attaches_scene_contract_meta():
@@ -119,5 +119,5 @@ def test_build_video_generation_context_attaches_scene_contract_meta():
     assert scene_payload["image_url"] == "https://example.com/scene_1.jpg"
     assert "generation_diagnostics" not in result["scene_info_payload"]
     assert "generation_diagnostics" not in result["context"]
-    assert scene_payload["image_purpose"] == "scene_opening_anchor"
-    assert scene_payload["frame_thesis"]
+    assert "image_purpose" not in scene_payload
+    assert "frame_thesis" not in scene_payload

@@ -46,11 +46,13 @@ def test_image_prompt_composer_does_not_invent_size_default(monkeypatch):
     monkeypatch.setattr(tool, "_build_style_guidance", lambda scene_info: {})
     monkeypatch.setattr(tool, "_resolve_style_name", lambda style_guidance: "")
     monkeypatch.setattr(tool, "_build_consistency_block", lambda assets, **_kwargs: ("", [], []))
+    monkeypatch.setattr(
+        tool,
+        "_compose_prompt_text",
+        lambda scene_data, **_kwargs: "东方玄幻史诗动画风格，韩立立于山村晨雾之间，细节清晰，构图稳定。",
+    )
 
     class FakeImageTool:
-        async def _create_image_prompt_from_scene(self, scene_data, style_name, style_guidance):
-            return "东方玄幻史诗动画风格，韩立立于山村晨雾之间，细节清晰，构图稳定。"
-
         async def execute(self, tool_input):
             captured["image_params"] = dict(tool_input.parameters or {})
             return {"success": True, "result": {"image_url": "https://img.example.com/composer.jpg", "size": "2K"}}

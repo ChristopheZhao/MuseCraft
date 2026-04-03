@@ -41,47 +41,6 @@ HIGH_RISK_MARKERS = (
     "杀",
 )
 
-APPEARANCE_MARKERS = (
-    "长袍",
-    "服饰",
-    "发型",
-    "黑发",
-    "面部",
-    "神情",
-    "气质",
-    "轮廓",
-    "色调",
-    "光影",
-    "线条",
-    "剑",
-    "武器",
-    "随身物件",
-    "道具",
-    "站姿",
-    "站立",
-    "符号",
-    "纹样",
-    "面庞",
-)
-
-STRONG_APPEARANCE_MARKERS = (
-    "长袍",
-    "服饰",
-    "发型",
-    "黑发",
-    "神情",
-    "轮廓",
-    "色调",
-    "光影",
-    "线条",
-    "剑",
-    "武器",
-    "随身物件",
-    "道具",
-    "纹样",
-    "面庞",
-)
-
 REFERENCE_TASK_DIRECTIONS = {"avatar", "headshot", "portrait", "full_body", "full-body"}
 
 PURPOSE_ALIASES = {
@@ -206,40 +165,6 @@ def contains_high_risk_action_language(value: Any) -> bool:
     return any(marker in text for marker in HIGH_RISK_MARKERS)
 
 
-def soften_still_language(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    replacements = {
-        "张开巨口扑向镜头": "盘踞于前景阴影中",
-        "巨口扑向镜头": "盘踞于前景阴影中",
-        "巨口扑向": "逼近前景",
-        "扑向镜头": "逼近前景",
-        "巨蟒突袭": "巨蟒现身",
-        "猛然袭来": "骤然现身",
-        "战斗姿态": "临战姿态",
-        "激战": "交锋",
-        "战斗": "对峙",
-        "对抗": "对峙",
-        "对决": "对峙",
-        "迎击": "应对",
-        "爆炸": "能量迸发",
-        "炸裂": "光芒迸发",
-        "轰击": "冲击",
-        "崩碎": "震裂",
-        "吞噬": "笼罩",
-        "腥风": "劲风",
-        "水墨风格闪现": "水墨风格呈现",
-        "特写镜头": "特写",
-        "镜头特写": "特写",
-        "镜头定格": "定格",
-    }
-    softened = text
-    for src, dst in replacements.items():
-        softened = softened.replace(src, dst)
-    return softened
-
-
 def normalize_still_text(value: Any, *, max_len: int | None = None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -249,75 +174,12 @@ def normalize_still_text(value: Any, *, max_len: int | None = None) -> str:
         for part in re.split(r"[，,；;。.!?！？\n]+", text)
     ]
     kept = [clause for clause in clauses if clause and not contains_video_only_language(clause)]
-    normalized = "，".join(kept) if kept else text
-    normalized = soften_still_language(normalized).strip(" ，,；;。.!?！？")
+    normalized = "，".join(kept).strip(" ，,；;。.!?！？")
+    if not normalized:
+        normalized = "" if contains_video_only_language(text) else text.strip(" ，,；;。.!?！？")
     if max_len is not None:
         return clip_text(normalized, max_len)
     return normalized
-
-
-def compress_character_description(
-    value: Any,
-    *,
-    segment_max_len: int = 72,
-    fallback_max_len: int = 100,
-    output_max_len: int | None = None,
-) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-
-    name = ""
-    body = raw
-    if "：" in raw:
-        maybe_name, rest = raw.split("：", 1)
-        if maybe_name.strip() and len(maybe_name.strip()) <= 12:
-            name = maybe_name.strip()
-            body = rest.strip()
-
-    cleaned_segments: List[str] = []
-    for segment in re.split(r"[；;]+", body):
-        seg = normalize_still_text(segment)
-        if not seg:
-            continue
-        if seg.startswith("原型："):
-            continue
-        if contains_video_only_language(seg):
-            continue
-        has_appearance_signal = any(marker in seg for marker in APPEARANCE_MARKERS)
-        if not has_appearance_signal and "，" in seg:
-            continue
-        if not has_appearance_signal and len(re.split(r"[，,]", seg)) >= 3:
-            continue
-        if not has_appearance_signal and seg.startswith("在") and len(seg) > 24:
-            continue
-        seg = (
-            seg.replace("物种：", "")
-            .replace("主角，", "")
-            .replace("主角", "")
-            .replace("成长型", "")
-            .strip(" ，,；;。.!?！？")
-        )
-        if not seg:
-            continue
-        cleaned_segments.append(clip_text(seg, segment_max_len))
-
-    if not cleaned_segments:
-        fallback = clip_text(normalize_still_text(body), fallback_max_len)
-        if not fallback or contains_video_only_language(fallback):
-            return ""
-        fallback_has_appearance_signal = any(marker in fallback for marker in STRONG_APPEARANCE_MARKERS)
-        if not fallback_has_appearance_signal and ("，" in fallback or (fallback.startswith("在") and len(fallback) > 24)):
-            return ""
-        result = f"{name}：{fallback}" if name else fallback
-        if output_max_len is not None:
-            return clip_text(result, output_max_len)
-        return result
-
-    joined = "；".join(dedup(cleaned_segments[:4]))
-    if output_max_len is not None:
-        joined = clip_text(joined, output_max_len)
-    return f"{name}：{joined}" if name else joined
 
 
 def select_scene_opening_root(scene_data: Dict[str, Any], *, fallback_title: str = "单帧静态画面") -> str:

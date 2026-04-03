@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 from .ai_services.service_interfaces import get_vlm_capabilities
 from . import image_prompt_normalization as prompt_norm
+from ..prompts.template_manager import get_template_manager
 from ...services.scene_info_reference_service import (
     SceneInfoReferenceResolutionError,
     load_scene_info_payload,
@@ -29,6 +30,7 @@ class ImagePromptComposerTool(AsyncTool):
         )
 
     def _initialize(self):
+        self._prompt_manager = get_template_manager("image_generator")
         return None
 
     def get_available_actions(self) -> List[str]:
@@ -200,20 +202,14 @@ class ImagePromptComposerTool(AsyncTool):
         consistency = registry.get_tool("consistency_tool")
 
         try:
-            prompt_text = await image_tool._create_image_prompt_from_scene(
+            prompt_text = self._compose_prompt_text(
                 scene_data,
-                style_name,
-                style_guidance,
+                style_name=style_name,
+                style_guidance=style_guidance,
             )
         except Exception as exc:
             raise ToolError(f"compose prompt failed: {exc}", self.metadata.name) from exc
         prompt_text = (prompt_text or "").strip()
-        if hasattr(image_tool, "_is_prompt_weak") and callable(getattr(image_tool, "_is_prompt_weak")):
-            try:
-                if image_tool._is_prompt_weak(prompt_text) and isinstance(fallback_prompt, str) and fallback_prompt.strip():
-                    prompt_text = fallback_prompt.strip()
-            except Exception:
-                pass
         if not prompt_text and isinstance(fallback_prompt, str) and fallback_prompt.strip():
             prompt_text = fallback_prompt.strip()
         if not prompt_text:
@@ -233,18 +229,21 @@ class ImagePromptComposerTool(AsyncTool):
             caller_tool=self.metadata.name,
         )
         assets = consistency_payload.get("assets") if isinstance(consistency_payload, dict) else {}
+        resolved_purpose = self._resolve_image_purpose(scene_data)
+        resolved_task_direction = self._resolve_task_direction(scene_data)
+
         consistency_block, categories, locked_segments = self._build_consistency_block(
             assets,
-            image_purpose=scene_data.get("image_purpose") or image_purpose,
-            task_direction=scene_data.get("task_direction") or task_direction,
+            image_purpose=resolved_purpose,
+            task_direction=resolved_task_direction,
         )
 
         if consistency_block:
             prompt_text = self._merge_prompt_text_with_consistency(
                 prompt_text,
                 assets,
-                image_purpose=scene_data.get("image_purpose") or image_purpose,
-                task_direction=scene_data.get("task_direction") or task_direction,
+                image_purpose=resolved_purpose,
+                task_direction=resolved_task_direction,
             )
 
         image_params: Dict[str, Any] = {
@@ -284,10 +283,9 @@ class ImagePromptComposerTool(AsyncTool):
         metadata["consistency_categories"] = categories
         metadata["consistency_lock_count"] = len(locked_segments)
         metadata["consistency_source"] = "scene_info_ref"
-        metadata["image_purpose"] = scene_data.get("image_purpose") or self._canonicalize_image_purpose(image_purpose)
-        metadata["frame_thesis"] = scene_data.get("frame_thesis") or ""
-        if scene_data.get("task_direction"):
-            metadata["task_direction"] = scene_data.get("task_direction")
+        metadata["image_purpose"] = resolved_purpose
+        if resolved_task_direction:
+            metadata["task_direction"] = resolved_task_direction
 
         try:
             self.logger.info(
@@ -352,19 +350,15 @@ class ImagePromptComposerTool(AsyncTool):
             or scene_data.get("reference_type")
             or ""
         ).strip()
-        scene_data["image_purpose"] = prompt_norm.infer_image_purpose(
-            scene_data,
-            explicit_value=image_purpose or scene_data.get("image_purpose"),
-            task_direction=normalized_task_direction.lower(),
-        )
-        scene_data["frame_thesis"] = str(
-            scene_data.get("frame_thesis")
-            or prompt_norm.select_frame_thesis(
-                scene_data,
-                image_purpose=scene_data["image_purpose"],
-                fallback_title=(scene_data.get("title") or "单帧静态画面").strip(),
+        explicit_image_purpose = str(image_purpose or "").strip()
+        if explicit_image_purpose:
+            scene_data["image_purpose"] = self._canonicalize_image_purpose(
+                explicit_image_purpose,
+                task_direction=normalized_task_direction.lower(),
             )
-        ).strip()
+        else:
+            scene_data.pop("image_purpose", None)
+        scene_data.pop("frame_thesis", None)
         if normalized_task_direction:
             scene_data["task_direction"] = normalized_task_direction
 
@@ -418,16 +412,174 @@ class ImagePromptComposerTool(AsyncTool):
         return ""
 
     @staticmethod
+    def _resolve_task_direction(scene_data: Dict[str, Any]) -> str:
+        return str(
+            (scene_data or {}).get("task_direction")
+            or (scene_data or {}).get("reference_view")
+            or (scene_data or {}).get("reference_kind")
+            or (scene_data or {}).get("reference_type")
+            or ""
+        ).strip().lower()
+
+    def _resolve_image_purpose(self, scene_data: Dict[str, Any]) -> str:
+        task_direction = self._resolve_task_direction(scene_data)
+        explicit = str((scene_data or {}).get("image_purpose") or "").strip()
+        if explicit:
+            return self._canonicalize_image_purpose(explicit, task_direction=task_direction)
+        if task_direction in prompt_norm.REFERENCE_TASK_DIRECTIONS:
+            return self._canonicalize_image_purpose("", task_direction=task_direction)
+        return ""
+
+    @staticmethod
     def _canonicalize_image_purpose(value: Any, *, task_direction: str = "") -> str:
         return prompt_norm.canonicalize_image_purpose(value, task_direction=task_direction)
 
-    def _compress_character_description(self, value: Any, *, max_len: int = 100) -> str:
-        return prompt_norm.compress_character_description(
-            value,
-            segment_max_len=72,
-            fallback_max_len=max_len,
-            output_max_len=max_len,
+    def _build_reference_root(self, scene_data: Dict[str, Any], *, task_direction: str) -> str:
+        names = self._coerce_list(scene_data.get("characters_present"))
+        subject = names[0] if names else (str(scene_data.get("title") or "").strip() or "角色")
+        if task_direction in {"avatar", "headshot", "portrait"}:
+            return f"{subject}角色头像参考图，单人正面，居中构图，背景干净。"
+        if task_direction in {"full_body", "full-body"}:
+            return f"{subject}角色全身参考图，单人正面站立，构图稳定，背景干净。"
+        return f"{subject}角色参考图，单人静态构图，突出稳定造型与标志性特征。"
+
+    def _build_scene_description(self, scene_data: Dict[str, Any], *, image_purpose: str, task_direction: str) -> str:
+        if image_purpose == "character_reference":
+            return self._build_reference_root(scene_data, task_direction=task_direction)
+
+        for key in ("opening_state", "visual_description", "title"):
+            normalized = prompt_norm.normalize_still_text(scene_data.get(key), max_len=180)
+            if normalized:
+                return normalized
+        return "单帧静态画面"
+
+    def _build_scene_character_sections(self, scene_data: Dict[str, Any]) -> List[str]:
+        sections: List[str] = []
+        structured = scene_data.get("character_constraints_struct")
+        if isinstance(structured, list):
+            for item in structured:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("display_name") or item.get("name") or "").strip()
+                segments: List[str] = []
+                prompt_snippet = self._clip_text(item.get("prompt_snippet"), 120)
+                if prompt_snippet:
+                    sections.append(f"{name}：{prompt_snippet}" if name else prompt_snippet)
+                    continue
+                for key in ("description", "archetype_or_identity", "species_or_breed"):
+                    value = self._clip_text(item.get(key), 120)
+                    if value:
+                        segments.append(value)
+                signature = self._join_items(item.get("signature_outfit_or_props") or [], max_items=4)
+                if signature:
+                    segments.append(f"标志道具：{signature}")
+                traits = self._join_items(item.get("key_traits") or item.get("traits") or [], max_items=6)
+                if traits:
+                    segments.append(f"特征：{traits}")
+                if segments:
+                    sections.append(f"{name}：" + "；".join(segments) if name else "；".join(segments))
+
+        if sections:
+            return self._dedupe_prompt_entries(sections)
+
+        names = self._coerce_list(scene_data.get("characters_present"))
+        if names:
+            return [f"角色：{'、'.join(names[:4])}"]
+        return []
+
+    def _compose_prompt_text(
+        self,
+        scene_data: Dict[str, Any],
+        *,
+        style_name: str,
+        style_guidance: Dict[str, Any],
+    ) -> str:
+        task_direction = self._resolve_task_direction(scene_data)
+        image_purpose = self._resolve_image_purpose(scene_data)
+        scene_description = self._build_scene_description(
+            scene_data,
+            image_purpose=image_purpose,
+            task_direction=task_direction,
         )
+
+        style_sections: List[str] = []
+        for key, label in (
+            ("style_name", "风格"),
+            ("style_description", "风格说明"),
+            ("visual_approach", "媒介表现"),
+        ):
+            value = style_guidance.get(key)
+            if isinstance(value, str) and value.strip():
+                style_sections.append(f"{label}：{value.strip()}")
+        if not style_sections and style_name:
+            style_sections.append(f"风格：{style_name}")
+
+        mood_sections: List[str] = []
+        if image_purpose != "character_reference":
+            for key in ("mood_and_atmosphere", "emotional_tone", "mood"):
+                value = style_guidance.get(key) if key in style_guidance else scene_data.get(key)
+                normalized = prompt_norm.normalize_still_text(value, max_len=80)
+                if normalized:
+                    mood_sections.append(normalized)
+        mood_sections = self._dedupe_prompt_entries(mood_sections)
+
+        scene_focus: List[str] = []
+        if image_purpose == "character_reference":
+            if task_direction in {"avatar", "headshot", "portrait"}:
+                scene_focus.append("参考方向：头像特写，突出面部识别与发型/服饰细节")
+            elif task_direction in {"full_body", "full-body"}:
+                scene_focus.append("参考方向：全身立绘，完整呈现服饰轮廓、站姿与标志道具")
+            else:
+                scene_focus.append("参考方向：单人静态角色参考图，强调稳定身份特征")
+        else:
+            focus_text = prompt_norm.normalize_still_text(scene_data.get("content_focus"), max_len=100)
+            if focus_text:
+                scene_focus.append(focus_text)
+
+        color_sections = self._dedupe_prompt_entries(
+            self._coerce_list(style_guidance.get("color_palette")) + self._coerce_list(scene_data.get("color_palette"))
+        )
+        props_sections = self._dedupe_prompt_entries(self._coerce_list(scene_data.get("props_and_objects")))
+        cautionary_notes: List[str] = []
+        if any("动画" in seg or "动漫" in seg for seg in style_sections + mood_sections):
+            cautionary_notes.append("保持动画笔触，避免写实摄影质感")
+
+        if image_purpose == "character_reference":
+            root_label = "角色参考主体"
+            focus_label = "参考方向"
+            character_label = "稳定特征"
+            render_requirements = "角色参考图，单人静态构图，背景干净，无文字无水印，细节清晰。"
+        elif image_purpose in {"action_keyframe", "climax_peak", "continuity_bridge"}:
+            root_label = "关键帧构图"
+            focus_label = "画面焦点"
+            character_label = "主体锁定"
+            render_requirements = "关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
+        else:
+            root_label = "单帧构图"
+            focus_label = "画面焦点"
+            character_label = "主体锁定"
+            render_requirements = "单帧静态画面，主体清晰，构图稳定，无文字无水印，无分镜或剪辑说明。"
+
+        return self._prompt_manager.render_template(
+            "image_autoprompt",
+            {
+                "root_label": root_label,
+                "focus_label": focus_label,
+                "character_label": character_label,
+                "mood_label": "光线与氛围",
+                "props_label": "关键细节",
+                "scene_description": scene_description,
+                "scene_focus": scene_focus,
+                "character_sections": self._build_scene_character_sections(scene_data),
+                "style_sections": self._dedupe_prompt_entries(style_sections),
+                "mood_sections": mood_sections,
+                "color_sections": color_sections,
+                "props_sections": props_sections,
+                "cautionary_notes": cautionary_notes,
+                "render_requirements": render_requirements,
+            },
+            validate=False,
+        ).strip()
 
     def _build_consistency_block(
         self,
@@ -615,17 +767,44 @@ class ImagePromptComposerTool(AsyncTool):
         lock = character_assets.get("global_lock") or {}
         scene_cast = character_assets.get("scene_cast") or {}
         present = self._join_items(scene_cast.get("present") or character_assets.get("present") or [], max_items=4)
+        structured_blocks: List[str] = []
+        for item in character_assets.get("characters") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("display_name") or item.get("name") or "").strip()
+            prompt_snippet = self._clip_text(item.get("prompt_snippet"), 120)
+            if prompt_snippet:
+                structured_blocks.append(f"{name}：{prompt_snippet}" if name else prompt_snippet)
+                continue
+
+            segments: List[str] = []
+            description = self._clip_text(item.get("description"), 120)
+            if description:
+                segments.append(description)
+            traits = self._join_items(
+                item.get("key_traits") or item.get("traits") or item.get("abstract_traits") or [],
+                max_items=6,
+            )
+            if traits:
+                segments.append(f"特征：{traits}")
+            aliases = self._join_items(item.get("aliases") or [], max_items=4)
+            if aliases:
+                segments.append(f"别名：{aliases}")
+            if segments:
+                structured_blocks.append(f"{name}：" + "；".join(segments) if name else "；".join(segments))
+
+        scene_descriptions = []
         descriptions_raw = scene_cast.get("descriptions") or character_assets.get("descriptions") or []
-        descriptions_list: List[str] = []
-        if isinstance(descriptions_raw, list):
-            for item in descriptions_raw:
-                normalized = self._compress_character_description(item, max_len=100)
-                if not normalized:
-                    continue
-                if prompt_norm.contains_video_only_language(item) and normalized == str(item).strip():
-                    continue
-                descriptions_list.append(normalized)
-        descriptions = self._join_items(descriptions_list, max_items=2, sep="；")
+        if isinstance(descriptions_raw, list) and not structured_blocks:
+            for item in descriptions_raw[:2]:
+                normalized = prompt_norm.normalize_still_text(item, max_len=100)
+                if normalized:
+                    scene_descriptions.append(normalized)
+        descriptions = self._join_items(
+            self._dedupe_prompt_entries(structured_blocks or scene_descriptions),
+            max_items=2,
+            sep="；",
+        )
         stable_traits = self._join_items(lock.get("stable_traits") or [], max_items=6)
 
         guideline = ""
@@ -653,12 +832,7 @@ class ImagePromptComposerTool(AsyncTool):
         if image_purpose == "character_reference":
             return ""
         opening_anchor = environment_assets.get("opening_anchor") or {}
-        raw_opening_state = str(opening_anchor.get("opening_state") or "").strip()
-        opening_state = prompt_norm.normalize_still_text(raw_opening_state, max_len=120)
-        end_state = prompt_norm.normalize_still_text(
-            opening_anchor.get("end_state") or environment_assets.get("end_state"),
-            max_len=120,
-        )
+        opening_state = prompt_norm.normalize_still_text(opening_anchor.get("opening_state"), max_len=120)
         visual = prompt_norm.normalize_still_text(
             opening_anchor.get("visual_description") or environment_assets.get("visual_description"),
             max_len=120,
@@ -669,10 +843,8 @@ class ImagePromptComposerTool(AsyncTool):
         )
 
         parts: List[str] = []
-        if opening_state and not prompt_norm.contains_high_risk_action_language(raw_opening_state):
+        if opening_state:
             parts.append(f"开场状态：{opening_state}")
-        elif end_state:
-            parts.append(f"静态落点：{end_state}")
         elif visual:
             parts.append(f"场景主体：{visual}")
         if guideline and guideline not in parts:

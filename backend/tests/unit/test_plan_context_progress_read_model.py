@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.agents.utils.memory_helpers import ensure_mas_working_memory
 from app.agents.utils.plan_context import build_plan_context
+from app.services.memory_provider import build_memory_services
 
 
 def _write_scene_info_ref(tmp_path: Path) -> str:
@@ -27,7 +29,7 @@ def _write_scene_info_ref(tmp_path: Path) -> str:
     return str(ref_path)
 
 
-def test_build_plan_context_adds_progress_read_model_from_scene_info_ref_and_obs_receipts(tmp_path):
+def test_build_plan_context_adds_progress_read_model_from_delivery_receipts(tmp_path):
     scene_info_ref = _write_scene_info_ref(tmp_path)
 
     ctx = build_plan_context(
@@ -42,9 +44,19 @@ def test_build_plan_context_adds_progress_read_model_from_scene_info_ref_and_obs
                 {
                     "iteration": 0,
                     "action_result": {
-                        "act_log": [
-                            {"scene_number": 1, "success": True},
-                            {"scene_number": 2, "success": False, "error_type": "provider_error"},
+                        "delivery_receipts": [
+                            {
+                                "scene_number": 1,
+                                "status": "accepted",
+                                "delivery_surface": "scene_outputs.image",
+                                "delivery_ref": "scene_outputs.image.1",
+                            },
+                            {
+                                "scene_number": 2,
+                                "status": "failed",
+                                "delivery_surface": "scene_outputs.image",
+                                "delivery_ref": "scene_outputs.image.2",
+                            },
                         ]
                     },
                 }
@@ -56,47 +68,79 @@ def test_build_plan_context_adds_progress_read_model_from_scene_info_ref_and_obs
     assert progress["planned_scene_numbers"] == [1, 2, 3]
     assert progress["successful_scene_numbers"] == [1]
     assert progress["remaining_scene_numbers"] == [2, 3]
-    assert progress["recent_execution_receipts"] == [
-        {"iteration": 0, "scene_number": 1, "status": "succeeded"},
+    assert progress["recent_delivery_receipts"] == [
         {
             "iteration": 0,
-            "scene_number": 2,
-            "status": "failed",
-            "error_type": "provider_error",
-        },
+            "scene_number": 1,
+            "status": "accepted",
+            "delivery_surface": "scene_outputs.image",
+            "delivery_ref": "scene_outputs.image.1",
+        }
     ]
+    assert progress["derived_from"] == ["obs_records.delivery_receipts"]
+    assert progress["last_receipt_watermark"] == "scene_outputs.image.1"
+    assert progress["max_staleness_seconds"] > 0
 
 
-def test_build_plan_context_falls_back_to_executed_calls_when_act_log_is_absent(tmp_path):
+def test_build_plan_context_prefers_authoritative_scene_outputs_over_observation_receipts(tmp_path):
     scene_info_ref = _write_scene_info_ref(tmp_path)
+    services = build_memory_services()
+    shared = ensure_mas_working_memory("wf-progress-read-model", service=services.short_term)
+    shared.put(
+        "scene_outputs.image",
+        {
+            2: {"scene_number": 2, "image_path": "/tmp/scene-2.png"},
+            3: {"scene_number": 3, "image_url": "https://example.com/scene-3.png"},
+        },
+    )
 
     ctx = build_plan_context(
-        input_data={"static_context": {"scene_info_ref": scene_info_ref}},
+        input_data={
+            "workflow_state_id": "wf-progress-read-model",
+            "static_context": {"scene_info_ref": scene_info_ref},
+        },
         iteration_context={
             "obs_records": [
                 {
                     "iteration": 1,
                     "action_result": {
-                        "executed_calls": [
+                        "delivery_receipts": [
                             {
-                                "tool": "image_prompt_composer.generate",
-                                "success": True,
-                                "args": {"scene_number": 3},
+                                "scene_number": 1,
+                                "status": "accepted",
+                                "delivery_surface": "scene_outputs.image",
+                                "delivery_ref": "scene_outputs.image.1",
                             }
                         ]
                     },
                 }
             ]
         },
+        workflow_state_id="wf-progress-read-model",
+        service=services.short_term,
+        progress_kind="image",
     )
 
     progress = ctx["progress_read_model"]
     assert progress["planned_scene_numbers"] == [1, 2, 3]
-    assert progress["successful_scene_numbers"] == [3]
-    assert progress["remaining_scene_numbers"] == [1, 2]
-    assert progress["recent_execution_receipts"] == [
-        {"iteration": 1, "scene_number": 3, "status": "succeeded"}
+    assert progress["successful_scene_numbers"] == [2, 3]
+    assert progress["remaining_scene_numbers"] == [1]
+    assert progress["recent_delivery_receipts"] == [
+        {
+            "scene_number": 2,
+            "status": "accepted",
+            "delivery_surface": "scene_outputs.image",
+            "delivery_ref": "scene_outputs.image.2",
+        },
+        {
+            "scene_number": 3,
+            "status": "accepted",
+            "delivery_surface": "scene_outputs.image",
+            "delivery_ref": "scene_outputs.image.3",
+        },
     ]
+    assert progress["derived_from"] == ["scene_outputs.image"]
+    assert progress["last_receipt_watermark"] == "scene_outputs.image.3"
 
 
 def test_build_plan_context_keeps_explicit_diagnostics_when_progress_projection_cannot_be_built(tmp_path):

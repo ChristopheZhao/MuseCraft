@@ -359,6 +359,26 @@ def _build_attempt_lease_diagnostic(
     }
 
 
+def _build_completion_validation_failed_diagnostic(
+    *,
+    attempt: WorkflowNodeAttempt,
+    node_key: str,
+    validation_error: str,
+) -> Dict[str, Any]:
+    last_heartbeat_at = _normalize_datetime(getattr(attempt, "last_heartbeat_at", None))
+    lease_expires_at = _normalize_datetime(getattr(attempt, "lease_expires_at", None))
+    return {
+        "code": "execution_host_keepalive_completion_validation_failed",
+        "node_key": node_key,
+        "attempt_id": attempt.id,
+        "reason_code": "completion_validation_failed",
+        "last_heartbeat_at": last_heartbeat_at.isoformat() if last_heartbeat_at else None,
+        "lease_expires_at": lease_expires_at.isoformat() if lease_expires_at else None,
+        "validation_error": str(validation_error or "").strip(),
+        "captured_at": _now_utc().isoformat(),
+    }
+
+
 def _build_resume_control_projection(
     db: Session,
     task: Task,
@@ -1408,13 +1428,28 @@ class RuntimeSessionService:
             attempt_id=attempt_id,
         )
         if lease_token is not None:
-            RuntimeSessionService.assert_attempt_lease_sync(
-                db,
-                fresh_session,
-                attempt_id=attempt_id,
-                lease_token=lease_token,
-                allow_expired=False,
-            )
+            try:
+                RuntimeSessionService.assert_attempt_lease_sync(
+                    db,
+                    fresh_session,
+                    attempt_id=attempt_id,
+                    lease_token=lease_token,
+                    allow_expired=False,
+                )
+            except ValueError as exc:
+                node.diagnostics = _upsert_node_diagnostic(
+                    node,
+                    _build_completion_validation_failed_diagnostic(
+                        attempt=attempt,
+                        node_key=node_key,
+                        validation_error=str(exc),
+                    ),
+                )
+                db.commit()
+                db.refresh(attempt)
+                db.refresh(node)
+                db.refresh(fresh_session)
+                raise
 
         attempt.status = WorkflowAttemptStatus.SUCCEEDED.value
         _clear_attempt_lease_fields(attempt)

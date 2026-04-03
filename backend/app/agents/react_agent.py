@@ -291,6 +291,39 @@ class ReActAgent(BaseAgent, ABC):
                         plan_summary_preview or None,
                     )
                     if task_complete:
+                        completion_gate = self._accept_completion_request(
+                            stage="plan_contract",
+                            input_data=input_data,
+                            plan_context=plan_context,
+                            iteration_context=current_iter_context,
+                            iteration=iteration,
+                            plan_contract=plan_contract,
+                        )
+                        gate_accepted = bool(completion_gate.get("accepted", True))
+                        if not gate_accepted:
+                            task_complete = False
+                            self._record_completion_gate_rejection(
+                                input_data=input_data,
+                                iteration=iteration,
+                                stage="plan_contract",
+                                details=completion_gate,
+                            )
+                            self.logger.warning(
+                                "COMPLETION_GATE_REJECTED agent=%s iter=%d stage=plan_contract reason=%s",
+                                self.agent_name,
+                                iteration + 1,
+                                completion_gate.get("reason"),
+                            )
+                            if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
+                                action_plan["plan_contract"] = dict(action_plan["plan_contract"])
+                                action_plan["plan_contract"]["task_complete"] = False
+                            plan_contract = dict(plan_contract or {})
+                            plan_contract["task_complete"] = False
+                            plan_contract.setdefault(
+                                "completed_reason",
+                                str(completion_gate.get("reason") or "completion_gate_rejected"),
+                            )
+                    if task_complete:
                         # 关键语义：当 PLAN 判定“无需再行动且任务完成”时，本轮不应进入 ACT（否则会产生 noop 结果覆盖上一轮产物）。
                         no_tool_calls_streak = 0
                         # 写入一次终止事实到 Agent WM（便于审计/追溯），但不写入 PLAN 原文回执
@@ -504,6 +537,33 @@ class ReActAgent(BaseAgent, ABC):
                 
                 # 检查是否完成任务（以 PLAN 合同或领域规约裁决为准）
                 if reflection.get("task_complete", False):
+                    completion_gate = self._accept_completion_request(
+                        stage="reflection",
+                        input_data=input_data,
+                        plan_context=plan_context,
+                        iteration_context=current_iter_context,
+                        iteration=iteration,
+                        plan_contract=plan_contract,
+                        reflection=reflection,
+                        action_result=action_result,
+                    )
+                    gate_accepted = bool(completion_gate.get("accepted", True))
+                    if not gate_accepted:
+                        reflection = dict(reflection or {})
+                        reflection["task_complete"] = False
+                        self._record_completion_gate_rejection(
+                            input_data=input_data,
+                            iteration=iteration,
+                            stage="reflection",
+                            details=completion_gate,
+                        )
+                        self.logger.warning(
+                            "COMPLETION_GATE_REJECTED agent=%s iter=%d stage=reflection reason=%s",
+                            self.agent_name,
+                            iteration + 1,
+                            completion_gate.get("reason"),
+                        )
+                        continue
                     self.logger.info(f"✅ Iterative loop completed successfully after {iteration + 1} iterations")
                     
                     final_result = await self._finalize_success_results(
@@ -802,6 +862,34 @@ class ReActAgent(BaseAgent, ABC):
 
         return should_continue
 
+    def _record_completion_gate_rejection(
+        self,
+        *,
+        input_data: Dict[str, Any],
+        iteration: int,
+        stage: str,
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        try:
+            from .utils.wm_obs import append_obs_to_wm
+
+            append_obs_to_wm(
+                workflow_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
+                agent_name=self.agent_name,
+                obs_record={
+                    "iteration": iteration,
+                    "event": {
+                        "type": "completion_gate_rejected",
+                        "stage": stage,
+                        "reason": (details or {}).get("reason"),
+                        "details": dict(details or {}),
+                    },
+                },
+                service=self.short_term_service,
+            )
+        except Exception:
+            pass
+
     # === PLAN 上下文构造（分区：task/static/iteration） ===
     def _build_plan_context(
         self,
@@ -811,7 +899,34 @@ class ReActAgent(BaseAgent, ABC):
         """构造 PLAN 输入上下文，分区而非平铺。"""
         from .utils.plan_context import build_plan_context
 
-        return build_plan_context(input_data=input_data, iteration_context=iteration_context)
+        return build_plan_context(
+            input_data=input_data,
+            iteration_context=iteration_context,
+            workflow_state_id=str(input_data.get("workflow_state_id") or self.workflow_state_id or ""),
+            service=self.short_term_service,
+            progress_kind=self._get_plan_progress_kind(),
+            include_execution_contract=self._include_execution_contract_in_plan_context(),
+        )
+
+    def _get_plan_progress_kind(self) -> Optional[str]:
+        return None
+
+    def _include_execution_contract_in_plan_context(self) -> bool:
+        return True
+
+    def _accept_completion_request(
+        self,
+        *,
+        stage: str,
+        input_data: Dict[str, Any],
+        plan_context: Dict[str, Any],
+        iteration_context: Optional[Dict[str, Any]],
+        iteration: int,
+        plan_contract: Optional[Dict[str, Any]] = None,
+        reflection: Optional[Dict[str, Any]] = None,
+        action_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {"accepted": True}
     
     # === PLAN 消息构造（通用）：系统模板 + 观察 JSON ===
     def build_plan_messages(self, plan_context: Dict[str, Any]) -> List[Dict[str, Any]]:

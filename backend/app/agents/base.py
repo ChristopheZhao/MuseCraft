@@ -1158,12 +1158,23 @@ class BaseAgent(ABC):
             self._llms = self._load_llms_from_policy()
         return self._resolve_llm_for_role(r)
     
-    async def _execute_function_call(self, function_name: str, function_args: Dict[str, Any]) -> Any:
+    async def _execute_function_call(
+        self,
+        function_name: str,
+        function_args: Dict[str, Any],
+        *,
+        context_overrides: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         """执行LLM选择的工具调用"""
         # 优先使用扁平映射进行稳定路由
         if hasattr(self, "_fc_function_map") and function_name in getattr(self, "_fc_function_map", {}):
             tool_name, action = self._fc_function_map[function_name]
-            return await self.use_tool(tool_name, action, function_args)
+            return await self.use_tool(
+                tool_name,
+                action,
+                function_args,
+                context_overrides=context_overrides,
+            )
 
         # 兼容旧格式：解析“tool_action”风格名称
         parts = function_name.split("_")
@@ -1172,7 +1183,12 @@ class BaseAgent(ABC):
                 tool_name = "_".join(parts[:i])
                 action = "_".join(parts[i:])
                 if tool_name in self.allocated_tools:
-                    return await self.use_tool(tool_name, action, function_args)
+                    return await self.use_tool(
+                        tool_name,
+                        action,
+                        function_args,
+                        context_overrides=context_overrides,
+                    )
 
         # 找不到匹配，给出明确错误
         raise ValueError(
@@ -1343,7 +1359,14 @@ class BaseAgent(ABC):
                     pass
 
                 _call_ts = time.time()
-                tool_result = await self._execute_function_call(fn, args)
+                context_overrides = tool_call.get("execution_context")
+                if not isinstance(context_overrides, dict):
+                    context_overrides = None
+                tool_result = await self._execute_function_call(
+                    fn,
+                    args,
+                    context_overrides=context_overrides,
+                )
                 payload = tool_result.result if hasattr(tool_result, 'result') else tool_result
                 _dur = time.time() - _call_ts
                 # 兼容 ToolOutput / dict
@@ -1671,7 +1694,8 @@ class BaseAgent(ABC):
         tool_name: str, 
         action: str, 
         parameters: Dict[str, Any],
-        timeout: int = None
+        timeout: int = None,
+        context_overrides: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Use a tool (stateless execution)"""
         if tool_name not in self._available_tools:
@@ -1684,6 +1708,10 @@ class BaseAgent(ABC):
             from .tools.base_tool import ToolInput
             # 构造统一的工具上下文，支持子类按需扩展
             context = self._build_tool_context(tool_name=tool_name, action=action, parameters=parameters)
+            if isinstance(context_overrides, dict) and context_overrides:
+                merged_context = dict(context or {})
+                merged_context.update(context_overrides)
+                context = merged_context
             # action 允许为 None（无动作工具），约定下发 "__call__" 作为工具级调用占位符
             tool_input = ToolInput(action=(action if action is not None else "__call__"), parameters=parameters, context=context, timeout=timeout)
             result = await tool.execute(tool_input)

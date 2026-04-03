@@ -334,7 +334,6 @@ class VideoGenerationTool(AsyncTool):
                         "description": "可选：场景信息引用路径；若提供则工具内部构建包含一致性约束的完整提示词"
                     },
                     "emit_last_frame": {"type": "string", "enum": ["auto", "always", "never"], "description": "生成成功后是否自动提取并上传尾帧（auto按DAG出边判断）"},
-                    "workflow_state_id": {"type": "string", "description": "可选：在auto模式下用于出边计算"},
                     "prompt": prompt_field,
                     "duration": {"type": "integer", "enum": provider_config.duration_capabilities, "description": f"视频时长（秒），可选：{provider_config.duration_capabilities}"},
                     "depends_on_scene": {"type": ["integer", "string", "null"], "description": "可选：依赖的上一场景编号"},
@@ -389,6 +388,53 @@ class VideoGenerationTool(AsyncTool):
         }
         
         return schemas.get(action, {})
+
+    def _merge_execution_context_into_params(
+        self,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        merged = dict(params or {})
+        ctx = context if isinstance(context, dict) else {}
+
+        execution_contract = ctx.get("execution_contract")
+        if not isinstance(execution_contract, dict):
+            execution_contract = {}
+        storage = execution_contract.get("storage")
+        if not isinstance(storage, dict):
+            storage = {}
+        constraints = execution_contract.get("constraints")
+        if not isinstance(constraints, dict):
+            constraints = {}
+
+        explicit_workflow_state_id = str(merged.get("workflow_state_id") or "").strip()
+        bound_workflow_state_id = str(
+            storage.get("workflow_state_id") or ctx.get("workflow_state_id") or ""
+        ).strip()
+        if explicit_workflow_state_id and bound_workflow_state_id and explicit_workflow_state_id != bound_workflow_state_id:
+            raise ToolValidationError(
+                "workflow_state_id conflicts with execution context",
+                self.metadata.name,
+            )
+        if bound_workflow_state_id:
+            merged["workflow_state_id"] = bound_workflow_state_id
+
+        explicit_generate_audio = merged.get("generate_audio")
+        bound_generate_audio = constraints.get("generate_audio")
+        if isinstance(bound_generate_audio, bool):
+            if explicit_generate_audio is not None and not isinstance(explicit_generate_audio, bool):
+                raise ToolValidationError(
+                    "generate_audio must be boolean when provided",
+                    self.metadata.name,
+                )
+            if isinstance(explicit_generate_audio, bool) and explicit_generate_audio != bound_generate_audio:
+                raise ToolValidationError(
+                    "generate_audio conflicts with execution context",
+                    self.metadata.name,
+                )
+            merged["generate_audio"] = bound_generate_audio
+
+        return merged
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行视频生成工具"""
@@ -412,7 +458,10 @@ class VideoGenerationTool(AsyncTool):
             raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
         
         action = tool_input.action
-        params = tool_input.parameters
+        params = self._merge_execution_context_into_params(
+            tool_input.parameters,
+            tool_input.context,
+        )
         
         execution_liveness_probe = assert_current_execution_host_keepalive_healthy
 

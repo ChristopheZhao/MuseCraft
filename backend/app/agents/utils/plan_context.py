@@ -1,7 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from copy import deepcopy
+
+try:
+    from ...core.config import settings  # type: ignore
+except Exception:  # pragma: no cover - import fallback for tests
+    settings = None  # type: ignore
+
+from .memory_helpers import get_mas_working_memory
+
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
 
 
 def _normalize_task_assignment(task_ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,6 +124,26 @@ def _build_receipt(
     return receipt
 
 
+def _build_delivery_receipt(
+    *,
+    scene_number: int,
+    surface: str,
+    accepted_at: Optional[str] = None,
+    iteration: Optional[int] = None,
+) -> Dict[str, Any]:
+    receipt: Dict[str, Any] = {
+        "scene_number": scene_number,
+        "status": "accepted",
+        "delivery_surface": surface,
+        "delivery_ref": f"{surface}.{scene_number}",
+    }
+    if iteration is not None:
+        receipt["iteration"] = iteration
+    if accepted_at:
+        receipt["accepted_at"] = accepted_at
+    return receipt
+
+
 def _extract_receipts_from_act_log(
     *,
     act_log: List[Dict[str, Any]],
@@ -219,26 +250,160 @@ def _extract_execution_receipts(iteration_context: Optional[Dict[str, Any]]) -> 
     return receipts
 
 
+def _extract_delivery_receipts(
+    iteration_context: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not isinstance(iteration_context, dict):
+        return []
+    obs_records = iteration_context.get("obs_records")
+    if not isinstance(obs_records, list):
+        return []
+
+    receipts: List[Dict[str, Any]] = []
+    seen: set[Tuple[Optional[int], int, str]] = set()
+    for record in obs_records:
+        if not isinstance(record, dict):
+            continue
+        iteration = _coerce_int(record.get("iteration"))
+        action_result = record.get("action_result")
+        if not isinstance(action_result, dict):
+            continue
+        delivery_receipts = action_result.get("delivery_receipts")
+        if not isinstance(delivery_receipts, list):
+            continue
+        for item in delivery_receipts:
+            if not isinstance(item, dict):
+                continue
+            scene_number = _coerce_int(item.get("scene_number"))
+            status = str(item.get("status") or "").strip()
+            if scene_number is None or status != "accepted":
+                continue
+            receipt = dict(item)
+            if iteration is not None and receipt.get("iteration") is None:
+                receipt["iteration"] = iteration
+            receipt_key = (_coerce_int(receipt.get("iteration")), scene_number, status)
+            if receipt_key in seen:
+                continue
+            seen.add(receipt_key)
+            receipts.append(receipt)
+    return receipts
+
+
+def _resolve_progress_max_staleness_seconds() -> int:
+    try:
+        if settings is not None:
+            value = int(getattr(settings, "PLAN_PROGRESS_MAX_STALENESS_SECONDS", 60))
+            if value > 0:
+                return value
+    except Exception:
+        pass
+    return 60
+
+
+def _extract_scene_output_delivery_receipts(
+    *,
+    workflow_state_id: str,
+    service: "WorkingMemoryService",
+    kind: str,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    key = f"scene_outputs.{kind}"
+    try:
+        shared_memory = get_mas_working_memory(str(workflow_state_id), service=service)
+    except Exception as exc:
+        return [], _build_progress_diagnostic(
+            reason="scene_outputs_load_failed",
+            detail=type(exc).__name__,
+        )
+
+    bucket = shared_memory.get(key, {}) if shared_memory is not None else {}
+    if bucket in (None, {}):
+        return [], None
+    if not isinstance(bucket, dict):
+        return [], _build_progress_diagnostic(
+            reason="scene_outputs_invalid",
+            detail=key,
+        )
+
+    receipts: List[Dict[str, Any]] = []
+    for record in bucket.values():
+        if not isinstance(record, dict):
+            continue
+        scene_number = _coerce_int(record.get("scene_number"))
+        if scene_number is None:
+            continue
+        artifact_url = str(record.get(f"{kind}_url") or "").strip()
+        artifact_path = str(record.get(f"{kind}_path") or "").strip()
+        if not artifact_url and not artifact_path:
+            continue
+        receipts.append(
+            _build_delivery_receipt(
+                scene_number=scene_number,
+                surface=key,
+            )
+        )
+    receipts.sort(key=lambda item: item.get("scene_number") or 0)
+    return receipts, None
+
+
+def _build_last_receipt_watermark(receipts: List[Dict[str, Any]]) -> Optional[str]:
+    if not receipts:
+        return None
+    latest = receipts[-1]
+    scene_number = _coerce_int(latest.get("scene_number"))
+    accepted_at = str(latest.get("accepted_at") or "").strip()
+    delivery_ref = str(latest.get("delivery_ref") or "").strip()
+    if accepted_at and scene_number is not None:
+        return f"accepted:scene={scene_number}@{accepted_at}"
+    if delivery_ref:
+        return delivery_ref
+    if scene_number is not None:
+        return f"accepted:scene={scene_number}"
+    return "accepted"
+
+
 def _build_progress_read_model(
     *,
     static_ctx: Dict[str, Any],
     iteration_context: Optional[Dict[str, Any]],
+    workflow_state_id: Optional[str] = None,
+    service: Optional["WorkingMemoryService"] = None,
+    progress_kind: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     planned_scene_numbers, diagnostic = _extract_planned_scene_numbers(static_ctx)
     if not planned_scene_numbers:
         return {}, diagnostic
 
     planned_set = set(planned_scene_numbers)
-    receipts = [
+    source_diagnostic = diagnostic
+    delivery_receipts = [
         receipt
-        for receipt in _extract_execution_receipts(iteration_context)
+        for receipt in _extract_delivery_receipts(iteration_context)
         if _coerce_int(receipt.get("scene_number")) in planned_set
     ]
+    derived_from: List[str] = []
+
+    authoritative_receipts: List[Dict[str, Any]] = []
+    if progress_kind and workflow_state_id and service is not None:
+        authoritative_receipts, source_diagnostic = _extract_scene_output_delivery_receipts(
+            workflow_state_id=str(workflow_state_id),
+            service=service,
+            kind=str(progress_kind),
+        )
+        authoritative_receipts = [
+            receipt
+            for receipt in authoritative_receipts
+            if _coerce_int(receipt.get("scene_number")) in planned_set
+        ]
+    receipts = authoritative_receipts or delivery_receipts
+    if authoritative_receipts and progress_kind:
+        derived_from.append(f"scene_outputs.{progress_kind}")
+    elif delivery_receipts:
+        derived_from.append("obs_records.delivery_receipts")
     successful_scene_numbers = _sorted_unique(
         [
             int(receipt["scene_number"])
             for receipt in receipts
-            if receipt.get("status") == "succeeded"
+            if receipt.get("status") == "accepted"
         ]
     )
     successful_set = set(successful_scene_numbers)
@@ -252,9 +417,13 @@ def _build_progress_read_model(
             "planned_scene_numbers": planned_scene_numbers,
             "successful_scene_numbers": successful_scene_numbers,
             "remaining_scene_numbers": remaining_scene_numbers,
-            "recent_execution_receipts": receipts[-5:],
+            "recent_delivery_receipts": receipts[-5:],
+            "derived_from": derived_from,
+            "last_receipt_watermark": _build_last_receipt_watermark(receipts),
+            "projection_time": datetime.now(timezone.utc).isoformat(),
+            "max_staleness_seconds": _resolve_progress_max_staleness_seconds(),
         },
-        None,
+        source_diagnostic,
     )
 
 
@@ -262,6 +431,10 @@ def build_plan_context(
     *,
     input_data: Dict[str, Any],
     iteration_context: Optional[Dict[str, Any]],
+    workflow_state_id: Optional[str] = None,
+    service: Optional["WorkingMemoryService"] = None,
+    progress_kind: Optional[str] = None,
+    include_execution_contract: bool = True,
 ) -> Dict[str, Any]:
     """统一构造 PLAN 输入上下文（task/static/iteration 分区）。"""
     ctx: Dict[str, Any] = {}
@@ -281,13 +454,16 @@ def build_plan_context(
                 progress_read_model, progress_diagnostic = _build_progress_read_model(
                     static_ctx=static_ctx,
                     iteration_context=iteration_context,
+                    workflow_state_id=workflow_state_id,
+                    service=service,
+                    progress_kind=progress_kind,
                 )
                 if progress_read_model:
                     ctx["progress_read_model"] = progress_read_model
                 if progress_diagnostic:
                     diagnostics["progress_read_model"] = progress_diagnostic
             execution_contract = input_data.get("execution_contract") or {}
-            if isinstance(execution_contract, dict) and execution_contract:
+            if include_execution_contract and isinstance(execution_contract, dict) and execution_contract:
                 ctx["execution_contract"] = deepcopy(execution_contract)
     except Exception as exc:
         diagnostics["plan_context"] = _build_progress_diagnostic(

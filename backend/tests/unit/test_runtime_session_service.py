@@ -557,6 +557,49 @@ def test_upsert_attempt_node_diagnostic_sync_replaces_keepalive_entry_for_same_a
     assert keepalive_diagnostics[0]["reason_code"] == "heartbeat_validation_failed"
 
 
+def test_complete_node_attempt_sync_persists_completion_validation_failed_receipt(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="video",
+        task=task,
+    )
+    leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
+        sync_db,
+        session,
+        attempt_id=attempt.id,
+        lease_owner="orchestrator:video",
+        lease_token="expired-token",
+        lease_timeout_seconds=60,
+    )
+    leased_attempt.lease_expires_at = leased_attempt.last_heartbeat_at - timedelta(seconds=1)
+    sync_db.commit()
+
+    with pytest.raises(ValueError, match="execution lease expired"):
+        RuntimeSessionService.complete_node_attempt_sync(
+            sync_db,
+            session,
+            node_key="video",
+            attempt_id=attempt.id,
+            lease_token="expired-token",
+            node_status=WorkflowNodeStatus.COMPLETED.value,
+        )
+
+    node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "video")
+    completion_diagnostics = [
+        item
+        for item in (node.diagnostics or [])
+        if item.get("code") == "execution_host_keepalive_completion_validation_failed"
+    ]
+
+    assert len(completion_diagnostics) == 1
+    assert completion_diagnostics[0]["attempt_id"] == attempt.id
+    assert completion_diagnostics[0]["reason_code"] == "completion_validation_failed"
+    assert completion_diagnostics[0]["validation_error"] == f"Workflow attempt {attempt.id} execution lease expired"
+
+
 def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")

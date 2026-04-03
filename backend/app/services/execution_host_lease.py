@@ -56,6 +56,7 @@ class AttemptLeaseKeepaliveController:
         self._target: AttemptLeaseKeepaliveTarget | None = None
         self._last_published_signature: tuple[Any, ...] | None = None
         self._unhealthy_diagnostic: Dict[str, Any] | None = None
+        self._successful_heartbeat_seen = False
         self._thread = threading.Thread(
             target=self._run,
             name="attempt-lease-keepalive",
@@ -73,13 +74,29 @@ class AttemptLeaseKeepaliveController:
             self._target = target
             self._last_published_signature = None
             self._unhealthy_diagnostic = None
+            self._successful_heartbeat_seen = False
+        self._publish_target_receipt(
+            target,
+            code="execution_host_keepalive_activation_requested",
+            message="Execution host keepalive activation requested",
+        )
         self._wake_event.set()
 
-    def deactivate(self) -> None:
+    def deactivate(self, *, reason: str = "deactivated") -> None:
+        target = None
         with self._lock:
+            target = self._target
             self._target = None
             self._last_published_signature = None
             self._unhealthy_diagnostic = None
+            self._successful_heartbeat_seen = False
+        if target is not None:
+            self._publish_target_receipt(
+                target,
+                code="execution_host_keepalive_deactivated",
+                message="Execution host keepalive deactivated",
+                reason_code=str(reason or "deactivated").strip().lower() or "deactivated",
+            )
         self._wake_event.set()
 
     def close(self) -> None:
@@ -96,7 +113,59 @@ class AttemptLeaseKeepaliveController:
             if self._target == target:
                 self._target = None
                 self._last_published_signature = None
+                self._successful_heartbeat_seen = False
         self._wake_event.set()
+
+    def _build_keepalive_receipt(
+        self,
+        target: AttemptLeaseKeepaliveTarget,
+        *,
+        code: str,
+        message: str,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        receipt = {
+            "code": str(code or "").strip(),
+            "runtime_session_id": target.runtime_session_id,
+            "attempt_id": target.attempt_id,
+            "message": str(message or "").strip(),
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for key, value in (extra or {}).items():
+            if value is not None:
+                receipt[key] = value
+        return receipt
+
+    def _publish_target_receipt(
+        self,
+        target: AttemptLeaseKeepaliveTarget,
+        *,
+        code: str,
+        message: str,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        receipt = self._build_keepalive_receipt(
+            target,
+            code=code,
+            message=message,
+            **extra,
+        )
+        if self._publish_diagnostic is not None:
+            try:
+                self._publish_diagnostic(
+                    runtime_session_id=target.runtime_session_id,
+                    attempt_id=target.attempt_id,
+                    diagnostic=receipt,
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "Attempt lease keepalive receipt publish failed for session=%s attempt=%s code=%s: %s",
+                    target.runtime_session_id,
+                    target.attempt_id,
+                    receipt.get("code"),
+                    exc,
+                )
+        return receipt
 
     def _build_keepalive_diagnostic(
         self,
@@ -166,6 +235,24 @@ class AttemptLeaseKeepaliveController:
             if self._target == target:
                 self._unhealthy_diagnostic = dict(diagnostic or {})
 
+    def _mark_successful_heartbeat(self, target: AttemptLeaseKeepaliveTarget) -> bool:
+        with self._lock:
+            if self._target != target:
+                return False
+            first_success = not self._successful_heartbeat_seen
+            self._successful_heartbeat_seen = True
+            return first_success
+
+    @staticmethod
+    def _iso_datetime(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.isoformat()
+        return None
+
     def assert_healthy(self) -> None:
         with self._lock:
             diagnostic = dict(self._unhealthy_diagnostic or {})
@@ -194,6 +281,11 @@ class AttemptLeaseKeepaliveController:
             if signaled:
                 continue
 
+            self._publish_target_receipt(
+                target,
+                code="execution_host_keepalive_heartbeat_begin",
+                message="Execution host keepalive heartbeat started",
+            )
             db = self._session_factory()
             try:
                 runtime_session = self._load_session(db, target.runtime_session_id)
@@ -212,11 +304,32 @@ class AttemptLeaseKeepaliveController:
                     self._remember_unhealthy_diagnostic(target, diagnostic)
                     self._clear_target_if_matches(target)
                     continue
-                self._heartbeat_attempt(
+                attempt = self._heartbeat_attempt(
                     db,
                     runtime_session,
                     attempt_id=target.attempt_id,
                     lease_token=target.lease_token,
+                )
+                last_heartbeat_at = self._iso_datetime(
+                    getattr(attempt, "last_heartbeat_at", None) if attempt is not None else None
+                )
+                lease_expires_at = self._iso_datetime(
+                    getattr(attempt, "lease_expires_at", None) if attempt is not None else None
+                )
+                if self._mark_successful_heartbeat(target):
+                    self._publish_target_receipt(
+                        target,
+                        code="execution_host_keepalive_first_heartbeat_ack",
+                        message="Execution host keepalive first heartbeat acknowledged",
+                        last_heartbeat_at=last_heartbeat_at,
+                        lease_expires_at=lease_expires_at,
+                    )
+                self._publish_target_receipt(
+                    target,
+                    code="execution_host_keepalive_heartbeat_end",
+                    message="Execution host keepalive heartbeat completed",
+                    last_heartbeat_at=last_heartbeat_at,
+                    lease_expires_at=lease_expires_at,
                 )
             except ValueError as exc:
                 message = str(exc)
@@ -308,11 +421,11 @@ def activate_current_attempt_keepalive(
     return True
 
 
-def deactivate_current_attempt_keepalive() -> bool:
+def deactivate_current_attempt_keepalive(*, reason: str = "deactivated") -> bool:
     context = get_current_execution_host_lease_context()
     if context is None or context.attempt_lease_keepalive is None:
         return False
-    context.attempt_lease_keepalive.deactivate()
+    context.attempt_lease_keepalive.deactivate(reason=reason)
     return True
 
 

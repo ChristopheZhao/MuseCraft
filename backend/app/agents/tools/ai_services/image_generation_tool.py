@@ -16,11 +16,8 @@ from ....core.consistency_policy import get_consistency_policy
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError
 from .service_interfaces import get_vlm_service, get_vlm_capabilities
-from ...prompts.template_manager import get_template_manager
 from ....services.prompt_safety import (
-    sanitize_prompt,
     apply_prompt_safety,
-    get_prompt_safety_advisor,
     SafetyContext,
     sanitize_with_locks,
 )
@@ -28,7 +25,6 @@ from ....services.prompt_safety.rewrite import (
     is_sensitive_error as ps_is_sensitive_error,
     rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
 )
-from .. import image_prompt_normalization as prompt_norm
 
 
 class ImageGenerationTool(AsyncTool):
@@ -57,14 +53,12 @@ class ImageGenerationTool(AsyncTool):
         metadata = self.get_metadata()
         super().__init__(metadata=metadata, **kwargs)
         self._vlm_service = None
-        self._prompt_manager = get_template_manager("image_generator")
     
     def get_available_actions(self) -> List[str]:
-        # 精简对FC暴露的动作：优先复合函数
         return [
-            "generate_with_autoprompt",
             "generate_image",
-            "gen_image_prompt"
+            "analyze_image_style",
+            "extract_visual_features",
         ]
     
     def _initialize(self):
@@ -75,8 +69,7 @@ class ImageGenerationTool(AsyncTool):
         """为业务级图像工具提供默认的 FC 暴露策略"""
         return {
             "expose": True,
-            # 优先推荐复合函数
-            "allowed_actions": ["generate_with_autoprompt"]
+            "allowed_actions": ["generate_image"]
         }
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
@@ -113,32 +106,6 @@ class ImageGenerationTool(AsyncTool):
             base_schema["required"] = ["prompt"]
             base_schema["description"] = "根据用户提供的提示词直接生成图像，可选指定尺寸以及风格。"
 
-        elif action == "gen_image_prompt":
-            base_schema["properties"] = {
-                "scene_number": {
-                    "type": ["integer", "string"],
-                    "description": "可选：用于标识所属场景"
-                },
-                "scene_data": {
-                    "type": "object",
-                    "description": "场景信息（例如视觉描述、叙事要点、时长等）"
-                },
-                "style_guidance": {
-                    "type": "object",
-                    "description": "风格指导（如画风、构图偏好、色彩基调等）"
-                }
-            }
-            base_schema["description"] = "根据场景信息和风格指导生成图像提示词，而不直接产出图像。"
-        elif action == "generate_with_autoprompt":
-            base_schema["properties"] = {
-                "scene_number": {"type": ["integer", "string"], "description": "可选：用于追踪与持久化命名"},
-                "scene_data": {"type": "object", "description": "场景信息（视觉描述/标题/脚本摘要等）"},
-                "style_guidance": {"type": "object", "description": "风格指导（如画风、构图偏好、色彩基调等）"},
-                "fallback_prompt": {"type": "string", "description": "当自动提示生成失败时使用的备用提示词"},
-                "size": self._build_size_schema_property("图像尺寸；若不提供则由当前 provider 能力自动选择默认值"),
-                "persist": {"type": "boolean", "description": "是否持久化到存储（默认 true）"}
-            }
-            base_schema["description"] = "自动生成符合场景的图像提示词并调用底层服务生成图像，可配置尺寸与持久化。"
         elif action == "analyze_image_style":
             base_schema["properties"] = {
                 "image_url": {
@@ -355,10 +322,12 @@ class ImageGenerationTool(AsyncTool):
         
         if action == "generate_image":
             return await self._generate_image(parameters)
-        elif action == "gen_image_prompt":
-            return await self._gen_image_prompt(parameters)
-        elif action == "generate_with_autoprompt":
-            return await self._generate_with_autoprompt(parameters)
+        elif action in {"gen_image_prompt", "generate_with_autoprompt"}:
+            raise ToolError(
+                "autoprompt actions were removed from image_generation; use image_prompt_composer.generate",
+                tool_name=self.metadata.name,
+                error_code="action_removed",
+            )
         elif action == "analyze_image_style":
             return await self._analyze_image_style(parameters)
         elif action == "extract_visual_features":
@@ -649,324 +618,18 @@ class ImageGenerationTool(AsyncTool):
         style: str,
         style_guidance: Dict[str, Any] | None = None,
     ) -> str:
-        """根据场景与风格信息构建结构化图像提示词。
-
-        - 统一通过 prompt 模板输出，确保角色/画风描述与其它 Agent 保持一致性。
-        - 若模板渲染失败，则回退到轻量串接逻辑（与旧版本兼容）。
-        """
-
-        sd = scene_data or {}
-        sg = style_guidance or {}
-
-        def _as_list(value: Any) -> List[str]:
-            if isinstance(value, list):
-                return [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
-            if isinstance(value, (str, int, float)) and str(value).strip():
-                return [str(value).strip()]
-            return []
-
-        def _dedup(values: List[str]) -> List[str]:
-            seen = set()
-            result = []
-            for item in values:
-                if not item:
-                    continue
-                if item not in seen:
-                    seen.add(item)
-                    result.append(item)
-            return result
-
-        def _clip_text(value: Any, max_len: int = 120) -> str:
-            text = str(value or "").strip()
-            if not text:
-                return ""
-            if len(text) <= max_len:
-                return text
-            if max_len <= 3:
-                return text[:max_len]
-            return text[: max_len - 3] + "..."
-
-        task_direction = str(
-            sd.get("task_direction")
-            or sd.get("reference_view")
-            or sd.get("reference_kind")
-            or sd.get("reference_type")
-            or ""
-        ).strip().lower()
-        image_purpose = prompt_norm.canonicalize_image_purpose(sd.get("image_purpose"), task_direction=task_direction)
-
-        content_focus = (sd.get("content_focus") or "").strip()
-
-        def _build_reference_root() -> str:
-            names = _as_list(sd.get("characters_present"))
-            subject = names[0] if names else (sd.get("title") or "角色")
-            if task_direction in {"avatar", "headshot", "portrait"}:
-                return f"{subject}角色头像参考图，单人正面，居中构图，背景干净。"
-            if task_direction in {"full_body", "full-body"}:
-                return f"{subject}角色全身参考图，单人正面站立，构图稳定，背景干净。"
-            return f"{subject}角色参考图，单人静态构图，突出稳定造型、服饰与标志道具。"
-
-        scene_description = (
-            _build_reference_root()
-            if image_purpose == "character_reference"
-            else prompt_norm.select_frame_thesis(
-                sd,
-                image_purpose=image_purpose,
-                fallback_title=(sd.get("title") or "单帧静态画面").strip(),
-            )
+        raise ToolError(
+            "prompt synthesis was removed from image_generation; use image_prompt_composer.generate",
+            tool_name=self.metadata.name,
+            error_code="action_removed",
         )
-
-        # 角色结构化描述：优先使用结构化约束，其次角色描述文本
-        character_sections: List[str] = []
-        char_structs = sd.get("character_constraints_struct")
-        if isinstance(char_structs, list):
-            for item in char_structs:
-                if not isinstance(item, dict):
-                    continue
-                name = (item.get("display_name") or item.get("name") or "").strip()
-                segments: List[str] = []
-                for key in ["archetype_or_identity", "species_or_breed"]:
-                    val = item.get(key)
-                    if isinstance(val, str) and val.strip():
-                        segments.append(val.strip())
-                sig = _as_list(item.get("signature_outfit_or_props"))
-                if sig:
-                    segments.append("标志道具：" + "、".join(sig[:4]))
-                traits = _as_list(item.get("key_traits"))
-                if traits:
-                    segments.append("特征：" + "、".join(traits[:6]))
-                if segments:
-                    block = f"{name}：" + "；".join(segments) if name else "；".join(segments)
-                    character_sections.append(block)
-
-        if not character_sections:
-            raw_char_descs = _as_list(sd.get("character_descriptions")) or _as_list(sd.get("characters"))
-            char_descs = []
-            for item in raw_char_descs:
-                normalized = prompt_norm.compress_character_description(
-                    item,
-                    segment_max_len=64,
-                    fallback_max_len=80,
-                )
-                if not normalized:
-                    continue
-                if prompt_norm.contains_video_only_language(item) and normalized == item:
-                    continue
-                char_descs.append(normalized)
-            if not char_descs:
-                names = _as_list(sd.get("characters_present"))
-                if names:
-                    char_descs.append("登场角色：" + "、".join(names))
-            character_sections = char_descs
-
-        # 风格 / 媒介 / 情绪等信息
-        style_sections: List[str] = []
-        style_map = {
-            "style_name": "风格",
-            "style_description": "风格说明",
-            "visual_approach": "媒介表现",
-        }
-        for key, label in style_map.items():
-            val = sg.get(key)
-            if isinstance(val, str) and val.strip():
-                style_sections.append(f"{label}：{val.strip()}")
-
-        mood_sections = []
-        if image_purpose != "character_reference":
-            for key in ["mood_and_atmosphere", "emotional_tone", "mood"]:
-                val = sg.get(key) if key in sg else sd.get(key)
-                if isinstance(val, str) and val.strip():
-                    normalized_mood = _clip_text(prompt_norm.normalize_still_text(val), 80)
-                    if normalized_mood:
-                        mood_sections.append(normalized_mood)
-        mood_sections = _dedup(mood_sections)
-
-        color_sections = _dedup(
-            _as_list(sg.get("color_palette")) + _as_list(sd.get("color_palette"))
-        )
-
-        props_sections = _dedup(_as_list(sd.get("props_and_objects")))
-
-        # 辅助 bullet：仍以静态构图为核心，不回流 scene narrative / montage prose
-        scene_focus: List[str] = []
-        if image_purpose == "character_reference":
-            if task_direction in {"avatar", "headshot", "portrait"}:
-                scene_focus.append("参考方向：头像特写，突出面部识别与发型/服饰细节")
-            elif task_direction in {"full_body", "full-body"}:
-                scene_focus.append("参考方向：全身立绘，完整呈现服饰轮廓、站姿与标志道具")
-            else:
-                scene_focus.append("参考方向：单人静态角色参考图，强调稳定身份特征")
-        else:
-            focus_text = prompt_norm.normalize_still_text(content_focus)
-            if focus_text and not prompt_norm.contains_video_only_language(focus_text):
-                scene_focus.append(focus_text)
-
-        cautionary_notes: List[str] = []
-        anime_hint_sources = style_sections + mood_sections
-        if any("动画" in seg or "动漫" in seg for seg in anime_hint_sources):
-            cautionary_notes.append("保持动画笔触，避免写实摄影质感")
-
-        if image_purpose == "character_reference":
-            render_requirements = "角色参考图，单人静态构图，背景干净，无文字无水印，细节清晰。"
-        elif image_purpose in {"action_keyframe", "climax_peak", "continuity_bridge"}:
-            render_requirements = "关键帧静态画面，主体姿态明确，空间关系清晰，可自然衔接后续运动，无文字无水印。"
-        else:
-            render_requirements = "单帧静态画面，主体清晰，构图稳定，无文字无水印，无分镜或剪辑说明。"
-
-        template_payload = {
-            "root_label": (
-                "角色参考主体"
-                if image_purpose == "character_reference"
-                else ("关键帧构图" if image_purpose in {"action_keyframe", "climax_peak", "continuity_bridge"} else "单帧构图")
-            ),
-            "focus_label": "参考方向" if image_purpose == "character_reference" else "画面焦点",
-            "character_label": "稳定特征" if image_purpose == "character_reference" else "主体锁定",
-            "mood_label": "光线与氛围",
-            "props_label": "关键细节",
-            "scene_description": scene_description or "单帧静态画面",
-            "scene_focus": scene_focus,
-            "character_sections": _dedup(character_sections),
-            "style_sections": _dedup(style_sections),
-            "mood_sections": mood_sections,
-            "color_sections": color_sections,
-            "props_sections": props_sections,
-            "cautionary_notes": cautionary_notes,
-            "render_requirements": render_requirements,
-        }
-
-        try:
-            return self._prompt_manager.render_template(
-                "image_autoprompt",
-                template_payload,
-                validate=False,
-            ).strip()
-        except Exception:
-            # 回退：延用旧的串接逻辑，确保功能不中断
-            parts = [scene_description]
-            if scene_focus:
-                parts.append("；".join(scene_focus))
-            chars = _dedup(character_sections)
-            if chars:
-                parts.append(("稳定特征：" if image_purpose == "character_reference" else "主体锁定：") + "；".join(chars))
-
-            base = "，".join([p for p in parts if p]) or "场景静态画面"
-
-            art_style = (
-                sg.get("style_name")
-                or sg.get("visual_approach")
-                or sg.get("style")
-                or style
-                or ""
-            )
-            extra_bits = []
-            if art_style:
-                extra_bits.append(f"风格：{art_style}")
-            if color_sections:
-                extra_bits.append("配色：" + "、".join(color_sections))
-            if mood_sections:
-                extra_bits.append("氛围：" + "、".join(mood_sections))
-
-            tail = render_requirements
-            return f"{base}，{'，'.join(extra_bits)}，{tail}" if extra_bits else f"{base}，{tail}"
 
     async def _generate_with_autoprompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """复合：自动提示词 → 生成 → 可选持久化。"""
-        scene_data = params.get("scene_data") or {}
-        style_guidance = params.get("style_guidance") or {}
-        size = params.get("size")
-        persist = params.get("persist", True)
-        scene_number = params.get("scene_number")
-
-        # 仅在有显式风格时传递；避免默认强制 realistic
-        style = style_guidance.get("art_style") or style_guidance.get("style") or style_guidance.get("name") or ""
-        prompt_text = await self._create_image_prompt_from_scene(scene_data, style, style_guidance)
-        # 观测：记录提示词预览，便于核对与优化（不使用固定模板，仅日志）
-        try:
-            from ....core.config import settings as _cfg  # lazy import to avoid hard dependency at import time
-            max_chars = int(getattr(_cfg, 'CONTENT_PREVIEW_CHARS', 300))
-        except Exception:
-            max_chars = 300
-        preview = (prompt_text or "").replace("\n", " ")[:max_chars]
-        try:
-            self.logger.info(
-                f"🖼️ IMAGE_PROMPT scene={scene_number} len={len(prompt_text or '')} preview={preview}"
-            )
-        except Exception:
-            pass
-        if self._is_prompt_weak(prompt_text) and params.get("fallback_prompt"):
-            prompt_text = params.get("fallback_prompt")
-
-        gen = await self._generate_image({
-            "prompt": prompt_text,
-            # 风格可选：缺省时不传递，避免下游误导
-            **({"style": style} if style else {}),
-            **({"size": size} if size else {}),
-            "scene_number": scene_number
-        })
-
-        image_url = gen.get("image_url")
-        if not image_url:
-            raise ToolError(gen.get("error") or "image_generation returned no image_url", self.metadata.name)
-        prompt_text = gen.get("generated_prompt", prompt_text)
-        file_path = ""
-        hosted_url = ""
-        if persist and image_url:
-            from ..tool_registry import get_tool_registry
-            from ..base_tool import ToolInput as TI
-            dest_key = f"images/scene_{scene_number}_image.jpg" if scene_number is not None else "images/autoprompt_image.jpg"
-            # 优先使用本地文件存储工具；失败再尝试 OSS
-            try:
-                storage = get_tool_registry().get_tool("file_storage_tool")
-                res = await storage.execute(TI(action="upload_from_url", parameters={
-                    "url": image_url,
-                    "destination_key": dest_key,
-                    "metadata": {"scene_number": scene_number, "source": "generate_with_autoprompt"}
-                }))
-                payload = getattr(res, 'result', res)
-                if isinstance(payload, dict):
-                    file_path = payload.get("local_path") or payload.get("file_path", "")
-                    hosted_candidate = payload.get("url")
-                    if isinstance(hosted_candidate, str) and hosted_candidate.startswith(("http://", "https://")):
-                        hosted_url = hosted_candidate
-            except Exception:
-                # 忽略本地落盘失败，继续尝试直接上传到OSS（若可用）
-                file_path = ""
-
-            # 如果配置了 OSS，并且当前还没有公开 URL，则将本地文件上传到 OSS
-            if not hosted_url:
-                local_source = file_path or ""
-                if local_source:
-                    oss_url = await self._upload_local_image_to_oss(
-                        local_source,
-                        dest_key,
-                        metadata={"scene_number": scene_number, "source": "generate_with_autoprompt"}
-                    )
-                    if oss_url:
-                        hosted_url = oss_url
-                else:
-                    # 若没有本地文件，但仍有原始URL，尝试直接镜像上传
-                    oss_url = await self._mirror_image_url_to_oss(
-                        image_url,
-                        dest_key,
-                        metadata={"scene_number": scene_number, "source": "generate_with_autoprompt", "original_url": image_url}
-                    )
-                    if oss_url:
-                        hosted_url = oss_url
-
-        # 若获得了公开可访问的URL，则优先使用之
-        if hosted_url:
-            self.logger.info(f"IMAGE_REHOST_RESULT scene={scene_number} url={hosted_url}")
-            image_url = hosted_url
-
-        return {
-            "image_url": image_url,
-            "file_path": file_path,
-            "prompt_text": prompt_text,
-            "style": style,
-            "size": gen.get("size") or "",
-            "scene_number": scene_number,
-            "prompt_safety": gen.get("prompt_safety", {}),
-        }
+        raise ToolError(
+            "autoprompt execution was removed from image_generation; use image_prompt_composer.generate",
+            tool_name=self.metadata.name,
+            error_code="action_removed",
+        )
 
     async def _upload_local_image_to_oss(self, local_path: str, remote_path: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """将本地图片上传到 OSS，返回可公开访问的 URL。"""
@@ -1107,68 +770,12 @@ class ImageGenerationTool(AsyncTool):
         except Exception as e:
             raise ToolError(f"图像风格分析异常: {str(e)}", error_code="style_analysis_failed")
 
-    # 注意：建议在Agent中通过FC调用 gen_image_prompt 生成提示词，再调用 generate_image。
-
     async def _gen_image_prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """为单个场景生成高质量图像提示词（由LLM生成，作为外部能力封装为工具动作）。"""
-        try:
-            from .service_interfaces import get_llm_service
-            llm = get_llm_service()
-            # 从 ai_config 读取工具模型映射
-            try:
-                from ....core.ai_config import get_ai_config
-                ai_cfg = get_ai_config()
-                cfg_model = ai_cfg.get_model_for_tool("image_generation")
-                mcfg = ai_cfg.get_model_config(cfg_model) if cfg_model else None
-            except Exception:
-                cfg_model = None
-                mcfg = None
-
-            scene = params.get("scene_data", {}) or {}
-            style = params.get("style_guidance", {}) or {}
-
-            system = "你是资深动漫画面提示词工程师。请为给定场景生成高质量的图像提示词，突出主体、构图、光影与风格，避免含糊表述。只返回提示词文本。"
-            user_ctx = (
-                f"场景信息：\n"
-                f"- 视觉描述：{scene.get('visual_description','')}\n"
-                f"- 叙事要点：{scene.get('narrative_description','')}\n"
-                f"- 时长：{scene.get('duration','')}\n"
-                f"风格指导：{style}\n"
-                f"请直接输出最终提示词。"
-            )
-
-            # 安全提示不注入LLM提示词，仅用于遥测；生成后的结果再做 sanitize
-            system_prompt = system
-            user_payload = user_ctx
-
-            res = await llm.chat_completion(
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_payload}],
-                temperature=0.3,
-                model=(cfg_model or None)
-            )
-            prompt = (res.get("content") or "").strip()
-            if not prompt:
-                raise ToolError("未生成提示词", error_code="prompt_generation_failed")
-            advisor_meta = {}
-            sanitized = sanitize_prompt(
-                prompt,
-                {
-                    "modality": "image",
-                    "scene_number": params.get("scene_number"),
-                    "tool": self.metadata.name,
-                    "advisor_layers": advisor_meta.get("applied_layers") if advisor_meta else None,
-                },
-            )
-            prompt = sanitized.text or prompt
-            advisor_meta["sanitized_changed"] = sanitized.changed
-            advisor_meta["sanitized_matches"] = sanitized.matches
-            return {
-                "prompt_text": prompt,
-                "scene_number": params.get("scene_number"),
-                "prompt_safety": advisor_meta,
-            }
-        except Exception as e:
-            raise ToolError(f"提示词建议失败: {str(e)}", error_code="prompt_generation_failed")
+        raise ToolError(
+            "prompt generation was removed from image_generation; use image_prompt_composer.generate",
+            tool_name=self.metadata.name,
+            error_code="action_removed",
+        )
 
     def _is_prompt_weak(self, prompt: str) -> bool:
         """极轻量提示词质量判断（读取配置）"""

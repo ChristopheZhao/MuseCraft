@@ -9,7 +9,7 @@ agents:
     image_generation:
       expose: true
       allowed_actions:
-        - generate_with_autoprompt
+        - generate_image
     video_prompt_composer:
       expose: true
       allowed_actions:
