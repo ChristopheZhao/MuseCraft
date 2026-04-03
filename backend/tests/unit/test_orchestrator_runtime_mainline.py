@@ -23,6 +23,9 @@ from app.models import (
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.context_assembler import ContextContractAssembler
+from app.services.orchestration_runtime_transition_facade import (
+    OrchestrationRuntimeTransitionFacade,
+)
 from app.services.published_deliverable_service import (
     PublishedDeliverableService,
     build_deliverable_ref,
@@ -161,7 +164,63 @@ def _create_task(sync_db):
     return task
 
 
-def _build_agent(monkeypatch, sync_db, *, call_log):
+def _load_runtime_view_from_fresh_session(SessionLocal, task_id):
+    inspect_db = SessionLocal()
+    try:
+        fresh_task = inspect_db.query(Task).filter(Task.id == int(task_id)).first()
+        if fresh_task is None:
+            raise AssertionError(f"task {task_id} missing in fresh-session inspection")
+        return RuntimeSessionService.build_runtime_view_for_task_sync(inspect_db, fresh_task)
+    finally:
+        inspect_db.close()
+
+
+def _load_task_snapshot_from_fresh_session(SessionLocal, task_id):
+    inspect_db = SessionLocal()
+    try:
+        fresh_task = inspect_db.query(Task).filter(Task.id == int(task_id)).first()
+        if fresh_task is None:
+            raise AssertionError(f"task {task_id} missing in fresh-session inspection")
+        return {
+            "id": fresh_task.id,
+            "status": fresh_task.status,
+        }
+    finally:
+        inspect_db.close()
+
+
+def _load_runtime_session_snapshot_from_fresh_session(SessionLocal, session_id):
+    inspect_db = SessionLocal()
+    try:
+        fresh_session = RuntimeSessionService.get_session_by_id_sync(inspect_db, int(session_id))
+        if fresh_session is None:
+            raise AssertionError(f"runtime session {session_id} missing in fresh-session inspection")
+        return {
+            "id": fresh_session.id,
+            "status": fresh_session.status,
+        }
+    finally:
+        inspect_db.close()
+
+
+def _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session_id, node_key):
+    inspect_db = SessionLocal()
+    try:
+        fresh_node = RuntimeSessionService.get_node_by_key_sync(inspect_db, int(session_id), node_key)
+        if fresh_node is None:
+            raise AssertionError(
+                f"runtime node {node_key} missing for session {session_id} in fresh-session inspection"
+            )
+        return {
+            "id": fresh_node.id,
+            "status": fresh_node.status,
+            "diagnostics": list(fresh_node.diagnostics or []),
+        }
+    finally:
+        inspect_db.close()
+
+
+def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     shared_store = _FakeSharedStore()
     short_term = _FakeShortTermService(shared_store)
     memory_services = SimpleNamespace(
@@ -202,6 +261,12 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
+    if session_factory is not None:
+        agent._orchestration_runtime_transition_facade = OrchestrationRuntimeTransitionFacade(
+            context_contract_assembler=agent._context_contract_assembler,
+            orchestration_state=agent._orchestration_state,
+            session_factory=session_factory,
+        )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
@@ -271,7 +336,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log):
     return agent
 
 
-def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
+def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, session_factory=None):
     shared_store = _FakeSharedStore()
     short_term = _FakeShortTermService(shared_store)
     memory_services = SimpleNamespace(
@@ -314,6 +379,12 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses):
         assemble_agent_context=lambda **kwargs: {},
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
+    if session_factory is not None:
+        agent._orchestration_runtime_transition_facade = OrchestrationRuntimeTransitionFacade(
+            context_contract_assembler=agent._context_contract_assembler,
+            orchestration_state=agent._orchestration_state,
+            session_factory=session_factory,
+        )
     agent._workflow_completion_adapter = SimpleNamespace(
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
@@ -387,74 +458,9 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-        def _complete_on_sync_db(*, runtime_session_id, node_key, attempt_id, lease_token, node_status):
-            assert runtime_session_id == session.id
-            return RuntimeSessionService.complete_node_attempt_sync(
-                sync_db,
-                session,
-                node_key=node_key,
-                attempt_id=attempt_id,
-                lease_token=lease_token,
-                node_status=node_status,
-            )
-
-        def _open_gate_on_sync_db(
-            *,
-            runtime_session_id,
-            task_db_id,
-            workflow_id,
-            script_attempt_id,
-            lease_token,
-            trigger_reason,
-            script_output,
-            task_specs,
-            conditional_task_specs,
-            candidate_agents,
-        ):
-            assert runtime_session_id == session.id
-            assert task_db_id == task.id
-            boundary = agent._get_context_contract_assembler().publish_script_review_boundary_sync(
-                db=sync_db,
-                session=session,
-                workflow_state_id=workflow_id,
-                attempt_id=script_attempt_id,
-                script_output=script_output,
-            )
-            continuation_checkpoint = agent._orchestration_state.build_continuation_checkpoint(
-                task_specs=task_specs,
-                conditional_task_specs=conditional_task_specs,
-                candidate_agents=list(candidate_agents),
-                anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
-                node_key="script",
-                attempt_id=script_attempt_id,
-                decision_id=None,
-            )
-            gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
-                sync_db,
-                session,
-                task=task,
-                workflow_state_id=workflow_id,
-                attempt_id=script_attempt_id,
-                trigger_reason=trigger_reason,
-                script_output=script_output,
-                artifact_ref=dict(boundary.get("artifact_ref") or {}),
-                script_preview_text=str(boundary.get("script_preview_text") or ""),
-                lease_token=lease_token,
-                continuation_checkpoint=continuation_checkpoint,
-            )
-            return {
-                "status": "waiting_gate",
-                "session_id": session.id,
-                "gate_id": gate.id,
-                "node_key": "script",
-            }
-
-        monkeypatch.setattr(agent, "_complete_runtime_attempt_with_fresh_session", _complete_on_sync_db)
-        monkeypatch.setattr(agent, "_open_script_review_gate", _open_gate_on_sync_db)
 
         result = asyncio.run(
             agent._execute_impl(
@@ -463,7 +469,7 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
                 db=sync_db,
             )
         )
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert result["status"] == "waiting_gate"
@@ -482,16 +488,19 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         engine.dispose()
 
 
-def test_orchestrator_runtime_control_plane_helper_opens_fresh_session(monkeypatch):
+def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
-        monkeypatch.setattr(orchestrator_module, "SyncSessionLocal", SessionLocal)
-
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+        facade = OrchestrationRuntimeTransitionFacade(
+            context_contract_assembler=agent._context_contract_assembler,
+            orchestration_state=agent._orchestration_state,
+            session_factory=SessionLocal,
+        )
 
         observed = {}
 
@@ -501,7 +510,7 @@ def test_orchestrator_runtime_control_plane_helper_opens_fresh_session(monkeypat
             observed["task_id"] = runtime_task.id if runtime_task is not None else None
             return "ok"
 
-        result = agent._run_with_fresh_runtime_control_plane_session(
+        result = facade._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=session.id,
             task_db_id=task.id,
             action=_record_loaded_runtime_state,
@@ -522,25 +531,24 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
         completion_calls = []
+        class _StubRuntimeTransitions:
+            def complete_runtime_attempt(self, **kwargs):
+                completion_calls.append(dict(kwargs))
 
-        def _record_completion(**kwargs):
-            completion_calls.append(dict(kwargs))
+            def open_script_review_gate(self, **kwargs):
+                return {
+                    "status": "waiting_gate",
+                    "session_id": session.id,
+                    "gate_id": 1,
+                    "node_key": "script",
+                }
 
-        def _stub_gate(**kwargs):
-            return {
-                "status": "waiting_gate",
-                "session_id": session.id,
-                "gate_id": 1,
-                "node_key": "script",
-            }
-
-        monkeypatch.setattr(agent, "_complete_runtime_attempt_with_fresh_session", _record_completion)
-        monkeypatch.setattr(agent, "_open_script_review_gate", _stub_gate)
+        agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
 
         result = asyncio.run(
             agent._execute_impl(
@@ -561,32 +569,31 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
         engine.dispose()
 
 
-def test_orchestrator_mainline_routes_script_gate_transition_through_fresh_session_helper(monkeypatch):
+def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_transition_facade(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
         completion_calls = []
         gate_calls = []
+        class _StubRuntimeTransitions:
+            def complete_runtime_attempt(self, **kwargs):
+                completion_calls.append(dict(kwargs))
 
-        def _record_completion(**kwargs):
-            completion_calls.append(dict(kwargs))
+            def open_script_review_gate(self, **kwargs):
+                gate_calls.append(dict(kwargs))
+                return {
+                    "status": "waiting_gate",
+                    "session_id": session.id,
+                    "gate_id": 1,
+                    "node_key": "script",
+                }
 
-        def _record_gate(**kwargs):
-            gate_calls.append(dict(kwargs))
-            return {
-                "status": "waiting_gate",
-                "session_id": session.id,
-                "gate_id": 1,
-                "node_key": "script",
-            }
-
-        monkeypatch.setattr(agent, "_complete_runtime_attempt_with_fresh_session", _record_completion)
-        monkeypatch.setattr(agent, "_open_script_review_gate", _record_gate)
+        agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
 
         result = asyncio.run(
             agent._execute_impl(
@@ -613,33 +620,11 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         monkeypatch.setattr(orchestrator_module, "activate_current_attempt_keepalive", lambda **kwargs: False)
 
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-
-        def _fail_on_sync_db(
-            *,
-            runtime_session_id,
-            node_key,
-            attempt_id,
-            error_message,
-            lease_token,
-            diagnostics=None,
-        ):
-            assert runtime_session_id == session.id
-            return RuntimeSessionService.fail_node_attempt_sync(
-                sync_db,
-                session,
-                node_key=node_key,
-                attempt_id=attempt_id,
-                error_message=error_message,
-                lease_token=lease_token,
-                diagnostics=diagnostics,
-            )
-
-        monkeypatch.setattr(agent, "_fail_runtime_attempt_with_fresh_session", _fail_on_sync_db)
 
         with pytest.raises(AgentError, match="Execution host keepalive unavailable"):
             asyncio.run(
@@ -650,19 +635,19 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
                 )
             )
 
-        sync_db.refresh(task)
-        sync_db.refresh(session)
-        node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
+        fresh_task = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
+        fresh_session = _load_runtime_session_snapshot_from_fresh_session(SessionLocal, session.id)
+        node = _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session.id, "concept")
         keepalive_diagnostic = next(
             item
-            for item in (node.diagnostics or [])
+            for item in (node["diagnostics"] or [])
             if item.get("code") == "execution_host_keepalive"
         )
 
         assert call_log["concept_planner"] == []
-        assert session.status == WorkflowSessionStatus.FAILED.value
-        assert task.status == TaskStatus.FAILED.value
-        assert node.status == WorkflowNodeStatus.FAILED.value
+        assert fresh_session["status"] == WorkflowSessionStatus.FAILED.value
+        assert fresh_task["status"] == TaskStatus.FAILED.value
+        assert node["status"] == WorkflowNodeStatus.FAILED.value
         assert keepalive_diagnostic["state"] == "activation_failed"
         assert keepalive_diagnostic["reason_code"] == "keepalive_unavailable"
     finally:
@@ -678,7 +663,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         planning_calls = {"select": 0, "decompose": 0}
         continuation_calls = []
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
 
         async def _count_select(*args, **kwargs):
             planning_calls["select"] += 1
@@ -748,12 +733,13 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
                 db=sync_db,
             )
         )
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
+        fresh_task = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert second["status"] == "completed"
         assert runtime_view["status"] == WorkflowSessionStatus.COMPLETED.value
-        assert task.status == TaskStatus.COMPLETED.value
+        assert fresh_task["status"] == TaskStatus.COMPLETED.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["image"]["status"] == WorkflowNodeStatus.COMPLETED.value
@@ -773,7 +759,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         agent._prepare_agent_context = OrchestratorAgent._prepare_agent_context.__get__(agent, OrchestratorAgent)
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
@@ -808,7 +794,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
                 )
             )
 
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
         assert len(call_log["image_generator"]) == 0
     finally:
@@ -822,7 +808,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
 
         agent._llm_select_candidate_agents = _async_return(
@@ -860,7 +846,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
                 )
             )
 
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["image_generator"]) == 0
@@ -877,7 +863,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         planning_calls = {"select": 0, "decompose": 0}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
 
         async def _count_select(*args, **kwargs):
             planning_calls["select"] += 1
@@ -932,7 +918,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
                 db=sync_db,
             )
         )
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert second["status"] == "waiting_gate"
@@ -957,7 +943,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         planning_calls = {"select": 0, "decompose": 0}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
 
         async def _count_select(*args, **kwargs):
             planning_calls["select"] += 1
@@ -1012,7 +998,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
                 db=sync_db,
             )
         )
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert second["status"] == "waiting_gate"
@@ -1038,7 +1024,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
-        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         agent._should_retry_step = _async_return(True)
         agent.agents[AgentType.SCRIPT_WRITER] = _FlakyAgent(
             "script_writer",
@@ -1060,7 +1046,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
                 db=sync_db,
             )
         )
-        runtime_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert result["status"] == "waiting_gate"

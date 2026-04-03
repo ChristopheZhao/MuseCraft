@@ -2344,18 +2344,30 @@
       "id": "PLAN-20260403-049",
       "title": "Runtime control-plane boundary slimming after lease RCA",
       "kind": "refactor",
-      "status": "draft",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260403-049.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-04-03T05:18:46Z",
-      "updated_at": "2026-04-03T05:18:46Z",
+      "updated_at": "2026-04-03T13:54:27Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-04-03T05:18:46Z",
           "text": "Drafted a dedicated governance/refactor successor after PLAN-20260401-045 closure to review runtime-control-plane SoT clarity, orchestrator thickness, lease-surface reduction, and MySQL-vs-SQLite boundary policy without absorbing PLAN-20260402-047."
+        },
+        {
+          "at": "2026-04-03T09:17:25Z",
+          "text": "After PLAN-20260402-047 closure, PLAN-20260403-049 moved to in_progress; the next window must start with Stage A review-first governance freeze and pass stage verification before any bounded implementation slice."
+        },
+        {
+          "at": "2026-04-03T13:54:14Z",
+          "text": "Implementation and validation are complete at the bounded C1 seam; user requested that 049 close here and that any further slimming move into a separate C2 follow-on plan."
+        },
+        {
+          "at": "2026-04-03T13:54:27Z",
+          "text": "User confirmed closing 049 at governance plus bounded C1 completion; any further orchestrator/runtime slimming must continue under separate follow-on plan PLAN-20260403-050."
         }
       ]
     }
