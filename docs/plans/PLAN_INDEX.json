@@ -2417,6 +2417,68 @@
           "text": "Implementation and bounded validation are complete; user approved moving 050 to awaiting_user_confirmation while a separate SQL governance follow-on will be opened next."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260404-051",
+      "title": "SQL governance and evidence boundary follow-on",
+      "kind": "refactor",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260404-051.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-04T02:21:13Z",
+      "updated_at": "2026-04-04T02:56:07Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-04T02:21:13Z",
+          "text": "Opened as an independent managed SQL governance/design follow-on after PLAN-20260403-050 moved to awaiting_user_confirmation on checkpoint commit fc824ca."
+        },
+        {
+          "at": "2026-04-04T02:22:25Z",
+          "text": "Stage A boundary gate passed: runtime control-plane persistence, MAS-agent memory application, and SQL physical substrate were re-confirmed as separate layers; runtime SQL claims and memory backend claims are now explicitly classified; runtime implementation remains frozen pending later-stage claim inventory."
+        },
+        {
+          "at": "2026-04-04T02:37:21Z",
+          "text": "Stage B claim inventory and Stage C follow-on decision completed; no immediate runtime SQL remediation or MySQL verification slice is required on baseline fc824ca, and remaining backend questions stay in a separate memory-backend lane."
+        },
+        {
+          "at": "2026-04-04T02:56:07Z",
+          "text": "User approved closing the SQL governance slice after Stage A/B/C completion; runtime-vs-memory-vs-substrate guardrails are frozen and remaining backend/config work will continue in a separate memory governance plan."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260404-052",
+      "title": "Memory backend governance and contract boundary follow-on",
+      "kind": "refactor",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260404-052.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-04T02:56:16Z",
+      "updated_at": "2026-04-04T03:14:05Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-04T02:56:16Z",
+          "text": "Opened as the separate memory-governance successor after PLAN-20260404-051 closure, keeping backend selection/config/contract questions out of runtime SQL scope."
+        },
+        {
+          "at": "2026-04-04T02:58:26Z",
+          "text": "Stage A memory governance freeze passed; the plan now isolates memory backend selection/config/fallback/support questions from runtime SQL scope and leaves runtime implementation untouched."
+        },
+        {
+          "at": "2026-04-04T03:07:44Z",
+          "text": "Stage B memory claim inventory and Stage C follow-on decision completed; no implementation successor is opened because the current issues are governance/config/support questions without failing backend-local tests or reproduced runtime impact."
+        },
+        {
+          "at": "2026-04-04T03:14:05Z",
+          "text": "User approved closing the memory governance slice after Stage A/B/C review; no implementation follow-on is justified without stronger backend-local or operator-facing evidence."
+        }
+      ]
     }
   ]
 }
