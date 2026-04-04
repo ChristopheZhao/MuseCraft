@@ -23,6 +23,9 @@ from app.models import (
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.context_assembler import ContextContractAssembler
+from app.services.orchestration_runtime_resume_bootstrap_facade import (
+    OrchestrationRuntimeResumeBootstrapFacade,
+)
 from app.services.orchestration_runtime_transition_facade import (
     OrchestrationRuntimeTransitionFacade,
 )
@@ -453,6 +456,42 @@ async def _async_identity(*args, **kwargs):
     return workflow_data
 
 
+def _build_recording_resume_bootstrap_facade(agent):
+    real_facade = OrchestrationRuntimeResumeBootstrapFacade(
+        orchestration_state=agent._orchestration_state,
+    )
+
+    class _RecordingResumeBootstrapFacade:
+        def __init__(self):
+            self.resolve_calls = []
+            self.load_calls = []
+            self.start_calls = []
+
+        def resolve_runtime_resume_context(self, **kwargs):
+            self.resolve_calls.append(dict(kwargs))
+            return real_facade.resolve_runtime_resume_context(**kwargs)
+
+        def load_authoritative_resume_task_specs(self, **kwargs):
+            self.load_calls.append(dict(kwargs))
+            return real_facade.load_authoritative_resume_task_specs(**kwargs)
+
+        def start_runtime_attempt(self, **kwargs):
+            result = real_facade.start_runtime_attempt(**kwargs)
+            record = dict(kwargs)
+            record.update(
+                {
+                    "node_key": result.node_key,
+                    "attempt_id": result.attempt_id,
+                    "trigger_reason": result.trigger_reason,
+                    "lease_token": result.lease_token,
+                }
+            )
+            self.start_calls.append(record)
+            return result
+
+    return _RecordingResumeBootstrapFacade()
+
+
 def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
@@ -520,6 +559,72 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
         assert observed["db_id"] != id(sync_db)
         assert observed["session_id"] == session.id
         assert observed["task_id"] == task.id
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_runtime_resume_bootstrap_facade_uses_caller_owned_session(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        facade = OrchestrationRuntimeResumeBootstrapFacade(
+            orchestration_state=agent._orchestration_state,
+        )
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        observed_db_ids = []
+        original_start = RuntimeSessionService.start_node_attempt_sync
+        original_bind = RuntimeSessionService.bind_attempt_continuation_checkpoint_sync
+        original_grant = RuntimeSessionService.grant_attempt_lease_sync
+        original_clear = RuntimeSessionService.clear_node_diagnostic_codes_sync
+
+        def _record_start(db, runtime_session, **kwargs):
+            observed_db_ids.append(("start", id(db)))
+            return original_start(db, runtime_session, **kwargs)
+
+        def _record_bind(db, runtime_session, **kwargs):
+            observed_db_ids.append(("bind", id(db)))
+            return original_bind(db, runtime_session, **kwargs)
+
+        def _record_grant(db, runtime_session, **kwargs):
+            observed_db_ids.append(("grant", id(db)))
+            return original_grant(db, runtime_session, **kwargs)
+
+        def _record_clear(db, runtime_session, **kwargs):
+            observed_db_ids.append(("clear", id(db)))
+            return original_clear(db, runtime_session, **kwargs)
+
+        monkeypatch.setattr(RuntimeSessionService, "start_node_attempt_sync", staticmethod(_record_start))
+        monkeypatch.setattr(RuntimeSessionService, "bind_attempt_continuation_checkpoint_sync", staticmethod(_record_bind))
+        monkeypatch.setattr(RuntimeSessionService, "grant_attempt_lease_sync", staticmethod(_record_grant))
+        monkeypatch.setattr(RuntimeSessionService, "clear_node_diagnostic_codes_sync", staticmethod(_record_clear))
+
+        result = facade.start_runtime_attempt(
+            db=sync_db,
+            runtime_session=session,
+            task=task,
+            current_agent_type=AgentType.CONCEPT_PLANNER,
+            workflow_state_id=str(task.task_id),
+            task_specs={
+                AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+            },
+            conditional_task_specs={},
+            candidate_agents=[AgentType.CONCEPT_PLANNER],
+            script_trigger_reason="initial",
+            script_requested_by="system",
+            resume_anchor_agent=None,
+        )
+
+        assert result.node_key == "concept"
+        assert result.attempt_id is not None
+        assert result.lease_token
+        assert observed_db_ids
+        assert {db_id for _name, db_id in observed_db_ids} == {id(sync_db)}
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -615,12 +720,72 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
         engine.dispose()
 
 
+def test_orchestrator_mainline_routes_attempt_bootstrap_through_resume_facade(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        activate_calls = []
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._orchestration_runtime_resume_bootstrap_facade = _build_recording_resume_bootstrap_facade(agent)
+        monkeypatch.setattr(
+            orchestrator_module,
+            "activate_current_attempt_keepalive",
+            lambda **kwargs: activate_calls.append(dict(kwargs)) or True,
+        )
+
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        completion_calls = []
+        gate_calls = []
+
+        class _StubRuntimeTransitions:
+            def complete_runtime_attempt(self, **kwargs):
+                completion_calls.append(dict(kwargs))
+
+            def open_script_review_gate(self, **kwargs):
+                gate_calls.append(dict(kwargs))
+                return {
+                    "status": "waiting_gate",
+                    "session_id": session.id,
+                    "gate_id": 1,
+                    "node_key": "script",
+                }
+
+        agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
+
+        result = asyncio.run(
+            agent._execute_impl(
+                task=task,
+                input_data={"user_prompt": "test prompt"},
+                db=sync_db,
+            )
+        )
+
+        start_calls = agent._orchestration_runtime_resume_bootstrap_facade.start_calls
+        assert result["status"] == "waiting_gate"
+        assert len(start_calls) == 2
+        assert len(activate_calls) == 2
+        assert start_calls[0]["current_agent_type"] == AgentType.CONCEPT_PLANNER
+        assert start_calls[1]["current_agent_type"] == AgentType.SCRIPT_WRITER
+        assert activate_calls[0]["lease_token"] == start_calls[0]["lease_token"]
+        assert activate_calls[1]["lease_token"] == start_calls[1]["lease_token"]
+        assert completion_calls[0]["lease_token"] == start_calls[0]["lease_token"]
+        assert gate_calls[0]["lease_token"] == start_calls[1]["lease_token"]
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
 def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailable(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._orchestration_runtime_resume_bootstrap_facade = _build_recording_resume_bootstrap_facade(agent)
         monkeypatch.setattr(orchestrator_module, "activate_current_attempt_keepalive", lambda **kwargs: False)
 
         task = _create_task(sync_db)
@@ -650,6 +815,8 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
         assert node["status"] == WorkflowNodeStatus.FAILED.value
         assert keepalive_diagnostic["state"] == "activation_failed"
         assert keepalive_diagnostic["reason_code"] == "keepalive_unavailable"
+        assert len(agent._orchestration_runtime_resume_bootstrap_facade.start_calls) == 1
+        assert agent._orchestration_runtime_resume_bootstrap_facade.start_calls[0]["current_agent_type"] == AgentType.CONCEPT_PLANNER
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -725,6 +892,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
             feedback_text="looks good",
         )
         agent._memory_services.short_term._shared_store.clear()
+        agent._orchestration_runtime_resume_bootstrap_facade = _build_recording_resume_bootstrap_facade(agent)
 
         second = asyncio.run(
             agent._execute_impl(
@@ -743,11 +911,85 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["image"]["status"] == WorkflowNodeStatus.COMPLETED.value
+        assert len(agent._orchestration_runtime_resume_bootstrap_facade.load_calls) == 1
+        assert agent._orchestration_runtime_resume_bootstrap_facade.load_calls[0]["resume_action"] == "approve"
         assert planning_calls == {"select": 1, "decompose": 1}
         assert continuation_calls == [{"session_id": session.id, "task_id": task.id}]
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert len(call_log["image_generator"]) == 1
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        planning_calls = {"select": 0, "decompose": 0}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._orchestration_runtime_resume_bootstrap_facade = _build_recording_resume_bootstrap_facade(agent)
+
+        async def _count_select(*args, **kwargs):
+            planning_calls["select"] += 1
+            return ([AgentType.SCRIPT_WRITER], "unexpected-selection")
+
+        async def _count_decompose(*args, **kwargs):
+            planning_calls["decompose"] += 1
+            return ({AgentType.SCRIPT_WRITER: {"run": True, "order": 0, "scope": {}}}, {})
+
+        agent._llm_select_candidate_agents = _count_select
+        agent._llm_decompose_tasks = _count_decompose
+
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+        attempt = RuntimeSessionService.start_node_attempt_sync(
+            sync_db,
+            session,
+            node_key="script",
+            task=task,
+        )
+        continuation_checkpoint = agent._orchestration_state.build_continuation_checkpoint(
+            task_specs={
+                AgentType.SCRIPT_WRITER: {"run": True, "order": 0, "scope": {}},
+            },
+            conditional_task_specs={},
+            candidate_agents=[AgentType.SCRIPT_WRITER],
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="script",
+            attempt_id=attempt.id,
+            decision_id=None,
+        )
+        RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
+            sync_db,
+            session,
+            attempt_id=attempt.id,
+            continuation_checkpoint=continuation_checkpoint,
+        )
+        RuntimeSessionService.mark_session_resuming_sync(sync_db, session, task=task)
+
+        result = asyncio.run(
+            agent._execute_impl(
+                task=task,
+                input_data={"user_prompt": "test prompt"},
+                db=sync_db,
+            )
+        )
+
+        resolve_calls = agent._orchestration_runtime_resume_bootstrap_facade.resolve_calls
+        start_calls = agent._orchestration_runtime_resume_bootstrap_facade.start_calls
+        assert result["status"] == "waiting_gate"
+        assert len(resolve_calls) == 1
+        assert len(start_calls) == 1
+        assert start_calls[0]["current_agent_type"] == AgentType.SCRIPT_WRITER
+        assert start_calls[0]["trigger_reason"] == "resume"
+        assert planning_calls == {"select": 0, "decompose": 0}
+        assert len(call_log["concept_planner"]) == 0
+        assert len(call_log["script_writer"]) == 1
+        assert len(call_log["image_generator"]) == 0
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

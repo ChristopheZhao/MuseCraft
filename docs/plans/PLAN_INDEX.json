@@ -2311,18 +2311,26 @@
       "id": "PLAN-20260402-047",
       "title": "Missing owner-field diagnostics for image composer",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "archived",
       "priority": "P1",
       "owner": "codex",
-      "file_path": "docs/plans/active/PLAN-20260402-047.md",
-      "confirmed_by_user": false,
+      "file_path": "docs/plans/archive/2026-04/PLAN-20260402-047.md",
+      "confirmed_by_user": true,
       "created_at": "2026-04-02T10:00:59Z",
-      "updated_at": "2026-04-02T10:02:40Z",
-      "archived_at": null,
+      "updated_at": "2026-04-03T09:09:29Z",
+      "archived_at": "2026-04-03T09:09:29Z",
       "notes": [
         {
           "at": "2026-04-02T10:02:40Z",
           "text": "Follow-on governance plan opened after PLAN-20260402-046 closure to add explicit diagnostics when accepted image owner fields are absent, without reopening helper debt or scene-contract expansion."
+        },
+        {
+          "at": "2026-04-03T09:06:46Z",
+          "text": "Implementation and isolated targeted validation complete (11 passed); user asked whether PLAN-20260402-047 can be closed."
+        },
+        {
+          "at": "2026-04-03T09:06:51Z",
+          "text": "User confirmed closure after explicit diagnostics landed, alias leaks were removed, and isolated targeted unit validation passed (11 passed)."
         }
       ]
     },
@@ -2368,6 +2376,45 @@
         {
           "at": "2026-04-03T13:54:27Z",
           "text": "User confirmed closing 049 at governance plus bounded C1 completion; any further orchestrator/runtime slimming must continue under separate follow-on plan PLAN-20260403-050."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260403-050",
+      "title": "Orchestrator runtime resume/bootstrap boundary slimming follow-on",
+      "kind": "refactor",
+      "status": "awaiting_user_confirmation",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260403-050.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-03T13:53:49Z",
+      "updated_at": "2026-04-04T02:10:47Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-03T13:55:22Z",
+          "text": "Opened as the dedicated C2 follow-on after PLAN-20260403-049 closed at governance plus bounded C1. Scope is limited to orchestrator runtime resume/load/bootstrap slimming; keepalive, lease, queue-host, and post-execution transition surfaces remain out of scope unless a later amendment reopens them explicitly."
+        },
+        {
+          "at": "2026-04-03T14:24:41Z",
+          "text": "Stage A boundary freeze passed. The exact target seam is limited to `_resolve_runtime_script_state`, `_load_authoritative_resume_task_specs`, and `_start_runtime_attempt`; `050` will use a dedicated new resume/bootstrap facade/service and will not widen the existing post-execution transition facade."
+        },
+        {
+          "at": "2026-04-03T14:53:04Z",
+          "text": "Bounded Stage B/Stage C execution completed under the frozen seam. Orchestrator pre-execution resume/load/bootstrap choreography now routes through `backend/app/services/orchestration_runtime_resume_bootstrap_facade.py`, focused runtime-mainline unit logic passed as SQLite-bounded evidence, and the plan remains open only for user review/closure."
+        },
+        {
+          "at": "2026-04-03T14:58:44Z",
+          "text": "SQL/session owner split was tightened explicitly: the new pre-execution facade is documented and tested as a caller-owned current-session consumer, while fresh-session control-plane ownership remains confined to `OrchestrationRuntimeTransitionFacade`."
+        },
+        {
+          "at": "2026-04-04T02:00:23Z",
+          "text": "Added a runtime-vs-memory-vs-SQL boundary freeze note under PLAN-20260403-050. SQL is now explicitly framed as a physical substrate used by multiple subsystems, runtime persistence remains control-plane-owned by RuntimeSessionService, MAS memory remains application-layer-owned, and future SQL work must follow a claim-to-evidence matrix instead of conflating SQLite unit media, memory backends, and MySQL runtime authority."
+        },
+        {
+          "at": "2026-04-04T02:10:47Z",
+          "text": "Implementation and bounded validation are complete; user approved moving 050 to awaiting_user_confirmation while a separate SQL governance follow-on will be opened next."
         }
       ]
     }
