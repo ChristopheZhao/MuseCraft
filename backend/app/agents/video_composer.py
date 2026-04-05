@@ -19,6 +19,9 @@ from ..services.video_composer_execution_contract import (
 )
 
 
+_FINALIZE_BOUNDARY_KEY = "composer_finalize_boundary"
+
+
 class VideoComposerAgent(ReActAgent):
     """
     Video Composer Agent combines individual scene videos into a final cohesive video
@@ -101,6 +104,33 @@ class VideoComposerAgent(ReActAgent):
             return "final_with_voiceover"
         return "final_composed"
 
+    def _build_success_orchestration_report(self, mix_type: str) -> Dict[str, Any]:
+        return {
+            "status": "completed",
+            "boundary_event": "compose_completed",
+            "gate_triggers": ["workflow_global_bgm_mix_delivery"] if mix_type == "bgm" else [],
+            "artifacts": [
+                {"kind": "shared_fact", "ref": "project.final_video"},
+                {"kind": "shared_fact", "ref": "project.final_video_mix"},
+            ],
+            "reflection": {
+                "completion_state": "completed",
+                "mix_type": mix_type,
+                "reported_gaps": [],
+                "reported_hints": [],
+            },
+        }
+
+    def _latest_video_iteration_artifact(self) -> Dict[str, Any]:
+        try:
+            samples = self.wm.latest_iteration_artifacts(kind="video", limit=1)
+        except Exception:
+            samples = []
+        if not samples:
+            return {}
+        sample = samples[0]
+        return dict(sample) if isinstance(sample, dict) else {}
+
     def _build_mix_receipt(
         self,
         *,
@@ -136,6 +166,42 @@ class VideoComposerAgent(ReActAgent):
         if mix_type == "voiceover" and isinstance(voice_assets_ctx, list):
             receipt["inputs"]["voice_assets"] = voice_assets_ctx
         return receipt
+
+    def _remember_finalize_boundary(
+        self,
+        *,
+        input_data: Dict[str, Any],
+        mix_type: str,
+    ) -> None:
+        static_ctx = input_data.get("static_context") if isinstance(input_data, dict) else {}
+        static_ctx = static_ctx if isinstance(static_ctx, dict) else {}
+        boundary_input: Dict[str, Any] = {
+            "static_context": {
+                "final_video": dict(static_ctx.get("final_video") or {})
+                if isinstance(static_ctx.get("final_video"), dict)
+                else {},
+                "background_music": dict(static_ctx.get("background_music") or {})
+                if isinstance(static_ctx.get("background_music"), dict)
+                else {},
+                "voice_assets": list(static_ctx.get("voice_assets") or [])
+                if isinstance(static_ctx.get("voice_assets"), list)
+                else [],
+            },
+        }
+        self.wm.put(
+            _FINALIZE_BOUNDARY_KEY,
+            {
+                "compose_mode": str(mix_type or "compose"),
+                "receipt_input": boundary_input,
+            },
+        )
+
+    def _load_finalize_boundary(self) -> Dict[str, Any]:
+        try:
+            payload = self.wm.get(_FINALIZE_BOUNDARY_KEY, {})
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     async def _execute_action(
         self,
@@ -176,6 +242,7 @@ class VideoComposerAgent(ReActAgent):
         mix_type = boundary["compose_mode"]
         stored_path = mixed_path
         final_url = self._resolve_local_public_url("", stored_path)
+        self._remember_finalize_boundary(input_data=input_data, mix_type=mix_type)
         mix_receipt = self._build_mix_receipt(
             input_data=input_data,
             mix_type=mix_type,
@@ -188,24 +255,55 @@ class VideoComposerAgent(ReActAgent):
             "final_video_path": stored_path,
             "final_video_url": final_url,
             "mix_receipt": mix_receipt,
-            "orchestration_report": {
-                "status": "completed",
-                "boundary_event": "compose_completed",
-                "gate_triggers": ["workflow_global_bgm_mix_delivery"] if mix_type == "bgm" else [],
-                "artifacts": [
-                    {"kind": "shared_fact", "ref": "project.final_video"},
-                    {"kind": "shared_fact", "ref": "project.final_video_mix"},
-                ],
-                "reflection": {
-                    "completion_state": "completed",
-                    "mix_type": mix_type,
-                    "reported_gaps": [],
-                    "reported_hints": [],
-                },
-            },
+            "orchestration_report": self._build_success_orchestration_report(mix_type),
             "executed_calls": executed_calls,
             "plan_llm": plan_llm,
         }
+
+    async def _finalize_success_results(
+        self,
+        final_action_result: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        result = dict(await super()._finalize_success_results(final_action_result, context) or {})
+        workflow_id = str(context.get("workflow_state_id") or self.workflow_state_id or "")
+        if workflow_id:
+            result.setdefault("workflow_state_id", workflow_id)
+
+        final_path = str(result.get("final_video_path") or "").strip()
+        final_url = str(result.get("final_video_url") or "").strip()
+
+        artifact = self._latest_video_iteration_artifact()
+        if not final_path:
+            final_path = str(artifact.get("file_path") or "").strip()
+        if not final_url:
+            artifact_url = str(artifact.get("url") or "").strip()
+            if artifact_url or final_path:
+                final_url = self._resolve_local_public_url(artifact_url, final_path)
+
+        if final_path:
+            result["final_video_path"] = final_path
+        if final_url:
+            result["final_video_url"] = final_url
+
+        finalize_boundary = self._load_finalize_boundary()
+        mix_type = str(finalize_boundary.get("compose_mode") or "compose")
+        receipt_input = finalize_boundary.get("receipt_input")
+        receipt_input = dict(receipt_input) if isinstance(receipt_input, dict) else {}
+
+        mix_receipt = result.get("mix_receipt")
+        if (not isinstance(mix_receipt, dict) or not mix_receipt) and (final_path or final_url):
+            result["mix_receipt"] = self._build_mix_receipt(
+                input_data=receipt_input,
+                mix_type=mix_type,
+                output_path=final_path,
+                output_url=final_url,
+            )
+
+        if not isinstance(result.get("orchestration_report"), dict):
+            result["orchestration_report"] = self._build_success_orchestration_report(mix_type)
+
+        return result
 
     async def _reflect_on_results(
         self,
