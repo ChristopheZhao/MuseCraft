@@ -2479,6 +2479,99 @@
           "text": "User approved closing the memory governance slice after Stage A/B/C review; no implementation follow-on is justified without stronger backend-local or operator-facing evidence."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260404-053",
+      "title": "Final video state-sync and runtime regression audit",
+      "kind": "fix",
+      "status": "superseded",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260404-053.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-04T15:54:59Z",
+      "updated_at": "2026-04-04T16:43:11Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-04T16:43:11Z",
+          "text": "Superseded after deeper code-plus-runtime review proved two separate facts: the original runtime-vs-persistence split is real, and the current worktree also introduces a retry-path final_video handoff regression. 053 remains a useful investigation draft but is not executable as-is; successor PLAN-20260405-054 now owns the governed repair path."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260405-054",
+      "title": "Final video authority convergence and retry-handoff repair",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260405-054.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-04T16:42:06Z",
+      "updated_at": "2026-04-05T14:18:08Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-04T16:43:11Z",
+          "text": "Opened as the governed successor after code-plus-runtime review confirmed both the original final-video authority split and a current-worktree retry-path handoff regression. Companion background note PLAN-20260405-054-background.md freezes the evidence baseline, current-worktree classification, and out-of-scope follow-on candidates before any implementation resumes."
+        },
+        {
+          "at": "2026-04-05T02:41:39Z",
+          "text": "Pre-execution worktree disposition frozen: keep orchestrator/data-persistence/frontend read-model repairs in scope, narrow video_composer/media_runtime before execution, and move QC widening plus metadata-locking tests out of 054."
+        },
+        {
+          "at": "2026-04-05T03:05:37Z",
+          "text": "Bounded repair implemented and verified: retry-success now shares the orchestrator-owned composer handoff path, completion/runtime/persistence all derive final-video refs from the same authority, frontend no longer depends on /tasks/{id}/result, and targeted tests plus retry-path probe plus API health startup passed. Historical-task projection backfill remains out of scope."
+        },
+        {
+          "at": "2026-04-05T03:26:54Z",
+          "text": "Real acceptance on task 66191a8e-d73b-4512-a136-5ccfb9cd9868 disproved closure: video_composer completed and produced a final file, but quality_checker still failed because project.final_video was never promoted into MAS WM."
+        },
+        {
+          "at": "2026-04-05T03:41:00Z",
+          "text": "Architecture re-review corrected the owner framing: project.final_video remains the only deliverable SoT, while the remaining defect sits on the subagent completion receipt -> orchestrator handoff seam. react_agent.py is not the deliverable authority owner."
+        },
+        {
+          "at": "2026-04-05T04:16:44Z",
+          "text": "Plan review synchronized lifecycle and boundary state: 054 is in_progress, the receipt/SoT/workflow-decision split is now explicit, and the current amendment touch set is narrowed to video_composer finalize/handoff synthesis plus focused regression coverage before any broader react_agent/orchestrator change."
+        },
+        {
+          "at": "2026-04-05T04:26:11Z",
+          "text": "Implemented the bounded composer-local repair: video_composer now rebuilds its completion receipt from same-run execution evidence during finalize, focused regression coverage was added for plan_contract_task_complete, and targeted backend/.venv unit validation passed (3 passed)."
+        },
+        {
+          "at": "2026-04-05T14:18:08Z",
+          "text": "Closed after later fresh live runs and frontend/read-model integration validation crossed the historical video_composer -> quality_checker blocker without reintroducing project.final_video handoff loss. 054 closure covers new-run final-video authority convergence and composer handoff synthesis only; historical-task backfill remains out of scope."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260405-055",
+      "title": "Runtime decision root-cause isolation and phase-boundary repair",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260405-055.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-05T08:23:52Z",
+      "updated_at": "2026-04-05T14:06:41Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-05T08:27:23Z",
+          "text": "Created independent runtime-control-plane RCA stream after fresh-current-code acceptance showed primary runtime-decision failure masked by a secondary lease error; execution is stage-gated through PLAN-20260405-055-validation.md."
+        },
+        {
+          "at": "2026-04-05T14:06:26Z",
+          "text": "Fresh reruns, targeted tests, and 2026-04-05 frontend integration evidence indicate 055 scope is closed pending explicit user confirmation."
+        },
+        {
+          "at": "2026-04-05T14:06:41Z",
+          "text": "User confirmed 055 closure after fresh live reruns and 2026-04-05 frontend integration evidence."
+        }
+      ]
     }
   ]
 }
