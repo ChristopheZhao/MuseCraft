@@ -9,7 +9,7 @@ import { getRuntimeFailureMessage, getRuntimeTerminalStatus } from '@/lib/runtim
 /**
  * Lightweight task polling hook.
  * - Polls backend task status when WS is not connected
- * - On completion, fetches result and sets final video URL
+ * - On completion, resolves the final video from runtime/detail/resources
  * - Advances UI step to 'review'
  */
 export function useTaskPolling() {
@@ -68,8 +68,18 @@ export function useTaskPolling() {
       });
     };
 
-    const openCompletedResult = async (taskId: string) => {
+    const openCompletedResult = async (taskId: string, runtime?: Record<string, any> | null) => {
       const candidates: Array<string | undefined> = [];
+      const summaryOutput = runtime?.summary_output || {};
+      candidates.push(
+        summaryOutput?.final_video_url,
+        summaryOutput?.final_video_path,
+        summaryOutput?.video_url,
+        summaryOutput?.video_path,
+        summaryOutput?.output_assets?.final_video_url,
+        summaryOutput?.output_assets?.video_url,
+      );
+
       try {
         const detail = await ApiClient.getTaskDetail(taskId);
         lastStatusRef.current = 'completed';
@@ -82,19 +92,11 @@ export function useTaskPolling() {
       }
 
       try {
-        const res = await ApiClient.getTaskResult(taskId);
-        candidates.push(
-          res?.final_video_url,
-          res?.video_url,
-          res?.data?.video_url,
-          res?.result?.video_url,
-          res?.final_video_path,
-          res?.video_path,
-          res?.file_path,
-          res?.result?.file_path,
-        );
+        const resources = await ApiClient.getTaskResources(taskId);
+        const finalResource = resources.find((resource) => resource.is_final_output);
+        candidates.push(finalResource?.file_url);
       } catch {
-        // Ignore if endpoint not available
+        // Ignore if resources are not available yet
       }
 
       const picked = candidates.find((c) => typeof c === 'string' && c.length > 0);
@@ -146,7 +148,7 @@ export function useTaskPolling() {
           }
 
           if (runtimeTerminalStatus === 'completed') {
-            await openCompletedResult(taskId);
+            await openCompletedResult(taskId, runtime);
             return;
           }
         } catch (error) {

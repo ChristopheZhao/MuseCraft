@@ -43,6 +43,8 @@ def test_build_persistence_payload_projects_scene_and_final_resources(monkeypatc
             "duration": 3.5,
         }
     ]
+    assert payload["final_video_url"] == "/files/final.mp4"
+    assert payload["final_video_path"] == "/tmp/final.mp4"
     assert any(item.get("kind") == "final_video" for item in payload["resources"])
     assert any(item.get("filename") == "scene_1_video.mp4" for item in payload["resources"])
     assert any(item.get("filename") == "scene_1_image.jpg" for item in payload["resources"])
@@ -52,10 +54,11 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
     adapter = WorkflowCompletionAdapter(memory_services=SimpleNamespace(short_term=object()))
 
     adapter.build_persistence_payload = lambda workflow_id: {
+        "final_video_url": "/files/final.mp4",
+        "final_video_path": "/tmp/final.mp4",
         "scenes": [{"scene_number": 1}],
         "resources": [{"kind": "final_video", "url": "/files/final.mp4"}],
     }
-    adapter.resolve_final_video_url = lambda workflow_id: "/files/final.mp4"
     monkeypatch.setattr(
         "app.services.workflow_completion_adapter.build_mas_state_view",
         lambda workflow_id, service=None: {"projection_role": "facts_summary", "completed_scenes": 1},
@@ -86,7 +89,9 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
     assert payload["facts_summary"]["completed_scenes"] == 1
     assert payload["results"] == {"ok": True}
     assert payload["quality_score"] == 0.92
+    assert payload["final_video_path"] == "/tmp/final.mp4"
     assert result["final_video_url"] == "/files/final.mp4"
+    assert result["final_video_path"] == "/tmp/final.mp4"
 
 
 def test_publish_failed_emits_bounded_terminal_summary(monkeypatch):

@@ -51,6 +51,16 @@ export interface TaskDetailResponse extends TaskResponse {
   agent_executions_count: number;
 }
 
+export interface TaskResourceResponse {
+  id: number;
+  filename: string;
+  resource_type: string;
+  file_size?: number;
+  file_url?: string;
+  is_final_output: boolean;
+  processing_status: string;
+}
+
 export interface TaskRuntimeDecisionRequest {
   action: 'approve' | 'revise' | 'replan';
   feedback_text?: string;
@@ -148,14 +158,14 @@ export class ApiClient {
     return response.json();
   }
 
-  static async getTaskResult(taskId: string): Promise<any> {
-    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/result`, {
+  static async getTaskResources(taskId: string): Promise<TaskResourceResponse[]> {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/resources`, {
       cache: 'no-store',
     });
     
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.detail || 'Failed to get task result');
+      throw new Error(error.detail || 'Failed to get task resources');
     }
 
     return response.json();

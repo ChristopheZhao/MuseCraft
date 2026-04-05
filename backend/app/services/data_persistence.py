@@ -27,7 +27,7 @@ class DataPersistenceService:
         current_step = payload.get("current_step") or "Persisting data"
 
         try:
-            task = self._persist_task_from_payload(task_id, facts, status, progress, current_step, db)
+            task = self._persist_task_from_payload(task_id, facts, payload, status, progress, current_step, db)
             scene_results = self._persist_scenes_from_payload(task, scenes, db)
             resource_results = self._persist_resources_from_payload(task, resources, scenes, db)
             db.commit()
@@ -53,6 +53,7 @@ class DataPersistenceService:
         self,
         ext_id: str,
         facts: Dict[str, Any],
+        payload: Dict[str, Any],
         status: str,
         progress: Any,
         current_step: str,
@@ -103,12 +104,23 @@ class DataPersistenceService:
 
         # 元数据
         if hasattr(task, "output_metadata"):
-            task.output_metadata = {
-                "concept_plan": concept_plan,
-                "intelligent_style_design": intelligent_style_design,
-                "voice_plan": voice_plan,
-                "content_elements": content_elements,
-            }
+            output_metadata = dict(task.output_metadata or {})
+            output_metadata.update(
+                {
+                    "concept_plan": concept_plan,
+                    "intelligent_style_design": intelligent_style_design,
+                    "voice_plan": voice_plan,
+                    "content_elements": content_elements,
+                }
+            )
+            final_video_url, final_video_path = self._extract_final_video_refs(payload)
+            if final_video_url:
+                output_metadata["final_video_url"] = final_video_url
+            if final_video_path:
+                output_metadata["final_video_path"] = final_video_path
+            if payload.get("quality_score") is not None:
+                output_metadata["quality_score"] = payload.get("quality_score")
+            task.output_metadata = output_metadata
         db.flush()
         return task
 
@@ -172,6 +184,7 @@ class DataPersistenceService:
                     resource_type = ResourceType.VIDEO
             except Exception:
                 resource_type = ResourceType.VIDEO
+            is_final_output = bool(res.get("scope") == "task" and res.get("kind") == "final_video")
             model = Resource(
                 task_id=task.id,
                 scene_id=scene.id if scene else None,
@@ -179,26 +192,33 @@ class DataPersistenceService:
                 file_path=file_path,
                 file_url=file_url,
                 resource_type=resource_type,
+                is_final_output=is_final_output,
+                processing_status="completed",
             )
             db.add(model)
             results.append({"scene_number": scene_number, "resource_id": model.id, "status": "created"})
-
-        # 兼容 task 级 final 视频
-        for res in resources:
-            if not isinstance(res, dict):
-                continue
-            if res.get("scope") == "task" and res.get("kind") == "final_video":
-                model = Resource(
-                    task_id=task.id,
-                    filename=res.get("filename") or f"task_{task.id}_final_video",
-                    file_path=res.get("path") or res.get("file_path") or "",
-                    file_url=res.get("url") or res.get("file_url") or "",
-                    resource_type=ResourceType.VIDEO,
-                )
-                db.add(model)
-                results.append({"task_id": task.id, "resource_id": model.id, "status": "created"})
         db.flush()
         return results
+
+    def _extract_final_video_refs(self, payload: Dict[str, Any]) -> tuple[str, str]:
+        final_video_url = str(payload.get("final_video_url") or "").strip()
+        final_video_path = str(payload.get("final_video_path") or "").strip()
+        if final_video_url or final_video_path:
+            return final_video_url, final_video_path
+
+        resources = payload.get("resources") or []
+        if not isinstance(resources, list):
+            return "", ""
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            if resource.get("kind") != "final_video":
+                continue
+            return (
+                str(resource.get("url") or resource.get("file_url") or "").strip(),
+                str(resource.get("path") or resource.get("file_path") or "").strip(),
+            )
+        return "", ""
 
     def _update_scene_from_payload(self, scene: Scene, payload: Dict[str, Any]) -> None:
         def _s(key: str) -> str:

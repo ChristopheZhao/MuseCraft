@@ -12,7 +12,7 @@ from .base import AgentError
 from ..models import Task, AgentType
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
-from .utils.memory_helpers import write_shared_fact
+from .utils.media_runtime import build_local_public_url
 from ..services.video_composer_execution_contract import (
     get_video_composer_compose_mode,
     get_video_composer_execution_contract,
@@ -182,47 +182,6 @@ class VideoComposerAgent(ReActAgent):
             output_path=stored_path,
             output_url=final_url,
         )
-        if workflow_id:
-            payload = {
-                "path": stored_path,
-                "url": final_url,
-                "storage": {
-                    "provider": "local",
-                    "url": final_url,
-                    "skipped": True,
-                },
-            }
-            try:
-                write_shared_fact(
-                    workflow_id,
-                    "project.final_video",
-                    payload,
-                    service=self.short_term_service,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "MAS write failed: project.final_video agent=%s wf_id=%s err=%s",
-                    self.agent_name,
-                    workflow_id,
-                    exc,
-                    exc_info=True,
-                )
-            if isinstance(mix_receipt, dict) and mix_receipt:
-                try:
-                    write_shared_fact(
-                        workflow_id,
-                        "project.final_video_mix",
-                        dict(mix_receipt),
-                        service=self.short_term_service,
-                    )
-                except Exception as exc:
-                    self.logger.warning(
-                        "MAS write failed: project.final_video_mix agent=%s wf_id=%s err=%s",
-                        self.agent_name,
-                        workflow_id,
-                        exc,
-                        exc_info=True,
-                    )
         return {
             "success": True,
             "action_performed": "video_composition",
@@ -261,22 +220,7 @@ class VideoComposerAgent(ReActAgent):
 
     def _build_local_serving_url(self, local_path: str) -> str:
         """根据本地存储路径生成可通过 FastAPI 静态目录访问的 URL。"""
-
-        if not local_path:
-            return ""
-
-        try:
-            resolved = Path(local_path).resolve()
-            final_root = Path(settings.FINAL_OUTPUT_ROOT).resolve()
-            # 如果资源位于最终输出根目录内，则转换为 /files/outputs 下的相对路径
-            if final_root in resolved.parents or resolved == final_root:
-                relative = resolved.relative_to(final_root)
-                return f"/files/outputs/{relative.as_posix()}"
-        except Exception:
-            # 解析失败直接返回空串，调用方会降级到 file://
-            return ""
-
-        return ""
+        return build_local_public_url(local_path)
 
     def _resolve_local_public_url(self, publication_url: str, local_path: str) -> str:
         """优先使用已有的发布 URL，否则构建本地静态访问路径。"""

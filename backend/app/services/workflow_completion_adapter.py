@@ -30,6 +30,8 @@ class WorkflowCompletionAdapter:
     def build_persistence_payload(self, workflow_id: str) -> Dict[str, Any]:
         scenes: List[Dict[str, Any]] = []
         resources: List[Dict[str, Any]] = []
+        final_video_url = ""
+        final_video_path = ""
 
         wf_id = str(workflow_id or "")
         shared = None
@@ -129,16 +131,16 @@ class WorkflowCompletionAdapter:
 
         final_video = shared.get("project.final_video", {}) if shared is not None else {}
         if isinstance(final_video, dict):
-            final_url = final_video.get("url") or ""
-            final_path = final_video.get("path") or ""
-            if final_url or final_path:
+            final_video_url = str(final_video.get("url") or "").strip()
+            final_video_path = str(final_video.get("path") or "").strip()
+            if final_video_url or final_video_path:
                 resources.append(
                     {
                         "scope": "task",
                         "kind": "final_video",
                         "resource_type": "video",
-                        "url": final_url,
-                        "path": final_path,
+                        "url": final_video_url,
+                        "path": final_video_path,
                         "filename": "final_video.mp4",
                     }
                 )
@@ -159,7 +161,12 @@ class WorkflowCompletionAdapter:
                     }
                 )
 
-        return {"scenes": scenes, "resources": resources}
+        return {
+            "scenes": scenes,
+            "resources": resources,
+            "final_video_url": final_video_url,
+            "final_video_path": final_video_path,
+        }
 
     def resolve_final_video_url(self, workflow_id: str) -> str:
         try:
@@ -176,16 +183,18 @@ class WorkflowCompletionAdapter:
         *,
         task: Task,
         workflow_id: str,
+        persistence_payload: Optional[Dict[str, Any]] = None,
         results: Optional[Dict[str, Any]] = None,
         quality_score: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        persistence_payload = self.build_persistence_payload(workflow_id)
+        persistence_payload = persistence_payload or self.build_persistence_payload(workflow_id)
         try:
             facts_summary = build_mas_state_view(str(workflow_id), service=self._memory_services.short_term)
         except Exception:
             facts_summary = {}
 
-        final_video_url = self.resolve_final_video_url(workflow_id)
+        final_video_url = str(persistence_payload.get("final_video_url") or "").strip()
+        final_video_path = str(persistence_payload.get("final_video_path") or "").strip()
         payload: Dict[str, Any] = {
             "state": "workflow_completed",
             "status": "COMPLETED",
@@ -193,6 +202,7 @@ class WorkflowCompletionAdapter:
             "runtime_authoritative": False,
             "refresh_required": True,
             "final_video_url": final_video_url,
+            "final_video_path": final_video_path,
             "facts_summary": facts_summary,
             "scenes": persistence_payload.get("scenes") or [],
             "resources": persistence_payload.get("resources") or [],
@@ -212,6 +222,7 @@ class WorkflowCompletionAdapter:
         )
         return {
             "final_video_url": final_video_url,
+            "final_video_path": final_video_path,
             "scenes": payload["scenes"],
             "resources": payload["resources"],
         }

@@ -64,6 +64,7 @@ from .utils.memory_helpers import (
     write_shared_fact,
     read_shared_fact,
 )
+from .utils.media_runtime import build_local_public_url
 
 from ..events.execution import execution_context_var
 from .concept_planner import ConceptPlannerAgent
@@ -823,12 +824,14 @@ class OrchestratorAgent(BaseAgent):
                         execution_order=step_index + 1,
                     )
                     
-                    # Store results and prepare input for next agent
-                    workflow_results[agent_type.value] = agent_output
-                    workflow_data.update(agent_output)
-
-                    if agent_type == AgentType.VIDEO_COMPOSER:
-                        self._store_composer_outputs(str(wf_id), agent_output)
+                    # Store results and commit any authoritative shared facts for downstream gates.
+                    self._record_agent_output(
+                        workflow_id=str(wf_id),
+                        agent_type=agent_type,
+                        workflow_results=workflow_results,
+                        workflow_data=workflow_data,
+                        agent_output=agent_output,
+                    )
 
                     if (
                         runtime_session is not None
@@ -1029,8 +1032,13 @@ class OrchestratorAgent(BaseAgent):
                             db=db,
                             execution_order=step_index + 1,
                         )
-                        workflow_results[agent_type.value] = agent_output
-                        workflow_data.update(agent_output)
+                        self._record_agent_output(
+                            workflow_id=str(wf_id),
+                            agent_type=agent_type,
+                            workflow_results=workflow_results,
+                            workflow_data=workflow_data,
+                            agent_output=agent_output,
+                        )
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
                             try:
                                 write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"], service=self.short_term_service)
@@ -1080,17 +1088,14 @@ class OrchestratorAgent(BaseAgent):
             await self._update_progress(90, "Workflow completed, dispatching completion event", db)
             
             # 发布完成事件（监听器异步落库），不再同步持久化
-            shared_final = None
-            try:
-                shared_final = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-            except Exception:
-                shared_final = None
-            fv = shared_final.get("project.final_video", {}) if shared_final is not None else {}
-            final_url = ""
-            if isinstance(fv, dict):
-                final_url = str(fv.get("url") or fv.get("path") or "").strip()
-            if not final_url:
-                final_url = str(workflow_results.get("video_composer", {}).get("final_video_url") or "").strip()
+            persistence_payload = self._workflow_completion_adapter.build_persistence_payload(str(wf_id))
+            final_url = str(persistence_payload.get("final_video_url") or "").strip()
+            final_path = str(persistence_payload.get("final_video_path") or "").strip()
+            if workflow_results.get(AgentType.VIDEO_COMPOSER.value) and not (final_url or final_path):
+                raise AgentError(
+                    "Workflow completed without authoritative project.final_video; "
+                    "runtime summary and persistence projection would diverge"
+                )
 
             task.status = TaskStatus.COMPLETED
             task.update_progress("Completed", 100)
@@ -1098,16 +1103,20 @@ class OrchestratorAgent(BaseAgent):
             completion_payload = await self._workflow_completion_adapter.publish_completed(
                 task=task,
                 workflow_id=wf_id,
+                persistence_payload=persistence_payload,
                 results=workflow_results,
                 quality_score=workflow_results.get("quality_checker", {}).get("quality_score"),
             )
+            final_url = str(completion_payload.get("final_video_url") or "").strip()
+            final_path = str(completion_payload.get("final_video_path") or "").strip()
             if runtime_session is not None:
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
                     runtime_session_id=runtime_session.id,
                     task_db_id=task.id,
                     summary_output={
                         "status": "completed",
-                        "final_video_url": completion_payload.get("final_video_url") or final_url,
+                        "final_video_url": final_url,
+                        "final_video_path": final_path,
                         "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
                     },
                 )
@@ -1118,9 +1127,10 @@ class OrchestratorAgent(BaseAgent):
                 "status": "completed",
                 "total_steps": total_steps,
                 "results": workflow_results,
-                "final_video_url": completion_payload.get("final_video_url") or final_url,
+                "final_video_url": final_url,
+                "final_video_path": final_path,
                 "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
-                "persistence_status": "deferred",
+                "persistence_status": "event_published",
                 "workflow_state_id": wf_id
             }
             
@@ -1335,12 +1345,13 @@ class OrchestratorAgent(BaseAgent):
             return
         try:
             if final_path or final_url:
+                resolved_final_url = final_url or build_local_public_url(final_path)
                 payload = {
                     "path": final_path,
-                    "url": final_url,
+                    "url": resolved_final_url,
                     "storage": {
                         "provider": "local",
-                        "url": final_url,
+                        "url": resolved_final_url,
                         "skipped": True,
                     },
                 }
@@ -1355,6 +1366,21 @@ class OrchestratorAgent(BaseAgent):
         except Exception as exc:
             self.logger.error("❌ Failed to store composer outputs: %s", exc, exc_info=True)
             raise AgentError("Shared WM write failed (final_video)") from exc
+
+    def _record_agent_output(
+        self,
+        *,
+        workflow_id: str,
+        agent_type: AgentType,
+        workflow_results: Dict[str, Any],
+        workflow_data: Dict[str, Any],
+        agent_output: Dict[str, Any],
+    ) -> None:
+        workflow_results[agent_type.value] = agent_output
+        workflow_data.update(agent_output)
+
+        if agent_type == AgentType.VIDEO_COMPOSER:
+            self._store_composer_outputs(workflow_id, agent_output)
 
     def _build_execution_queue(
         self,
