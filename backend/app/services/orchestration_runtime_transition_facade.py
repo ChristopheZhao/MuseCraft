@@ -106,6 +106,23 @@ class OrchestrationRuntimeTransitionFacade:
             ),
         )
 
+    def upsert_runtime_attempt_diagnostic(
+        self,
+        *,
+        runtime_session_id: int,
+        attempt_id: int,
+        diagnostic: Dict[str, Any],
+    ) -> None:
+        self._run_with_fresh_runtime_control_plane_session(
+            runtime_session_id=runtime_session_id,
+            action=lambda runtime_db, fresh_runtime_session, _runtime_task: RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
+                runtime_db,
+                fresh_runtime_session,
+                attempt_id=attempt_id,
+                diagnostic=diagnostic,
+            ),
+        )
+
     def open_script_review_gate(
         self,
         *,

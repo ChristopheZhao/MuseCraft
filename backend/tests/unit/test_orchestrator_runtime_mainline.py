@@ -17,6 +17,7 @@ from app.models import (
     AgentType,
     Task,
     TaskStatus,
+    WorkflowAttemptStatus,
     TaskType,
     WorkflowSessionStatus,
     WorkflowNodeStatus,
@@ -218,6 +219,28 @@ def _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session_id, nod
             "id": fresh_node.id,
             "status": fresh_node.status,
             "diagnostics": list(fresh_node.diagnostics or []),
+        }
+    finally:
+        inspect_db.close()
+
+
+def _load_runtime_attempt_snapshot_from_fresh_session(SessionLocal, session_id, attempt_id):
+    inspect_db = SessionLocal()
+    try:
+        fresh_attempt = RuntimeSessionService.get_attempt_by_id_sync(
+            inspect_db,
+            int(session_id),
+            int(attempt_id),
+        )
+        if fresh_attempt is None:
+            raise AssertionError(
+                f"runtime attempt {attempt_id} missing for session {session_id} in fresh-session inspection"
+            )
+        return {
+            "id": fresh_attempt.id,
+            "status": fresh_attempt.status,
+            "error_message": fresh_attempt.error_message,
+            "lease_token": getattr(fresh_attempt, "lease_token", None),
         }
     finally:
         inspect_db.close()
@@ -821,6 +844,188 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
+
+
+def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failure(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._orchestration_runtime_resume_bootstrap_facade = _build_recording_resume_bootstrap_facade(agent)
+
+        async def _raise_runtime_decision_failure(*args, **kwargs):
+            raise AgentError("Runtime replan missing action")
+
+        agent._evaluate_runtime_boundary_cycle = _raise_runtime_decision_failure
+
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+
+        with pytest.raises(AgentError, match="Runtime replan missing action"):
+            asyncio.run(
+                agent._execute_impl(
+                    task=task,
+                    input_data={"user_prompt": "test prompt"},
+                    db=sync_db,
+                )
+            )
+
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
+        node = _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session.id, "concept")
+        task_snapshot = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
+        attempt_snapshot = _load_runtime_attempt_snapshot_from_fresh_session(
+            SessionLocal,
+            session.id,
+            runtime_view["current_attempt_id"],
+        )
+        stage_diagnostic = next(
+            item
+            for item in (node["diagnostics"] or [])
+            if item.get("code") == "concept_stage_failed"
+        )
+
+        assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
+        assert "Runtime replan missing action" in str(runtime_view["error_message"] or "")
+        assert "active execution lease" not in str(runtime_view["error_message"] or "")
+        assert task_snapshot["status"] == TaskStatus.FAILED.value
+        assert node["status"] == WorkflowNodeStatus.FAILED.value
+        assert stage_diagnostic["message"] == "Runtime replan missing action"
+        assert stage_diagnostic["state"] == "post_completion_failure"
+        assert stage_diagnostic["reason_code"] == "post_completion_control_plane_failure"
+        assert attempt_snapshot["status"] == WorkflowAttemptStatus.SUCCEEDED.value
+        assert attempt_snapshot["lease_token"] in (None, "")
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_runtime_decision_prompt_requires_explicit_continue_action(monkeypatch):
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=object())
+    agent.agent_name = "orchestrator"
+    agent.logger = logging.getLogger("test.orchestrator.runtime_decision.prompt_contract")
+    agent.prompt_manager = get_prompt_manager()
+    agent.get_system_instructions = lambda: {"primary_role": "工作流编排器"}
+    captured = {}
+
+    async def _capture_chat_completion(*, messages, **kwargs):
+        captured["messages"] = list(messages)
+        captured["kwargs"] = dict(kwargs)
+        return {"content": json.dumps({"action": "continue", "reason": "all_have_audio"})}
+
+    agent.get_llm = lambda role: SimpleNamespace(chat_completion=_capture_chat_completion)
+
+    decision = asyncio.run(
+        agent._llm_decide_runtime_decision(
+            workflow_state_id="wf-runtime-contract-1",
+            current_agent=AgentType.VIDEO_GENERATOR,
+            standby_agents=[AgentType.AUDIO_GENERATOR],
+            report={"boundary_event": "scene_video_completed"},
+            gate_events=[
+                {
+                    "gate_name": "workflow_video_audio_delivery",
+                    "result": "pass",
+                    "reason_code": "all_have_audio",
+                    "recommended_action": "continue",
+                    "facts": {"all_have_audio": True},
+                }
+            ],
+            replan_count=0,
+            max_replans=2,
+        )
+    )
+
+    system_content = captured["messages"][0]["content"]
+
+    assert decision["action"] == "continue"
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
+    assert "输出 JSON 对象必须始终包含字符串字段 action 和 reason" in system_content
+    assert "{\"action\":\"continue\",\"reason\":\"...\"}" in system_content
+    assert "不允许只返回 reason、rationale" in system_content
+
+
+def test_candidate_selection_prompt_includes_mainline_and_audio_optionality_priors(monkeypatch):
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=object())
+    agent.agent_name = "orchestrator"
+    agent.logger = logging.getLogger("test.orchestrator.candidate_selection.prompt_contract")
+    agent.prompt_manager = get_prompt_manager()
+    agent.get_system_instructions = lambda: {"primary_role": "工作流编排器"}
+    agent.agents = {
+        AgentType.CONCEPT_PLANNER: object(),
+        AgentType.SCRIPT_WRITER: object(),
+        AgentType.VOICE_SYNTHESIZER: object(),
+        AgentType.IMAGE_GENERATOR: object(),
+        AgentType.VIDEO_GENERATOR: object(),
+        AgentType.AUDIO_GENERATOR: object(),
+        AgentType.VIDEO_COMPOSER: object(),
+        AgentType.QUALITY_CHECKER: object(),
+    }
+    captured = {}
+
+    async def _capture_chat_completion(*, messages, **kwargs):
+        captured["messages"] = list(messages)
+        captured["kwargs"] = dict(kwargs)
+        return {
+            "content": json.dumps(
+                {
+                    "candidate_agents": [
+                        AgentType.CONCEPT_PLANNER.value,
+                        AgentType.SCRIPT_WRITER.value,
+                        AgentType.IMAGE_GENERATOR.value,
+                        AgentType.VIDEO_GENERATOR.value,
+                        AgentType.VIDEO_COMPOSER.value,
+                        AgentType.QUALITY_CHECKER.value,
+                    ],
+                    "selection_rationale": "test",
+                }
+            )
+        }
+
+    agent.get_llm = lambda role: SimpleNamespace(chat_completion=_capture_chat_completion)
+
+    selected, rationale = asyncio.run(
+        agent._llm_select_candidate_agents(
+            workflow_data={
+                "user_prompt": "生成一个5秒的测试短视频，简单蓝色主题即可",
+                "duration": 5,
+                "resolution": "1280x720",
+                "target_resolution": "1280x720",
+                "audio_contract": {
+                    "allow_silence": True,
+                    "need_voiceover": False,
+                    "need_global_bgm": False,
+                },
+                "audio_capability": {
+                    "provider": "doubao",
+                    "supports_native_audio": True,
+                    "native_audio_default_enabled": True,
+                },
+            },
+            workflow_id="wf-candidate-contract-1",
+        )
+    )
+
+    system_content = captured["messages"][0]["content"]
+    user_content = captured["messages"][1]["content"]
+
+    assert [agent_type.value for agent_type in selected] == [
+        AgentType.CONCEPT_PLANNER.value,
+        AgentType.SCRIPT_WRITER.value,
+        AgentType.IMAGE_GENERATOR.value,
+        AgentType.VIDEO_GENERATOR.value,
+        AgentType.VIDEO_COMPOSER.value,
+        AgentType.QUALITY_CHECKER.value,
+    ]
+    assert rationale == "test"
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
+    assert "最小可执行候选集" in system_content
+    assert "当前视频模型是否支持同步生成声音" in system_content
+    assert "不能省略 script_writer" in system_content
+    assert "只影响 voice_synthesizer / audio_generator 是否可省略" in user_content
+    assert "必须同时保留 script_writer" in user_content
 
 
 def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monkeypatch):

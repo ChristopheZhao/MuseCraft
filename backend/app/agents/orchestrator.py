@@ -464,6 +464,15 @@ class OrchestratorAgent(BaseAgent):
             use_cache=True,
             auto_reload=False,
         )
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_INPUT workflow=%s system=%s user=%s",
+                workflow_id,
+                system_text,
+                user_text,
+            )
+        except Exception:
+            pass
         llm = self.get_llm("plan")
         resp = await llm.chat_completion(
             messages=[
@@ -477,6 +486,14 @@ class OrchestratorAgent(BaseAgent):
         content = resp.get("content") if isinstance(resp, dict) else None
         if not content:
             raise AgentError("LLM candidate selection returned empty content")
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_OUTPUT_RAW workflow=%s content=%s",
+                workflow_id,
+                content,
+            )
+        except Exception:
+            pass
 
         try:
             data = json.loads(content)
@@ -509,6 +526,15 @@ class OrchestratorAgent(BaseAgent):
             if isinstance(data, dict)
             else ""
         )
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_OUTPUT_NORMALIZED workflow=%s candidate_agents=%s rationale=%s",
+                workflow_id,
+                json.dumps([agent.value for agent in candidate_agents], ensure_ascii=False),
+                rationale,
+            )
+        except Exception:
+            pass
         return candidate_agents, rationale
 
     async def _execute_impl(
@@ -582,6 +608,11 @@ class OrchestratorAgent(BaseAgent):
 
         workflow_results = {}
         if script_resume_action in {"approve", "revise"}:
+            self.logger.info(
+                "ORCH_PLAN_MODE workflow=%s mode=resume_script action=%s",
+                wf_id,
+                script_resume_action,
+            )
             try:
                 resume_bundle = runtime_resume_bootstrap.load_authoritative_resume_task_specs(
                     db=db,
@@ -605,6 +636,11 @@ class OrchestratorAgent(BaseAgent):
             execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
             standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
         elif runtime_resume_checkpoint is not None:
+            self.logger.info(
+                "ORCH_PLAN_MODE workflow=%s mode=resume_checkpoint anchor=%s",
+                wf_id,
+                resume_anchor_agent.value if isinstance(resume_anchor_agent, AgentType) else "",
+            )
             task_specs, _conditional_task_specs, candidate_agents = self._orchestration_state.checkpoint_to_task_specs(
                 runtime_resume_checkpoint,
                 require_decision_id=False,
@@ -617,6 +653,7 @@ class OrchestratorAgent(BaseAgent):
             execution_queue = execution_queue[execution_queue.index(resume_anchor_agent) :]
             standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
         else:
+            self.logger.info("ORCH_PLAN_MODE workflow=%s mode=fresh", wf_id)
             candidate_agents, _selection_rationale = await self._llm_select_candidate_agents(
                 workflow_data=workflow_data,
                 workflow_id=wf_id,
@@ -631,6 +668,16 @@ class OrchestratorAgent(BaseAgent):
 
             execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
             standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        try:
+            self.logger.info(
+                "ORCH_PLAN_QUEUE workflow=%s candidate_agents=%s execution_queue=%s standby_agents=%s",
+                wf_id,
+                json.dumps([agent.value for agent in candidate_agents], ensure_ascii=False),
+                json.dumps([agent.value for agent in execution_queue], ensure_ascii=False),
+                json.dumps([agent.value for agent in standby_agents], ensure_ascii=False),
+            )
+        except Exception:
+            pass
         replan_count = 0
         max_replans = int(getattr(settings, "ORCHESTRATOR_MAX_REPLAN_ACTIVATIONS", 2))
         total_steps = len(execution_queue)
@@ -702,6 +749,30 @@ class OrchestratorAgent(BaseAgent):
 
             raise AgentError(message)
 
+        def _retire_runtime_attempt_scope(
+            *,
+            reason: str,
+            preserve_completed_attempt: bool = False,
+        ) -> Optional[Dict[str, Any]]:
+            nonlocal current_runtime_node_key, current_attempt_id
+            nonlocal current_attempt_trigger_reason, current_attempt_lease_token
+            nonlocal current_attempt_keepalive_active
+
+            retired_context: Optional[Dict[str, Any]] = None
+            if preserve_completed_attempt and current_runtime_node_key is not None and current_attempt_id is not None:
+                retired_context = {
+                    "node_key": current_runtime_node_key,
+                    "attempt_id": int(current_attempt_id),
+                }
+            if current_attempt_keepalive_active:
+                deactivate_current_attempt_keepalive(reason=reason)
+                current_attempt_keepalive_active = False
+            current_runtime_node_key = None
+            current_attempt_id = None
+            current_attempt_trigger_reason = ""
+            current_attempt_lease_token = None
+            return retired_context
+
         try:
             for step_index, agent_type in enumerate(execution_queue):
                 total_steps = max(len(execution_queue), 1)
@@ -711,6 +782,7 @@ class OrchestratorAgent(BaseAgent):
                 current_attempt_trigger_reason = ""
                 current_attempt_lease_token: Optional[str] = None
                 current_attempt_keepalive_active = False
+                retired_completed_attempt_context: Optional[Dict[str, Any]] = None
                 if agent_type in skip_agents:
                     self.logger.info("⏭️ Skipping %s due to runtime skip_agents", agent.agent_name)
                     continue
@@ -845,6 +917,10 @@ class OrchestratorAgent(BaseAgent):
                             attempt_id=current_attempt_id,
                             lease_token=current_attempt_lease_token,
                             node_status=WorkflowNodeStatus.COMPLETED.value,
+                        )
+                        retired_completed_attempt_context = _retire_runtime_attempt_scope(
+                            reason="attempt_completed",
+                            preserve_completed_attempt=True,
                         )
 
                     if (
@@ -984,7 +1060,33 @@ class OrchestratorAgent(BaseAgent):
                                 }
                             ],
                         )
-                        current_attempt_id = None
+                        _retire_runtime_attempt_scope(reason="attempt_failed")
+                    elif (
+                        runtime_session is not None
+                        and retired_completed_attempt_context is not None
+                    ):
+                        try:
+                            self._get_orchestration_runtime_transition_facade().upsert_runtime_attempt_diagnostic(
+                                runtime_session_id=runtime_session.id,
+                                attempt_id=int(retired_completed_attempt_context["attempt_id"]),
+                                diagnostic={
+                                    "code": f"{retired_completed_attempt_context['node_key']}_stage_failed",
+                                    "attempt_id": int(retired_completed_attempt_context["attempt_id"]),
+                                    "stage": retired_completed_attempt_context["node_key"],
+                                    "state": "post_completion_failure",
+                                    "reason_code": "post_completion_control_plane_failure",
+                                    "message": str(e),
+                                },
+                            )
+                        except Exception as diag_err:
+                            self.logger.warning(
+                                "Failed to persist post-completion runtime diagnostic for session=%s attempt=%s: %s",
+                                runtime_session.id,
+                                retired_completed_attempt_context.get("attempt_id"),
+                                diag_err,
+                            )
+                        finally:
+                            retired_completed_attempt_context = None
                     error_msg = f"Workflow failed at step {step_index + 1} ({agent.agent_name}): {str(e)}"
                     self.logger.error(error_msg)
                     
@@ -1536,33 +1638,47 @@ class OrchestratorAgent(BaseAgent):
             }
 
         llm = self.get_llm("plan")
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是多智能体编排器的运行时调整决策器。"
-                    "必须仅输出 JSON，对当前子智能体回报和节点边界 gate 结果做下一步决策。"
-                    "允许动作只有：continue、activate_from_standby、abort。"
-                    "如果选择 activate_from_standby，target_agent 必须来自 standby_candidates。"
-                    "不要发明新的 agent，也不要输出工具调用。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
+        pm = self.prompt_manager
+        try:
+            agent_sys = self.get_system_instructions() or {}
+            pr = agent_sys.get("primary_role") or "工作流编排器"
+        except Exception:
+            pr = "工作流编排器"
+        system_text = pm.render_template(
+            "agents/orchestrator",
+            "runtime_decision_system",
+            variables={"primary_role": pr},
+            use_cache=True,
+            auto_reload=False,
+        )
+        user_text = pm.render_template(
+            "agents/orchestrator",
+            "runtime_decision_user",
+            variables={
+                "workflow_id": str(workflow_state_id or ""),
+                "current_agent": current_agent.value,
+                "report_json": json.dumps(dict(report or {}), ensure_ascii=False),
+                "standby_candidates_json": json.dumps([agent.value for agent in standby_agents], ensure_ascii=False),
+                "gate_events_json": json.dumps(list(gate_events or []), ensure_ascii=False),
+                "replan_budget_json": json.dumps(
                     {
-                        "workflow_id": str(workflow_state_id or ""),
-                        "current_agent": current_agent.value,
-                        "report": dict(report or {}),
-                        "standby_candidates": [agent.value for agent in standby_agents],
-                        "gate_events": list(gate_events or []),
-                        "replan_budget": {
-                            "used": int(replan_count),
-                            "max": int(max_replans),
-                        },
+                        "used": int(replan_count),
+                        "max": int(max_replans),
                     },
                     ensure_ascii=False,
                 ),
+            },
+            use_cache=True,
+            auto_reload=False,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": system_text,
+            },
+            {
+                "role": "user",
+                "content": user_text,
             },
         ]
         try:
@@ -1843,6 +1959,15 @@ class OrchestratorAgent(BaseAgent):
                 use_cache=True,
                 auto_reload=False,
             )
+            try:
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_INPUT workflow=%s system=%s user=%s",
+                    workflow_id,
+                    system_text,
+                    user_text,
+                )
+            except Exception:
+                pass
             llm = self.get_llm("plan")
             resp = await llm.chat_completion(
                 messages=[
@@ -1856,6 +1981,14 @@ class OrchestratorAgent(BaseAgent):
             content = resp.get("content") if isinstance(resp, dict) else None
             if not content:
                 raise ValueError("LLM decomposition returned empty content")
+            try:
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_OUTPUT_RAW workflow=%s content=%s",
+                    workflow_id,
+                    content,
+                )
+            except Exception:
+                pass
             data = json.loads(content)
             agents = data.get("agents") if isinstance(data, dict) else None
             task_map: Dict[AgentType, Dict[str, Any]] = {}
@@ -1957,6 +2090,19 @@ class OrchestratorAgent(BaseAgent):
                     "fallback_used": False,
                 }
                 conditional_task_specs[task_id] = spec
+            try:
+                normalized_task_map = {
+                    agent_type.value: dict(spec)
+                    for agent_type, spec in task_map.items()
+                }
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_OUTPUT_NORMALIZED workflow=%s task_specs=%s conditional_task_specs=%s",
+                    workflow_id,
+                    json.dumps(normalized_task_map, ensure_ascii=False),
+                    json.dumps(conditional_task_specs, ensure_ascii=False),
+                )
+            except Exception:
+                pass
             return task_map, conditional_task_specs
         except Exception as e:
             try:
