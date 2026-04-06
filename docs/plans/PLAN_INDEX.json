@@ -2630,6 +2630,20 @@
           "text": "User confirmed closeout after fresh live API verification; bounded QC semantic repair is complete and validated."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260406-058",
+      "title": "Quick-mode frontend runtime UX repair and workspace evolution",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260406-058.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-06T08:05:26Z",
+      "updated_at": "2026-04-06T08:05:26Z",
+      "archived_at": null,
+      "notes": []
     }
   ]
 }
