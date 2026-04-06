@@ -7,9 +7,8 @@ from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType, Resource, ResourceType
-from ..services.ai_client import AIClient
-from ..services.file_storage import FileStorageService
+from ..models import Task, AgentType
+from .utils.media_runtime import resolve_local_public_path
 
 
 class QualityCheckerAgent(BaseAgent):
@@ -28,8 +27,6 @@ class QualityCheckerAgent(BaseAgent):
             llms=llms,
             memory_services=memory_services,
         )
-        # 移除直接AI客户端依赖
-        self.file_storage = FileStorageService()
     
     async def _execute_impl(
         self, 
@@ -41,94 +38,30 @@ class QualityCheckerAgent(BaseAgent):
         
         # Validate input
         self._validate_input(input_data, ["workflow_state_id"])
-        
-        workflow_state_id = input_data["workflow_state_id"]
-        
-        # 🧠 Phase 1.2 - 实现MAS记忆共享：QualityChecker检索创意指导和质量标准
-        original_concept_plan = {}
-        try:
-            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
-            if retrieved_guidance:
-                original_concept_plan = retrieved_guidance
-                self.logger.info(f"🧠 QualityChecker: 成功检索到原始创意指导，用于质量对比验证")
-            else:
-                self.logger.warning(f"⚠️ QualityChecker: 未找到创意指导记忆，无法进行原始需求对比")
-        except Exception as e:
-            self.logger.warning(f"⚠️ QualityChecker: 记忆检索失败 - {e}")
-        
-        # 从 Shared Working Memory 读取事实视图
-        from .utils.memory_helpers import get_mas_working_memory, read_shared_fact
-        wm = None
-        try:
-            wm = get_mas_working_memory(str(workflow_state_id), service=self.short_term_service)
-        except Exception as _wm_err:
-            self.logger.warning(f"MAS WM unavailable, degrading: {str(_wm_err)}")
-        view = wm.get("scene_overview", {}) if wm else {"scenes": []}
-        
+
+        quality_inputs = self._require_quality_inputs(input_data)
+        view = quality_inputs["scene_overview"]
+        concept_plan = quality_inputs["concept_plan"]
+        original_requirements = quality_inputs["original_requirements"]
+        final_video_url = quality_inputs["final_video_url"]
+        final_video_path = quality_inputs["final_video_path"]
+        composition_timeline = quality_inputs["composition_timeline"]
+        video_metadata = quality_inputs["video_metadata"]
+        context_diagnostics = quality_inputs["context_diagnostics"]
+
         await self._update_progress(10, "Loading final video from workflow", db)
-        
-        # Get final video facts from MAS WM
-        fv = wm.get("project.final_video", {}) if wm else {}
-        final_video_url = fv.get("url") or fv.get("path") or ""
-        concept_plan = wm.get("project.concept_plan", {}) if wm else {}
-        
-        # 组合时间线：从场景概览推导（start/end/duration）
-        composition_timeline = []
-        try:
-            scenes = view.get("scenes") if isinstance(view, dict) else []
-            cursor = 0.0
-            for scene in scenes or []:
-                if not isinstance(scene, dict):
-                    continue
-                try:
-                    sn = int(scene.get("scene_number"))
-                except Exception:
-                    continue
-                try:
-                    dur = float(scene.get("duration") or 0.0)
-                except Exception:
-                    dur = 0.0
-                start = cursor
-                end = start + dur
-                composition_timeline.append({
-                    "scene_number": sn,
-                    "start": start,
-                    "end": end,
-                    "duration": dur,
-                })
-                cursor = end
-        except Exception:
-            composition_timeline = []
-        # 视频元数据：优先 facts.final_video.metadata，其次基于时间线估算总时长
-        video_metadata = fv.get("metadata", {}) if isinstance(fv, dict) else {}
-        if not video_metadata:
-            try:
-                total = sum(float(x.get("duration") or 0.0) for x in composition_timeline)
-                video_metadata = {"duration": total}
-            except Exception:
-                video_metadata = {}
-        
-        if not final_video_url:
-            # 质量检查强依赖“成片”：缺失应直接报错并给出诊断信息，避免掩盖上游 composer 问题。
-            try:
-                outputs = wm.get("scene_outputs.video", {}) if wm else {}
-                outputs_cnt = len(outputs) if isinstance(outputs, dict) else 0
-            except Exception:
-                outputs_cnt = 0
-            try:
-                scenes_cnt = len(view.get("scenes") or []) if isinstance(view, dict) else 0
-            except Exception:
-                scenes_cnt = 0
+
+        if not (final_video_path or final_video_url):
             raise AgentError(
                 f"No final video content available for quality check "
-                f"(project.final_video missing; scene_outputs.video={outputs_cnt}; scenes={scenes_cnt})"
+                f"(diagnostics={context_diagnostics})"
             )
         
         await self._update_progress(20, "Performing technical analysis", db)
         
         # Perform technical quality checks
         technical_quality = await self._analyze_technical_quality(
-            final_video_url, video_metadata
+            final_video_path or final_video_url, video_metadata
         )
         
         await self._update_progress(40, "Analyzing content quality", db)
@@ -137,8 +70,8 @@ class QualityCheckerAgent(BaseAgent):
         content_quality = await self._analyze_content_quality(
             concept_plan,
             composition_timeline,
-            final_video_url,
-            original_concept_plan,
+            final_video_url or final_video_path,
+            original_requirements,
             video_metadata
         )
         
@@ -173,12 +106,59 @@ class QualityCheckerAgent(BaseAgent):
             "compliance_check": compliance_check,
             "quality_assessment": quality_assessment,
             "recommendations": quality_assessment["recommendations"],
-            "approval_status": quality_assessment["approval_status"]
+            "approval_status": quality_assessment["approval_status"],
+            "input_diagnostics": context_diagnostics,
         }
         
         await self._update_progress(100, "Quality check completed", db)
         
         return output_data
+
+    def _require_quality_inputs(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        static_context = input_data.get("static_context") if isinstance(input_data, dict) else {}
+        if not isinstance(static_context, dict) or not static_context:
+            raise AgentError(
+                "quality_checker static_context missing; orchestrator/context assembler boundary is required"
+            )
+
+        final_video = static_context.get("final_video")
+        final_video = dict(final_video) if isinstance(final_video, dict) else {}
+        final_video_path = str(final_video.get("path") or "").strip()
+        final_video_url = str(final_video.get("url") or "").strip()
+        if not final_video_path and final_video_url:
+            final_video_path = resolve_local_public_path(final_video_url)
+
+        diagnostics = static_context.get("context_diagnostics")
+        diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+        if diagnostics:
+            status = str(diagnostics.get("status") or "").strip().lower()
+            if status and status != "resolved":
+                self.logger.warning("quality_checker boundary diagnostics: %s", diagnostics)
+
+        scene_overview = static_context.get("scene_overview")
+        concept_plan = static_context.get("concept_plan")
+        original_requirements = static_context.get("original_requirements")
+        composition_timeline = static_context.get("composition_timeline")
+        video_metadata = static_context.get("video_metadata")
+
+        return {
+            "scene_overview": dict(scene_overview) if isinstance(scene_overview, dict) else {"scenes": []},
+            "concept_plan": dict(concept_plan) if isinstance(concept_plan, dict) else {},
+            "original_requirements": (
+                dict(original_requirements)
+                if isinstance(original_requirements, dict)
+                else {}
+            ),
+            "final_video_path": final_video_path,
+            "final_video_url": final_video_url,
+            "composition_timeline": (
+                list(composition_timeline)
+                if isinstance(composition_timeline, list)
+                else []
+            ),
+            "video_metadata": dict(video_metadata) if isinstance(video_metadata, dict) else {},
+            "context_diagnostics": diagnostics,
+        }
     
     async def _perform_image_based_quality_check(
         self, 
@@ -294,6 +274,8 @@ class QualityCheckerAgent(BaseAgent):
         # Check file exists and is accessible
         # Convert URL to local path if needed
         video_path = video_url.replace("file://", "") if video_url.startswith("file://") else video_url
+        if video_path.startswith("/files/"):
+            video_path = resolve_local_public_path(video_path) or video_path
         if not os.path.exists(video_path):
             technical_checks["file_integrity"] = False
             issues.append("Video file not found or inaccessible")
@@ -411,7 +393,9 @@ class QualityCheckerAgent(BaseAgent):
             analysis_prompt = self.render_prompt(
                 "video_quality_analysis",
                 concept_plan=json.dumps(concept_plan, indent=2),
-                composition_timeline=json.dumps(composition_timeline, indent=2)
+                composition_timeline=json.dumps(composition_timeline, indent=2),
+                original_requirements=json.dumps(original_requirements, indent=2),
+                video_metadata=json.dumps(video_metadata, indent=2),
             )
             
             # 使用AI配置管理器获取适合的模型

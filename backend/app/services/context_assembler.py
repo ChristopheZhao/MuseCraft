@@ -11,6 +11,7 @@ from ..agents.adapters.memory_views import (
     build_script_stage_views,
     build_image_generation_context,
     build_media_agent_context,
+    build_quality_checker_context,
     build_video_composer_context,
     build_video_generation_context,
     build_voice_synthesis_context,
@@ -298,6 +299,18 @@ class ContextContractAssembler:
                 raise AgentError(f"Invalid video_composer static context boundary: {exc}") from exc
             if composer_ctx:
                 static_context.update(composer_ctx)
+
+        elif agent_type == AgentType.QUALITY_CHECKER:
+            quality_ctx = build_quality_checker_context(
+                workflow_state_id,
+                service=self._memory_services.short_term,
+            )
+            context_payload = quality_ctx.get("context") if isinstance(quality_ctx, dict) else {}
+            diagnostics = quality_ctx.get("diagnostics") if isinstance(quality_ctx, dict) else {}
+            if isinstance(context_payload, dict) and context_payload:
+                static_context.update(context_payload)
+            if isinstance(diagnostics, dict) and diagnostics:
+                assembler_diagnostics["quality_checker_context"] = diagnostics
 
         elif agent_type == AgentType.IMAGE_GENERATOR:
             image_ctx = build_image_generation_context(

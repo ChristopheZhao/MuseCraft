@@ -50,6 +50,11 @@ from ..services.published_deliverable_service import get_published_deliverable_r
 from ..services.script_review_contract import (
     get_script_review_contract,
 )
+from ..services.video_metadata_service import (
+    merge_video_metadata,
+    normalize_video_metadata,
+    probe_local_video_metadata_sync,
+)
 from ..services.video_composer_execution_contract import (
     build_video_composer_execution_contract,
 )
@@ -1448,6 +1453,13 @@ class OrchestratorAgent(BaseAgent):
         try:
             if final_path or final_url:
                 resolved_final_url = final_url or build_local_public_url(final_path)
+                seed_metadata = normalize_video_metadata(agent_output.get("metadata", {}))
+                probed_metadata = probe_local_video_metadata_sync(final_path) if final_path else {}
+                final_video_metadata = merge_video_metadata(
+                    seed_metadata,
+                    probed_metadata,
+                    overwrite_non_empty=True,
+                )
                 payload = {
                     "path": final_path,
                     "url": resolved_final_url,
@@ -1457,6 +1469,8 @@ class OrchestratorAgent(BaseAgent):
                         "skipped": True,
                     },
                 }
+                if isinstance(final_video_metadata, dict) and final_video_metadata:
+                    payload["metadata"] = dict(final_video_metadata)
                 write_shared_fact(wf_id, "project.final_video", payload, service=self.short_term_service)
             if isinstance(mix_receipt, dict) and mix_receipt:
                 write_shared_fact(

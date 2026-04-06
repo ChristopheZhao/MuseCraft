@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
 from ...services.scene_contract import annotate_scene_info_payload
+from ...services.video_metadata_service import (
+    merge_video_metadata,
+    normalize_video_metadata,
+    probe_local_video_metadata_sync,
+)
 from ...services.video_composer_execution_contract import get_video_composer_compose_mode
+from ..utils.media_runtime import build_local_public_url, resolve_local_public_path
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
 
@@ -397,6 +403,105 @@ def _has_video_artifact(payload: Dict[str, Any]) -> bool:
     return bool(str(payload.get("path") or "").strip() or str(payload.get("url") or "").strip())
 
 
+def build_quality_checker_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    try:
+        wm = _get_mas_working_memory(str(workflow_id), service=service)
+    except Exception:
+        wm = None
+
+    scene_overview = wm.get("scene_overview", {}) if wm else {}
+    video_outputs = wm.get("scene_outputs.video", {}) if wm else {}
+    final_video = wm.get("project.final_video", {}) if wm else {}
+    concept_plan = wm.get("project.concept_plan", {}) if wm else {}
+
+    if not isinstance(scene_overview, dict):
+        scene_overview = {"scenes": []}
+    if not isinstance(video_outputs, dict):
+        video_outputs = {}
+    if not isinstance(final_video, dict):
+        final_video = {}
+    if not isinstance(concept_plan, dict):
+        concept_plan = {}
+
+    final_video_path, final_video_url, final_video_source = _normalize_quality_checker_final_video_refs(
+        final_video
+    )
+    composition_timeline, timeline_source = _build_quality_checker_composition_timeline(
+        scene_overview=scene_overview,
+        video_outputs=video_outputs,
+    )
+
+    stored_metadata = normalize_video_metadata(final_video.get("metadata", {}))
+    probed_metadata = probe_local_video_metadata_sync(final_video_path) if final_video_path else {}
+    video_metadata = merge_video_metadata(
+        stored_metadata,
+        probed_metadata,
+        overwrite_non_empty=False,
+    )
+
+    metadata_sources: List[str] = []
+    if stored_metadata:
+        metadata_sources.append("project.final_video.metadata")
+    if probed_metadata:
+        metadata_sources.append("local_probe")
+    if not video_metadata.get("duration") and composition_timeline:
+        total_duration = sum(float(entry.get("duration") or 0.0) for entry in composition_timeline)
+        video_metadata["duration"] = total_duration
+        metadata_sources.append("composition_timeline")
+    metadata_source = "+".join(metadata_sources) if metadata_sources else "missing"
+
+    concept_source = "project.concept_plan" if concept_plan else "missing"
+    fallback_reasons: List[str] = []
+    if final_video_source == "missing":
+        fallback_reasons.append("final_video_missing")
+    if concept_source == "missing":
+        fallback_reasons.append("concept_plan_missing")
+    if timeline_source != "scene_overview":
+        fallback_reasons.append(f"timeline_source={timeline_source}")
+    if metadata_source not in {"project.final_video.metadata", "missing"}:
+        fallback_reasons.append(f"video_metadata_source={metadata_source}")
+    if metadata_source == "missing":
+        fallback_reasons.append("video_metadata_missing")
+
+    if final_video_source == "missing":
+        status = "missing_final_video"
+    elif fallback_reasons:
+        status = "resolved_with_fallbacks"
+    else:
+        status = "resolved"
+
+    diagnostics: Dict[str, Any] = {
+        "workflow_state_id": str(workflow_id or ""),
+        "status": status,
+        "final_video_source": final_video_source,
+        "concept_plan_source": concept_source,
+        "timeline_source": timeline_source,
+        "video_metadata_source": metadata_source,
+    }
+    if fallback_reasons:
+        diagnostics["fallback_reason"] = ", ".join(fallback_reasons)
+
+    return {
+        "context": {
+            "scene_overview": scene_overview,
+            "concept_plan": concept_plan,
+            "original_requirements": concept_plan,
+            "final_video": {
+                "path": final_video_path,
+                "url": final_video_url,
+            },
+            "composition_timeline": composition_timeline,
+            "video_metadata": video_metadata,
+            "context_diagnostics": diagnostics,
+        },
+        "diagnostics": diagnostics,
+    }
+
+
 def _has_audio_artifact(payload: Dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -457,6 +562,104 @@ def _build_video_composer_scene_media_ref(
         return scene_media_ref, include_audio
     except Exception:
         return None, include_audio
+
+
+def _normalize_quality_checker_final_video_refs(final_video: Dict[str, Any]) -> tuple[str, str, str]:
+    video_path = str(final_video.get("path") or "").strip() if isinstance(final_video, dict) else ""
+    video_url = str(final_video.get("url") or "").strip() if isinstance(final_video, dict) else ""
+    source_parts: List[str] = []
+
+    if video_path:
+        source_parts.append("project.final_video.path")
+    if video_url:
+        source_parts.append("project.final_video.url")
+
+    if not video_path and video_url:
+        video_path = resolve_local_public_path(video_url)
+    if not video_url and video_path:
+        video_url = build_local_public_url(video_path) or f"file://{video_path}"
+
+    source = "+".join(source_parts) if source_parts else "missing"
+    return video_path, video_url, source
+
+
+def _build_quality_checker_composition_timeline(
+    *,
+    scene_overview: Dict[str, Any],
+    video_outputs: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], str]:
+    timeline = _build_quality_checker_timeline_from_records(
+        (scene_overview.get("scenes") if isinstance(scene_overview, dict) else []) or [],
+        duration_keys=("duration",),
+    )
+    if timeline:
+        return timeline, "scene_overview"
+
+    records: List[Dict[str, Any]] = []
+    if isinstance(video_outputs, dict):
+        for bucket_key, payload in video_outputs.items():
+            if not isinstance(payload, dict):
+                continue
+            record = dict(payload)
+            if record.get("scene_number") is None:
+                record["scene_number"] = bucket_key
+            records.append(record)
+
+    timeline = _build_quality_checker_timeline_from_records(
+        records,
+        duration_keys=("duration_sec", "duration"),
+    )
+    if timeline:
+        return timeline, "scene_outputs.video"
+    return [], "missing"
+
+
+def _build_quality_checker_timeline_from_records(
+    records: List[Dict[str, Any]],
+    *,
+    duration_keys: tuple[str, ...],
+) -> List[Dict[str, Any]]:
+    normalized_records: List[Dict[str, Any]] = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        scene_number = _coerce_int(record.get("scene_number"))
+        if scene_number is None:
+            continue
+        duration = 0.0
+        for key in duration_keys:
+            try:
+                duration = float(record.get(key) or 0.0)
+            except Exception:
+                duration = 0.0
+            if duration > 0:
+                break
+        normalized = {
+            "scene_number": scene_number,
+            "duration": duration,
+        }
+        scene_type = str(record.get("scene_type") or "").strip()
+        if scene_type:
+            normalized["scene_type"] = scene_type
+        normalized_records.append(normalized)
+
+    normalized_records.sort(key=lambda entry: int(entry["scene_number"]))
+
+    timeline: List[Dict[str, Any]] = []
+    cursor = 0.0
+    for record in normalized_records:
+        duration = float(record.get("duration") or 0.0)
+        entry = {
+            "scene_number": int(record["scene_number"]),
+            "start": cursor,
+            "end": cursor + duration,
+            "duration": duration,
+        }
+        if record.get("scene_type"):
+            entry["scene_type"] = record["scene_type"]
+        timeline.append(entry)
+        cursor += duration
+    return timeline
 
 
 def build_image_generation_context(
@@ -1050,6 +1253,7 @@ __all__ = [
     "load_roles_context",
     "load_concept_plan",
     "build_media_agent_context",
+    "build_quality_checker_context",
     "build_image_generation_context",
     "build_video_generation_context",
     "build_voice_synthesis_context",

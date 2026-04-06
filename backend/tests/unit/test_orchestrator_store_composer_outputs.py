@@ -21,6 +21,10 @@ def test_store_composer_outputs_derives_public_final_video_url(monkeypatch):
 
     monkeypatch.setattr("app.agents.orchestrator.write_shared_fact", _capture_write)
     monkeypatch.setattr("app.agents.orchestrator.build_local_public_url", lambda path: "/files/outputs/videos/final.mp4")
+    monkeypatch.setattr(
+        "app.agents.orchestrator.probe_local_video_metadata_sync",
+        lambda path: {"duration": 45.2, "format": "mp4"} if path == "/tmp/final.mp4" else {},
+    )
 
     agent._store_composer_outputs(
         "wf-123",
@@ -32,6 +36,7 @@ def test_store_composer_outputs_derives_public_final_video_url(monkeypatch):
 
     assert captured["project.final_video"]["url"] == "/files/outputs/videos/final.mp4"
     assert captured["project.final_video"]["path"] == "/tmp/final.mp4"
+    assert captured["project.final_video"]["metadata"]["duration"] == 45.2
 
 
 def test_record_agent_output_routes_video_composer_through_shared_handoff(monkeypatch):

@@ -34,3 +34,23 @@ def build_local_public_url(local_path: str) -> str:
             continue
 
     return ""
+
+
+def resolve_local_public_path(public_url: str) -> str:
+    if not public_url:
+        return ""
+
+    candidate = str(public_url).strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("file://"):
+        return candidate.replace("file://", "", 1)
+
+    for public_prefix, root in _static_roots():
+        if not candidate.startswith(public_prefix):
+            continue
+        relative = candidate[len(public_prefix) :].lstrip("/")
+        resolved = (Path(root) / relative).resolve()
+        return str(resolved)
+
+    return ""

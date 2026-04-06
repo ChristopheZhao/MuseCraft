@@ -2572,6 +2572,37 @@
           "text": "User confirmed 055 closure after fresh live reruns and 2026-04-05 frontend integration evidence."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260405-056",
+      "title": "quality_checker diagnostic distortion boundary freeze and owner-correct repair",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260405-056.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-05T15:10:32Z",
+      "updated_at": "2026-04-06T03:16:03Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-05T15:12:56Z",
+          "text": "Stage A evidence freeze completed: QC boundary is the primary owner; Stage B authorized but not yet started."
+        },
+        {
+          "at": "2026-04-06T02:53:00Z",
+          "text": "Completed Stage B.5 architecture cleanup: QC now consumes MAS WM context through adapter/context-assembler, sub-agent metadata probes removed, and owner-chain metadata projection verified by targeted tests (8 passed)."
+        },
+        {
+          "at": "2026-04-06T03:02:00Z",
+          "text": "Stage C equivalent live verification passed on real workflow 9587c5b5-216c-4bf4-8a37-4c9078b4e900: backend served the final MP4 with HTTP 200, and current assembler/QC over isolated MAS WM facts no longer reproduced duration=0, file-not-found, or not-mp4 diagnostics."
+        },
+        {
+          "at": "2026-04-06T03:16:03Z",
+          "text": "Plan closure confirmed after architecture/boundary review and focused regression rerun (7 passed). Residual intro/outro warnings were split out as a separate semantic-contract follow-up instead of widening 056."
+        }
+      ]
     }
   ]
 }
