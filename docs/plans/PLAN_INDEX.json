@@ -2635,15 +2635,20 @@
       "id": "PLAN-20260406-058",
       "title": "Quick-mode frontend runtime UX repair and workspace evolution",
       "kind": "fix",
-      "status": "draft",
+      "status": "in_progress",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260406-058.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-06T08:05:26Z",
-      "updated_at": "2026-04-06T08:05:26Z",
+      "updated_at": "2026-04-06T09:00:11Z",
       "archived_at": null,
-      "notes": []
+      "notes": [
+        {
+          "at": "2026-04-06T09:00:11Z",
+          "text": "Sprint 1 execution started with Playwright Firefox reproduction as first gate"
+        }
+      ]
     }
   ]
 }
