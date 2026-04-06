@@ -350,13 +350,16 @@ class QualityCheckerAgent(BaseAgent):
             issues.append(f"Missing scenes: expected {expected_scenes}, got {actual_scenes}")
         
         # Analyze scene types distribution
-        scene_types = [entry.get("scene_type", "main_content") for entry in composition_timeline]
-        
-        if "intro" not in scene_types:
-            issues.append("Missing introduction scene")
-        
-        if "outro" not in scene_types and len(composition_timeline) > 2:
-            issues.append("Missing conclusion scene")
+        scene_type_evidence = self._analyze_scene_type_evidence(composition_timeline)
+        explicit_scene_types = scene_type_evidence["explicit_scene_types"]
+        intro_outro_check_applied = scene_type_evidence["label_status"] == "complete"
+
+        if intro_outro_check_applied:
+            if "intro" not in explicit_scene_types:
+                issues.append("Missing introduction scene")
+            
+            if "outro" not in explicit_scene_types and len(composition_timeline) > 2:
+                issues.append("Missing conclusion scene")
         
         # Calculate content score
         passed_checks = sum(1 for check in content_analysis.values() if check)
@@ -375,8 +378,12 @@ class QualityCheckerAgent(BaseAgent):
             "analysis": content_analysis,
             "issues": issues,
             "scene_breakdown": self._analyze_scene_breakdown(composition_timeline),
+            "scene_type_diagnostics": {
+                **scene_type_evidence,
+                "intro_outro_check_applied": intro_outro_check_applied,
+            },
             "ai_analysis": ai_content_analysis,
-            "recommendations": self._get_content_recommendations(issues, scene_types)
+            "recommendations": self._get_content_recommendations(issues, scene_type_evidence)
         }
     
     async def _ai_content_analysis(
@@ -591,19 +598,56 @@ class QualityCheckerAgent(BaseAgent):
         
         total_scenes = len(composition_timeline)
         total_duration = sum(entry["duration"] for entry in composition_timeline)
-        
-        scene_types = {}
-        for entry in composition_timeline:
-            scene_type = entry.get("scene_type", "main_content")
-            scene_types[scene_type] = scene_types.get(scene_type, 0) + 1
+        scene_type_evidence = self._analyze_scene_type_evidence(composition_timeline)
         
         return {
             "total_scenes": total_scenes,
             "total_duration": total_duration,
             "average_scene_duration": total_duration / total_scenes if total_scenes > 0 else 0,
-            "scene_type_distribution": scene_types,
+            "scene_type_distribution": scene_type_evidence["scene_type_distribution"],
+            "scene_type_label_status": scene_type_evidence["label_status"],
+            "labeled_scene_count": scene_type_evidence["labeled_scene_count"],
+            "unlabeled_scene_count": scene_type_evidence["unlabeled_scene_count"],
             "shortest_scene": min((entry["duration"] for entry in composition_timeline), default=0),
             "longest_scene": max((entry["duration"] for entry in composition_timeline), default=0)
+        }
+
+    def _analyze_scene_type_evidence(self, composition_timeline: List[Dict]) -> Dict[str, Any]:
+        """Classify how much explicit scene-type evidence is available."""
+
+        explicit_scene_types: List[str] = []
+        scene_type_distribution: Dict[str, int] = {}
+        unlabeled_scene_numbers: List[int] = []
+
+        for entry in composition_timeline:
+            scene_type = str(entry.get("scene_type") or "").strip()
+            if scene_type:
+                explicit_scene_types.append(scene_type)
+                scene_type_distribution[scene_type] = scene_type_distribution.get(scene_type, 0) + 1
+                continue
+            try:
+                unlabeled_scene_numbers.append(int(entry.get("scene_number")))
+            except Exception:
+                continue
+
+        total_scenes = len(composition_timeline)
+        labeled_scene_count = len(explicit_scene_types)
+        unlabeled_scene_count = max(0, total_scenes - labeled_scene_count)
+
+        if total_scenes <= 0 or labeled_scene_count <= 0:
+            label_status = "missing"
+        elif unlabeled_scene_count > 0:
+            label_status = "partial"
+        else:
+            label_status = "complete"
+
+        return {
+            "label_status": label_status,
+            "explicit_scene_types": explicit_scene_types,
+            "scene_type_distribution": scene_type_distribution,
+            "labeled_scene_count": labeled_scene_count,
+            "unlabeled_scene_count": unlabeled_scene_count,
+            "unlabeled_scene_numbers": unlabeled_scene_numbers,
         }
     
     def _get_technical_recommendations(self, issues: List[str]) -> List[str]:
@@ -625,10 +669,16 @@ class QualityCheckerAgent(BaseAgent):
         
         return recommendations
     
-    def _get_content_recommendations(self, issues: List[str], scene_types: List[str]) -> List[str]:
+    def _get_content_recommendations(
+        self,
+        issues: List[str],
+        scene_type_evidence: Dict[str, Any],
+    ) -> List[str]:
         """Generate content recommendations based on issues"""
         
         recommendations = []
+        label_status = str(scene_type_evidence.get("label_status") or "").strip().lower()
+        explicit_scene_types = list(scene_type_evidence.get("explicit_scene_types") or [])
         
         if "Missing introduction scene" in issues:
             recommendations.append("Add an engaging introduction scene")
@@ -639,7 +689,12 @@ class QualityCheckerAgent(BaseAgent):
         if any("Missing scenes" in issue for issue in issues):
             recommendations.append("Regenerate missing scenes to complete the narrative")
         
-        if len(set(scene_types)) < 2:
+        if label_status != "complete":
+            recommendations.append(
+                "Provide explicit scene_type labels if intro/outro structure needs automated verification"
+            )
+        
+        if label_status == "complete" and len(set(explicit_scene_types)) < 2:
             recommendations.append("Add variety in scene types for better engagement")
         
         return recommendations
