@@ -1,28 +1,54 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, MessageSquareText, RefreshCcw, RotateCcw } from 'lucide-react';
+import {
+  Activity,
+  AlertCircle,
+  ArrowRight,
+  Brain,
+  CheckCircle2,
+  Clock3,
+  FileText,
+  Film,
+  Loader2,
+  MessageSquareText,
+  Mic,
+  Music4,
+  PauseCircle,
+  PlayCircle,
+  RefreshCcw,
+  RotateCcw,
+  ShieldCheck,
+  Sparkles,
+  Video,
+} from 'lucide-react';
 
-import AgentOrchestrator from '@/components/agents/AgentOrchestrator';
-import RealTimeProgress from '@/components/progress/RealTimeProgress';
 import { ApiClient } from '@/lib/api';
 import {
-  getRuntimeDisplayNodes,
   getRuntimeFailureMessage,
+  getRuntimeWorkspaceProjection,
+  isBootstrapRuntimePlaceholder,
   isPreNodeFailure,
 } from '@/lib/runtimeReadModel';
+import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
+import type { RuntimeDisplayNode } from '@/lib/runtimeReadModel';
 
-const statusClassMap: Record<string, string> = {
-  queued: 'bg-gray-100 text-gray-700',
-  running: 'bg-blue-100 text-blue-700',
-  pending_gate: 'bg-amber-100 text-amber-700',
-  approved: 'bg-emerald-100 text-emerald-700',
-  needs_revision: 'bg-orange-100 text-orange-700',
-  completed: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
-  skipped: 'bg-gray-100 text-gray-500',
-  stale: 'bg-zinc-100 text-zinc-600',
+type FocusMode =
+  | 'running'
+  | 'hitl'
+  | 'resume_available'
+  | 'resume_blocked'
+  | 'failed'
+  | 'completed'
+  | 'detached';
+
+type NodeMeta = {
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ className?: string }>;
+  accentClass: string;
+  iconClass: string;
 };
 
 const actionLabelMap: Record<string, string> = {
@@ -31,19 +57,253 @@ const actionLabelMap: Record<string, string> = {
   replan: '要求重规划',
 };
 
-const nodeLabelMap: Record<string, string> = {
-  concept: '概念规划',
-  script: '脚本创作',
-  image: '图像生成',
-  video: '视频生成',
-  voice: '语音合成',
-  compose: '视频合成',
-  audio: '音频处理',
-  quality: '质量检查',
+const nodeMetaMap: Record<string, NodeMeta> = {
+  concept: {
+    label: '概念规划',
+    description: '整理创意方向、角色关系与场景目标。',
+    icon: Brain,
+    accentClass: 'from-emerald-500/18 via-emerald-400/10 to-transparent',
+    iconClass: 'bg-emerald-100 text-emerald-700',
+  },
+  script: {
+    label: '脚本创作',
+    description: '产出可执行脚本，并在 gate 时进入人工确认。',
+    icon: FileText,
+    accentClass: 'from-amber-500/18 via-amber-400/10 to-transparent',
+    iconClass: 'bg-amber-100 text-amber-700',
+  },
+  image: {
+    label: '图像生成',
+    description: '生成镜头所需的关键视觉资产。',
+    icon: Sparkles,
+    accentClass: 'from-fuchsia-500/18 via-fuchsia-400/10 to-transparent',
+    iconClass: 'bg-fuchsia-100 text-fuchsia-700',
+  },
+  video: {
+    label: '视频生成',
+    description: '将镜头与动作描述推进为动态片段。',
+    icon: Film,
+    accentClass: 'from-sky-500/18 via-sky-400/10 to-transparent',
+    iconClass: 'bg-sky-100 text-sky-700',
+  },
+  voice: {
+    label: '语音合成',
+    description: '生成旁白或对白所需的语音轨道。',
+    icon: Mic,
+    accentClass: 'from-violet-500/18 via-violet-400/10 to-transparent',
+    iconClass: 'bg-violet-100 text-violet-700',
+  },
+  compose: {
+    label: '视频合成',
+    description: '把镜头、音频与资产组装成可交付成片。',
+    icon: Video,
+    accentClass: 'from-indigo-500/18 via-indigo-400/10 to-transparent',
+    iconClass: 'bg-indigo-100 text-indigo-700',
+  },
+  audio: {
+    label: '音频处理',
+    description: '补充或混合背景音乐与音效层。',
+    icon: Music4,
+    accentClass: 'from-rose-500/18 via-rose-400/10 to-transparent',
+    iconClass: 'bg-rose-100 text-rose-700',
+  },
+  quality: {
+    label: '质量检查',
+    description: '检查交付结果与最终运行质量。',
+    icon: ShieldCheck,
+    accentClass: 'from-teal-500/18 via-teal-400/10 to-transparent',
+    iconClass: 'bg-teal-100 text-teal-700',
+  },
 };
 
+const fallbackNodeMeta: NodeMeta = {
+  label: '运行节点',
+  description: '当前 runtime 节点未提供专门的视觉元数据。',
+  icon: Activity,
+  accentClass: 'from-slate-500/18 via-slate-400/10 to-transparent',
+  iconClass: 'bg-slate-100 text-slate-700',
+};
+
+const statusMetaMap: Record<
+  string,
+  { label: string; badgeClass: string; railDotClass: string }
+> = {
+  queued: {
+    label: '等待启动',
+    badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
+    railDotClass: 'bg-slate-300',
+  },
+  running: {
+    label: '正在执行',
+    badgeClass: 'bg-sky-100 text-sky-700 border-sky-200',
+    railDotClass: 'bg-sky-500',
+  },
+  pending_gate: {
+    label: '等待确认',
+    badgeClass: 'bg-amber-100 text-amber-800 border-amber-200',
+    railDotClass: 'bg-amber-500',
+  },
+  approved: {
+    label: '审核通过',
+    badgeClass: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    railDotClass: 'bg-emerald-500',
+  },
+  needs_revision: {
+    label: '等待修订',
+    badgeClass: 'bg-orange-100 text-orange-700 border-orange-200',
+    railDotClass: 'bg-orange-500',
+  },
+  completed: {
+    label: '已完成',
+    badgeClass: 'bg-green-100 text-green-700 border-green-200',
+    railDotClass: 'bg-green-600',
+  },
+  failed: {
+    label: '运行失败',
+    badgeClass: 'bg-red-100 text-red-700 border-red-200',
+    railDotClass: 'bg-red-500',
+  },
+  skipped: {
+    label: '已跳过',
+    badgeClass: 'bg-zinc-100 text-zinc-600 border-zinc-200',
+    railDotClass: 'bg-zinc-400',
+  },
+  stale: {
+    label: '历史版本',
+    badgeClass: 'bg-zinc-100 text-zinc-700 border-zinc-300',
+    railDotClass: 'bg-zinc-500',
+  },
+};
+
+function getNodeMeta(nodeKey?: string | null): NodeMeta {
+  if (!nodeKey) {
+    return fallbackNodeMeta;
+  }
+  return nodeMetaMap[nodeKey] || {
+    ...fallbackNodeMeta,
+    label: nodeKey,
+  };
+}
+
+function getStatusMeta(status?: string | null) {
+  if (!status) {
+    return statusMetaMap.queued;
+  }
+  return statusMetaMap[status] || {
+    label: status,
+    badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
+    railDotClass: 'bg-slate-400',
+  };
+}
+
+function formatTimestamp(value?: string | null): string {
+  if (!value) {
+    return '-';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function flattenValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '-';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractDiagnosticLines(node?: RuntimeDisplayNode | null): string[] {
+  if (!node) {
+    return [];
+  }
+
+  return node.diagnostics
+    .flatMap((diagnostic) => {
+      if (typeof diagnostic === 'string') {
+        return [diagnostic];
+      }
+      const keys = ['message', 'detail', 'code', 'reason', 'status'];
+      return keys
+        .map((key) => diagnostic?.[key])
+        .filter((value): value is string | number | boolean => value !== undefined && value !== null)
+        .map((value) => String(value));
+    })
+    .filter((line) => line.trim().length > 0)
+    .slice(0, 3);
+}
+
+function getArtifactHighlights(node?: RuntimeDisplayNode | null) {
+  if (!node) {
+    return [];
+  }
+
+  return node.artifact_refs.slice(0, 3).map((artifact, index) => ({
+    title:
+      (typeof artifact.label === 'string' && artifact.label) ||
+      (typeof artifact.kind === 'string' && artifact.kind) ||
+      (typeof artifact.artifact_type === 'string' && artifact.artifact_type) ||
+      `artifact_${index + 1}`,
+    detail:
+      (typeof artifact.url === 'string' && artifact.url) ||
+      (typeof artifact.path === 'string' && artifact.path) ||
+      (typeof artifact.ref === 'string' && artifact.ref) ||
+      'runtime 已记录产物引用',
+  }));
+}
+
+function getSummaryHighlights(summaryOutput?: Record<string, unknown>) {
+  return Object.entries(summaryOutput || {})
+    .filter(([, value]) => value !== null && value !== undefined && String(flattenValue(value)).trim().length > 0)
+    .slice(0, 3)
+    .map(([key, value]) => ({
+      key,
+      value: flattenValue(value),
+    }));
+}
+
+const ContextSection: React.FC<{
+  eyebrow: string;
+  title: string;
+  children: React.ReactNode;
+}> = ({ eyebrow, title, children }) => (
+  <section className="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-card">
+    <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{eyebrow}</div>
+    <h3 className="mt-2 text-base font-semibold text-slate-900">{title}</h3>
+    <div className="mt-4 space-y-3 text-sm text-slate-600">{children}</div>
+  </section>
+);
+
+const KeyValueRow: React.FC<{
+  label: string;
+  value: React.ReactNode;
+}> = ({ label, value }) => (
+  <div className="flex items-start justify-between gap-3">
+    <span className="text-slate-500">{label}</span>
+    <span className="max-w-[180px] text-right font-medium text-slate-900 break-all">{value}</span>
+  </div>
+);
+
 const QuickModeWorkspace: React.FC = () => {
-  const { currentRequest, quickRuntime, setQuickRuntime, addNotification } = useAppStore();
+  const {
+    currentRequest,
+    quickProcessingContext,
+    quickRuntime,
+    setQuickRuntime,
+    addNotification,
+    wsConnected,
+  } = useAppStore();
   const [feedbackText, setFeedbackText] = useState('');
   const [submittingAction, setSubmittingAction] = useState<string | null>(null);
   const [resumingRuntime, setResumingRuntime] = useState(false);
@@ -64,6 +324,12 @@ const QuickModeWorkspace: React.FC = () => {
     () => isPreNodeFailure(quickRuntime),
     [quickRuntime]
   );
+  const isFreshSubmitBootstrap = useMemo(
+    () =>
+      quickProcessingContext === 'fresh_submit' &&
+      (!quickRuntime || isBootstrapRuntimePlaceholder(quickRuntime)),
+    [quickProcessingContext, quickRuntime]
+  );
 
   useEffect(() => {
     if (activeGate?.status === 'awaiting_human') {
@@ -71,8 +337,68 @@ const QuickModeWorkspace: React.FC = () => {
     }
   }, [activeGate?.id, activeGate?.status]);
 
+  const workspace = useMemo(
+    () => getRuntimeWorkspaceProjection(quickRuntime),
+    [quickRuntime]
+  );
+  const focusNode = workspace.focusNode;
+  const currentNode = workspace.currentNode;
+  const focusNodeMeta = getNodeMeta(focusNode?.node_key);
+  const focusNodeStatus = getStatusMeta(
+    currentNode?.displayStatus ||
+      focusNode?.displayStatus ||
+      (quickRuntime?.status === 'failed'
+        ? 'failed'
+        : quickRuntime?.status === 'completed'
+          ? 'completed'
+          : 'queued')
+  );
+  const diagnosticLines = useMemo(
+    () => extractDiagnosticLines(focusNode),
+    [focusNode]
+  );
+  const artifactHighlights = useMemo(
+    () => getArtifactHighlights(focusNode),
+    [focusNode]
+  );
+  const summaryHighlights = useMemo(
+    () => getSummaryHighlights(quickRuntime?.summary_output),
+    [quickRuntime?.summary_output]
+  );
+  const FocusIcon = focusNodeMeta.icon;
+
+  const focusMode: FocusMode = useMemo(() => {
+    if (isScriptGate && activeGate?.status === 'awaiting_human') {
+      return 'hitl';
+    }
+    if (runtimeFailureMessage) {
+      return 'failed';
+    }
+    if (resumeControl?.state === 'resume_available') {
+      return 'resume_available';
+    }
+    if (resumeControl?.state === 'resume_blocked') {
+      return 'resume_blocked';
+    }
+    if (quickRuntime?.status === 'completed') {
+      return 'completed';
+    }
+    if (quickRuntime) {
+      return 'running';
+    }
+    return 'detached';
+  }, [
+    activeGate?.status,
+    isScriptGate,
+    quickRuntime,
+    resumeControl?.state,
+    runtimeFailureMessage,
+  ]);
+
   const handleResumeRuntime = async () => {
-    if (!currentRequest?.id || !resumeControl?.can_resume) return;
+    if (!currentRequest?.id || !resumeControl?.can_resume) {
+      return;
+    }
     try {
       setResumingRuntime(true);
       const result = await ApiClient.resumeTaskRuntime(currentRequest.id);
@@ -96,7 +422,9 @@ const QuickModeWorkspace: React.FC = () => {
   };
 
   const handleDecision = async (action: 'approve' | 'revise' | 'replan') => {
-    if (!currentRequest?.id) return;
+    if (!currentRequest?.id) {
+      return;
+    }
     try {
       setSubmittingAction(action);
       const result = await ApiClient.submitScriptGateDecision(currentRequest.id, {
@@ -126,182 +454,540 @@ const QuickModeWorkspace: React.FC = () => {
     }
   };
 
-  const runtimeNodes = useMemo(
-    () => getRuntimeDisplayNodes(quickRuntime),
-    [quickRuntime]
+  const renderFocusModeBadge = () => {
+    const commonClassName =
+      'inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold';
+    switch (focusMode) {
+      case 'hitl':
+        return (
+          <div className={`${commonClassName} border-amber-300 bg-amber-500/15 text-amber-100`}>
+            <MessageSquareText className="h-4 w-4" />
+            等待人工确认
+          </div>
+        );
+      case 'resume_available':
+        return (
+          <div className={`${commonClassName} border-emerald-300 bg-emerald-500/15 text-emerald-100`}>
+            <PlayCircle className="h-4 w-4" />
+            可恢复执行
+          </div>
+        );
+      case 'resume_blocked':
+        return (
+          <div className={`${commonClassName} border-orange-300 bg-orange-500/15 text-orange-100`}>
+            <PauseCircle className="h-4 w-4" />
+            查看态诊断
+          </div>
+        );
+      case 'failed':
+        return (
+          <div className={`${commonClassName} border-red-300 bg-red-500/15 text-red-100`}>
+            <AlertCircle className="h-4 w-4" />
+            运行失败
+          </div>
+        );
+      case 'completed':
+        return (
+          <div className={`${commonClassName} border-emerald-300 bg-emerald-500/15 text-emerald-100`}>
+            <CheckCircle2 className="h-4 w-4" />
+            结果已生成
+          </div>
+        );
+      case 'detached':
+        return (
+          <div className={`${commonClassName} border-slate-300 bg-white/10 text-slate-100`}>
+            <Clock3 className="h-4 w-4" />
+            等待 runtime 数据
+          </div>
+        );
+      default:
+        return (
+          <div className={`${commonClassName} border-sky-300 bg-sky-500/15 text-sky-100`}>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            runtime 正在推进
+          </div>
+        );
+    }
+  };
+
+  const renderNodeSnapshot = (title: string, description: string) => (
+    <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
+            {title}
+          </div>
+          <h3 className="mt-2 text-xl font-semibold text-slate-900">{focusNodeMeta.label}</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{description}</p>
+        </div>
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
+            focusNodeStatus.badgeClass
+          )}
+        >
+          {focusNodeStatus.label}
+        </span>
+      </div>
+
+      <div className="mt-5 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-400">revision</div>
+          <div className="mt-2 font-semibold text-slate-900">{focusNode?.revision_index ?? 0}</div>
+        </div>
+        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-400">gate</div>
+          <div className="mt-2 font-semibold text-slate-900">
+            {focusNode?.gate_required ? 'required' : 'none'}
+          </div>
+        </div>
+        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-400">artifacts</div>
+          <div className="mt-2 font-semibold text-slate-900">{focusNode?.artifact_refs.length ?? 0}</div>
+        </div>
+        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-400">diagnostics</div>
+          <div className="mt-2 font-semibold text-slate-900">{focusNode?.diagnostics.length ?? 0}</div>
+        </div>
+      </div>
+    </div>
   );
 
-  return (
-    <div className="flex-1 flex flex-col gap-6 overflow-auto">
-      {isScriptGate && activeGate?.status === 'awaiting_human' && (
-        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-amber-200 p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-amber-100 text-amber-800 px-3 py-1 text-xs font-medium">
-                <MessageSquareText className="w-4 h-4" />
-                等待脚本确认
-              </div>
-              <h3 className="text-lg font-semibold text-gray-900 mt-3">脚本工作台</h3>
-              <p className="text-sm text-gray-600 mt-1">当前流程已在 `script gate` 暂停。确认后才会继续后续生成。</p>
-            </div>
-            <div className="text-right text-sm text-gray-500">
-              <div>推荐动作：{activeGate.recommended_action || 'approve'}</div>
-              <div>允许动作：{(activeGate.allowed_actions || []).join(' / ') || 'approve'}</div>
-            </div>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 xl:grid-cols-[minmax(0,1.4fr)_360px] gap-6">
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="font-medium text-gray-900">脚本预览</h4>
-                <span className="text-xs text-gray-500">触发原因：{String(activeGate.facts?.trigger_reason || 'initial')}</span>
-              </div>
-              <pre className="whitespace-pre-wrap text-sm leading-6 text-gray-700 max-h-[420px] overflow-auto">
-                {scriptPreviewText || '暂无脚本预览'}
-              </pre>
-            </div>
-
-            <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <h4 className="font-medium text-gray-900">审核反馈</h4>
-              <p className="text-sm text-gray-600 mt-1">`approve` 可直接续跑；`revise` 和 `replan` 建议补充反馈。</p>
-              <textarea
-                className="mt-4 w-full min-h-[180px] rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                placeholder="例如：剧情方向不对、角色设定需要调整、某段对白要更简洁"
-                value={feedbackText}
-                onChange={(e) => setFeedbackText(e.target.value)}
-              />
-              {resumeHint && (
-                <div className="mt-4 rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm text-primary-700">
-                  {resumeHint}
-                </div>
-              )}
-              <div className="mt-4 grid grid-cols-1 gap-3">
-                <button
-                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
-                  disabled={!!submittingAction}
-                  onClick={() => void handleDecision('approve')}
-                >
-                  {submittingAction === 'approve' ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                  批准并继续
-                </button>
-                <button
-                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-60"
-                  disabled={!!submittingAction}
-                  onClick={() => void handleDecision('revise')}
-                >
-                  {submittingAction === 'revise' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
-                  要求重写
-                </button>
-                <button
-                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-800 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-900 disabled:opacity-60"
-                  disabled={!!submittingAction}
-                  onClick={() => void handleDecision('replan')}
-                >
-                  {submittingAction === 'replan' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
-                  要求重规划
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {resumeControl?.state === 'resume_available' && (
-        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-slate-200 p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-3">
-              <RefreshCcw className="w-5 h-5 text-slate-700 mt-0.5" />
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">可恢复执行</h3>
-                <p className="text-sm text-gray-600 mt-1">
-                  当前工作台只是在查看既有 runtime；control-plane 已确认该 run 存在合法 continuation checkpoint，可显式恢复执行。
-                </p>
-                <p className="text-xs text-gray-500 mt-2">reason: {resumeControl.reason_code}</p>
-              </div>
-            </div>
-            <button
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-950 disabled:opacity-60"
-              disabled={resumingRuntime}
-              onClick={() => void handleResumeRuntime()}
-            >
-              {resumingRuntime ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
-              恢复执行
-            </button>
-          </div>
-        </section>
-      )}
-
-      {resumeControl?.state === 'resume_blocked' && (
-        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-orange-200 p-6">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-orange-700 mt-0.5" />
-            <div>
-              <h3 className="text-lg font-semibold text-orange-900">恢复条件缺失</h3>
-              <p className="text-sm text-orange-800 mt-1">
-                当前工作台已经附着到该 runtime，但 control-plane 没有找到可消费的 continuation checkpoint，因此不能显式恢复执行。
-              </p>
-              <p className="text-xs text-orange-700 mt-2">reason: {resumeControl.reason_code}</p>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {runtimeFailureMessage && (
-        <section className="bg-white/95 backdrop-blur rounded-xl shadow-card border border-red-200 p-6">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-600 mt-0.5" />
-            <div>
-              <h3 className="text-lg font-semibold text-red-900">运行失败</h3>
-              <p className="text-sm text-red-700 mt-1">
-                {runtimeFailureMessage}
-              </p>
-              {showPreNodeFailureHint && (
-                <p className="text-xs text-red-600 mt-2">
-                  失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。
-                </p>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
-
-      <section className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-lg font-semibold text-gray-900">运行时状态</h3>
-            <p className="text-sm text-gray-600">session: {quickRuntime?.session_id ?? '-'} / status: {quickRuntime?.status ?? 'queued'}</p>
-          </div>
-          {quickRuntime?.current_node_key && (
-            <span className="rounded-full bg-primary-50 text-primary-700 px-3 py-1 text-xs font-medium">
-              当前节点：{nodeLabelMap[quickRuntime.current_node_key] || quickRuntime.current_node_key}
-            </span>
-          )}
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-          {runtimeNodes.map((node) => (
-            <div key={node.node_key} className="rounded-lg border border-gray-200 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium text-gray-900">{nodeLabelMap[node.node_key] || node.node_key}</div>
-                  <div className="text-xs text-gray-500 mt-1">rev {node.revision_index}</div>
-                </div>
-                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusClassMap[node.displayStatus] || 'bg-gray-100 text-gray-700'}`}>
-                  {node.displayStatus}
-                </span>
-              </div>
-              {activeGate?.node_id === node.id && activeGate?.status === 'awaiting_human' && (
-                <p className="mt-3 text-xs text-amber-700">该节点等待人工审核后继续。</p>
-              )}
+  const renderArtifactPanel = () => (
+    <div className="rounded-[24px] border border-slate-200 bg-slate-50/70 p-5">
+      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">primary signal</div>
+      <h3 className="mt-2 text-base font-semibold text-slate-900">当前产物与诊断</h3>
+      {artifactHighlights.length > 0 ? (
+        <div className="mt-4 space-y-3">
+          {artifactHighlights.map((artifact) => (
+            <div key={`${artifact.title}-${artifact.detail}`} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+              <div className="font-medium text-slate-900">{artifact.title}</div>
+              <div className="mt-1 text-sm text-slate-600 break-all">{artifact.detail}</div>
             </div>
           ))}
         </div>
-      </section>
+      ) : diagnosticLines.length > 0 ? (
+        <ul className="mt-4 space-y-3">
+          {diagnosticLines.map((line) => (
+            <li key={line} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
+              {line}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-5 text-sm leading-6 text-slate-600">
+          当前节点还没有暴露新的 artifact 引用。工作台会继续跟随 runtime read-model 自动刷新，不再预先占满未来节点。
+        </div>
+      )}
+    </div>
+  );
 
-      <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 mt-2">
-        <AgentOrchestrator />
+  const renderFocusBody = () => {
+    if (focusMode === 'hitl') {
+      return (
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_340px]">
+          <div className="space-y-5">
+            {renderNodeSnapshot('current node', '当前主线已进入脚本审核 gate。人工决策会直接改变后续 runtime 走向。')}
+            <div className="rounded-[24px] border border-amber-200 bg-amber-50/80 p-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700">script preview</div>
+                  <h3 className="mt-2 text-base font-semibold text-slate-900">脚本工作台</h3>
+                </div>
+                <div className="text-right text-xs text-amber-800">
+                  <div>推荐动作：{activeGate?.recommended_action || 'approve'}</div>
+                  <div>允许动作：{(activeGate?.allowed_actions || []).join(' / ') || 'approve'}</div>
+                </div>
+              </div>
+              <pre className="mt-4 max-h-[420px] overflow-auto whitespace-pre-wrap rounded-2xl border border-amber-200 bg-white px-4 py-4 text-sm leading-6 text-slate-700">
+                {scriptPreviewText || '暂无脚本预览'}
+              </pre>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">decision workspace</div>
+              <h3 className="mt-2 text-base font-semibold text-slate-900">审核反馈</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                `approve` 会直接续跑；`revise` 和 `replan` 建议附带反馈，让主线可以回到正确分支。
+              </p>
+              <textarea
+                className="mt-4 min-h-[180px] w-full rounded-2xl border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                placeholder="例如：剧情冲突不够强、角色目标要更明确、镜头语言偏离原设定"
+                value={feedbackText}
+                onChange={(event) => setFeedbackText(event.target.value)}
+              />
+              {resumeHint && (
+                <div className="mt-4 rounded-2xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-700">
+                  {resumeHint}
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-3">
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+                disabled={!!submittingAction}
+                onClick={() => void handleDecision('approve')}
+              >
+                {submittingAction === 'approve' ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4" />
+                )}
+                批准并继续
+              </button>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-orange-600 px-4 py-3 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-60"
+                disabled={!!submittingAction}
+                onClick={() => void handleDecision('revise')}
+              >
+                {submittingAction === 'revise' ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                要求重写
+              </button>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-950 disabled:opacity-60"
+                disabled={!!submittingAction}
+                onClick={() => void handleDecision('replan')}
+              >
+                {submittingAction === 'replan' ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCcw className="h-4 w-4" />
+                )}
+                要求重规划
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (focusMode === 'resume_available') {
+      return (
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="space-y-5">
+            {renderNodeSnapshot('resume checkpoint', '当前页面附着的是既有 runtime。control-plane 已确认 continuation checkpoint 存在，可以显式续跑。')}
+            <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/80 p-5 text-sm leading-6 text-emerald-900">
+              <div className="font-semibold">恢复原因</div>
+              <div className="mt-2">reason: {resumeControl?.reason_code || 'checkpoint_ready'}</div>
+            </div>
+          </div>
+          <div className="rounded-[24px] bg-slate-950 p-5 text-white">
+            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-300">primary action</div>
+            <h3 className="mt-2 text-lg font-semibold">恢复执行</h3>
+            <p className="mt-3 text-sm leading-6 text-slate-300">
+              只有在当前 run 确认存在合法 checkpoint 时，这个工作台才会给出恢复 CTA。
+            </p>
+            <button
+              className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-medium text-slate-900 hover:bg-slate-100 disabled:opacity-60"
+              disabled={resumingRuntime}
+              onClick={() => void handleResumeRuntime()}
+            >
+              {resumingRuntime ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCcw className="h-4 w-4" />
+              )}
+              恢复执行
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (focusMode === 'resume_blocked') {
+      return (
+        <div className="space-y-5">
+          {renderNodeSnapshot('view mode', '当前工作台已经附着到 runtime，但 control-plane 并未给出可消费的 continuation checkpoint。')}
+          <div className="rounded-[24px] border border-orange-200 bg-orange-50/90 p-5 text-sm leading-6 text-orange-900">
+            <div className="font-semibold">恢复条件缺失</div>
+            <p className="mt-2">
+              这不是 fresh bootstrap；它表示当前处于查看态诊断。用户仍可以阅读已发生轨迹和上下文，但当前没有显式恢复入口。
+            </p>
+            <p className="mt-2 text-xs text-orange-800">reason: {resumeControl?.reason_code || 'missing_checkpoint'}</p>
+          </div>
+          {renderArtifactPanel()}
+        </div>
+      );
+    }
+
+    if (focusMode === 'failed') {
+      return (
+        <div className="space-y-5">
+          {renderNodeSnapshot('failure snapshot', '工作台保留已发生轨迹，并把失败原因提升为主焦点，而不是继续渲染一个铺满的固定流水线。')}
+          <div className="rounded-[24px] border border-red-200 bg-red-50/90 p-5">
+            <div className="text-sm font-semibold text-red-900">运行失败</div>
+            <p className="mt-2 text-sm leading-6 text-red-800">{runtimeFailureMessage}</p>
+            {showPreNodeFailureHint && (
+              <p className="mt-3 text-xs text-red-700">
+                失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。
+              </p>
+            )}
+          </div>
+          {renderArtifactPanel()}
+        </div>
+      );
+    }
+
+    if (focusMode === 'completed') {
+      return (
+        <div className="space-y-5">
+          {renderNodeSnapshot('delivery summary', '当前 run 已完成。工作台会把用户送往结果评审与下载，而不是继续停留在固定节点骨架上。')}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/80 p-5 text-sm leading-6 text-emerald-900">
+              <div className="font-semibold">结果已可交付</div>
+              <p className="mt-2">轮询会在拿到最终视频地址后把页面切到结果评审与导出视图。</p>
+            </div>
+            <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">summary output</div>
+              <div className="mt-4 space-y-3 text-sm text-slate-700">
+                {summaryHighlights.length > 0 ? (
+                  summaryHighlights.map((item) => (
+                    <div key={item.key}>
+                      <div className="font-medium text-slate-900">{item.key}</div>
+                      <div className="mt-1 break-all text-slate-600">{item.value}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-slate-600">summary_output 还没有可展示的摘要字段。</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (focusMode === 'detached') {
+      return (
+        <div className="rounded-[24px] border border-slate-200 bg-white p-6 text-sm leading-6 text-slate-600">
+          任务已进入 processing，但当前还没有拿到 runtime 读模型。工作台会在下一轮同步后自动附着。
+        </div>
+      );
+    }
+
+    return (
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="space-y-5">
+          {renderNodeSnapshot('current node', '主焦点只跟随当前节点和已发生轨迹。未来节点不会预占版面，直到 runtime 真正推进到那里。')}
+          <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">primary action</div>
+            <h3 className="mt-2 text-base font-semibold text-slate-900">等待 runtime 继续推进</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              当前阶段不需要人工动作。若 runtime 进入 HITL gate、失败态或显式恢复态，中心卡会直接切换为对应工作面板。
+            </p>
+          </div>
+        </div>
+        <div className="space-y-5">
+          {renderArtifactPanel()}
+          <div className="rounded-[24px] border border-slate-200 bg-white p-5">
+            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">runtime note</div>
+            <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1 text-sm font-medium text-sky-700">
+              <ArrowRight className="h-4 w-4" />
+              下一步只在节点真实到达后出现
+            </div>
+          </div>
+        </div>
       </div>
-      <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-        <RealTimeProgress />
+    );
+  };
+
+  if (isFreshSubmitBootstrap) {
+    return (
+      <div className="flex-1 overflow-auto">
+        <section className="rounded-[28px] border border-blue-200 bg-white/95 p-6 shadow-card">
+          <div className="flex items-start gap-3">
+            <Loader2 className="mt-0.5 h-5 w-5 animate-spin text-blue-600" />
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900">正在连接运行时</h3>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                任务已经创建成功，当前仍处于首个 attempt 建立前的 bootstrap 阶段。前端会在 runtime 真正附着后切入新的工作台视图。
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[260px_minmax(0,1fr)_300px]">
+        <aside className="space-y-4">
+          <section className="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-card">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">storyboard rail</div>
+            <h2 className="mt-2 text-lg font-semibold text-slate-900">执行轨迹</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              这里只展示已到达节点。未来节点会等到 runtime 真正推进后再出现。
+            </p>
+          </section>
+
+          <section className="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-card">
+            {workspace.arrivedNodes.length > 0 ? (
+              <div className="relative pl-3">
+                {workspace.arrivedNodes.map((node, index) => {
+                  const meta = getNodeMeta(node.node_key);
+                  const status = getStatusMeta(node.displayStatus);
+                  const Icon = meta.icon;
+                  const isCurrent = currentNode?.id === node.id;
+
+                  return (
+                    <div key={node.id} className="relative pb-4 last:pb-0">
+                      {index < workspace.arrivedNodes.length - 1 && (
+                        <div className="absolute left-[5px] top-7 h-[calc(100%-8px)] w-px bg-slate-200" />
+                      )}
+                      <div className={cn('absolute left-0 top-5 h-3 w-3 rounded-full', status.railDotClass)} />
+                      <div
+                        className={cn(
+                          'ml-7 rounded-[22px] border bg-white p-4 transition',
+                          isCurrent ? 'border-primary-300 ring-2 ring-primary-100' : 'border-slate-200'
+                        )}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className={cn('flex h-10 w-10 items-center justify-center rounded-2xl', meta.iconClass)}>
+                            <Icon className="h-5 w-5" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="font-medium text-slate-900">{meta.label}</div>
+                              {isCurrent && (
+                                <span className="rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium text-primary-700">
+                                  当前
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                              <span
+                                className={cn(
+                                  'inline-flex items-center rounded-full border px-2.5 py-1 font-medium',
+                                  status.badgeClass
+                                )}
+                              >
+                                {status.label}
+                              </span>
+                              <span>rev {node.revision_index}</span>
+                            </div>
+                            <p className="mt-3 text-sm leading-6 text-slate-600">{meta.description}</p>
+                            {activeGate?.node_id === node.id && activeGate?.status === 'awaiting_human' && (
+                              <p className="mt-3 text-xs font-medium text-amber-700">该节点等待人工审核后继续。</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-[20px] border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-600">
+                当前还没有已到达节点。工作台会在 runtime 真正附着后开始形成执行轨迹。
+              </div>
+            )}
+          </section>
+        </aside>
+
+        <main className="space-y-5">
+          <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-white/95 shadow-card">
+            <div className={cn('relative overflow-hidden bg-slate-950 px-6 py-6 text-white', `bg-gradient-to-r ${focusNodeMeta.accentClass}`)}>
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.12),transparent_45%)]" />
+              <div className="relative flex flex-wrap items-start justify-between gap-5">
+                <div className="max-w-2xl">
+                  {renderFocusModeBadge()}
+                  <div className="mt-5 flex items-center gap-3">
+                    <div className={cn('flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/10', focusNodeMeta.iconClass)}>
+                      <FocusIcon className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-300">
+                        {currentRequest?.title || 'quick runtime workspace'}
+                      </div>
+                      <h1 className="mt-1 text-2xl font-semibold text-white">{focusNodeMeta.label}</h1>
+                    </div>
+                  </div>
+                  <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">
+                    {focusMode === 'running' && '主视觉只围绕当前节点、已发生轨迹和当前诊断展开，不再使用铺满全页的固定流水线。'}
+                    {focusMode === 'hitl' && '当前节点已进入人工确认。工作台把脚本预览、反馈输入和决策动作并置到一个可执行面板里。'}
+                    {focusMode === 'resume_available' && '这是已存在 runtime 的显式恢复态，不是 fresh run 的启动阶段。'}
+                    {focusMode === 'resume_blocked' && '这里呈现的是查看态诊断，不再把它误判成 fresh run 的异常启动。'}
+                    {focusMode === 'failed' && '失败被提升为当前主焦点，同时保留已发生轨迹作为上下文。'}
+                    {focusMode === 'completed' && '运行已经走完，工作台会把焦点转向最终交付摘要。'}
+                    {focusMode === 'detached' && 'processing 页面已经打开，但 runtime 读模型还没有完成首轮附着。'}
+                  </p>
+                </div>
+
+                <div className="rounded-[24px] border border-white/10 bg-white/10 p-4 backdrop-blur">
+                  <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-300">runtime status</div>
+                  <div className="mt-3 text-3xl font-semibold text-white">{quickRuntime?.status || 'queued'}</div>
+                  <div className="mt-2 text-sm text-slate-300">
+                    当前节点：{focusNodeMeta.label}
+                  </div>
+                  <div className="mt-1 text-sm text-slate-300">
+                    已到达节点：{workspace.arrivedNodes.length}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6">{renderFocusBody()}</div>
+          </section>
+        </main>
+
+        <aside className="space-y-4">
+          <ContextSection eyebrow="runtime snapshot" title="运行上下文">
+            <KeyValueRow label="任务" value={currentRequest?.id || '-'} />
+            <KeyValueRow label="session" value={quickRuntime?.session_id ?? '-'} />
+            <KeyValueRow label="attempt" value={quickRuntime?.current_attempt_id ?? '-'} />
+            <KeyValueRow label="状态" value={quickRuntime?.status || 'queued'} />
+            <KeyValueRow label="更新时间" value={formatTimestamp(quickRuntime?.updated_at)} />
+          </ContextSection>
+
+          <ContextSection eyebrow="control plane" title="控制面诊断">
+            <KeyValueRow label="resume_state" value={resumeControl?.state || '-'} />
+            <KeyValueRow label="resume_reason" value={resumeControl?.reason_code || '-'} />
+            <KeyValueRow label="gate" value={activeGate?.gate_name || '-'} />
+            <KeyValueRow label="future_hidden" value={workspace.futureNodes.length} />
+            {workspace.futureNodes.length > 0 && (
+              <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                未来节点不会预占页面。它们只会在 runtime 真正到达时进入轨迹和焦点区。
+              </div>
+            )}
+          </ContextSection>
+
+          <ContextSection eyebrow="skipped path" title="本次未走通道">
+            {workspace.skippedNodes.length > 0 ? (
+              workspace.skippedNodes.map((node) => {
+                const meta = getNodeMeta(node.node_key);
+                return (
+                  <div key={node.id} className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                    <div className="font-medium text-slate-900">{meta.label}</div>
+                    <div className="mt-1 text-xs text-zinc-600">status: skipped</div>
+                    <div className="mt-2 text-sm leading-6 text-slate-600">{meta.description}</div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-600">
+                本次主线没有跳过节点。
+              </div>
+            )}
+          </ContextSection>
+
+          <ContextSection eyebrow="telemetry" title="轻量遥测">
+            <KeyValueRow label="ws" value={wsConnected ? 'connected' : 'polling'} />
+            <KeyValueRow label="arrived" value={workspace.arrivedNodes.length} />
+            <KeyValueRow label="skipped" value={workspace.skippedNodes.length} />
+            <KeyValueRow label="summary_keys" value={summaryHighlights.length} />
+            <div className="rounded-2xl bg-slate-950 px-4 py-3 text-sm leading-6 text-slate-200">
+              业务进度仍然只以 runtime read-model 为准；WS 和 polling 只是同步通道，不再冒充工作流 truth。
+            </div>
+          </ContextSection>
+        </aside>
       </div>
     </div>
   );

@@ -22,7 +22,13 @@ import ParameterControls from './ParameterControls';
 import { useI18n } from '@/i18n/I18nProvider';
 
 const VideoRequestForm: React.FC = () => {
-  const { setCurrentRequest, setCurrentStep, setQuickRuntime, addNotification } = useAppStore();
+  const {
+    setCurrentRequest,
+    setCurrentStep,
+    setQuickRuntime,
+    setQuickProcessingContext,
+    addNotification,
+  } = useAppStore();
   const { t } = useI18n();
   const [workspaceSessionId, setWorkspaceSessionId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -143,6 +149,7 @@ const VideoRequestForm: React.FC = () => {
     setExistingRunDismissed(true);
     setCurrentRequest(request);
     setQuickRuntime(run.runtime);
+    setQuickProcessingContext('attached_runtime');
     setCurrentStep('processing');
     if (notification) {
       addNotification(notification);
@@ -193,6 +200,7 @@ const VideoRequestForm: React.FC = () => {
     console.info('CREATE_NEW_RUN selected', { sessionId: workspaceSessionId || existingRun?.task?.session_id || 'unknown' });
     setExistingRunDismissed(true);
     setQuickRuntime(null);
+    setQuickProcessingContext(null);
     setCurrentRequest(null);
   };
 
@@ -256,7 +264,7 @@ const VideoRequestForm: React.FC = () => {
       setIsSubmitting(true);
       setExistingRunDismissed(true);
       setQuickRuntime(null);
-      setCurrentStep('processing');
+      setQuickProcessingContext(null);
       console.info('FORM_SUBMIT creating new quick task', {
         sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
         title: formData.title,
@@ -300,6 +308,7 @@ const VideoRequestForm: React.FC = () => {
       };
 
       setCurrentRequest(request);
+      setQuickProcessingContext('fresh_submit');
       setCurrentStep('processing');
       setExistingRun(null);
       
@@ -322,6 +331,7 @@ const VideoRequestForm: React.FC = () => {
         message: error instanceof Error ? error.message : t('notify.submitFailed.msg'),
         autoClose: 8000,
       });
+      setQuickProcessingContext(null);
       setCurrentStep('input');
     } finally {
       setIsSubmitting(false);
