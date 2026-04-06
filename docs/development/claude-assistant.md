@@ -124,6 +124,9 @@ The system operates on a **multi-agent orchestration pattern** where each agent 
 cd backend
 python scripts/start_dev.py
 
+# Custom port configuration (optional)
+API_PORT=8080 python scripts/start_dev.py
+
 # Run database migrations
 alembic upgrade head
 
@@ -139,6 +142,9 @@ python scripts/validate_system.py
 ```bash
 # Start frontend development server
 npm run dev
+
+# Custom port configuration (optional)
+PORT=3001 npm run dev
 
 # Build for production
 npm run build
@@ -346,6 +352,14 @@ All tests support both real API mode and mock mode for CI/CD environments.
 - **Development Environment**
   - 项目使用的是uv环境
   - 项目使用的是uv python环境，要测试需要用uv测试
+
+- **Port Configuration**
+  - 后端默认端口: 8000 (可通过 `API_HOST`/`API_PORT` 环境变量配置)
+  - 前端默认端口: 3000 (可通过 `PORT` 环境变量配置)
+  - 配置方式:
+    - 后端: 在根目录 `.env` 中设置 `API_PORT=8080`
+    - 前端: 在 `frontend/.env.local` 中设置 `PORT=3001`
+    - 或临时使用: `API_PORT=8080 python scripts/start_dev.py`
 
 ## Development Philosophy
 

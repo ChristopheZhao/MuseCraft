@@ -3,20 +3,29 @@
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
+import math
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.orm import Session
 
-from ....agents import SeriesPlannerAgent
 from ....agents.base import AgentError
 from ....core.database import SessionLocal
 from ....core.constants import GenerationMode
-from ....core.mode_router import resolve_generation_mode, dispatch_generation
-from ....core.story_plan import ProjectState, project_state_repository, EpisodeStatus
+from ....core.story_plan import (
+    EpisodePlan,
+    EpisodeEditorialStatus,
+    EpisodeExecutionStatus,
+    ProjectOperationState,
+    ProjectState,
+    StoryPlan,
+    project_state_repository,
+)
 from ....models import Task, TaskStatus, TaskType
+from ....services.project_job_contract import attach_project_plan_contract
+from ....services.project_job_queue import ProjectJobQueueService
+from ....services.task_queue import TaskQueueService
 from ....services.project_service import update_episode_script
 
 
@@ -65,11 +74,25 @@ class EpisodeRuntimeModel(BaseModel):
     error: Optional[str] = None
 
 
+class ProjectOperationStatusModel(BaseModel):
+    status: str
+    task_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ProjectProgressModel(BaseModel):
+    planning: ProjectOperationStatusModel = Field(default_factory=lambda: ProjectOperationStatusModel(status="idle"))
+    character_references: ProjectOperationStatusModel = Field(
+        default_factory=lambda: ProjectOperationStatusModel(status="idle")
+    )
+
+
 class ProjectStateResponse(BaseModel):
     project_id: str
     mode: str
     story_plan: StoryPlanModel
     episodes_runtime: Dict[str, EpisodeRuntimeModel] = Field(default_factory=dict)
+    progress: ProjectProgressModel = Field(default_factory=ProjectProgressModel)
     global_settings: Dict[str, Any] = Field(default_factory=dict)
     cost_budget: Optional[float] = None
     total_cost: float = 0.0
@@ -94,10 +117,14 @@ class ProjectCreateRequest(BaseModel):
     tone_and_mood: Optional[str] = None
     additional_notes: Dict[str, Any] = Field(default_factory=dict)
     project_id: Optional[str] = None
+    auto_generate_scripts: bool = True
+    generate_character_references: bool = True
 
 
 class ProjectCreateResponse(BaseModel):
     project: ProjectStateResponse
+    task_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 class EpisodeScriptRequest(BaseModel):
@@ -107,11 +134,21 @@ class EpisodeScriptRequest(BaseModel):
 
 
 class EpisodeGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     episode_ids: List[str] = Field(default_factory=list)
     episode_indices: List[int] = Field(default_factory=list)
     auto_approve: bool = False
     force_rerun: bool = False
-    runtime_overrides: Dict[str, Any] = Field(default_factory=dict)
+    project_character_reference_images_enabled: Optional[bool] = None
+
+
+def _schedule_project_plan(task_db_id: Optional[int]) -> Optional[str]:
+    if task_db_id is None:
+        return None
+
+    task_queue = ProjectJobQueueService()
+    return task_queue.queue_task(task_db_id)
 
 
 class EpisodeGenerationResponse(BaseModel):
@@ -127,6 +164,9 @@ class EpisodeGenerationResponse(BaseModel):
 
 
 def _serialize_project_state(project_state: ProjectState) -> ProjectStateResponse:
+    for episode in project_state.story_plan.episodes:
+        project_state.ensure_runtime_state(episode.episode_id)
+
     payload = project_state.to_dict()
     runtime_payload = {
         ep_id: EpisodeRuntimeModel(**data)
@@ -147,6 +187,7 @@ def _serialize_project_state(project_state: ProjectState) -> ProjectStateRespons
         mode=payload["mode"],
         story_plan=story_model,
         episodes_runtime=runtime_payload,
+        progress=ProjectProgressModel(**(payload.get("progress") or {})),
         global_settings=payload.get("global_settings", {}),
         cost_budget=payload.get("cost_budget"),
         total_cost=payload.get("total_cost", 0.0),
@@ -189,7 +230,7 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
     session = SessionLocal()
     task: Optional[Task] = None
     try:
-        payload = {
+        payload = attach_project_plan_contract({
             "project_id": project_id,
             "user_prompt": request.user_prompt,
             "target_duration_seconds": request.target_duration_seconds,
@@ -204,7 +245,9 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             "visual_style": request.visual_style,
             "tone_and_mood": request.tone_and_mood,
             "additional_notes": request.additional_notes,
-        }
+            "auto_generate_scripts": bool(request.auto_generate_scripts),
+            "generate_character_references": bool(request.generate_character_references),
+        })
 
         task = _create_task(
             session,
@@ -213,28 +256,48 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             task_type=TaskType.SCRIPT_WRITING,
             input_params=payload,
         )
-
-        from ....agents.utils.llm_policy import LLMPolicyManager
-
-        policy_path = (
-            Path(__file__).resolve()
-            .parents[3]
-            .joinpath('config', 'llm_policies.yaml')
-        )
-        policy_manager = LLMPolicyManager(str(policy_path))
-        planner_llms = policy_manager.build_llms_for_agent('series_planner')
-
-        planner = SeriesPlannerAgent(llms=planner_llms)
-        await planner.execute(
-            task=task,
-            input_data=payload,
-            db=session,
-            execution_order=1,
-        )
-
-        task.status = TaskStatus.COMPLETED.value
-        task.update_progress("Series plan completed", 100)
+        task.status = TaskStatus.QUEUED.value
+        task.update_progress("Project planning queued", 0)
         session.commit()
+
+        # Bootstrap a placeholder project state immediately so the frontend can navigate
+        # without waiting for LLM planning to finish.
+        per_episode_cap = int(request.episode_cap_seconds or 60) or 60
+        min_episode_duration = int(request.episode_min_seconds or 45) or 45
+        target_duration = max(60, int(request.target_duration_seconds))
+        episodes_count = max(1, math.ceil(target_duration / per_episode_cap))
+        planned_episode_duration = max(min_episode_duration, min(per_episode_cap, target_duration // episodes_count))
+
+        story_plan = StoryPlan(
+            project_id=project_id,
+            user_prompt=request.user_prompt,
+            target_duration_seconds=target_duration,
+            aspect_ratio=request.aspect_ratio,
+        )
+        remainder = target_duration
+        for index in range(episodes_count):
+            target_for_episode = planned_episode_duration
+            if index == episodes_count - 1:
+                target_for_episode = remainder
+            remainder = max(0, remainder - target_for_episode)
+            story_plan.add_episode(EpisodePlan.create(index, f"Episode {index + 1}", target_for_episode, summary=""))
+
+        project_state = ProjectState(
+            project_id=project_id,
+            mode=request.mode,
+            story_plan=story_plan,
+            global_settings={
+                "resolution": request.resolution,
+                "style_preference": request.style_preference,
+            },
+        )
+        project_state.progress.planning.status = ProjectOperationState.QUEUED
+        project_state.progress.planning.task_id = str(task.task_id)
+        project_state_repository.save(project_state)
+
+        celery_task_id = _schedule_project_plan(task.id)
+        if not celery_task_id:
+            raise RuntimeError("Failed to queue project planning job")
 
     except Exception as exc:  # noqa: BLE001
         session.rollback()
@@ -243,15 +306,24 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
             task.status = TaskStatus.FAILED.value
             task.error_message = str(exc)
             session.commit()
+        project_state = project_state_repository.get(project_id)
+        if project_state:
+            project_state.progress.planning.status = ProjectOperationState.FAILED
+            project_state.progress.planning.error = str(exc)
+            project_state_repository.save(project_state)
         raise HTTPException(status_code=500, detail=f"Failed to create project plan: {exc}") from exc
     finally:
         session.close()
 
     project_state = project_state_repository.get(project_id)
     if not project_state:
-        raise HTTPException(status_code=500, detail="Project plan not found after generation")
+        raise HTTPException(status_code=500, detail="Project plan not found after queuing")
 
-    return ProjectCreateResponse(project=_serialize_project_state(project_state))
+    return ProjectCreateResponse(
+        project=_serialize_project_state(project_state),
+        task_id=str(task.task_id) if task else None,
+        status=str(task.status) if task else None,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectStateResponse)
@@ -286,13 +358,19 @@ async def orchestrate_project(
     project_state = project_state_repository.get(project_id)
     if not project_state:
         raise HTTPException(status_code=404, detail="Project not found")
+    planning_status = (project_state.progress.planning.status.value if project_state.progress else None)
+    if planning_status in {"queued", "in_progress"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project planning in progress; please retry after it completes.",
+        )
 
     session = SessionLocal()
     task: Optional[Task] = None
     task_identifier: str = ""
     task_status_value: Optional[str] = None
     try:
-        payload = request.dict()
+        payload = request.model_dump()
         payload["project_id"] = project_id
         payload["mode"] = GenerationMode.PROJECT.value
         auto_approve = bool(payload.get("auto_approve", False))
@@ -324,28 +402,31 @@ async def orchestrate_project(
         for ep in to_mark:
             runtime = project_state.ensure_runtime_state(ep.episode_id)
 
-            should_run = False
-            if force_rerun:
-                should_run = True
-            elif runtime.status in {
-                EpisodeStatus.APPROVED,
-                EpisodeStatus.NEEDS_REVISION,
-                EpisodeStatus.FAILED,
+            if auto_approve and ep.status in {
+                EpisodeEditorialStatus.DRAFT,
+                EpisodeEditorialStatus.PENDING_APPROVAL,
             }:
-                should_run = True
-            elif auto_approve and runtime.status in {
-                EpisodeStatus.DRAFT,
-                EpisodeStatus.PENDING_APPROVAL,
-            }:
-                runtime.status = EpisodeStatus.APPROVED
+                ep.status = EpisodeEditorialStatus.APPROVED
                 runtime.error = None
-                ep.status = EpisodeStatus.APPROVED
+
+            should_run = False
+            if ep.status == EpisodeEditorialStatus.APPROVED and force_rerun:
+                should_run = True
+            elif ep.status == EpisodeEditorialStatus.APPROVED and runtime.status in {
+                EpisodeExecutionStatus.IDLE,
+                EpisodeExecutionStatus.STALE,
+                EpisodeExecutionStatus.FAILED,
+                EpisodeExecutionStatus.COMPLETED,
+            }:
                 should_run = True
 
-            if should_run:
-                runtime.status = EpisodeStatus.GENERATING
+            if runtime.status == EpisodeExecutionStatus.GENERATING:
+                runtime.status = EpisodeExecutionStatus.STALE
                 runtime.error = None
-                ep.status = EpisodeStatus.GENERATING
+
+            if should_run:
+                runtime.status = EpisodeExecutionStatus.GENERATING
+                runtime.error = None
         project_state_repository.save(project_state)
 
     except Exception as exc:  # noqa: BLE001
@@ -363,7 +444,9 @@ async def orchestrate_project(
     finally:
         session.close()
 
-    background_tasks.add_task(_schedule_episode_orchestration, task.id if task else None, payload)
+    if task is not None:
+        task_queue = TaskQueueService()
+        background_tasks.add_task(task_queue.queue_task, task.id)
 
     status_value = task_status_value or TaskStatus.FAILED.value
     return EpisodeGenerationResponse(
@@ -372,51 +455,3 @@ async def orchestrate_project(
         result={},
         project=_serialize_project_state(project_state_repository.get(project_id) or project_state),
     )
-
-
-def _schedule_episode_orchestration(task_db_id: Optional[int], payload: Dict[str, Any]) -> None:
-    if task_db_id is None:
-        return
-    import asyncio
-    import threading
-
-    def runner() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(_run_episode_orchestration(task_db_id, payload))
-        finally:
-            loop.close()
-
-    threading.Thread(target=runner, name=f"episode-orch-{task_db_id}", daemon=True).start()
-
-
-async def _run_episode_orchestration(task_db_id: int, payload: Dict[str, Any]) -> None:
-    session = SessionLocal()
-    task: Optional[Task] = None
-    try:
-        task = session.get(Task, task_db_id)
-        if not task:
-            return
-        task.status = TaskStatus.IN_PROGRESS.value
-        session.commit()
-
-        mode = resolve_generation_mode(payload.get("mode"), route_default=GenerationMode.PROJECT)
-        await dispatch_generation(
-            mode,
-            task=task,
-            input_data=payload,
-            db=session,
-            execution_order=1,
-        )
-
-        session.commit()
-
-    except Exception as exc:  # noqa: BLE001
-        session.rollback()
-        if task:
-            task.status = TaskStatus.FAILED.value
-            task.error_message = str(exc)
-            session.commit()
-    finally:
-        session.close()

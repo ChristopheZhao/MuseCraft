@@ -8,7 +8,7 @@ from typing import Any, Dict
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType
+from ..models import Task, AgentType
 
 
 class EpisodeScriptPlannerAgent(BaseAgent):
@@ -28,7 +28,6 @@ class EpisodeScriptPlannerAgent(BaseAgent):
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
     ) -> Dict[str, Any]:
         self._validate_input(

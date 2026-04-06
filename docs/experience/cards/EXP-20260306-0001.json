@@ -1,0 +1,60 @@
+{
+  "id": "EXP-20260306-0001",
+  "created_at": "2026-03-06T15:17:33Z",
+  "updated_at": "2026-03-06T15:29:35Z",
+  "title": "避免将多Agent编排退化为模式枚举与布尔路由",
+  "problem_signature": "围绕音频Agent是否加入active pool，出现 strategy/mode/fallback 与 run_audio_agent/video_generate_audio 双布尔控制，导致编排权分散到门控与工具层，orchestrator被弱化。",
+  "problem_signature_norm": "围绕音频agent是否加入active pool，出现 strategy/mode/fallback 与 run_audio_agent/video_generate_audio 双布尔控制，导致编排权分散到门控与工具层，orchestrator被弱化。",
+  "decision_rules": [
+    "编排决策单点归属orchestrator；门控只输出达标判定信号，不直接启停agent。",
+    "工具层只做本地输入输出契约与执行，不读取全局策略做跨agent裁决。",
+    "fallback定义为运行时重编排行为（retry/switch/expand/replan），不是preflight模式名。",
+    "active pool保持最小语义：include/exclude + reason，避免跨agent布尔耦合膨胀。",
+    "能力声明（supports_native_audio）只用于初始规划，不等价于结果保证。",
+    "明确拆分音频语义：global_bgm 与 scene_voiceover，禁止混用同一门控规则。"
+  ],
+  "review_checklist": [
+    "是否存在可被单一全局变量等价替代的编排决策？",
+    "模式名与实际运行行为是否一一对应、可观测？",
+    "门控是否仅产出 pass/fail/confidence/reason，而非直接改编排？",
+    "工具是否在不知道全局策略时仍可独立正确执行？",
+    "是否出现 run_xxx/use_xxx 布尔字段随agent数量线性增长？",
+    "fallback是否在执行后触发，而不是preflight命名？",
+    "global_bgm 与 scene_voiceover 是否被分开建模与验收？"
+  ],
+  "source_event_refs": [
+    "docs/experience/sources/2026-03-06-audio-orchestration-thread.md#boundary-thread",
+    "docs/experience/sources/2026-03-06-audio-orchestration-thread.md#p1-review-followup"
+  ],
+  "doc_refs": [
+    "backend/app/agents/orchestrator.py#L1263",
+    "backend/app/agents/orchestrator.py#L1284",
+    "backend/app/agents/tools/ai_services/video_generation_tool_v2.py#L1010",
+    "backend/app/agents/tools/video_composition/composition_tool.py#L374"
+  ],
+  "tags": [
+    "orchestrator",
+    "multi-agent",
+    "gating-boundary",
+    "anti-hardcode",
+    "fallback-semantics"
+  ],
+  "context_constraints": [
+    "适用于多agent系统从预定义流程向自主编排迁移阶段",
+    "允许短期工程化先验，但必须有退场机制"
+  ],
+  "anti_patterns": [
+    "把fallback当预定义模式而非运行时动作",
+    "用跨agent全局布尔字段替代计划模型",
+    "在门控/工具层重复实现编排策略"
+  ],
+  "outcome": "统一了编排边界：约束结果目标而非执行路径，降低系统滑向hardcoded workflow的风险。",
+  "confidence": "high",
+  "owner": "codex",
+  "capture_meta": {
+    "trigger_mode": "manual-explicit",
+    "confirmed_by_user": true,
+    "confirmed_at": "2026-03-06T15:29:35Z",
+    "confirmation_note": "User explicitly requested experience record summarization and confirmed persistence."
+  }
+}

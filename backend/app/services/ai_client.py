@@ -298,10 +298,18 @@ class AIClient:
             from zhipuai import ZhipuAI
             
             client = ZhipuAI(api_key=settings.GLM_API_KEY)
+
+            configured_video_model = (getattr(settings, "COGVIDEOX3_MODEL", None) or "").strip()
+            model_override = kwargs.get("model")
+            target_model = model_override or configured_video_model
+            if not target_model:
+                raise AIClientError(
+                    "GLM video model is not configured; set COGVIDEOX3_MODEL in env/config or pass model explicitly"
+                )
             
             # Prepare request parameters - use CogVideoX-3 API format
             video_params = {
-                "model": kwargs.get("model", "cogvideox-3"),  # 升级到 cogvideox-3
+                "model": target_model,
                 "prompt": prompt,
             }
             
@@ -338,7 +346,7 @@ class AIClient:
             self.logger.info(f"GLM video generation started, task_id: {response.id}, status: {response.task_status}")
             
             # Poll for completion (GLM CogVideoX is async)
-            return await self._poll_glm_video_generation(client, response.id, prompt)
+            return await self._poll_glm_video_generation(client, response.id, prompt, target_model)
                 
         except Exception as e:
             self.logger.error(f"GLM video generation failed: {str(e)}")
@@ -349,6 +357,7 @@ class AIClient:
         client,
         task_id: str,
         prompt: str,
+        model: Optional[str] = None,
         max_wait: int = 600  # 10 minutes for video generation
     ) -> Dict[str, Any]:
         """Poll GLM CogVideoX API for video generation completion"""
@@ -370,7 +379,7 @@ class AIClient:
                             "video_url": video_data.url,
                             "task_id": task_id,
                             "status": "completed",
-                            "model": "cogvideox",
+                            "model": model,
                             "prompt": prompt,
                             "cover_image_url": getattr(video_data, 'cover_image_url', None)
                         }

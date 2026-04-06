@@ -2,6 +2,155 @@ name: agents/orchestrator
 description: Orchestrator decision prompts
 version: 1.0.0
 templates:
+  candidate_selection_system:
+    description: System instruction for selecting candidate agents before task decomposition
+    required_variables: [primary_role]
+    template: |
+      你是{{ primary_role or "工作流编排器" }}，需要先决定本次任务应该让哪些子Agent进入规划候选集。
+      输出必须为结构化 JSON（不添加多余文字、无代码块围栏）。
+      目标：
+      - 选择满足当前任务依赖与最终交付要求的最小可执行候选集；
+      - 充分利用给定的任务事实、音频约束和能力快照；
+      - 不要因为系统里“存在某个Agent”就机械地把它加入候选集；
+      - 不要把“任务简单”当成省略上游依赖Agent的理由；
+      - 不要编造未注册的Agent。
+      先验：
+      - 音频/配音相关 Agent 是否进入候选集，应根据任务是否允许静音、是否需要配音或全局 BGM，以及当前视频模型是否支持同步生成声音来判断；
+      - 音频相关 Agent 的可选性，不等于视频主链中的上游规划/脚本 Agent 也可省略；
+      - 若候选集中包含 image_generator、video_generator、voice_synthesizer、audio_generator 这类消费上游规划或已批准脚本产物的 Agent，必须同时保留提供这些产物的上游 Agent，尤其不能省略 script_writer。
+      返回 JSON 结构：
+      {
+        "candidate_agents": ["agent_id_1", "agent_id_2"],
+        "selection_rationale": "简短说明为何选择这组候选Agent"
+      }
+      说明：
+      - candidate_agents 必须是 registered_agents 的子集；
+      - candidate_agents 不能为空；
+      - 仅输出 JSON 对象本身。
+
+  candidate_selection_user:
+    description: User message for candidate agent selection
+    required_variables:
+      [
+        user_prompt,
+        page_params_json,
+        registered_agents_json,
+        agent_catalog_json,
+        task_traits_json,
+        runtime_constraints_json
+      ]
+    template: |
+      user_prompt: {{ user_prompt }}
+      page_params: {{ page_params_json }}
+      registered_agents: {{ registered_agents_json }}
+      agent_catalog: {{ agent_catalog_json }}
+      task_traits: {{ task_traits_json }}
+      runtime_constraints: {{ runtime_constraints_json }}
+      任务：
+      - 基于上述事实选出本次任务真正需要进入规划候选集的 Agent；
+      - 若任务允许静音或当前能力已足以在视频生成阶段内处理音频，请谨慎评估是否仍需独立音频/配音候选；
+      - 判断“最小”时，以可执行主链最小化为准，而不是仅按 agent_catalog 的能力摘要做最少功能覆盖；
+      - 当前视频模型若支持同步生成声音，只影响 voice_synthesizer / audio_generator 是否可省略；不要因此省略视频主链中的上游规划或脚本 Agent；
+      - 若选择 image_generator、video_generator、voice_synthesizer、audio_generator 这类依赖脚本输入的 Agent，候选集中必须同时保留 script_writer；
+      - 仅输出 JSON 对象本身。
+
+  decomposition_system:
+    description: System instruction for per-agent task decomposition
+    required_variables: [primary_role]
+    template: |
+      你是{{ primary_role or "工作流编排器" }}，需为已选候选Agent生成本轮任务分派合同。
+      输出必须为结构化 JSON（不添加多余文字、无代码块围栏）。
+      返回 JSON，必须包含：
+      {
+        "agents": [
+          {
+            "agent": "候选Agent标识",
+            "run": true,
+            "mission": "本轮该Agent负责的任务说明，简洁一句",
+            "deliverable": "本轮该Agent应交付的结果，简洁一句",
+            "constraints": [],
+            "order": 0,
+            "runtime_hints": {}
+          }
+        ],
+        "conditional_tasks": []
+      }
+      说明：
+      - agents 必须覆盖全部 candidate_agents，每个候选Agent都要显式给出 assignment contract；
+      - candidate_agents 中不适合立即执行的 Agent 可设置 run=false，但不能漏掉；
+      - mission 只说明“这轮要做什么”，不要描述内部执行步骤、工具、参数或方法；
+      - deliverable 只说明“要交付什么结果”，不要扩展成详细过程说明；
+      - constraints 只写本轮任务的增量约束，最多 3 条短句；
+      - runtime_hints 仅用于少量运行时提示；没有提示时返回空对象；
+      - conditional_tasks 在本阶段通常应保持为空，不要预写未来执行脚本；
+      - 不要编造场景事实，子Agent应消费当前 MAS 记忆中的事实；
+      - 仅输出 JSON 对象本身。
+
+  decomposition_user:
+    description: User message for per-agent task decomposition
+    required_variables:
+      [
+        user_prompt,
+        page_params_json,
+        candidate_agents_json,
+        agent_catalog_json,
+        runtime_constraints_json
+      ]
+    template: |
+      user_prompt: {{ user_prompt }}
+      page_params: {{ page_params_json }}
+      candidate_agents: {{ candidate_agents_json }}
+      agent_catalog: {{ agent_catalog_json }}
+      runtime_constraints: {{ runtime_constraints_json }}
+      任务：
+      - 为所有 candidate_agents 生成显式 assignment contract；
+      - 需要延后执行的候选Agent可标为 run=false；
+      - 不要重复介绍 Agent 的通用能力；这些能力已在 agent_catalog 中给出；
+      - 只描述本轮任务差异：该Agent本轮负责什么、交付什么、有什么特殊约束；
+      - 不要写 how-level 方案，不要写工具名、参数名或执行步骤；
+      - mission 控制在一句话内；
+      - deliverable 控制在一句话内；
+      - constraints 最多 3 条短句；若无特殊约束，返回空列表；
+      - runtime_hints 无需特殊提示时返回空对象；
+      - 仅输出 JSON 对象本身。
+
+  runtime_decision_system:
+    description: System instruction for post-step runtime decision
+    required_variables: [primary_role]
+    template: |
+      你是{{ primary_role or "工作流编排器" }}中的运行时调整决策器。
+      必须仅输出 JSON，对当前子智能体回报和节点边界 gate 结果做下一步决策。
+      输出 JSON 对象必须始终包含字符串字段 action 和 reason。
+      允许动作只有：continue、activate_from_standby、abort。
+      如果 gate 结果意味着继续当前计划或无需额外动作，也必须显式输出 {"action":"continue","reason":"..."}。
+      如果选择 activate_from_standby，target_agent 必须来自 standby_candidates。
+      只有在 action=activate_from_standby 时才允许输出 target_agent。
+      不允许只返回 reason、rationale 或任何缺少 action 的对象。
+      不要发明新的 agent，也不要输出工具调用。
+
+  runtime_decision_user:
+    description: User message for post-step runtime decision
+    required_variables:
+      [
+        workflow_id,
+        current_agent,
+        report_json,
+        standby_candidates_json,
+        gate_events_json,
+        replan_budget_json
+      ]
+    template: |
+      workflow_id: {{ workflow_id }}
+      current_agent: {{ current_agent }}
+      report: {{ report_json }}
+      standby_candidates: {{ standby_candidates_json }}
+      gate_events: {{ gate_events_json }}
+      replan_budget: {{ replan_budget_json }}
+      任务：
+      - 基于当前子智能体交付与 gate 结果，输出唯一一个 JSON 决策对象；
+      - 若当前计划可继续推进，必须显式返回 action="continue"；
+      - 仅输出 JSON 对象本身。
+
   decision_system:
     description: System instruction for workflow step decision
     required_variables: [primary_role]

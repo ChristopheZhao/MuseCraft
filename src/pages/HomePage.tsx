@@ -4,14 +4,13 @@ import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import VideoRequestForm from '@/components/forms/VideoRequestForm';
-import AgentOrchestrator from '@/components/agents/AgentOrchestrator';
-import RealTimeProgress from '@/components/progress/RealTimeProgress';
 import VideoPlayer from '@/components/video/VideoPlayer';
 import ExportInterface from '@/components/video/ExportInterface';
 import { useI18n } from '@/i18n/I18nProvider';
 import { useTaskPolling } from '@/hooks/useTaskPolling';
 import ResultOverlay from '@/components/video/ResultOverlay';
 import ProjectModeView from '@/components/project/ProjectModeView';
+import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
 
 const HomePage: React.FC = () => {
   const { ui, currentRequest, finalVideoUrl, mode, setMode, setCurrentStep } = useAppStore();
@@ -33,17 +32,7 @@ const HomePage: React.FC = () => {
         );
 
       case 'processing':
-        return (
-          <div className="flex-1 flex flex-col gap-6 overflow-auto">
-            {/* Agent Status & Progress (full width) */}
-            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 mt-2">
-              <AgentOrchestrator />
-            </div>
-            <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
-              <RealTimeProgress />
-            </div>
-          </div>
-        );
+        return <QuickModeWorkspace />;
 
       case 'review':
         return (

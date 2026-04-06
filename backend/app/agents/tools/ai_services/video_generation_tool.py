@@ -79,11 +79,7 @@ class VideoGenerationTool(AsyncTool):
             "optimize_parameters"
         ]
 
-    def get_action_stage(self, action: str) -> str:
-        """声明动作阶段：分析/优化为 plan，生成为 act。"""
-        if action == "generate":
-            return "act"
-        return "plan"
+    # 取消阶段语义：工具仅具有执行属性
     
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         schemas = {

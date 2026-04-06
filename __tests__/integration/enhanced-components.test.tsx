@@ -275,146 +275,114 @@ describe('Enhanced React Components Integration Tests', () => {
     })
   })
 
-  describe('Real-time Communication Integration', () => {
-    it('should handle WebSocket connection lifecycle and message processing', async () => {
-      // Mock WebSocket
-      const mockWS = new (global as any).WebSocket('ws://localhost:8000/ws')
-      
+  describe('Runtime Read-Model Integration', () => {
+    it('should render progress from quickRuntime while keeping telemetry auxiliary', async () => {
+      mockStore.currentRequest = {
+        id: 'test-request-123',
+        title: 'Sustainable Technology Video',
+      }
+      mockStore.agents = [
+        {
+          id: 'concept-generator',
+          name: 'Concept Generator',
+          type: 'concept-generator',
+          status: 'working',
+          progress: 45,
+          description: 'Generates concepts',
+          capabilities: ['concept-generation'],
+          currentTask: 'Analyzing sustainability concepts',
+        }
+      ]
+      mockStore.quickRuntime = {
+        session_id: 1,
+        task_db_id: 1,
+        mode: 'quick',
+        status: 'running',
+        current_node_key: 'concept',
+        summary_output: {},
+        nodes: [
+          {
+            id: 1,
+            node_key: 'concept',
+            node_type: 'agent',
+            order_index: 0,
+            scope_type: 'session',
+            status: 'running',
+            revision_index: 0,
+            gate_required: false,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+          {
+            id: 2,
+            node_key: 'script',
+            node_type: 'agent',
+            order_index: 1,
+            scope_type: 'session',
+            status: 'queued',
+            revision_index: 0,
+            gate_required: false,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+        ],
+        active_gate: null,
+      }
+
       render(<RealTimeProgress />)
-      
-      // Initial disconnected state
-      expect(mockStore.setWSConnected).toHaveBeenCalledWith(false)
-      
-      // Simulate connection
-      act(() => {
-        mockStore.wsConnected = true
-        if (mockWS.onopen) {
-          mockWS.onopen(new Event('open'))
-        }
-      })
-      
-      // Should show connected status
-      expect(screen.getByText(/connected/i)).toBeInTheDocument()
-      
-      // Simulate progress update message
-      act(() => {
-        mockWS.simulateMessage({
-          type: 'progress-update',
-          data: {
-            task_id: 'test-task-123',
-            agent_id: 'concept-generator',
-            progress: 75,
-            status: 'working',
-            current_task: 'Refining concept details',
-            estimated_time_remaining: 45
-          }
-        })
-      })
-      
-      // Should update agent progress
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('concept-generator', {
-        progress: 75,
-        status: 'working',
-        currentTask: 'Refining concept details',
-        estimatedTime: 45
-      })
-      
-      // Simulate agent completion message
-      act(() => {
-        mockWS.simulateMessage({
-          type: 'agent-status-update',
-          data: {
-            agent_id: 'concept-generator',
-            status: 'completed',
-            progress: 100,
-            result: {
-              concept: 'Innovative sustainability narrative',
-              themes: ['renewable energy', 'green technology', 'future cities']
-            }
-          }
-        })
-      })
-      
-      // Should update agent status and add result
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('concept-generator', {
-        status: 'completed',
-        progress: 100
-      })
-      
-      // Simulate connection error and reconnection
-      act(() => {
-        mockStore.wsConnected = false
-        if (mockWS.onclose) {
-          mockWS.onclose(new CloseEvent('close', { code: 1006, reason: 'Connection lost' }))
-        }
-      })
-      
-      expect(screen.getByText(/disconnected/i)).toBeInTheDocument()
-      expect(screen.getByText(/reconnecting/i)).toBeInTheDocument()
+
+      expect(screen.getByText(/Sustainable Technology Video/i)).toBeInTheDocument()
+      expect(screen.getByText(/概念规划/)).toBeInTheDocument()
+      expect(screen.getByText(/WS 遥测仅作辅助/)).toBeInTheDocument()
     })
 
-    it('should handle concurrent agent updates and state synchronization', async () => {
-      const initialAgents = [
-        { id: 'concept-generator', status: 'working', progress: 30 },
-        { id: 'script-writer', status: 'waiting', progress: 0 },
-        { id: 'image-generator', status: 'waiting', progress: 0 }
-      ]
-      
-      mockStore.agents = initialAgents
-      
-      const mockWS = new (global as any).WebSocket('ws://localhost:8000/ws')
-      render(<AgentOrchestrator />)
-      
-      // Simulate multiple concurrent updates
-      act(() => {
-        // Agent 1 progress update
-        mockWS.simulateMessage({
-          type: 'progress-update',
-          data: {
-            agent_id: 'concept-generator',
-            progress: 85,
-            status: 'working'
-          }
-        })
-        
-        // Agent 2 starts working
-        mockWS.simulateMessage({
-          type: 'agent-status-update',
-          data: {
-            agent_id: 'script-writer',
-            status: 'working',
-            progress: 15,
-            current_task: 'Analyzing concept for script structure'
-          }
-        })
-        
-        // Agent 1 completes
-        mockWS.simulateMessage({
-          type: 'agent-status-update',
-          data: {
-            agent_id: 'concept-generator',
+    it('should render orchestration nodes from quickRuntime instead of websocket fixture state', async () => {
+      mockStore.currentRequest = {
+        id: 'test-request-123',
+        title: 'Sustainable Technology Video',
+      }
+      mockStore.quickRuntime = {
+        session_id: 1,
+        task_db_id: 1,
+        mode: 'quick',
+        status: 'running',
+        current_node_key: 'script',
+        summary_output: {},
+        nodes: [
+          {
+            id: 1,
+            node_key: 'concept',
+            node_type: 'agent',
+            order_index: 0,
+            scope_type: 'session',
             status: 'completed',
-            progress: 100
-          }
-        })
-      })
-      
-      // Verify all updates were processed correctly
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('concept-generator', {
-        progress: 85,
-        status: 'working'
-      })
-      
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('script-writer', {
-        status: 'working',
-        progress: 15,
-        currentTask: 'Analyzing concept for script structure'
-      })
-      
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('concept-generator', {
-        status: 'completed',
-        progress: 100
-      })
+            revision_index: 0,
+            gate_required: false,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+          {
+            id: 2,
+            node_key: 'script',
+            node_type: 'agent',
+            order_index: 1,
+            scope_type: 'session',
+            status: 'running',
+            revision_index: 0,
+            gate_required: false,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+        ],
+        active_gate: null,
+      }
+
+      render(<AgentOrchestrator />)
+
+      expect(screen.getByText(/当前运行节点：脚本创作/)).toBeInTheDocument()
+      expect(screen.getByText(/概念规划/)).toBeInTheDocument()
+      expect(screen.getByText(/脚本创作/)).toBeInTheDocument()
+      expect(screen.getAllByText(/completed|running/).length).toBeGreaterThan(0)
     })
   })
 

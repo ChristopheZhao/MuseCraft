@@ -76,7 +76,7 @@ class SceneContinuityPreparationTool(AsyncTool):
                     },
                     "workflow_state_id": {
                         "type": "string",
-                        "description": "可选：明确指定 WorkflowState，确保连续性解析限定在当前任务内"
+                        "description": "可选：Workflow id（由调用方控制），工具本身不读取共享记忆"
                     }
                 },
                 "required": ["scene_number"],
@@ -139,54 +139,13 @@ class SceneContinuityPreparationTool(AsyncTool):
                     video_url=url_in,
                     memory_scene_number=None
                 )
-                if not final_frame_result.get("success"):
-                    # 覆盖URL失败（如403）：尝试按依赖自动解析（内存/上游视频/last_frame_url）作为兜底
-                    try:
-                        from ....core.workflow_state import workflow_manager
-                        prev_scene_no_fb: Optional[int] = None
-                        current_scene_image_url_fb: str = ""
-                        for wf in workflow_manager.get_active_workflows():
-                            sc = wf.get_scene(scene_number)
-                            if sc is not None:
-                                current_scene_image_url_fb = getattr(sc, 'image_url', '') or ''
-                                depv = getattr(sc, 'depends_on_scene', None)
-                                if isinstance(depv, (int, str)) and str(depv).isdigit():
-                                    prev_scene_no_fb = int(depv)
-                                break
-                        if prev_scene_no_fb is not None:
-                            # 先查内存
-                            alt = await self._extract_final_frame(video_url=None, memory_scene_number=prev_scene_no_fb)
-                            if alt.get('success') and isinstance(alt.get('frame_data'), str):
-                                fd = alt.get('frame_data')
-                                if fd.startswith('http'):
-                                    self.logger.info("♻️  覆盖URL失败，复用内存中的连续性帧URL")
-                                    return {
-                                        "success": True,
-                                        "scene_number": scene_number,
-                                        "image_url": fd,
-                                        "continuity_used": True,
-                                        "processing_type": "continuity_frame_reuse",
-                                        "message": f"场景 {scene_number} 复用上游已存连续性帧"
-                                    }
-                                # 非URL：上传后复用
-                                up = await self._upload_frame_to_oss(fd, scene_number)
-                                if up.get('success'):
-                                    return {
-                                        "success": True,
-                                        "scene_number": scene_number,
-                                        "image_url": up.get('url'),
-                                        "continuity_used": True,
-                                        "processing_type": "continuity_frame_reuse",
-                                        "message": f"场景 {scene_number} 复用上游已存连续性帧（上传后）"
-                                    }
-                        # 仍不可用：保留原有兜底（fallback_image_url 或当前场景 image_url）
-                    except Exception:
-                        pass
+                frame_data = final_frame_result.get("frame_data") if isinstance(final_frame_result, dict) else None
+                if not frame_data:
+                    # 覆盖URL失败：不再依赖 shared_wm，直接回退
                     raise ToolError(
-                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
+                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error') if isinstance(final_frame_result, dict) else 'Unknown error'}",
                         self.metadata.name
                     )
-                frame_data = final_frame_result["frame_data"]
                 upload_result = await self._upload_frame_to_oss(frame_data, scene_number)
                 if not upload_result.get("success"):
                     raise ToolError(
@@ -217,28 +176,14 @@ class SceneContinuityPreparationTool(AsyncTool):
                     "warning": f"当前场景尾帧处理失败，使用兜底图像"
                 }
 
-        # 自动依赖解析：根据 WorkflowState 的 depends_on_scene 查找上游视频
+        # 自动依赖解析：依赖由调用方上下文注入（参数），不再读取 shared_wm
         prev_scene_no: Optional[int] = None
         current_scene_image_url: str = ""
         try:
-            from ....core.workflow_state import workflow_manager
-            # 遍历活跃工作流，定位包含该场景的工作流
-            candidate_wf = None
-            for wf in workflow_manager.get_active_workflows():
-                sc = wf.get_scene(scene_number)
-                if sc is not None:
-                    candidate_wf = wf
-                    break
-            if candidate_wf is not None:
-                cur_sc = candidate_wf.get_scene(scene_number)
-                current_scene_image_url = getattr(cur_sc, 'image_url', '') or ''
-                dep = getattr(cur_sc, 'depends_on_scene', None)
-                if isinstance(dep, (int, str)):
-                    try:
-                        dep = int(dep) if dep is not None else None
-                    except Exception:
-                        dep = None
-                prev_scene_no = dep if (isinstance(dep, int) and dep > 0) else None
+            prev_scene_no_param = params.get("depends_on_scene")
+            if isinstance(prev_scene_no_param, (int, str)) and str(prev_scene_no_param).isdigit():
+                prev_scene_no = int(prev_scene_no_param)
+            current_scene_image_url = params.get("current_scene_image_url") or fallback_image_url or ""
         except Exception:
             prev_scene_no = None
 
@@ -268,57 +213,33 @@ class SceneContinuityPreparationTool(AsyncTool):
                 memory_scene_number=prev_scene_no
             )
             frame_data: Optional[str] = None
-            if final_frame_result.get("success"):
+            if isinstance(final_frame_result, dict):
                 frame_data = final_frame_result.get("frame_data")
-                # 若返回的是直链URL（非data_url），可直接复用，无需再次上传
-                if isinstance(frame_data, str) and frame_data.startswith("http"):
-                    self.logger.info("♻️  复用已存在的连续性帧URL（跳过上传）")
-                    return {
-                        "success": True,
-                        "scene_number": scene_number,
-                        "image_url": frame_data,
-                        "continuity_used": True,
-                        "processing_type": "continuity_frame_reuse",
-                        "previous_scene": prev_scene_no,
-                        "frame_extraction_info": final_frame_result.get("extraction_info", {}),
-                        "message": f"场景 {scene_number} 复用上游已存连续性帧"
-                    }
+            # 若返回的是直链URL（非data_url），可直接复用，无需再次上传
+            if isinstance(frame_data, str) and frame_data.startswith("http"):
+                self.logger.info("♻️  复用已存在的连续性帧URL（跳过上传）")
+                return {
+                    "success": True,
+                    "scene_number": scene_number,
+                    "image_url": frame_data,
+                    "continuity_used": True,
+                    "processing_type": "continuity_frame_reuse",
+                    "previous_scene": prev_scene_no,
+                    "frame_extraction_info": final_frame_result.get("extraction_info", {}) if isinstance(final_frame_result, dict) else {},
+                    "message": f"场景 {scene_number} 复用上游已存连续性帧"
+                }
             # 2) 若内存无可用帧，则尝试从上游视频提帧
             if not frame_data:
                 prev_video_url = None
                 prev_video_path = None
-                try:
-                    # 再次获取workflow以查找上游视频产物
-                    from ....core.workflow_state import workflow_manager
-                    for wf in workflow_manager.get_active_workflows():
-                        sc_prev = wf.get_scene(prev_scene_no) if prev_scene_no else None
-                        if sc_prev is not None:
-                            prev_video_url = getattr(sc_prev, 'video_url', '') or ''
-                            prev_video_path = getattr(sc_prev, 'video_path', '') or ''
-                            # 优先使用 URL；若无URL则使用本地路径
-                            break
-                except Exception:
-                    prev_video_url, prev_video_path = None, None
+                # 由调用方提供上游视频源，工具不再读取 shared_wm
+                prev_video_url = params.get("previous_scene_video_url") or None
+                prev_video_path = params.get("previous_scene_video_path") or None
 
                 source = prev_video_url or prev_video_path
                 if not source:
                     # 兜底：若上游无视频，也许已存 last_frame_url 可直接复用
-                    try:
-                        from ....core.workflow_state import workflow_manager
-                        for wf in workflow_manager.get_active_workflows():
-                            sc_prev = wf.get_scene(prev_scene_no) if prev_scene_no else None
-                            if sc_prev is not None and getattr(sc_prev, 'last_frame_url', ''):
-                                return {
-                                    "success": True,
-                                    "scene_number": scene_number,
-                                    "image_url": getattr(sc_prev, 'last_frame_url'),
-                                    "continuity_used": True,
-                                    "processing_type": "continuity_frame_reuse",
-                                    "previous_scene": prev_scene_no,
-                                    "message": f"场景 {scene_number} 复用上游 last_frame_url"
-                                }
-                    except Exception:
-                        pass
+                    # 不再依赖 WorkflowState.last_frame_url；前面已尝试从内存/上游视频提帧
                     # 仍不可用：回退到兜底图像
                     fallback = fallback_image_url or current_scene_image_url
                     return {
@@ -335,9 +256,9 @@ class SceneContinuityPreparationTool(AsyncTool):
                     video_url=source,
                     memory_scene_number=prev_scene_no
                 )
-                if not final_frame_result.get("success"):
+                if not isinstance(final_frame_result, dict) or not final_frame_result.get("frame_data"):
                     raise ToolError(
-                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error')}",
+                        f"Failed to extract final frame: {final_frame_result.get('error', 'Unknown error') if isinstance(final_frame_result, dict) else 'Unknown error'}",
                         self.metadata.name
                     )
                 frame_data = final_frame_result["frame_data"]
@@ -403,8 +324,7 @@ class SceneContinuityPreparationTool(AsyncTool):
                         if isinstance(payload, dict):
                             if payload.get("format") == "data_url" and payload.get("data_url"):
                                 return {
-                                    "success": True,
-                                    "frame_data": payload.get("data_url"),  # 直接返回data_url，便于上传
+                                    "frame_data": payload.get("data_url"),
                                     "extraction_info": {
                                         "source": "memory",
                                         "from_scene": int(memory_scene_number),
@@ -414,7 +334,6 @@ class SceneContinuityPreparationTool(AsyncTool):
                             if payload.get("format") == "url" and payload.get("url"):
                                 # 若内存记录的是直链URL，可以直接返回（无需再上传）
                                 return {
-                                    "success": True,
                                     "frame_data": payload.get("url"),
                                     "extraction_info": {
                                         "source": "memory",
@@ -428,7 +347,7 @@ class SceneContinuityPreparationTool(AsyncTool):
 
             # 2) 回退：从视频中提取最后一帧并以 data_url 形式返回
             if not video_url:
-                return {"success": False, "error": "No video_url provided for extraction"}
+                raise ToolError("No video_url provided for extraction", error_code="missing_video_url")
             result = await final_frame_tool.execute(ToolInput(
                 action="extract_final_frame_from_video",
                 parameters={
@@ -449,20 +368,19 @@ class SceneContinuityPreparationTool(AsyncTool):
                         frame_data = None
                 if frame_data:
                     return {
-                        "success": True,
                         "frame_data": frame_data,
                         "extraction_info": {
                             "source_video": video_url,
                             "extraction_method": "final_frame_tool:extract_final_frame_from_video"
                         }
                     }
-                return {"success": False, "error": "Extraction returned no data_url"}
+                raise ToolError("Extraction returned no data_url", error_code="frame_extraction_empty")
             else:
                 error_msg = getattr(result, 'error', "Unknown extraction error")
-                return {"success": False, "error": error_msg}
-            
+                raise ToolError(error_msg, error_code="frame_extraction_failed")
+
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            raise ToolError(str(e), error_code="frame_extraction_error")
     
     async def _upload_frame_to_oss(self, frame_data: Any, scene_number: int) -> Dict[str, Any]:
         """
@@ -494,7 +412,8 @@ class SceneContinuityPreparationTool(AsyncTool):
             upload_params = {
                 "remote_path": remote_path,
                 "content_type": "image/jpeg",
-                "public_read": True
+                "public_read": True,
+                "overwrite": True,
             }
             
             # 处理不同格式的frame_data
@@ -528,6 +447,15 @@ class SceneContinuityPreparationTool(AsyncTool):
             # 处理ToolOutput格式
             if hasattr(result, 'success') and result.success:
                 upload_result = result.result
+                try:
+                    self.logger.info(
+                        "CONTINUITY_FRAME_UPLOADED scene=%s remote_path=%s url=%s",
+                        scene_number,
+                        upload_result.get("remote_path") if isinstance(upload_result, dict) else None,
+                        upload_result.get("url") if isinstance(upload_result, dict) else None,
+                    )
+                except Exception:
+                    pass
                 return {
                     "success": True,
                     "url": upload_result.get("url"),
@@ -537,12 +465,11 @@ class SceneContinuityPreparationTool(AsyncTool):
                         "public_read": True
                     }
                 }
-            else:
-                error_msg = result.error if hasattr(result, 'error') else "Unknown upload error"
-                return {"success": False, "error": error_msg}
-                
+            error_msg = result.error if hasattr(result, 'error') else "Unknown upload error"
+            return {"success": False, "error": error_msg}
+
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            raise ToolError(str(e), error_code="oss_upload_error")
     
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""

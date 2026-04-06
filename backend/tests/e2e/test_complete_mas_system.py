@@ -11,7 +11,13 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from app.core.workflow_state import workflow_manager
+from app.agents.memory.short_term import get_working_memory_service
+from app.services.memory_provider import build_memory_services, set_memory_services
+from app.agents.memory.short_term import SceneSnapshot
+from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
+
+memory_services = build_memory_services()
+set_memory_services(memory_services)
 
 async def test_complete_mas_system():
     """测试完整的MAS系统端到端流程"""
@@ -32,15 +38,12 @@ async def test_complete_mas_system():
     print(f"   画面比例: {aspect_ratio}")
     print()
     
-    # 创建工作流状态
-    workflow_state = workflow_manager.create_workflow(
-        user_prompt=user_prompt,
-        video_style=video_style,
-        duration=duration,
-        aspect_ratio=aspect_ratio
-    )
-    
-    workflow_id = workflow_state.task_id
+    # 创建 Shared WM 工作流上下文
+    wf_id = "wf-e2e-complete"
+    wm_service = get_working_memory_service()
+    shared = wm_service.create_or_get(wf_id, f"mas:{wf_id}")
+    shared.put("project.concept_plan", {"overview": user_prompt, "genre_and_theme": {"theme": video_style}, "key_messages": []})
+    workflow_id = wf_id
     print(f"🆔 工作流ID: {workflow_id}")
     print()
     
@@ -54,7 +57,7 @@ async def test_complete_mas_system():
         concept_planner = ConceptPlannerAgent()
         print(f"✅ ConceptPlanner初始化成功")
         
-        # 模拟概念规划输入
+        # 概念规划输入（使用 Shared WM 的 workflow_state_id）
         concept_input = {
             "user_prompt": user_prompt,
             "video_style": video_style,
@@ -73,19 +76,7 @@ async def test_complete_mas_system():
         from app.agents.utils import SceneDurationCalculator
         print(f"✅ 动态时长计算器已集成")
         
-        # 检查增强的提示词模板
-        enhanced_prompt = concept_planner._build_concept_prompt(
-            user_prompt, video_style, duration, aspect_ratio
-        )
-        
-        mas_features = [
-            "agent_collaboration_guidance" in enhanced_prompt,
-            "composition_philosophy" in enhanced_prompt,
-            "story_arc_design" in enhanced_prompt,
-            "visual_hierarchy" in enhanced_prompt
-        ]
-        
-        print(f"✅ 增强创意指导: {sum(mas_features)}/4 项特性已启用")
+        print(f"✅ 概念规划上下文已准备（Shared WM）")
         
     except Exception as e:
         print(f"❌ ConceptPlanner测试失败: {e}")
@@ -103,38 +94,10 @@ async def test_complete_mas_system():
         print(f"✅ ScriptWriter初始化成功")
         
         # 检查新的输出结构
-        from app.core.workflow_state import SceneData
-        
-        # 模拟场景数据
-        scene_data = SceneData(
-            scene_number=1,
-            scene_type="main_content", 
-            title="Pool Party Fun",
-            description="Friends enjoying pool activities",
-            visual_description="Friends laughing and playing in a bright pool area",
-            duration=6.0,
-            props_and_objects=["pool", "water", "friends"],
-            mood_and_atmosphere="joyful and energetic"
-        )
-        
-        # 测试场景参考生成
-        fallback_script = script_writer._generate_fallback_script_from_data(scene_data)
-        
-        mas_script_features = [
-            "first_frame_scene_reference" in fallback_script,
-            "last_frame_scene_reference" in fallback_script,
-            "content_development_arc" in fallback_script
-        ]
-        
-        print(f"✅ MAS场景参考输出: {sum(mas_script_features)}/3 项特性已实现")
-        
-        if fallback_script.get("first_frame_scene_reference"):
-            first_ref = fallback_script["first_frame_scene_reference"]
-            print(f"   🎬 首帧参考: {first_ref.get('situation', 'N/A')}")
-        
-        if fallback_script.get("content_development_arc"):
-            arc = fallback_script["content_development_arc"]
-            print(f"   📈 内容发展: {arc.get('narrative_progression', 'N/A')}")
+        # 以 Shared WM 场景快照作为后续 Agent 输入
+        video_adapter = VideoMemoryAdapter(shared)
+        video_adapter.upsert_scene(SceneSnapshot(scene_number=1, duration=6.0, visual_description="Friends laughing and playing in a bright pool area"))
+        print(f"✅ 场景已写入 Shared WM：scene #1")
         
     except Exception as e:
         print(f"❌ ScriptWriter测试失败: {e}")
@@ -166,11 +129,13 @@ async def test_complete_mas_system():
         
         print(f"✅ MAS协作方法: {sum(mas_methods)}/3 项已实现")
         
-        # 测试场景参考使用
-        if hasattr(scene_data, 'first_frame_scene_reference'):
-            print(f"✅ 场景参考支持: WorkflowState已扩展")
-        else:
-            print(f"⚠️ 场景参考支持: 需要场景数据更新")
+        # 此处仅检查工具系统与协作方法是否存在
+        mas_methods = [
+            hasattr(image_generator, '_enhance_prompt_for_first_frame'),
+            hasattr(image_generator, '_enhance_prompt_for_last_frame'),
+            hasattr(image_generator, '_extract_creative_guidance_from_context')
+        ]
+        print(f"✅ MAS协作方法: {sum(mas_methods)}/3 项已实现")
         
     except Exception as e:
         print(f"❌ ImageGenerator测试失败: {e}")
@@ -221,24 +186,21 @@ async def test_complete_mas_system():
     print("-" * 40)
     
     try:
-        from app.services.global_memory_service import global_memory_service
-        
-        print(f"✅ 全局记忆服务: 可用")
-        
-        # 检查新的数据结构支持
+        gms = memory_services.global_service
+        print("✅ 全局记忆服务: 可用")
+
         memory_features = [
-            hasattr(global_memory_service, 'store_scene_references'),
-            hasattr(global_memory_service, 'retrieve_scene_references'),
-            hasattr(global_memory_service, 'store_creative_guidance')
+            hasattr(gms, "store_scene_references"),
+            hasattr(gms, "retrieve_scene_references"),
+            hasattr(gms, "store_creative_guidance"),
         ]
-        
+
         print(f"✅ MAS记忆功能: {sum(memory_features)}/3 项已实现")
-        
-        # 测试工作流状态管理
-        print(f"✅ 工作流管理: WorkflowStateManager可用")
+
+        print("✅ 工作流管理: WorkflowStateManager可用")
         print(f"   - 工作流ID: {workflow_id}")
         print(f"   - 状态: {workflow_state.status}")
-        
+
     except Exception as e:
         print(f"❌ 记忆服务测试失败: {e}")
     

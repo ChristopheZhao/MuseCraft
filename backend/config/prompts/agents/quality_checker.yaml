@@ -17,14 +17,22 @@ templates:
     variables:
       - "concept_plan"
       - "composition_timeline"
+      - "original_requirements"
+      - "video_metadata"
     template: |
       分析此视频作品的内容质量和连贯性。
 
-      ## 原始概念
+      ## 当前概念计划
       {{ concept_plan }}
+
+      ## 原始需求与创意基线
+      {{ original_requirements }}
 
       ## 最终组合时间线
       {{ composition_timeline }}
+
+      ## 技术元数据
+      {{ video_metadata }}
 
       请评估：
       1. 叙事连贯性和流畅度

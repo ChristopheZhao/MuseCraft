@@ -1,18 +1,77 @@
 """
-Orchestrator Agent - Coordinates the entire video generation workflow
-现在使用WorkflowState内存管理，避免数据库中断问题
+Orchestrator Agent - Coordinates the entire video generation workflow.
 """
 import asyncio
 import os
 import logging
-from typing import Dict, Any, List
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, TaskStatus, AgentType
-from ..core.workflow_state import WorkflowState, WorkflowStatus, workflow_manager
-from ..services.data_persistence import data_persistence_service
-from ..services.global_memory_service import global_memory_service
+from ..models import (
+    Task,
+    TaskStatus,
+    AgentType,
+    WorkflowSessionStatus,
+    WorkflowNodeStatus,
+)
+from ..services.memory_provider import build_memory_services, MemoryServices
+from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
+from ..services.context_assembler import ContextContractAssembler
+from ..services.orchestration_observation_adapter import OrchestrationObservationAdapter
+from ..services.orchestration_control_plane import (
+    OrchestrationControlPlane,
+    OrchestrationControlPlaneError,
+)
+from ..services.orchestration_protocol import OrchestrationProtocol, OrchestrationProtocolError
+from ..services.orchestration_queue_policy import OrchestrationQueuePolicy
+from ..services.orchestration_runtime_controller import (
+    OrchestrationRuntimeController,
+    OrchestrationRuntimeControllerError,
+)
+from ..services.orchestration_runtime_resume_bootstrap_facade import (
+    OrchestrationRuntimeResumeBootstrapError,
+    OrchestrationRuntimeResumeBootstrapFacade,
+)
+from ..services.orchestration_runtime_transition_facade import (
+    OrchestrationRuntimeTransitionFacade,
+)
+from ..services.orchestration_state_adapter import OrchestrationStateAdapter
+from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
+from ..services.runtime_session_service import RuntimeSessionService
+from ..services.execution_host_lease import (
+    activate_current_attempt_keepalive,
+    deactivate_current_attempt_keepalive,
+)
+from ..services.published_deliverable_service import get_published_deliverable_ref
+from ..services.script_review_contract import (
+    get_script_review_contract,
+)
+from ..services.video_metadata_service import (
+    merge_video_metadata,
+    normalize_video_metadata,
+    probe_local_video_metadata_sync,
+)
+from ..services.video_composer_execution_contract import (
+    build_video_composer_execution_contract,
+)
+from ..services.video_execution_contract import (
+    build_video_generation_execution_contract,
+)
+# legacy WM singleton removed - use injected self._memory_services.short_term
+from .utils.memory_helpers import (
+    agent_scope,
+    mas_scope,
+    get_mas_working_memory,
+    write_shared_fact,
+    read_shared_fact,
+)
+from .utils.media_runtime import build_local_public_url
+
+from ..events.execution import execution_context_var
 from .concept_planner import ConceptPlannerAgent
 from .script_writer import ScriptWriterAgent
 from .image_generator import ImageGeneratorAgent
@@ -23,6 +82,7 @@ from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 from .tools.tool_registry import get_tool_registry
 from ..core.config import settings
+from ..core.video_config_manager import get_video_config
 
 
 class OrchestratorAgent(BaseAgent):
@@ -31,33 +91,88 @@ class OrchestratorAgent(BaseAgent):
     by coordinating all specialized agents in the correct order
     """
     
-    def __init__(self):
+    @classmethod
+    def create_default(cls) -> "OrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
         import os
         from .utils.llm_policy import LLMPolicyManager
         policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
         self._llm_policy = LLMPolicyManager(policy_file)
+        if memory_services is None:
+            raise ValueError("memory_services is required for OrchestratorAgent")
+        self._memory_services = memory_services
+        self._audio_delivery_gate = AudioDeliveryGateEvaluator(memory_services=self._memory_services)
+        self._context_contract_assembler = ContextContractAssembler(self._memory_services)
+        self._orchestration_state = OrchestrationStateAdapter(self._memory_services)
+        self._orchestration_observation = OrchestrationObservationAdapter(self._memory_services)
+        self._orchestration_protocol = OrchestrationProtocol()
+        self._runtime_controller = OrchestrationRuntimeController(
+            memory_services=self._memory_services,
+            orchestration_state=self._orchestration_state,
+        )
+        self._orchestration_control_plane = OrchestrationControlPlane(
+            memory_services=self._memory_services,
+            protocol=self._orchestration_protocol,
+            orchestration_state=self._orchestration_state,
+            audio_delivery_gate=self._audio_delivery_gate,
+            observation_adapter=self._orchestration_observation,
+            runtime_controller=self._runtime_controller,
+        )
+        self._workflow_completion_adapter = WorkflowCompletionAdapter(
+            self._memory_services,
+            owner_agent_name="orchestrator",
+        )
+        self.video_config = get_video_config()
         super().__init__(
             agent_type=AgentType.ORCHESTRATOR,
             agent_name="orchestrator",
             timeout_seconds=getattr(settings, 'ORCHESTRATOR_TIMEOUT_SECONDS', 1800),
             max_retries=1,
-            llms=self._llm_policy.build_llms_for_agent('orchestrator')
+            llms=self._llm_policy.build_llms_for_agent('orchestrator'),
+            memory_services=self._memory_services,
         )
         
         # Initialize all specialized agents
         self.agents = {
-            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(llms=self._llm_policy.build_llms_for_agent('concept_planner')),
-            AgentType.SCRIPT_WRITER: ScriptWriterAgent(llms=self._llm_policy.build_llms_for_agent('script_writer')),
-            AgentType.VOICE_SYNTHESIZER: VoiceSynthesizerAgent(llms=self._llm_policy.build_llms_for_agent('voice_synthesizer')),
-            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('image_generator')),
-            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('video_generator')),
-            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(llms=self._llm_policy.build_llms_for_agent('audio_generator')),
-            AgentType.VIDEO_COMPOSER: VideoComposerAgent(llms=self._llm_policy.build_llms_for_agent('video_composer')),
-            AgentType.QUALITY_CHECKER: QualityCheckerAgent(llms=self._llm_policy.build_llms_for_agent('quality_checker'))
+            AgentType.CONCEPT_PLANNER: ConceptPlannerAgent(
+                llms=self._llm_policy.build_llms_for_agent('concept_planner'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.SCRIPT_WRITER: ScriptWriterAgent(
+                llms=self._llm_policy.build_llms_for_agent('script_writer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VOICE_SYNTHESIZER: VoiceSynthesizerAgent(
+                llms=self._llm_policy.build_llms_for_agent('voice_synthesizer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.IMAGE_GENERATOR: ImageGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('image_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VIDEO_GENERATOR: VideoGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('video_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.AUDIO_GENERATOR: AudioGeneratorAgent(
+                llms=self._llm_policy.build_llms_for_agent('audio_generator'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.VIDEO_COMPOSER: VideoComposerAgent(
+                llms=self._llm_policy.build_llms_for_agent('video_composer'),
+                memory_services=self._memory_services,
+            ),
+            AgentType.QUALITY_CHECKER: QualityCheckerAgent(
+                llms=self._llm_policy.build_llms_for_agent('quality_checker'),
+                memory_services=self._memory_services,
+            ),
         }
 
         # Per-step repeat counters for policy decisions
         self._step_repeat_counts: Dict[AgentType, int] = {}
+        self._last_audio_route_payload: Dict[str, Any] = {}
 
         # 打印每个Agent的LLM注入摘要，便于排查：role -> provider/model
         try:
@@ -74,405 +189,1110 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.info(f"LLM injected for {atype.value}: {roles}")
         except Exception:
             pass
-        
-        # Define workflow execution order
-        self.workflow_order = [
-            AgentType.CONCEPT_PLANNER,
-            AgentType.SCRIPT_WRITER,
-            AgentType.IMAGE_GENERATOR,
-            AgentType.VIDEO_GENERATOR,
-            AgentType.VOICE_SYNTHESIZER,
-            AgentType.VIDEO_COMPOSER,  # 视频合成：拼接场景视频 + 后续语音混流
-            AgentType.AUDIO_GENERATOR,  # 音频生成：基于完整视频生成匹配音乐
-            AgentType.QUALITY_CHECKER
-        ]
 
     def reset_repeat_counters(self) -> None:
         """Clear per-step repeat counters so retries start fresh."""
         self._step_repeat_counts = {}
 
+    @staticmethod
+    def _parse_agent_type(value: Any) -> Optional[AgentType]:
+        if isinstance(value, AgentType):
+            return value
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return AgentType[raw.upper()]
+        except Exception:
+            pass
+        try:
+            return AgentType(raw.lower())
+        except Exception:
+            pass
+        try:
+            return AgentType(raw)
+        except Exception:
+            return None
+
+    def _registered_agents(self) -> List[AgentType]:
+        agents = getattr(self, "agents", {}) or {}
+        return [agent_type for agent_type in agents.keys() if isinstance(agent_type, AgentType)]
+
+    @staticmethod
+    def _agent_requires_approved_script_input(agent_type: AgentType) -> bool:
+        return OrchestrationQueuePolicy.requires_approved_script_input(agent_type)
+
+    @staticmethod
+    def _has_approved_script_runtime_input(runtime_input_payload: Optional[Dict[str, Any]]) -> bool:
+        ref = get_published_deliverable_ref(runtime_input_payload, node_key="script")
+        return isinstance(ref, dict) and ref.get("is_approved") is True
+
+    def _ensure_dispatch_prerequisites(
+        self,
+        *,
+        agent_type: AgentType,
+        workflow_state_id: str,
+        runtime_input_payload: Optional[Dict[str, Any]],
+    ) -> None:
+        if not self._agent_requires_approved_script_input(agent_type):
+            return
+        if self._has_approved_script_runtime_input(runtime_input_payload):
+            return
+        raise AgentError(
+            "Script prerequisite not satisfied for dispatch: "
+            f"workflow_id={workflow_state_id} agent={agent_type.value} "
+            "status=script_prerequisite_not_satisfied"
+        )
+
+    @staticmethod
+    def _planning_agent_catalog() -> Dict[str, str]:
+        return {
+            AgentType.CONCEPT_PLANNER.value: "负责概念规划、整体创意方向与场景方案设计",
+            AgentType.SCRIPT_WRITER.value: "负责将概念方案扩展成可执行的视频脚本与镜头台词",
+            AgentType.IMAGE_GENERATOR.value: "负责生成分镜图片与关键静态视觉素材",
+            AgentType.VIDEO_GENERATOR.value: "负责生成场景视频片段与动态画面",
+            AgentType.VOICE_SYNTHESIZER.value: "负责旁白、角色配音或语音合成",
+            AgentType.VIDEO_COMPOSER.value: "负责拼接、合成与最终视频组装",
+            AgentType.AUDIO_GENERATOR.value: "负责背景音乐、音效或后置音频生成",
+            AgentType.QUALITY_CHECKER.value: "负责结果审查、完整性核验与质量把关",
+        }
+
+    @staticmethod
+    def _extract_planning_task_traits(workflow_data: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(workflow_data or {})
+        audio_contract = dict(payload.get("audio_contract") or {})
+        return {
+            "duration": payload.get("duration"),
+            "resolution": payload.get("resolution") or payload.get("target_resolution"),
+            "has_voice_settings": isinstance(payload.get("voice_settings"), dict),
+            "has_voice_plan": isinstance(payload.get("voice_plan"), dict),
+            "has_audio_requirements": isinstance(payload.get("audio_requirements"), dict),
+            "has_script_review_contract": isinstance(payload.get("script_review_contract"), dict),
+            "allow_silence": bool(audio_contract.get("allow_silence", True)),
+            "need_voiceover": bool(audio_contract.get("need_voiceover", False)),
+            "need_global_bgm": bool(audio_contract.get("need_global_bgm", False)),
+        }
+
+    @staticmethod
+    def _normalize_assignment_constraints(value: Any) -> List[str]:
+        if isinstance(value, list):
+            constraints: List[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    constraints.append(text)
+            return constraints
+        text = str(value or "").strip()
+        return [text] if text else []
+
+    @staticmethod
+    def _normalize_runtime_hints(value: Any) -> Dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+    @classmethod
+    def _resolve_task_runtime_hints(cls, task_spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(task_spec, dict):
+            return {}
+        return cls._normalize_runtime_hints(task_spec.get("runtime_hints"))
+
+    @staticmethod
+    def _build_agent_execution_contract(
+        *,
+        agent_type: AgentType,
+        workflow_state_id: str,
+        runtime_hints: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if agent_type == AgentType.VIDEO_GENERATOR:
+            generate_audio = None
+            if isinstance(runtime_hints, dict):
+                candidate = runtime_hints.get("generate_audio")
+                if isinstance(candidate, bool):
+                    generate_audio = bool(candidate)
+            return build_video_generation_execution_contract(
+                workflow_state_id=workflow_state_id,
+                generate_audio=generate_audio,
+            )
+
+        if agent_type == AgentType.VIDEO_COMPOSER:
+            try:
+                if isinstance(runtime_hints, dict):
+                    legacy_keys = [
+                        key for key in ("add_bgm", "add_voiceover", "compose_requested")
+                        if runtime_hints.get(key) is not None
+                    ]
+                    if legacy_keys:
+                        raise AgentError(
+                            "Legacy video_composer runtime overrides are no longer supported; "
+                            f"use compose_mode instead (got: {', '.join(legacy_keys)})"
+                        )
+                compose_mode = "compose"
+                if isinstance(runtime_hints, dict) and runtime_hints.get("compose_mode") is not None:
+                    compose_mode = str(runtime_hints.get("compose_mode"))
+                return build_video_composer_execution_contract(
+                    workflow_state_id=workflow_state_id,
+                    compose_mode=compose_mode,
+                )
+            except ValueError as exc:
+                raise AgentError(f"Invalid video_composer execution boundary: {exc}") from exc
+
+        return {}
+
+    @staticmethod
+    def _build_task_assignment(
+        *,
+        agent_type: AgentType,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        task_spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
+        if not isinstance(task_spec, dict):
+            raise AgentError(
+                f"Missing task_spec for scheduled agent: {agent_type.value}"
+            )
+        assignment = dict(task_spec)
+        assignment.setdefault("agent", agent_type.value)
+        assignment.setdefault("constraints", [])
+        assignment.setdefault("runtime_hints", {})
+        assignment.setdefault("run", True)
+        return assignment
+
+    def _get_orchestration_state_adapter(self) -> OrchestrationStateAdapter:
+        adapter = getattr(self, "_orchestration_state", None)
+        if adapter is None:
+            adapter = OrchestrationStateAdapter(memory_services=self._memory_services)
+            self._orchestration_state = adapter
+        return adapter
+
+    def _get_context_contract_assembler(self) -> ContextContractAssembler:
+        assembler = getattr(self, "_context_contract_assembler", None)
+        if assembler is None:
+            assembler = ContextContractAssembler(self._memory_services)
+            self._context_contract_assembler = assembler
+        return assembler
+
+    def _get_orchestration_runtime_transition_facade(self) -> OrchestrationRuntimeTransitionFacade:
+        facade = getattr(self, "_orchestration_runtime_transition_facade", None)
+        if facade is None:
+            facade = OrchestrationRuntimeTransitionFacade(
+                context_contract_assembler=self._get_context_contract_assembler(),
+                orchestration_state=self._get_orchestration_state_adapter(),
+            )
+            self._orchestration_runtime_transition_facade = facade
+        return facade
+
+    def _get_orchestration_runtime_resume_bootstrap_facade(
+        self,
+    ) -> OrchestrationRuntimeResumeBootstrapFacade:
+        facade = getattr(self, "_orchestration_runtime_resume_bootstrap_facade", None)
+        if facade is None:
+            facade = OrchestrationRuntimeResumeBootstrapFacade(
+                orchestration_state=self._get_orchestration_state_adapter(),
+                logger=self.logger,
+            )
+            self._orchestration_runtime_resume_bootstrap_facade = facade
+        return facade
+
+    def _get_orchestration_observation_adapter(self) -> OrchestrationObservationAdapter:
+        adapter = getattr(self, "_orchestration_observation", None)
+        if adapter is None:
+            adapter = OrchestrationObservationAdapter(memory_services=self._memory_services)
+            self._orchestration_observation = adapter
+        return adapter
+
+    def _get_orchestration_control_plane(self) -> OrchestrationControlPlane:
+        control_plane = getattr(self, "_orchestration_control_plane", None)
+        if control_plane is None:
+            control_plane = OrchestrationControlPlane(
+                memory_services=self._memory_services,
+                protocol=getattr(self, "_orchestration_protocol", None),
+                orchestration_state=self._get_orchestration_state_adapter(),
+                audio_delivery_gate=getattr(self, "_audio_delivery_gate", None),
+                observation_adapter=self._get_orchestration_observation_adapter(),
+                runtime_controller=getattr(self, "_runtime_controller", None),
+            )
+            self._orchestration_control_plane = control_plane
+        return control_plane
+
+    async def _llm_select_candidate_agents(
+        self,
+        *,
+        workflow_data: Dict[str, Any],
+        workflow_id: str,
+    ) -> Tuple[List[AgentType], str]:
+        registered_agents = self._registered_agents()
+        if not registered_agents:
+            raise AgentError("No registered agents available for candidate selection")
+
+        task_traits = self._extract_planning_task_traits(workflow_data)
+        page_params = {
+            "duration": workflow_data.get("duration"),
+            "resolution": workflow_data.get("resolution"),
+            "target_resolution": workflow_data.get("target_resolution"),
+        }
+        pm = self.prompt_manager
+        try:
+            agent_sys = self.get_system_instructions() or {}
+            pr = agent_sys.get("primary_role") or "工作流编排器"
+        except Exception:
+            pr = "工作流编排器"
+
+        system_text = pm.render_template(
+            "agents/orchestrator",
+            "candidate_selection_system",
+            variables={"primary_role": pr},
+            use_cache=True,
+            auto_reload=False,
+        )
+        user_text = pm.render_template(
+            "agents/orchestrator",
+            "candidate_selection_user",
+            variables={
+                "user_prompt": str(
+                    workflow_data.get("user_prompt") or workflow_data.get("prompt") or ""
+                ),
+                "page_params_json": json.dumps(page_params, ensure_ascii=False),
+                "registered_agents_json": json.dumps(
+                    [agent.value for agent in registered_agents], ensure_ascii=False
+                ),
+                "agent_catalog_json": json.dumps(
+                    self._planning_agent_catalog(), ensure_ascii=False
+                ),
+                "task_traits_json": json.dumps(task_traits, ensure_ascii=False),
+                "runtime_constraints_json": json.dumps(
+                    {
+                        "audio_contract": workflow_data.get("audio_contract") or {},
+                        "audio_capability": workflow_data.get("audio_capability") or {},
+                        "workflow_state_id": workflow_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            use_cache=True,
+            auto_reload=False,
+        )
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_INPUT workflow=%s system=%s user=%s",
+                workflow_id,
+                system_text,
+                user_text,
+            )
+        except Exception:
+            pass
+        llm = self.get_llm("plan")
+        resp = await llm.chat_completion(
+            messages=[
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            max_tokens=getattr(settings, "LLM_MAX_TOKENS_STANDARD", 2048),
+        )
+        content = resp.get("content") if isinstance(resp, dict) else None
+        if not content:
+            raise AgentError("LLM candidate selection returned empty content")
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_OUTPUT_RAW workflow=%s content=%s",
+                workflow_id,
+                content,
+            )
+        except Exception:
+            pass
+
+        try:
+            data = json.loads(content)
+        except Exception as exc:
+            raise AgentError(f"LLM candidate selection returned invalid JSON: {exc}") from exc
+
+        raw_agents = data.get("candidate_agents") if isinstance(data, dict) else None
+        if not isinstance(raw_agents, list) or not raw_agents:
+            raise AgentError("LLM candidate selection missing candidate_agents list")
+
+        registered_set = set(registered_agents)
+        candidate_agents: List[AgentType] = []
+        unknown_agents: List[str] = []
+        for raw in raw_agents:
+            parsed = self._parse_agent_type(raw)
+            if parsed is None or parsed not in registered_set:
+                unknown_agents.append(str(raw))
+                continue
+            if parsed not in candidate_agents:
+                candidate_agents.append(parsed)
+        if unknown_agents:
+            raise AgentError(
+                "LLM candidate selection returned unknown agents: "
+                + ", ".join(unknown_agents)
+            )
+        if not candidate_agents:
+            raise AgentError("LLM candidate selection produced no valid candidate agents")
+        rationale = (
+            str(data.get("selection_rationale") or "").strip()
+            if isinstance(data, dict)
+            else ""
+        )
+        try:
+            self.logger.info(
+                "ORCH_PLAN_CANDIDATE_OUTPUT_NORMALIZED workflow=%s candidate_agents=%s rationale=%s",
+                workflow_id,
+                json.dumps([agent.value for agent in candidate_agents], ensure_ascii=False),
+                rationale,
+            )
+        except Exception:
+            pass
+        return candidate_agents, rationale
+
     async def _execute_impl(
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
-        """Execute the complete video generation workflow using WorkflowState"""
+        """Execute the complete video generation workflow using Shared Working Memory"""
         
         self._current_task = task
+        mem_service = self._memory_services.short_term
+        mem_service.create_or_get(str(task.task_id), mas_scope(str(task.task_id)))
         
-        # 创建WorkflowState对象 - MAS智能风格决策
-        workflow_state = workflow_manager.create_workflow(
-            user_prompt=input_data.get("user_prompt", ""),
-            style_preference=input_data.get("style_preference"),
-            duration=input_data.get("duration", 30),
-            aspect_ratio=input_data.get("aspect_ratio", "16:9"),
-            resolution=input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION
-        )
-        
-        self.logger.info(f"🚀 开始工作流执行，WorkflowState ID: {workflow_state.task_id}")
-        
-        # Update task status
-        task.status = TaskStatus.IN_PROGRESS
-        task.update_progress("Starting workflow", 0)
-        workflow_state.set_status(WorkflowStatus.INITIALIZING, "Starting workflow", 0)
-        db.commit()
-        
-        workflow_data = input_data.copy()
+        # 使用 Task.task_id 作为本次工作流的 Shared WM 标识
+        wf_id = str(task.task_id)
+        self.logger.info(f"🚀 开始工作流执行，Workflow ID: {wf_id}")
+        try:
+            audio_capability = self._get_video_audio_capability()
+            audio_contract = self._orchestration_state.build_audio_contract(
+                workflow_state_id=wf_id,
+                input_data=input_data,
+            )
+        except Exception as route_err:
+            raise AgentError(f"Failed to initialize orchestration context: {route_err}") from route_err
+
+        runtime_resume_bootstrap = self._get_orchestration_runtime_resume_bootstrap_facade()
+        try:
+            runtime_resume_context = runtime_resume_bootstrap.resolve_runtime_resume_context(
+                db=db,
+                task=task,
+            )
+        except OrchestrationRuntimeResumeBootstrapError as exc:
+            raise AgentError(str(exc)) from exc
+        runtime_session = runtime_resume_context.runtime_session
+        script_gate = runtime_resume_context.script_gate
+        latest_script_decision = runtime_resume_context.latest_script_decision
+        script_resume_action = runtime_resume_context.script_resume_action
+        if script_gate is not None and latest_script_decision is None:
+            return {
+                "status": "waiting_gate",
+                "session_id": runtime_session.id,
+                "gate_id": script_gate.id,
+                "node_key": "script",
+            }
+
+        runtime_input_payload = dict(getattr(runtime_session, "input_payload", {}) or {})
+        workflow_data = runtime_input_payload.copy() if runtime_input_payload else input_data.copy()
         workflow_data.setdefault("resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION)
         workflow_data.setdefault("target_resolution", workflow_data.get("resolution"))
-        # 不能直接传递 WorkflowState 对象，因为它不能JSON序列化
-        # 将 workflow_state_id 传递给 Agent，Agent内部通过 workflow_manager 获取状态
-        workflow_data["workflow_state_id"] = workflow_state.task_id
+        # 将 workflow_state_id 传递给 Agent，Agent 从 Shared WM 读取上下文
+        workflow_data["workflow_state_id"] = wf_id
+        workflow_data["audio_contract"] = dict(audio_contract)
+        workflow_data["audio_capability"] = dict(audio_capability)
+        skip_agents: set[AgentType] = set()
+        raw_skip_agents = input_data.get("skip_agents") if isinstance(input_data, dict) else []
+        if isinstance(raw_skip_agents, list):
+            for item in raw_skip_agents:
+                try:
+                    skip_agents.add(AgentType(str(item)))
+                except Exception:
+                    continue
+        review_contract = get_script_review_contract(getattr(runtime_session, "input_payload", None))
+        if script_resume_action in {"revise", "replan"} and isinstance(review_contract, dict) and review_contract:
+            workflow_data["script_review_contract"] = dict(review_contract)
+        else:
+            workflow_data.pop("script_review_contract", None)
 
-        # 将存在的 Episode/Project 上下文注入工作流（无需配置即可生效）
-        if workflow_data.get("episode_context"):
-            setattr(workflow_state, "episode_context", workflow_data.get("episode_context"))
-        if workflow_data.get("project_context"):
-            setattr(workflow_state, "project_context", workflow_data.get("project_context"))
+        runtime_resume_checkpoint = runtime_resume_context.runtime_resume_checkpoint
+        resume_anchor_agent = runtime_resume_context.resume_anchor_agent
 
         workflow_results = {}
-        
-        total_steps = len(self.workflow_order)
-        
-        try:
-            for step_index, agent_type in enumerate(self.workflow_order):
-                agent = self.agents[agent_type]
+        if script_resume_action in {"approve", "revise"}:
+            self.logger.info(
+                "ORCH_PLAN_MODE workflow=%s mode=resume_script action=%s",
+                wf_id,
+                script_resume_action,
+            )
+            try:
+                resume_bundle = runtime_resume_bootstrap.load_authoritative_resume_task_specs(
+                    db=db,
+                    runtime_session=runtime_session,
+                    resume_action=script_resume_action,
+                )
+            except OrchestrationRuntimeResumeBootstrapError as exc:
+                raise AgentError(str(exc)) from exc
+            task_specs = resume_bundle.task_specs
+            _conditional_task_specs = resume_bundle.conditional_task_specs
+            candidate_agents = resume_bundle.candidate_agents
+            if script_resume_action == "approve":
+                skip_agents.update({AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER})
+                RuntimeSessionService.consume_script_approval_continuation_sync(
+                    db,
+                    runtime_session,
+                    task=task,
+                )
+            else:
+                skip_agents.add(AgentType.CONCEPT_PLANNER)
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        elif runtime_resume_checkpoint is not None:
+            self.logger.info(
+                "ORCH_PLAN_MODE workflow=%s mode=resume_checkpoint anchor=%s",
+                wf_id,
+                resume_anchor_agent.value if isinstance(resume_anchor_agent, AgentType) else "",
+            )
+            task_specs, _conditional_task_specs, candidate_agents = self._orchestration_state.checkpoint_to_task_specs(
+                runtime_resume_checkpoint,
+                require_decision_id=False,
+            )
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            if resume_anchor_agent not in execution_queue:
+                raise AgentError(
+                    f"Runtime continuation anchor {resume_anchor_agent.value} is not dispatchable from persisted task_specs"
+                )
+            execution_queue = execution_queue[execution_queue.index(resume_anchor_agent) :]
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        else:
+            self.logger.info("ORCH_PLAN_MODE workflow=%s mode=fresh", wf_id)
+            candidate_agents, _selection_rationale = await self._llm_select_candidate_agents(
+                workflow_data=workflow_data,
+                workflow_id=wf_id,
+            )
 
-                if not self._should_run_agent(agent_type, workflow_state):
-                    self.logger.info(f"⏭️ Skipping {agent.agent_name} due to workflow conditions")
+            # 任务分解（LLM → per-agent 指令），失败则回退
+            task_specs, _conditional_task_specs = await self._llm_decompose_tasks(
+                workflow_data,
+                wf_id,
+                candidate_agents=list(candidate_agents),
+            )
+
+            execution_queue = self._build_execution_queue(task_specs, candidate_agents=list(candidate_agents))
+            standby_agents = self._build_standby_agents(task_specs, candidate_agents=list(candidate_agents))
+        try:
+            self.logger.info(
+                "ORCH_PLAN_QUEUE workflow=%s candidate_agents=%s execution_queue=%s standby_agents=%s",
+                wf_id,
+                json.dumps([agent.value for agent in candidate_agents], ensure_ascii=False),
+                json.dumps([agent.value for agent in execution_queue], ensure_ascii=False),
+                json.dumps([agent.value for agent in standby_agents], ensure_ascii=False),
+            )
+        except Exception:
+            pass
+        replan_count = 0
+        max_replans = int(getattr(settings, "ORCHESTRATOR_MAX_REPLAN_ACTIVATIONS", 2))
+        total_steps = len(execution_queue)
+        script_trigger_reason = (
+            script_resume_action if script_resume_action in {"revise", "replan"} else "initial"
+        )
+        if runtime_resume_checkpoint is not None and resume_anchor_agent == AgentType.SCRIPT_WRITER:
+            script_trigger_reason = "resume"
+        script_requested_by = (
+            str(getattr(latest_script_decision, "actor_type", "") or "system")
+            if latest_script_decision is not None
+            else "system"
+        )
+
+        def _build_execution_host_keepalive_diagnostic(
+            *,
+            node_key: str,
+            attempt_id: int,
+            state: str,
+            reason_code: str,
+            message: str,
+        ) -> Dict[str, Any]:
+            return {
+                "code": "execution_host_keepalive",
+                "node_key": str(node_key or "").strip() or None,
+                "attempt_id": int(attempt_id),
+                "state": str(state or "").strip().lower() or "failed",
+                "reason_code": str(reason_code or "").strip().lower() or "unknown",
+                "message": str(message or "").strip(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        def _activate_runtime_attempt_keepalive_or_fail() -> bool:
+            nonlocal current_runtime_node_key, current_attempt_id, current_attempt_lease_token
+
+            if runtime_session is None or current_runtime_node_key is None or current_attempt_id is None:
+                return False
+
+            activated = activate_current_attempt_keepalive(
+                runtime_session_id=runtime_session.id,
+                attempt_id=current_attempt_id,
+                lease_token=current_attempt_lease_token,
+            )
+            if activated:
+                return True
+
+            message = "Execution host keepalive unavailable for leased runtime attempt"
+            try:
+                self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
+                    runtime_session_id=runtime_session.id,
+                    node_key=current_runtime_node_key,
+                    attempt_id=current_attempt_id,
+                    error_message=message,
+                    lease_token=current_attempt_lease_token,
+                    diagnostics=[
+                        _build_execution_host_keepalive_diagnostic(
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            state="activation_failed",
+                            reason_code="keepalive_unavailable",
+                            message=message,
+                        )
+                    ],
+                )
+            finally:
+                current_runtime_node_key = None
+                current_attempt_id = None
+                current_attempt_lease_token = None
+
+            raise AgentError(message)
+
+        def _retire_runtime_attempt_scope(
+            *,
+            reason: str,
+            preserve_completed_attempt: bool = False,
+        ) -> Optional[Dict[str, Any]]:
+            nonlocal current_runtime_node_key, current_attempt_id
+            nonlocal current_attempt_trigger_reason, current_attempt_lease_token
+            nonlocal current_attempt_keepalive_active
+
+            retired_context: Optional[Dict[str, Any]] = None
+            if preserve_completed_attempt and current_runtime_node_key is not None and current_attempt_id is not None:
+                retired_context = {
+                    "node_key": current_runtime_node_key,
+                    "attempt_id": int(current_attempt_id),
+                }
+            if current_attempt_keepalive_active:
+                deactivate_current_attempt_keepalive(reason=reason)
+                current_attempt_keepalive_active = False
+            current_runtime_node_key = None
+            current_attempt_id = None
+            current_attempt_trigger_reason = ""
+            current_attempt_lease_token = None
+            return retired_context
+
+        try:
+            for step_index, agent_type in enumerate(execution_queue):
+                total_steps = max(len(execution_queue), 1)
+                agent = self.agents[agent_type]
+                current_runtime_node_key: Optional[str] = None
+                current_attempt_id: Optional[int] = None
+                current_attempt_trigger_reason = ""
+                current_attempt_lease_token: Optional[str] = None
+                current_attempt_keepalive_active = False
+                retired_completed_attempt_context: Optional[Dict[str, Any]] = None
+                if agent_type in skip_agents:
+                    self.logger.info("⏭️ Skipping %s due to runtime skip_agents", agent.agent_name)
                     continue
+                try:
+                    shared_view = get_mas_working_memory(wf_id, service=self.short_term_service)
+                    scope = agent_scope(wf_id, agent.agent_name)
+                    try:
+                        mem_service.reset(scope, wf_id)
+                    except Exception:
+                        pass
+                    mem_service.create_or_get(
+                        wf_id,
+                        scope,
+                        owner_agent=agent.agent_name,
+                        shared_view=shared_view,
+                    )
+                except Exception as mem_err:
+                    raise AgentError(
+                        f"Failed to initialise iteration memory for {agent.agent_name}: {mem_err}"
+                    ) from mem_err
+
+                # LLM 指定 run=False 时跳过
+                try:
+                    spec_run = task_specs.get(agent_type, {}).get("run") if isinstance(task_specs, dict) else None
+                    if spec_run is False:
+                        self.logger.info(f"⏭️ Skipping {agent.agent_name} (directive run=false)")
+                        continue
+                except Exception:
+                    pass
+
+                if runtime_session is not None:
+                    self._ensure_dispatch_prerequisites(
+                        agent_type=agent_type,
+                        workflow_state_id=wf_id,
+                        runtime_input_payload=runtime_input_payload,
+                    )
+
+                self._emit_pre_dispatch_diagnostics(agent_type, wf_id)
+                if runtime_session is not None:
+                    try:
+                        attempt_bootstrap = runtime_resume_bootstrap.start_runtime_attempt(
+                            db=db,
+                            runtime_session=runtime_session,
+                            task=task,
+                            current_agent_type=agent_type,
+                            workflow_state_id=wf_id,
+                            task_specs=task_specs,
+                            conditional_task_specs=_conditional_task_specs,
+                            candidate_agents=list(candidate_agents),
+                            script_trigger_reason=script_trigger_reason,
+                            script_requested_by=script_requested_by,
+                            resume_anchor_agent=resume_anchor_agent,
+                        )
+                    except OrchestrationRuntimeResumeBootstrapError as exc:
+                        raise AgentError(str(exc)) from exc
+                    current_runtime_node_key = attempt_bootstrap.node_key
+                    current_attempt_id = attempt_bootstrap.attempt_id
+                    current_attempt_trigger_reason = attempt_bootstrap.trigger_reason
+                    current_attempt_lease_token = attempt_bootstrap.lease_token
+                    current_attempt_keepalive_active = _activate_runtime_attempt_keepalive_or_fail()
                 
                 # Update progress
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
                 current_step = f"Executing {agent.agent_name}"
                 
                 await self._update_progress(
-                    execution, 
                     progress_percentage, 
                     current_step,
                     db
                 )
                 
-                # Update task and workflow state progress
+                # Update task progress
                 task.update_progress(current_step, progress_percentage)
-                workflow_state.set_status(
-                    self._get_workflow_status_for_agent(agent_type),
-                    current_step,
-                    progress_percentage
-                )
-                db.commit()
-                
                 self.logger.info(f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
                 
                 try:
                     # Prepare agent input with creative context (if available)
                     self.logger.info(f"🧠 DEBUG: Preparing context for {agent_type.value}")
-                    agent_input = await self._prepare_agent_context(workflow_data, agent_type, workflow_state.task_id)
+                    agent_input = await self._prepare_scheduled_agent_input(
+                        workflow_data=workflow_data,
+                        agent_type=agent_type,
+                        workflow_id=wf_id,
+                        task_specs=task_specs,
+                        runtime_input_payload=runtime_input_payload,
+                    )
                     
                     # Debug: Check if context contains creative guidance
                     if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR]:
                         has_creative_guidance = "creative_guidance" in agent_input
                         scene_guidances_count = len(agent_input.get("scene_guidances", {}))
                         self.logger.info(f"🧠 DEBUG: {agent_type.value} context - creative_guidance: {has_creative_guidance}, scene_guidances: {scene_guidances_count}")
+
+                    # Hard gate: quality_checker requires a final video deliverable in MAS SoT.
+                    if agent_type == AgentType.QUALITY_CHECKER:
+                        try:
+                            from .adapters.state.agent_outputs import assess_final_video_ready
+
+                            delivery = assess_final_video_ready(str(wf_id), service=self.short_term_service)
+                            if not delivery.get("ready"):
+                                raise AgentError("Cannot run quality_checker: project.final_video missing in MAS WM")
+                        except AgentError:
+                            raise
+                        except Exception as err:
+                            raise AgentError(f"Cannot run quality_checker: final_video check failed: {err}") from err
                     
                     # Execute the agent (now purely stateless)
                     agent_output = await agent.execute(
                         task=task,
                         input_data=agent_input,
                         db=db,
-                        execution_order=step_index + 1
+                        execution_order=step_index + 1,
                     )
                     
-                    # Store results and prepare input for next agent
-                    workflow_results[agent_type.value] = agent_output
-                    workflow_data.update(agent_output)
+                    # Store results and commit any authoritative shared facts for downstream gates.
+                    self._record_agent_output(
+                        workflow_id=str(wf_id),
+                        agent_type=agent_type,
+                        workflow_results=workflow_results,
+                        workflow_data=workflow_data,
+                        agent_output=agent_output,
+                    )
 
-                    # Composer re-entry: after AudioAgent, add BGM if in composer mode
+                    if (
+                        runtime_session is not None
+                        and agent_type != AgentType.SCRIPT_WRITER
+                        and current_runtime_node_key is not None
+                        and current_attempt_id is not None
+                    ):
+                        self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
+                            runtime_session_id=runtime_session.id,
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            lease_token=current_attempt_lease_token,
+                            node_status=WorkflowNodeStatus.COMPLETED.value,
+                        )
+                        retired_completed_attempt_context = _retire_runtime_attempt_scope(
+                            reason="attempt_completed",
+                            preserve_completed_attempt=True,
+                        )
+
+                    if (
+                        runtime_session is not None
+                        and agent_type == AgentType.SCRIPT_WRITER
+                        and current_attempt_id is not None
+                    ):
+                        return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
+                            runtime_session_id=runtime_session.id,
+                            task_db_id=task.id,
+                            workflow_id=wf_id,
+                            script_attempt_id=current_attempt_id,
+                            lease_token=current_attempt_lease_token,
+                            trigger_reason=current_attempt_trigger_reason or script_trigger_reason,
+                            script_output=dict(agent_output or {}),
+                            task_specs=task_specs,
+                            conditional_task_specs=_conditional_task_specs,
+                            candidate_agents=list(candidate_agents),
+                        )
+
+                    # Runtime decisions are driven by subagent reports plus boundary-triggered gate results.
                     try:
-                        mixing_mode = getattr(settings, 'AUDIO_MIXING_MODE', 'composer')
-                    except Exception:
-                        mixing_mode = 'composer'
-                    if agent_type == AgentType.VIDEO_COMPOSER and mixing_mode == 'composer':
-                        try:
-                            if getattr(workflow_state, 'voice_over_assets', None):
-                                self.logger.info("🎤 Scheduling composer to add voice-over tracks")
-                                comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
-                                comp_input = {
-                                    "workflow_state_id": workflow_state.task_id,
-                                    "add_voiceover": True
-                                }
-                                comp_out = await comp_agent.execute(
-                                    task=task,
-                                    input_data=comp_input,
-                                    db=db,
-                                    execution_order=step_index + 1
-                                )
-                                workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_voiceover"] = comp_out
-                                workflow_data.update(comp_out)
-                        except Exception as e:
-                            self.logger.warning(f"Composer add_voiceover failed: {e}")
-                    if agent_type == AgentType.AUDIO_GENERATOR and mixing_mode == 'composer':
-                        try:
-                            self.logger.info("🎼 Scheduling composer to add background music")
-                            comp_agent = self.agents.get(AgentType.VIDEO_COMPOSER)
-                            comp_input = {
-                                "workflow_state_id": workflow_state.task_id,
-                                "add_bgm": True
-                            }
-                            comp_out = await comp_agent.execute(
-                                task=task,
-                                input_data=comp_input,
-                                db=db,
-                                execution_order=step_index + 1
-                            )
-                            workflow_results[AgentType.VIDEO_COMPOSER.value + "_add_bgm"] = comp_out
-                            workflow_data.update(comp_out)
-                            base_result = workflow_results.get(AgentType.VIDEO_COMPOSER.value)
-                            if isinstance(base_result, dict):
-                                merged_result = dict(base_result)
-                                merged_result.update(comp_out or {})
-                                workflow_results[AgentType.VIDEO_COMPOSER.value] = merged_result
-                            else:
-                                workflow_results[AgentType.VIDEO_COMPOSER.value] = comp_out
-                        except Exception as e:
-                            self.logger.warning(f"Composer add_bgm failed: {e}")
-
-                    # Orchestrator policy-first decision; LLM provides optional advice
-                    try:
-                        # Policy decision based on subtask_state + repeat budget
-                        policy_decision = None
-                        st = (agent_output.get("subtask_state") or "").strip().lower() if isinstance(agent_output, dict) else ""
-                        summary = agent_output.get("summary") if isinstance(agent_output, dict) else {}
-                        pending_cnt = 0
-                        try:
-                            pending_cnt = int(summary.get("pending") or 0) if isinstance(summary, dict) else 0
-                        except Exception:
-                            pending_cnt = 0
-                        max_repeat = getattr(settings, 'ORCHESTRATOR_MAX_REPEAT_PER_STEP', 1)
-                        cnt = self._step_repeat_counts.get(agent_type, 0)
-                        if st == "complete":
-                            policy_decision = "proceed_next"
-                        elif st in ("partial", "blocked"):
-                            policy_decision = "repeat_agent" if (cnt < max_repeat and pending_cnt > 0) else "proceed_next"
-                        elif st == "max_iter_reached":
-                            policy_decision = "proceed_next"
-                        elif st == "error":
-                            policy_decision = "repeat_agent" if (cnt < max_repeat) else "halt_workflow"
-
-                        # If not determinable from policy, ask LLM; otherwise prefer policy
-                        decision = policy_decision or await self._decide_next_step_llm(
+                        runtime_cycle = await self._evaluate_runtime_boundary_cycle(
+                            workflow_state_id=wf_id,
                             current_agent=agent_type,
                             agent_output=agent_output,
-                            workflow_state=workflow_state
+                            audio_contract=dict(audio_contract or {}),
+                            candidate_agents=list(candidate_agents),
+                            standby_agents=standby_agents,
+                            replan_count=replan_count,
+                            max_replans=max_replans,
+                            current_index=step_index,
+                            execution_queue=execution_queue,
+                            task_specs=task_specs,
+                            conditional_task_specs=_conditional_task_specs,
                         )
-                        if decision == "repeat_agent":
-                            self.logger.info(f"🔁 Orchestrator LLM decided to repeat {agent.agent_name}")
-                            # Repeat with limit
-                            if cnt < max_repeat:
-                                self._step_repeat_counts[agent_type] = cnt + 1
-                                agent_output = await agent.execute(
-                                    task=task,
-                                    input_data=agent_input,
-                                    db=db,
-                                    execution_order=step_index + 1
-                                )
-                                workflow_results[agent_type.value] = agent_output
-                                workflow_data.update(agent_output)
-                            else:
-                                self.logger.warning(f"⚠️ Repeat limit reached for {agent.agent_name} (max={max_repeat}); proceeding to next step")
-                        elif decision == "halt_workflow":
-                            raise AgentError("Workflow halted by orchestrator LLM decision")
-                        else:
-                            self.logger.info(f"➡️ Orchestrator LLM decided to proceed to next step")
-                    except Exception as ce:
-                        # If LLM decision fails, proceed sequentially
-                        self.logger.warning(f"⚠️ Orchestrator decision failed: {ce}. Proceeding sequentially.")
+                        runtime_decision = runtime_cycle.get("runtime_decision") or {}
+                        replan_action = str(runtime_decision.get("action") or "continue").strip()
+                        replan_reason = str(runtime_decision.get("reason") or "none").strip()
+                        apply_result = runtime_cycle.get("apply_result") or {}
+                        if apply_result.get("status") == "activated":
+                            target_agent = apply_result.get("target_agent")
+                            updated_queue = apply_result.get("execution_queue")
+                            if isinstance(updated_queue, list):
+                                execution_queue[:] = list(updated_queue)
+                            updated_task_specs = apply_result.get("task_specs")
+                            if isinstance(updated_task_specs, dict):
+                                task_specs.clear()
+                                task_specs.update(updated_task_specs)
+                            standby_agents = list(apply_result.get("standby_agents") or standby_agents)
+                            replan_count = int(apply_result.get("replan_count") or replan_count)
+                            self.logger.info(
+                                "ADAPTIVE_REPLAN action=activate_from_standby target=%s reason=%s queue_changed=%s count=%s",
+                                target_agent.value if isinstance(target_agent, AgentType) else target_agent,
+                                replan_reason,
+                                bool(apply_result.get("queue_changed")),
+                                replan_count,
+                            )
+                        elif apply_result.get("status") == "abort":
+                            raise AgentError(f"Workflow halted by runtime decision: {replan_reason}")
+                        decision_ack = runtime_cycle.get("decision_ack") or {}
+                        self.logger.debug(
+                            "RUNTIME_DECISION_ACK %s",
+                            json.dumps(decision_ack, ensure_ascii=False),
+                        )
+                    except AgentError:
+                        raise
+                    except Exception as replan_err:
+                        raise AgentError(
+                            f"Runtime decision evaluation failed: {replan_err}"
+                        ) from replan_err
                     
                     # Handoff final results to WF (only when agent reports completion via final_* fields)
-                    try:
-                        finals = agent_output.get("final_completed_scenes") if isinstance(agent_output, dict) else None
-                        if finals and isinstance(finals, list):
-                            wf_id = workflow_state.task_id
-                            wf = workflow_manager.get_workflow(wf_id)
-                            committed = 0
-                            for rec in finals:
-                                if not isinstance(rec, dict):
-                                    continue
-                                sn = rec.get("scene_number")
-                                if sn is None:
-                                    continue
-                                # 支持图像或视频两类产物
-                                iu = rec.get("image_url") or ""
-                                ip = rec.get("image_path") or ""
-                                vu = rec.get("video_url") or ""
-                                vp = rec.get("video_path") or ""
-                                pt = rec.get("prompt_text") or ""
-                                try:
-                                    if iu or ip:
-                                        wf.update_scene(int(sn), image_url=iu, image_path=ip, image_prompt=pt)
-                                        committed += 1
-                                    if vu or vp:
-                                        wf.update_scene(int(sn), video_url=vu, video_path=vp, video_prompt=pt)
-                                        committed += 1
-                                except Exception:
-                                    continue
-                            self.logger.info(f"WF_COMMIT: agent={agent.agent_name} scenes={len(finals)} committed={committed}")
-                    except Exception as _wf_err:
-                        self.logger.warning(f"WF_COMMIT_WARN: {str(_wf_err)}")
+                    # 仅写 Shared WM；不再回写 WorkflowState（避免双轨）
+                    tracked_kind = None
+                    if agent_type == AgentType.IMAGE_GENERATOR:
+                        tracked_kind = "image"
+                    elif agent_type == AgentType.VIDEO_GENERATOR:
+                        tracked_kind = "video"
+                    elif agent_type == AgentType.AUDIO_GENERATOR:
+                        tracked_kind = "audio"
+                    if tracked_kind:
+                        shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
+                        bucket = shared.get(f"scene_outputs.{tracked_kind}", {}) if shared is not None else {}
+                        committed = len(bucket) if isinstance(bucket, dict) else 0
+                        extra: Dict[str, Any] = {}
+                        if tracked_kind == "audio":
+                            try:
+                                bgm = shared.get("project.background_music", {}) if shared is not None else {}
+                                extra["project_background_music"] = bool(
+                                    isinstance(bgm, dict)
+                                    and (str(bgm.get("audio_path") or "").strip() or str(bgm.get("audio_url") or "").strip())
+                                )
+                            except Exception:
+                                extra["project_background_music"] = False
+                        self.logger.info(
+                            "WM_COMMIT(%s): agent=%s committed=%s extra=%s",
+                            tracked_kind,
+                            agent.agent_name,
+                            committed,
+                            extra or None,
+                        )
 
                     # Handle memory storage if this agent produced memory data
                     if agent_type == AgentType.CONCEPT_PLANNER:
                         self.logger.info("🧠 DEBUG: About to store creative guidance from ConceptPlanner")
                         await self._store_creative_guidance_from_output(agent_output)
                         
-                        # 🔧 修复：设置concept_plan到workflow_state
+                        # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
                         if "concept_plan" in agent_output:
-                            workflow_state.concept_plan = agent_output["concept_plan"]
-                            self.logger.info("🎭 设置concept_plan到workflow_state")
+                            try:
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"], service=self.short_term_service)
+                            except Exception:
+                                pass
                     else:
                         self.logger.info(f"🧠 DEBUG: No memory storage needed for {agent_type.value}")
                     
                     self.logger.info(f"Completed workflow step {step_index + 1}/{total_steps}: {agent.agent_name}")
 
-                    # Lightweight WS signals for coarse-grained UI sync
-                    try:
-                        if agent_type == AgentType.IMAGE_GENERATOR and self._is_image_step_completed(agent_output):
-                            summary = agent_output.get("summary") or {}
-                            images_cnt = 0
-                            try:
-                                images_cnt = int(summary.get("generated_successfully") or 0)
-                            except Exception:
-                                images_cnt = len(agent_output.get("final_completed_scenes") or [])
-                            await self.websocket_manager.broadcast_to_task(
-                                str(task.task_id),
-                                {
-                                    "type": "image_assets_ready",
-                                    "task_id": str(task.task_id),
-                                    "images_count": images_cnt,
-                                }
-                            )
-                        if agent_type == AgentType.VIDEO_GENERATOR and self._is_video_step_completed(agent_output):
-                            summary = agent_output.get("summary") or {}
-                            videos_cnt = 0
-                            try:
-                                videos_cnt = int(summary.get("generated_successfully") or 0)
-                            except Exception:
-                                videos_cnt = len(agent_output.get("final_completed_scenes") or [])
-                            await self.websocket_manager.broadcast_to_task(
-                                str(task.task_id),
-                                {
-                                    "type": "video_assets_ready",
-                                    "task_id": str(task.task_id),
-                                    "videos_count": videos_cnt,
-                                }
-                            )
-                    except Exception as _ws_sig_err:
-                        self.logger.warning(f"WS coarse signal failed: {str(_ws_sig_err)}")
-                    
                 except Exception as e:
+                    if (
+                        runtime_session is not None
+                        and current_runtime_node_key is not None
+                        and current_attempt_id is not None
+                    ):
+                        self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
+                            runtime_session_id=runtime_session.id,
+                            node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            error_message=str(e),
+                            lease_token=current_attempt_lease_token,
+                            diagnostics=[
+                                {
+                                    "code": f"{current_runtime_node_key}_stage_failed",
+                                    "stage": current_runtime_node_key,
+                                    "message": str(e),
+                                }
+                            ],
+                        )
+                        _retire_runtime_attempt_scope(reason="attempt_failed")
+                    elif (
+                        runtime_session is not None
+                        and retired_completed_attempt_context is not None
+                    ):
+                        try:
+                            self._get_orchestration_runtime_transition_facade().upsert_runtime_attempt_diagnostic(
+                                runtime_session_id=runtime_session.id,
+                                attempt_id=int(retired_completed_attempt_context["attempt_id"]),
+                                diagnostic={
+                                    "code": f"{retired_completed_attempt_context['node_key']}_stage_failed",
+                                    "attempt_id": int(retired_completed_attempt_context["attempt_id"]),
+                                    "stage": retired_completed_attempt_context["node_key"],
+                                    "state": "post_completion_failure",
+                                    "reason_code": "post_completion_control_plane_failure",
+                                    "message": str(e),
+                                },
+                            )
+                        except Exception as diag_err:
+                            self.logger.warning(
+                                "Failed to persist post-completion runtime diagnostic for session=%s attempt=%s: %s",
+                                runtime_session.id,
+                                retired_completed_attempt_context.get("attempt_id"),
+                                diag_err,
+                            )
+                        finally:
+                            retired_completed_attempt_context = None
                     error_msg = f"Workflow failed at step {step_index + 1} ({agent.agent_name}): {str(e)}"
                     self.logger.error(error_msg)
                     
                     # Check if we should retry the failed step
                     if await self._should_retry_step(agent_type, e, db):
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
-                        # Retry the step
-                        agent_input = await self._prepare_agent_context(workflow_data, agent_type, workflow_state.task_id)
+                        retry_trigger_reason = (
+                            script_trigger_reason
+                            if agent_type == AgentType.SCRIPT_WRITER and script_trigger_reason in {"revise", "replan"}
+                            else "retry"
+                        )
+                        if runtime_session is not None:
+                            try:
+                                attempt_bootstrap = runtime_resume_bootstrap.start_runtime_attempt(
+                                    db=db,
+                                    runtime_session=runtime_session,
+                                    task=task,
+                                    current_agent_type=agent_type,
+                                    workflow_state_id=wf_id,
+                                    task_specs=task_specs,
+                                    conditional_task_specs=_conditional_task_specs,
+                                    candidate_agents=list(candidate_agents),
+                                    script_trigger_reason=script_trigger_reason,
+                                    script_requested_by=script_requested_by,
+                                    resume_anchor_agent=resume_anchor_agent,
+                                    trigger_reason_override=retry_trigger_reason,
+                                )
+                            except OrchestrationRuntimeResumeBootstrapError as exc:
+                                raise AgentError(str(exc)) from exc
+                            current_runtime_node_key = attempt_bootstrap.node_key
+                            current_attempt_id = attempt_bootstrap.attempt_id
+                            current_attempt_trigger_reason = attempt_bootstrap.trigger_reason
+                            current_attempt_lease_token = attempt_bootstrap.lease_token
+                            current_attempt_keepalive_active = _activate_runtime_attempt_keepalive_or_fail()
+                        agent_input = await self._prepare_scheduled_agent_input(
+                            workflow_data=workflow_data,
+                            agent_type=agent_type,
+                            workflow_id=wf_id,
+                            task_specs=task_specs,
+                            runtime_input_payload=runtime_input_payload,
+                        )
                         agent_output = await agent.execute(
                             task=task,
                             input_data=agent_input,
                             db=db,
-                            execution_order=step_index + 1
+                            execution_order=step_index + 1,
                         )
-                        workflow_results[agent_type.value] = agent_output
-                        workflow_data.update(agent_output)
-                        
-                        # 🔧 修复：在重试成功后也设置concept_plan
+                        self._record_agent_output(
+                            workflow_id=str(wf_id),
+                            agent_type=agent_type,
+                            workflow_results=workflow_results,
+                            workflow_data=workflow_data,
+                            agent_output=agent_output,
+                        )
                         if agent_type == AgentType.CONCEPT_PLANNER and "concept_plan" in agent_output:
-                            workflow_state.concept_plan = agent_output["concept_plan"]
-                            self.logger.info("🎭 重试后设置concept_plan到workflow_state")
-                    else:
-                        # Mark task as failed
-                        task.status = TaskStatus.FAILED
-                        task.add_error(error_msg)
-                        db.commit()
-                        raise AgentError(error_msg) from e
+                            try:
+                                write_shared_fact(wf_id, "project.concept_plan", agent_output["concept_plan"], service=self.short_term_service)
+                                self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
+                            except Exception:
+                                pass
+                        if (
+                            runtime_session is not None
+                            and agent_type != AgentType.SCRIPT_WRITER
+                            and current_runtime_node_key is not None
+                            and current_attempt_id is not None
+                        ):
+                            self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
+                                runtime_session_id=runtime_session.id,
+                                node_key=current_runtime_node_key,
+                                attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
+                                node_status=WorkflowNodeStatus.COMPLETED.value,
+                            )
+                        if (
+                            runtime_session is not None
+                            and agent_type == AgentType.SCRIPT_WRITER
+                            and current_attempt_id is not None
+                        ):
+                            return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
+                                runtime_session_id=runtime_session.id,
+                                task_db_id=task.id,
+                                workflow_id=wf_id,
+                                script_attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
+                                trigger_reason=current_attempt_trigger_reason or retry_trigger_reason,
+                                script_output=dict(agent_output or {}),
+                                task_specs=task_specs,
+                                conditional_task_specs=_conditional_task_specs,
+                                candidate_agents=list(candidate_agents),
+                            )
+                        continue
+
+                    # 不重试：标记失败并通知
+                    raise AgentError(error_msg) from e
+                finally:
+                    if current_attempt_keepalive_active:
+                        deactivate_current_attempt_keepalive(reason="attempt_scope_exit")
+                        current_attempt_keepalive_active = False
             
             # Workflow completed successfully
-            await self._update_progress(execution, 90, "Workflow completed, persisting data", db)
-            workflow_state.set_status(WorkflowStatus.PERSISTING_DATA, "Persisting data to database", 90)
+            await self._update_progress(90, "Workflow completed, dispatching completion event", db)
             
-            # 使用DataPersistenceService统一持久化数据
-            self.logger.info("💾 开始持久化工作流数据到数据库...")
-            persistence_result = await data_persistence_service.persist_workflow_results(workflow_state, db)
-            
-            if persistence_result["status"] == "success":
-                # Update task status
-                task.status = TaskStatus.COMPLETED
-                task.update_progress("Completed", 100)
-                workflow_state.set_status(WorkflowStatus.COMPLETED, "Workflow completed", 100)
-                
-                self.logger.info(f"✅ 工作流和数据持久化完成: {persistence_result}")
-            else:
-                # 持久化失败，但工作流本身成功了
-                task.status = TaskStatus.COMPLETED  # 仍然标记为完成
-                task.add_error(f"数据持久化部分失败: {persistence_result.get('error', '')}")
-                workflow_state.add_warning("数据持久化部分失败，但工作流成功完成")
-                
-                self.logger.warning(f"⚠️ 工作流成功但持久化失败: {persistence_result}")
-            
-            db.commit()
-            
-            # Send final WebSocket notification
-            await self._send_workflow_completion(task, workflow_results)
+            # 发布完成事件（监听器异步落库），不再同步持久化
+            persistence_payload = self._workflow_completion_adapter.build_persistence_payload(str(wf_id))
+            final_url = str(persistence_payload.get("final_video_url") or "").strip()
+            final_path = str(persistence_payload.get("final_video_path") or "").strip()
+            if workflow_results.get(AgentType.VIDEO_COMPOSER.value) and not (final_url or final_path):
+                raise AgentError(
+                    "Workflow completed without authoritative project.final_video; "
+                    "runtime summary and persistence projection would diverge"
+                )
+
+            task.status = TaskStatus.COMPLETED
+            task.update_progress("Completed", 100)
+
+            completion_payload = await self._workflow_completion_adapter.publish_completed(
+                task=task,
+                workflow_id=wf_id,
+                persistence_payload=persistence_payload,
+                results=workflow_results,
+                quality_score=workflow_results.get("quality_checker", {}).get("quality_score"),
+            )
+            final_url = str(completion_payload.get("final_video_url") or "").strip()
+            final_path = str(completion_payload.get("final_video_path") or "").strip()
+            if runtime_session is not None:
+                self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
+                    runtime_session_id=runtime_session.id,
+                    task_db_id=task.id,
+                    summary_output={
+                        "status": "completed",
+                        "final_video_url": final_url,
+                        "final_video_path": final_path,
+                        "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
+                    },
+                )
             
             self.logger.info(f"🎉 工作流完成，任务ID: {task.task_id}")
             
             return {
-                "workflow_status": "completed",
+                "status": "completed",
                 "total_steps": total_steps,
                 "results": workflow_results,
-                "final_video_url": workflow_results.get("video_composer", {}).get("final_video_url"),
+                "final_video_url": final_url,
+                "final_video_path": final_path,
                 "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
-                "persistence_status": persistence_result["status"],
-                "workflow_state_id": workflow_state.task_id
+                "persistence_status": "event_published",
+                "workflow_state_id": wf_id
             }
             
         except Exception as e:
             # Workflow failed
             error_msg = f"Workflow failed: {str(e)}"
-            
-            # 记录错误到WorkflowState
-            workflow_state.add_error(error_msg)
-            workflow_state.set_status(WorkflowStatus.FAILED, error_msg, workflow_state.progress_percentage)
-            
-            # 尝试持久化失败状态（尽力而为）
+
             try:
-                await data_persistence_service.persist_workflow_results(workflow_state, db)
-                self.logger.info("❌ 工作流失败状态已持久化")
-            except Exception as persist_error:
-                self.logger.error(f"❌❌ 连持久化失败状态都失败了: {str(persist_error)}")
-            
-            task.status = TaskStatus.FAILED
-            task.add_error(error_msg)
-            db.commit()
-            
-            await self._send_workflow_failure(task, error_msg)
+                await self._workflow_completion_adapter.publish_failed(
+                    task=task,
+                    workflow_id=wf_id,
+                    error_message=error_msg,
+                )
+            except Exception as evt_err:
+                self.logger.warning("Failed to publish workflow_failed event: %s", evt_err)
+            if runtime_session is not None and runtime_session.status != WorkflowSessionStatus.FAILED.value:
+                self._get_orchestration_runtime_transition_facade().mark_runtime_session_failed(
+                    runtime_session_id=runtime_session.id,
+                    task_db_id=task.id,
+                    error_message=error_msg,
+                )
             
             raise AgentError(error_msg) from e
+        finally:
+            try:
+                mem_service.cleanup_workflow(wf_id)
+            except Exception as cleanup_err:
+                self.logger.warning(
+                    "Iteration memory cleanup failed for workflow %s: %s",
+                    wf_id,
+                    cleanup_err,
+                )
 
-    async def _decide_next_step_llm(self, current_agent: AgentType, agent_output: Dict[str, Any], workflow_state: WorkflowState) -> str:
+    async def _decide_next_step_llm(self, current_agent: AgentType, workflow_id: str) -> str:
         """Use a lightweight LLM + orchestrator_control tool to decide next step.
         Returns: 'proceed_next' | 'repeat_agent' | 'halt_workflow'
         """
-        # Build observation (concise)
-        summary = agent_output.get("summary") or {}
-        meta = agent_output.get("react_metadata") or {}
-        gen_results = agent_output.get("generation_results") or []
-        success_count = sum(1 for r in gen_results if isinstance(r, dict) and r.get("success"))
-        fail_count = sum(1 for r in gen_results if isinstance(r, dict) and not r.get("success"))
+        # Build observation (concise, facts-only) from MAS WM (SoT)
+        try:
+            from .adapters.state.agent_outputs import assess_agent_delivery
+            from .adapters.state.mas_state import build_mas_state_view
+
+            delivery = assess_agent_delivery(str(workflow_id), current_agent, service=self.short_term_service)
+            facts_summary = build_mas_state_view(str(workflow_id), service=self.short_term_service)
+        except Exception:
+            delivery = {}
+            facts_summary = {}
+
+        meta = {"workflow_id": str(workflow_id), "facts_summary": facts_summary}
+        summary = {"delivery": delivery}
+        try:
+            success_count = int((delivery or {}).get("completed") or 0)
+        except Exception:
+            success_count = 0
+        fail_count = 0
 
         # 使用模板生成系统指令（保持中立，不暴露工具/参数名）
         # 使用统一提示体系：优先读取 YAML 中 orchestrator 的系统指令；如不可用则回退到简短中立文案
@@ -553,150 +1373,50 @@ class OrchestratorAgent(BaseAgent):
         # Default fallback: proceed
         return "proceed_next"
     
-    def _get_workflow_status_for_agent(self, agent_type: AgentType) -> WorkflowStatus:
-        """根据Agent类型获取对应的WorkflowStatus"""
-        status_mapping = {
-            AgentType.CONCEPT_PLANNER: WorkflowStatus.CONCEPT_PLANNING,
-            AgentType.SCRIPT_WRITER: WorkflowStatus.SCRIPT_WRITING,
-            AgentType.VOICE_SYNTHESIZER: WorkflowStatus.VOICE_SYNTHESIZING,
-            AgentType.IMAGE_GENERATOR: WorkflowStatus.IMAGE_GENERATING,
-            AgentType.VIDEO_GENERATOR: WorkflowStatus.VIDEO_GENERATING,
-            AgentType.VIDEO_COMPOSER: WorkflowStatus.VIDEO_COMPOSING,
-            AgentType.QUALITY_CHECKER: WorkflowStatus.QUALITY_CHECKING
-        }
-        return status_mapping.get(agent_type, WorkflowStatus.INITIALIZING)
+    # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
     
     async def _should_retry_step(
-        self, 
-        agent_type: AgentType, 
-        error: Exception, 
+        self,
+        agent_type: AgentType,
+        error: Exception,
         db: Session
     ) -> bool:
         """Determine if a failed workflow step should be retried"""
-        
-        # Get the latest execution for this agent type
-        latest_execution = db.query(AgentExecution).filter(
-            AgentExecution.task_id == self._current_task.id,
-            AgentExecution.agent_type == agent_type
-        ).order_by(AgentExecution.created_at.desc()).first()
-        
-        if not latest_execution or not latest_execution.can_retry:
-            return False
-        
-        # Define retry logic based on error type and agent type
+        # 简化：按错误类型和策略决定，不依赖 AgentExecution 表
         retry_conditions = {
             AgentType.IMAGE_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
             AgentType.VIDEO_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
             AgentType.VIDEO_COMPOSER: ["processing_error", "temporary_file_error"],
         }
-        
+
         error_type = type(error).__name__.lower()
-        
         if agent_type in retry_conditions:
             return any(condition in error_type for condition in retry_conditions[agent_type])
-        
-        # Default: retry on timeout and temporary errors
         return "timeout" in error_type or "temporary" in error_type
 
-    def _is_image_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+    def _is_image_step_completed(self, workflow_id: str) -> bool:
         """Gate condition for image generation step completion."""
-        meta = agent_output.get("react_metadata") or {}
-        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
-            return True
-        summary = agent_output.get("summary") or {}
-        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
-            return True
-        results = agent_output.get("generation_results") or []
-        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
-            return True
-        self.logger.warning("Image step not completed: no task_complete and no successful results")
+        try:
+            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
+            outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
+            if isinstance(outputs, dict) and outputs:
+                return True
+        except Exception:
+            pass
+        self.logger.warning("Image step not completed: no scene_outputs.image found in MAS WM")
         return False
 
-    def _is_video_step_completed(self, agent_output: Dict[str, Any]) -> bool:
+    def _is_video_step_completed(self, workflow_id: str) -> bool:
         """Gate condition for video generation step completion."""
-        meta = agent_output.get("react_metadata") or {}
-        if isinstance(meta, dict) and meta.get("completion_type") == "task_complete":
-            return True
-        summary = agent_output.get("summary") or {}
-        if isinstance(summary, dict) and int(summary.get("generated_successfully", 0)) > 0:
-            return True
-        results = agent_output.get("generation_results") or []
-        if isinstance(results, list) and any(bool(r.get("success")) for r in results if isinstance(r, dict)):
-            return True
-        self.logger.warning("Video step not completed: no task_complete and no successful results")
+        try:
+            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
+            outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
+            if isinstance(outputs, dict) and outputs:
+                return True
+        except Exception:
+            pass
+        self.logger.warning("Video step not completed: no scene_outputs.video found in MAS WM")
         return False
-    
-    async def _send_workflow_completion(self, task: Task, results: Dict[str, Any]):
-        """Send workflow completion notification via WebSocket"""
-        try:
-            message = {
-                "type": "workflow_completed",
-                "task_id": str(task.task_id),
-                "status": "completed",
-                "results": results,
-                "timestamp": int(asyncio.get_event_loop().time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to send workflow completion notification: {e}")
-    
-    async def _send_workflow_failure(self, task: Task, error_message: str):
-        """Send workflow failure notification via WebSocket"""
-        try:
-            message = {
-                "type": "workflow_failed",
-                "task_id": str(task.task_id),
-                "status": "failed", 
-                "error": error_message,
-                "timestamp": int(asyncio.get_event_loop().time())
-            }
-            
-            await self.websocket_manager.broadcast_to_task(
-                str(task.task_id),
-                message
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to send workflow failure notification: {e}")
-    
-    def get_workflow_status(self, task: Task, db: Session) -> Dict[str, Any]:
-        """Get current workflow status and progress"""
-        
-        executions = db.query(AgentExecution).filter(
-            AgentExecution.task_id == task.id
-        ).order_by(AgentExecution.execution_order).all()
-        
-        workflow_status = {
-            "task_id": str(task.task_id),
-            "overall_status": task.status.value,
-            "overall_progress": task.progress_percentage,
-            "current_step": task.current_step,
-            "total_steps": len(self.workflow_order),
-            "completed_steps": len([e for e in executions if e.is_completed]),
-            "failed_steps": len([e for e in executions if e.is_failed]),
-            "steps": []
-        }
-        
-        for agent_type in self.workflow_order:
-            execution = next(
-                (e for e in executions if e.agent_type == agent_type), 
-                None
-            )
-            
-            step_info = {
-                "agent_type": agent_type.value,
-                "status": execution.status.value if execution else "pending",
-                "progress": execution.progress_percentage if execution else 0,
-                "duration": execution.duration if execution else None,
-                "error": execution.error_message if execution and execution.is_failed else None
-            }
-            
-            workflow_status["steps"].append(step_info)
-        
-        return workflow_status
     
     async def _store_creative_guidance_from_output(self, agent_output: Dict[str, Any]):
         """从ConceptPlanner输出中存储创意指导到全局记忆"""
@@ -707,7 +1427,7 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.warning("No memory data found in ConceptPlanner output")
                 return
             
-            success = await global_memory_service.store_creative_guidance(
+            success = await self.memory_service.store_creative_guidance(
                 workflow_id=memory_data["workflow_id"],
                 concept_plan=memory_data["concept_plan"],
                 agent_name=memory_data["agent_name"]
@@ -720,24 +1440,381 @@ class OrchestratorAgent(BaseAgent):
                 
         except Exception as e:
             self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
-    
-    def _should_run_agent(self, agent_type: AgentType, workflow_state: WorkflowState) -> bool:
-        if agent_type == AgentType.VOICE_SYNTHESIZER:
-            voice_plan = getattr(workflow_state, "voice_plan", {}) or {}
-            if not voice_plan or not voice_plan.get("enabled"):
-                return False
-            if str(voice_plan.get("mode", "none")).lower() == "none":
-                return False
-            scene_guidance = voice_plan.get("scene_guidance") or []
-            if scene_guidance:
-                return any(bool(g.get("should_narrate", True)) for g in scene_guidance if isinstance(g, dict))
-            # 若缺少逐场景指导，则默认尝试执行，由下游Agent自我校验
-            return True
-        return True
 
-    async def _prepare_agent_context(self, workflow_data: Dict[str, Any], agent_type: AgentType, workflow_id: str) -> Dict[str, Any]:
+    def _store_composer_outputs(self, workflow_id: str, agent_output: Dict[str, Any]) -> None:
+        wf_id = str(workflow_id or "")
+        if not wf_id or not isinstance(agent_output, dict):
+            return
+        final_path = str(agent_output.get("final_video_path") or "").strip()
+        final_url = str(agent_output.get("final_video_url") or "").strip()
+        mix_receipt = agent_output.get("mix_receipt")
+        if not (final_path or final_url or isinstance(mix_receipt, dict)):
+            return
+        try:
+            if final_path or final_url:
+                resolved_final_url = final_url or build_local_public_url(final_path)
+                seed_metadata = normalize_video_metadata(agent_output.get("metadata", {}))
+                probed_metadata = probe_local_video_metadata_sync(final_path) if final_path else {}
+                final_video_metadata = merge_video_metadata(
+                    seed_metadata,
+                    probed_metadata,
+                    overwrite_non_empty=True,
+                )
+                payload = {
+                    "path": final_path,
+                    "url": resolved_final_url,
+                    "storage": {
+                        "provider": "local",
+                        "url": resolved_final_url,
+                        "skipped": True,
+                    },
+                }
+                if isinstance(final_video_metadata, dict) and final_video_metadata:
+                    payload["metadata"] = dict(final_video_metadata)
+                write_shared_fact(wf_id, "project.final_video", payload, service=self.short_term_service)
+            if isinstance(mix_receipt, dict) and mix_receipt:
+                write_shared_fact(
+                    wf_id,
+                    "project.final_video_mix",
+                    dict(mix_receipt),
+                    service=self.short_term_service,
+                )
+        except Exception as exc:
+            self.logger.error("❌ Failed to store composer outputs: %s", exc, exc_info=True)
+            raise AgentError("Shared WM write failed (final_video)") from exc
+
+    def _record_agent_output(
+        self,
+        *,
+        workflow_id: str,
+        agent_type: AgentType,
+        workflow_results: Dict[str, Any],
+        workflow_data: Dict[str, Any],
+        agent_output: Dict[str, Any],
+    ) -> None:
+        workflow_results[agent_type.value] = agent_output
+        workflow_data.update(agent_output)
+
+        if agent_type == AgentType.VIDEO_COMPOSER:
+            self._store_composer_outputs(workflow_id, agent_output)
+
+    def _build_execution_queue(
+        self,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        *,
+        candidate_agents: Optional[List[AgentType]] = None,
+    ) -> List[AgentType]:
+        return OrchestrationQueuePolicy.build_execution_queue(
+            task_specs=task_specs,
+            candidate_agents=candidate_agents,
+        )
+
+    def _build_standby_agents(
+        self,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        *,
+        candidate_agents: Optional[List[AgentType]] = None,
+    ) -> List[AgentType]:
+        return OrchestrationQueuePolicy.build_standby_agents(
+            task_specs=task_specs,
+            candidate_agents=candidate_agents,
+        )
+
+    @staticmethod
+    def _current_execution_id() -> Optional[str]:
+        try:
+            exec_state = execution_context_var.get()
+            return getattr(exec_state, "id", None) if exec_state else None
+        except Exception:
+            return None
+
+    async def _evaluate_runtime_boundary_cycle(
+        self,
+        *,
+        workflow_state_id: str,
+        current_agent: AgentType,
+        agent_output: Dict[str, Any],
+        audio_contract: Dict[str, Any],
+        candidate_agents: List[AgentType],
+        standby_agents: List[AgentType],
+        replan_count: int,
+        max_replans: int,
+        current_index: int,
+        execution_queue: List[AgentType],
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        conditional_task_specs: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        try:
+            execution_id = self._current_execution_id()
+            report = self._orchestration_protocol.build_subagent_report(
+                workflow_state_id=workflow_state_id,
+                agent_type=current_agent,
+                agent_output=agent_output,
+                execution_id=execution_id,
+            )
+            control_plane = self._get_orchestration_control_plane()
+            decision_request = control_plane.open_runtime_decision(
+                workflow_state_id=workflow_state_id,
+                current_agent=current_agent,
+                standby_agents=standby_agents,
+                report=report,
+                audio_contract=dict(audio_contract or {}),
+                replan_count=replan_count,
+                max_replans=max_replans,
+                execution_id=execution_id,
+            )
+            if not isinstance(decision_request, dict) or not decision_request:
+                raise OrchestrationControlPlaneError(
+                    "open_runtime_decision must return explicit envelope"
+                )
+            request_status = str(decision_request.get("status") or "").strip()
+            if request_status == "no_gate":
+                return {
+                    "runtime_decision": {},
+                    "apply_result": dict(decision_request.get("apply_result") or {}),
+                    "decision_ack": dict(decision_request.get("decision_ack") or {}),
+                }
+            if request_status != "ready":
+                raise OrchestrationControlPlaneError(
+                    f"Unsupported runtime decision envelope status: {request_status or '<empty>'}"
+                )
+            payload = decision_request.get("decision_request")
+            if not isinstance(payload, dict) or not payload:
+                raise OrchestrationControlPlaneError(
+                    "ready runtime decision envelope missing decision_request"
+                )
+            runtime_decision = await self._llm_decide_runtime_decision(
+                workflow_state_id=workflow_state_id,
+                current_agent=current_agent,
+                standby_agents=standby_agents,
+                report=payload.get("report") or {},
+                gate_events=payload.get("gate_events") or [],
+                replan_count=replan_count,
+                max_replans=max_replans,
+            )
+            apply_response = control_plane.apply_runtime_decision(
+                workflow_state_id=workflow_state_id,
+                current_agent=current_agent,
+                current_index=current_index,
+                runtime_decision=runtime_decision,
+                execution_queue=execution_queue,
+                task_specs=task_specs,
+                candidate_agents=list(candidate_agents),
+                conditional_task_specs=conditional_task_specs,
+                standby_agents=standby_agents,
+                replan_count=replan_count,
+            )
+            apply_result = apply_response.get("apply_result") or {}
+            decision_ack = apply_response.get("decision_ack") or {}
+            return {
+                "runtime_decision": runtime_decision,
+                "apply_result": apply_result,
+                "decision_ack": decision_ack,
+            }
+        except OrchestrationProtocolError as exc:
+            raise AgentError(f"Runtime protocol violated: {exc}") from exc
+        except (OrchestrationControlPlaneError, OrchestrationRuntimeControllerError) as exc:
+            raise AgentError(f"Runtime control-plane violated: {exc}") from exc
+
+    @staticmethod
+    def _deserialize_agent_pool(raw_pool: Any) -> List[AgentType]:
+        parsed: List[AgentType] = []
+        if not isinstance(raw_pool, list):
+            return parsed
+        for item in raw_pool:
+            try:
+                parsed.append(AgentType(str(item)))
+            except Exception:
+                continue
+        return parsed
+
+    async def _llm_decide_runtime_decision(
+        self,
+        *,
+        workflow_state_id: str,
+        current_agent: AgentType,
+        standby_agents: List[AgentType],
+        report: Dict[str, Any],
+        gate_events: List[Dict[str, Any]],
+        replan_count: int,
+        max_replans: int,
+    ) -> Dict[str, Any]:
+        if not gate_events:
+            return {"action": "continue", "reason": "no_runtime_gate_event", "facts": {"report": report or {}}}
+        if not standby_agents:
+            return {
+                "action": "continue",
+                "reason": "standby_pool_empty",
+                "facts": {
+                    "report": report or {},
+                    "gate_events": list(gate_events or []),
+                },
+            }
+
+        llm = self.get_llm("plan")
+        pm = self.prompt_manager
+        try:
+            agent_sys = self.get_system_instructions() or {}
+            pr = agent_sys.get("primary_role") or "工作流编排器"
+        except Exception:
+            pr = "工作流编排器"
+        system_text = pm.render_template(
+            "agents/orchestrator",
+            "runtime_decision_system",
+            variables={"primary_role": pr},
+            use_cache=True,
+            auto_reload=False,
+        )
+        user_text = pm.render_template(
+            "agents/orchestrator",
+            "runtime_decision_user",
+            variables={
+                "workflow_id": str(workflow_state_id or ""),
+                "current_agent": current_agent.value,
+                "report_json": json.dumps(dict(report or {}), ensure_ascii=False),
+                "standby_candidates_json": json.dumps([agent.value for agent in standby_agents], ensure_ascii=False),
+                "gate_events_json": json.dumps(list(gate_events or []), ensure_ascii=False),
+                "replan_budget_json": json.dumps(
+                    {
+                        "used": int(replan_count),
+                        "max": int(max_replans),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            use_cache=True,
+            auto_reload=False,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": system_text,
+            },
+            {
+                "role": "user",
+                "content": user_text,
+            },
+        ]
+        try:
+            response = await llm.chat_completion(
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=getattr(settings, "LLM_MAX_TOKENS_STANDARD", 1024),
+            )
+            data = json.loads((response.get("content") or "{}").strip() or "{}")
+        except Exception as exc:
+            raise AgentError(f"Runtime replan LLM decision failed: {exc}") from exc
+
+        action_raw = data.get("action")
+        if not isinstance(action_raw, str) or not action_raw.strip():
+            raise AgentError("Runtime replan missing action")
+        action = action_raw.strip().lower()
+        reason = str(data.get("reason") or data.get("rationale") or "llm_runtime_replan").strip()
+        target_raw = str(data.get("target_agent") or "").strip()
+        allowed_targets = {agent.value: agent for agent in standby_agents}
+
+        if action not in {"continue", "activate_from_standby", "abort"}:
+            raise AgentError(f"Runtime replan returned invalid action: {action}")
+
+        if action == "activate_from_standby":
+            target_agent = allowed_targets.get(target_raw)
+            if target_agent is None:
+                raise AgentError(
+                    f"Runtime replan returned invalid target_agent: {target_raw or '<empty>'}"
+                )
+            if replan_count >= max(0, int(max_replans)):
+                return {
+                    "action": "abort",
+                    "reason": "replan_budget_exhausted",
+                    "facts": {
+                        "report": report,
+                        "gate_events": gate_events,
+                        "llm_output": data,
+                    },
+                }
+            return {
+                "action": "activate_from_standby",
+                "target_agent": target_agent,
+                "reason": reason or "llm_runtime_replan_activation",
+                "facts": {
+                    "report": report,
+                    "gate_events": gate_events,
+                    "llm_output": data,
+                },
+            }
+
+        if action == "abort":
+            return {
+                "action": "abort",
+                "reason": reason or "llm_runtime_replan_abort",
+                "facts": {
+                    "report": report,
+                    "gate_events": gate_events,
+                    "llm_output": data,
+                },
+            }
+
+        return {
+            "action": "continue",
+            "reason": reason or "llm_runtime_replan_continue",
+            "facts": {
+                "report": report,
+                "gate_events": gate_events,
+                "llm_output": data,
+            },
+        }
+
+    def _get_video_audio_capability(self) -> Dict[str, Any]:
+        """Read current provider audio capability from video config manager."""
+        try:
+            provider_cfg = self.video_config.get_current_provider_config()
+            return {
+                "provider": provider_cfg.provider_name,
+                "supports_native_audio": bool(getattr(provider_cfg, "supports_native_audio", False)),
+                "native_audio_param_name": str(getattr(provider_cfg, "native_audio_param_name", "generate_audio") or "generate_audio"),
+                "native_audio_default_enabled": getattr(provider_cfg, "native_audio_default_enabled", None),
+            }
+        except Exception:
+            return {
+                "provider": "",
+                "supports_native_audio": False,
+                "native_audio_param_name": "generate_audio",
+                "native_audio_default_enabled": None,
+            }
+
+    def _emit_pre_dispatch_diagnostics(self, agent_type: AgentType, workflow_state_id: str) -> None:
+        if agent_type == AgentType.AUDIO_GENERATOR:
+            try:
+                contract = read_shared_fact(
+                    workflow_state_id,
+                    "workflow.contract.audio",
+                    {},
+                    service=self.short_term_service,
+                ) or {}
+                self.logger.info(
+                    "AUDIO_AGENT_DISPATCH: workflow_id=%s policy=%s allow_silence=%s need_global_bgm=%s need_voiceover=%s",
+                    workflow_state_id,
+                    contract.get("policy") if isinstance(contract, dict) else None,
+                    bool((contract or {}).get("allow_silence")) if isinstance(contract, dict) else None,
+                    bool((contract or {}).get("need_global_bgm")) if isinstance(contract, dict) else None,
+                    bool((contract or {}).get("need_voiceover")) if isinstance(contract, dict) else None,
+                )
+                self._last_audio_route_payload = {}
+            except Exception as route_err:
+                self.logger.warning("AUDIO_ORCHESTRATION diagnostics failed: %s", route_err)
+
+    async def _prepare_agent_context(
+        self,
+        workflow_data: Dict[str, Any],
+        agent_type: AgentType,
+        workflow_id: str,
+        *,
+        runtime_input_payload: Optional[Dict[str, Any]] = None,
+        execution_contract: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """为Agent准备包含创意指导的上下文数据"""
-        
+
         try:
             # 复制基础工作流数据
             agent_input = workflow_data.copy()
@@ -746,19 +1823,7 @@ class OrchestratorAgent(BaseAgent):
                 episode_ctx = None
                 project_ctx = None
                 episode_ctx = workflow_data.get("episode_context")
-                if not episode_ctx:
-                    try:
-                        wf = workflow_manager.get_workflow(workflow_id)
-                        episode_ctx = getattr(wf, "episode_context", None) if wf else None
-                    except Exception:
-                        episode_ctx = None
                 project_ctx = workflow_data.get("project_context")
-                if not project_ctx:
-                    try:
-                        wf = workflow_manager.get_workflow(workflow_id)
-                        project_ctx = getattr(wf, "project_context", None) if wf else None
-                    except Exception:
-                        project_ctx = None
 
                 if episode_ctx:
                     agent_input["episode_context"] = episode_ctx
@@ -770,113 +1835,292 @@ class OrchestratorAgent(BaseAgent):
                     )
                 if project_ctx:
                     agent_input["project_context"] = project_ctx
-
-            # 如果是需要创意指导的Agent，从记忆服务获取并添加到上下文
-            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
-
-                # 获取整体创意指导
-                overall_guidance = await global_memory_service.retrieve_creative_guidance(
-                    workflow_id=workflow_id,
-                    agent_name=f"orchestrator_for_{agent_type.value}"
-                )
-                
-                if overall_guidance.get("has_guidance"):
-                    agent_input["creative_guidance"] = overall_guidance.get("overall_guidance", {})
-                    
-                    # 为所有场景准备指导数据
-                    scene_guidances = {}
-                    concept_plan = workflow_data.get("concept_plan", {})
-                    scenes = concept_plan.get("scenes", [])
-                    
-                    for scene in scenes:
-                        scene_number = scene.get("scene_number")
-                        if scene_number:
-                            scene_guidance = await global_memory_service.retrieve_creative_guidance(
-                                workflow_id=workflow_id,
-                                scene_number=scene_number,
-                                agent_name=f"orchestrator_for_{agent_type.value}"
+                    try:
+                        self.logger.info(
+                            "🧠 Project context injected for %s",
+                            agent_type.value,
+                        )
+                    except Exception:
+                        pass
+            boundary_context = self._get_context_contract_assembler().assemble_agent_context(
+                agent_type=agent_type,
+                workflow_state_id=workflow_id,
+                workflow_data=workflow_data,
+                runtime_input_payload=runtime_input_payload,
+                execution_contract=execution_contract,
+            )
+            if isinstance(boundary_context, dict):
+                assembler_diagnostics = boundary_context.pop("_assembler_diagnostics", None)
+                if isinstance(assembler_diagnostics, dict):
+                    for name, receipt in assembler_diagnostics.items():
+                        if not isinstance(receipt, dict):
+                            continue
+                        status = str(receipt.get("status") or "").strip().lower()
+                        if status and status != "resolved":
+                            self.logger.warning(
+                                "Boundary assembly fallback for %s on %s: %s",
+                                agent_type.value,
+                                name,
+                                receipt,
                             )
-                            
-                            if scene_guidance.get("has_guidance"):
-                                scene_guidances[f"scene_{scene_number}"] = scene_guidance.get("scene_guidance", {})
-                    
+                for key, value in boundary_context.items():
+                    if value:
+                        agent_input[key] = value
+
+            if agent_type in [AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR]:
+                overall_guidance = workflow_data.get("creative_guidance")
+                if overall_guidance:
+                    agent_input["creative_guidance"] = overall_guidance
+                scene_guidances = workflow_data.get("scene_guidances")
+                if scene_guidances:
                     agent_input["scene_guidances"] = scene_guidances
 
-                    # 音频专用：注入时间线与总时长（从 WorkflowState 读取），便于音频对齐
-                    if agent_type == AgentType.AUDIO_GENERATOR:
-                        try:
-                            from ..core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(workflow_id)
-                            timeline = []
-                            total_duration = 0.0
-                            if wf:
-                                for sc in getattr(wf, 'scenes', []) or []:
-                                    try:
-                                        sn = int(getattr(sc, 'scene_number', 0) or 0)
-                                    except Exception:
-                                        sn = 0
-                                    if not sn:
-                                        continue
-                                    dur = float(getattr(sc, 'duration', 0.0) or 0.0)
-                                    st = float(getattr(sc, 'start_time', 0.0) or 0.0)
-                                    ed = float(getattr(sc, 'end_time', st + dur) or (st + dur))
-                                    total_duration += dur
-                                    timeline.append({
-                                        "scene_number": sn,
-                                        "start": st,
-                                        "end": ed,
-                                        "duration": dur,
-                                        "mood": getattr(sc, 'mood_and_atmosphere', ''),
-                                    })
-                            agent_input["audio_timeline"] = timeline
-                            agent_input["audio_total_duration"] = total_duration
-                        except Exception as _e:
-                            self.logger.warning(f"AUDIO_CTX_WARN: failed to inject timeline: {_e}")
-
-                    self.logger.info(f"🧠 Orchestrator prepared creative context for {agent_type.value} with {len(scene_guidances)} scene guidances")
-                else:
-                    self.logger.warning(f"⚠️ No creative guidance available for {agent_type.value}")
-            elif agent_type == AgentType.VOICE_SYNTHESIZER:
-                try:
-                    from ..core.workflow_state import workflow_manager
-
-                    wf = workflow_manager.get_workflow(workflow_id)
-                    if wf:
-                        agent_input.setdefault("voice_plan", getattr(wf, "voice_plan", {}) or {})
-                        agent_input.setdefault("concept_plan", getattr(wf, "concept_plan", {}) or {})
-
-                        scene_payloads: List[Dict[str, Any]] = []
-                        for sc in getattr(wf, "scenes", []) or []:
-                            try:
-                                sn = int(getattr(sc, "scene_number", 0) or 0)
-                            except Exception:
-                                sn = 0
-                            if not sn:
-                                continue
-                            scene_payloads.append(
-                                {
-                                    "scene_number": sn,
-                                    "title": getattr(sc, "title", ""),
-                                    "duration": float(getattr(sc, "duration", 0.0) or 0.0),
-                                    "start_time": float(getattr(sc, "start_time", 0.0) or 0.0),
-                                    "end_time": float(getattr(sc, "end_time", 0.0) or 0.0),
-                                    "narrative_description": getattr(sc, "narrative_description", ""),
-                                    "visual_description": getattr(sc, "visual_description", ""),
-                                    "mood": getattr(sc, "mood_and_atmosphere", ""),
-                                    "video_prompt": getattr(sc, "video_prompt", ""),
-                                    "video_generation_params": getattr(sc, "video_generation_params", {}),
-                                    "video_url": getattr(sc, "video_path", None) or getattr(sc, "video_url", ""),
-                                    "script_text": getattr(sc, "script_text", ""),
-                                }
-                            )
-
-                        agent_input["voice_scenes"] = scene_payloads
-                except Exception as _e:
-                    self.logger.warning(f"VOICE_CTX_WARN: failed to assemble voice context: {_e}")
-
             return agent_input
-            
+
+        except AgentError:
+            raise
         except Exception as e:
-            self.logger.error(f"❌ Failed to prepare agent context for {agent_type.value}: {e}")
-            # 返回原始数据，不阻塞workflow
-            return workflow_data
+            self.logger.error(
+                "❌ Failed to prepare agent context for %s: %s",
+                agent_type.value,
+                e,
+            )
+            raise AgentError(
+                f"Failed to prepare agent context for {agent_type.value}: {e}"
+            ) from e
+
+    async def _prepare_scheduled_agent_input(
+        self,
+        *,
+        workflow_data: Dict[str, Any],
+        agent_type: AgentType,
+        workflow_id: str,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        runtime_input_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        task_assignment = self._build_task_assignment(
+            agent_type=agent_type,
+            task_specs=task_specs,
+        )
+        runtime_hints = self._resolve_task_runtime_hints(task_assignment)
+        execution_contract = self._build_agent_execution_contract(
+            agent_type=agent_type,
+            workflow_state_id=workflow_id,
+            runtime_hints=runtime_hints,
+        )
+        agent_input = await self._prepare_agent_context(
+            workflow_data,
+            agent_type,
+            workflow_id,
+            runtime_input_payload=runtime_input_payload,
+            execution_contract=execution_contract,
+        )
+        if isinstance(execution_contract, dict) and execution_contract:
+            agent_input["execution_contract"] = execution_contract
+        agent_input["task"] = task_assignment
+        return agent_input
+
+    async def _llm_decompose_tasks(
+        self,
+        workflow_data: Dict[str, Any],
+        workflow_id: str,
+        candidate_agents: List[AgentType],
+    ) -> Tuple[Dict[AgentType, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """LLM 生成 per-agent assignment contract，缺失 expected coverage 时显式失败。"""
+        try:
+            if not isinstance(candidate_agents, list) or not candidate_agents:
+                raise ValueError("LLM task decomposition requires explicit candidate_agents")
+            user_prompt = workflow_data.get("user_prompt") or workflow_data.get("prompt") or ""
+            page_params = {
+                "duration": workflow_data.get("duration"),
+                "resolution": workflow_data.get("resolution"),
+                "target_resolution": workflow_data.get("target_resolution"),
+            }
+            available_agents = [atype.value for atype in candidate_agents if isinstance(atype, AgentType)]
+            pm = self.prompt_manager
+            try:
+                agent_sys = self.get_system_instructions() or {}
+                pr = agent_sys.get("primary_role") or "工作流编排器"
+            except Exception:
+                pr = "工作流编排器"
+            system_text = pm.render_template(
+                "agents/orchestrator",
+                "decomposition_system",
+                variables={"primary_role": pr},
+                use_cache=True,
+                auto_reload=False,
+            )
+            user_text = pm.render_template(
+                "agents/orchestrator",
+                "decomposition_user",
+                variables={
+                    "user_prompt": str(user_prompt),
+                    "page_params_json": json.dumps(page_params, ensure_ascii=False),
+                    "candidate_agents_json": json.dumps(available_agents, ensure_ascii=False),
+                    "agent_catalog_json": json.dumps(
+                        self._planning_agent_catalog(), ensure_ascii=False
+                    ),
+                    "runtime_constraints_json": json.dumps(
+                        {
+                            "audio_contract": workflow_data.get("audio_contract") or {},
+                            "audio_capability": workflow_data.get("audio_capability") or {},
+                            "task_traits": self._extract_planning_task_traits(workflow_data),
+                            "workflow_state_id": workflow_id,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                use_cache=True,
+                auto_reload=False,
+            )
+            try:
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_INPUT workflow=%s system=%s user=%s",
+                    workflow_id,
+                    system_text,
+                    user_text,
+                )
+            except Exception:
+                pass
+            llm = self.get_llm("plan")
+            resp = await llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": user_text},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=getattr(settings, "LLM_MAX_TOKENS_STANDARD", 2048),
+            )
+            content = resp.get("content") if isinstance(resp, dict) else None
+            if not content:
+                raise ValueError("LLM decomposition returned empty content")
+            try:
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_OUTPUT_RAW workflow=%s content=%s",
+                    workflow_id,
+                    content,
+                )
+            except Exception:
+                pass
+            data = json.loads(content)
+            agents = data.get("agents") if isinstance(data, dict) else None
+            task_map: Dict[AgentType, Dict[str, Any]] = {}
+            conditional_task_specs: Dict[str, Dict[str, Any]] = {}
+            expected_agents = [
+                atype
+                for atype in list(candidate_agents)
+                if isinstance(atype, AgentType)
+            ]
+            expected_agent_set = set(expected_agents)
+            unexpected_agents: List[str] = []
+            if isinstance(agents, list):
+                for item in agents:
+                    if not isinstance(item, dict):
+                        continue
+                    atype = self._parse_agent_type(item.get("agent"))
+                    if atype is None:
+                        continue
+                    if atype not in expected_agent_set:
+                        unexpected_agents.append(atype.value)
+                        continue
+                    run_flag = item.get("run")
+                    mission = str(item.get("mission") or "").strip()
+                    deliverable = str(item.get("deliverable") or "").strip()
+                    if not mission:
+                        raise ValueError(
+                            f"LLM task decomposition missing mission for agent: {atype.value}"
+                        )
+                    if not deliverable:
+                        raise ValueError(
+                            f"LLM task decomposition missing deliverable for agent: {atype.value}"
+                        )
+                    spec = {
+                        "agent": atype.value,
+                        "mission": mission,
+                        "deliverable": deliverable,
+                        "constraints": self._normalize_assignment_constraints(
+                            item.get("constraints")
+                        ),
+                        "order": item.get("order"),
+                        "runtime_hints": self._normalize_runtime_hints(
+                            item.get("runtime_hints")
+                        ),
+                        "run": bool(run_flag) if run_flag is not None else True,
+                        "fallback_used": False,
+                    }
+                    task_map[atype] = spec
+            if unexpected_agents:
+                raise ValueError(
+                    "LLM task decomposition returned task_specs for non-candidate agents: "
+                    + ", ".join(sorted(set(unexpected_agents)))
+                )
+            missing_agents = [
+                atype.value for atype in expected_agents if not isinstance(task_map.get(atype), dict)
+            ]
+            if missing_agents:
+                raise ValueError(
+                    "LLM task decomposition missing task_specs for agents: "
+                    + ", ".join(missing_agents)
+                )
+            conditional_tasks = data.get("conditional_tasks") if isinstance(data, dict) else None
+            if conditional_tasks is not None and not isinstance(conditional_tasks, list):
+                raise ValueError("LLM task decomposition conditional_tasks must be list when provided")
+            for item in conditional_tasks or []:
+                if not isinstance(item, dict):
+                    continue
+                task_id = str(item.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                atype = self._parse_agent_type(item.get("agent"))
+                if atype is None:
+                    continue
+                if atype not in expected_agent_set:
+                    raise ValueError(
+                        "LLM task decomposition returned conditional_task for non-candidate agent: "
+                        f"{atype.value}"
+                    )
+                mission = str(item.get("mission") or "").strip()
+                deliverable = str(item.get("deliverable") or "").strip()
+                if not mission:
+                    raise ValueError(
+                        f"LLM task decomposition missing mission for conditional task: {task_id}"
+                    )
+                if not deliverable:
+                    raise ValueError(
+                        f"LLM task decomposition missing deliverable for conditional task: {task_id}"
+                    )
+                spec = {
+                    "agent": atype.value,
+                    "mission": mission,
+                    "deliverable": deliverable,
+                    "constraints": self._normalize_assignment_constraints(
+                        item.get("constraints")
+                    ),
+                    "trigger": item.get("trigger"),
+                    "runtime_hints": self._normalize_runtime_hints(
+                        item.get("runtime_hints")
+                    ),
+                    "fallback_used": False,
+                }
+                conditional_task_specs[task_id] = spec
+            try:
+                normalized_task_map = {
+                    agent_type.value: dict(spec)
+                    for agent_type, spec in task_map.items()
+                }
+                self.logger.info(
+                    "ORCH_PLAN_DECOMP_OUTPUT_NORMALIZED workflow=%s task_specs=%s conditional_task_specs=%s",
+                    workflow_id,
+                    json.dumps(normalized_task_map, ensure_ascii=False),
+                    json.dumps(conditional_task_specs, ensure_ascii=False),
+                )
+            except Exception:
+                pass
+            return task_map, conditional_task_specs
+        except Exception as e:
+            try:
+                self.logger.error("LLM task decomposition failed: %s (required)", e)
+            except Exception:
+                pass
+            raise AgentError(f"LLM task decomposition is required but failed: {e}") from e

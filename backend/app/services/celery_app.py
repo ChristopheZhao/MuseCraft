@@ -1,15 +1,19 @@
 """
 Celery application configuration
 """
+import logging
+
 from celery import Celery
+from celery.signals import setup_logging, worker_process_init
 from ..core.config import settings
+from ..core.logging_config import configure_logging
 
 # Create Celery app
 celery_app = Celery(
     "short_video_maker",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.services.task_queue"]
+    include=["app.services.task_queue", "app.services.project_job_queue"]
 )
 
 # Celery configuration
@@ -25,17 +29,58 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_routes={
         'process_video_task': {'queue': 'video_processing'},
+        'process_project_job': {'queue': 'project_workflow'},
     },
     worker_log_format='[%(asctime)s: %(levelname)s/%(processName)s] %(message)s',
     worker_task_log_format='[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s',
+    worker_hijack_root_logger=False,
 )
+
+
+@setup_logging.connect
+def _setup_celery_logging(**kwargs):
+    """Centralize Celery logging through the shared logging owner."""
+
+    configure_logging(force=True)
+
+
+@worker_process_init.connect
+def _init_worker_process(**kwargs):
+    """Worker subprocess initialization.
+    - 不再主动改写 root logger 级别，遵循注入优先：
+      Celery CLI/环境的 --loglevel 控制控制台；.env 的 LOG_LEVEL 仅影响应用内部使用 basicConfig 的场景。
+    - 仅附加 MAS 文件日志（如启用）与注册工具，避免越权。
+    """
+    import logging
+
+    # Register default tools once per worker process
+    try:
+        from ..agents.tools import register_default_tools
+        register_default_tools()
+    except Exception as e:
+        logging.getLogger("celery_task").warning(f"Tool registry init failed in worker_process_init: {e}")
+
+
+class ProcessVideoTaskError(RuntimeError):
+    """Raised when a queued video-processing run fails in a business-aware way."""
+
+
+def _load_sync_process_video_task():
+    from .task_queue import sync_process_video_task
+
+    return sync_process_video_task
+
+
+def _load_sync_process_project_job():
+    from .project_job_queue import sync_process_project_job
+
+    return sync_process_project_job
 
 
 @celery_app.task(bind=True, name="process_video_task")
 def process_video_task(self, task_id: int):
     """Celery task for processing video generation"""
     
-    import logging
     logger = logging.getLogger("celery_task")
     
     logger.info(f"=== Starting Celery task for task_id: {task_id} ===")
@@ -48,7 +93,7 @@ def process_video_task(self, task_id: int):
     
     try:
         logger.info("Importing sync_process_video_task function...")
-        from .task_queue import sync_process_video_task
+        sync_process_video_task = _load_sync_process_video_task()
         logger.info("Successfully imported sync_process_video_task")
         
         logger.info(f"Calling sync_process_video_task with task_id: {task_id}")
@@ -56,38 +101,62 @@ def process_video_task(self, task_id: int):
         result = sync_process_video_task(task_id)
         logger.info(f"sync_process_video_task returned: {result}")
         
-        # Update final state
         if isinstance(result, dict) and "error" in result:
             logger.error(f"Task failed with error: {result['error']}")
-            self.update_state(
-                state='FAILURE',
-                meta={'error': result["error"]}
-            )
-            raise Exception(result["error"])
-        else:
-            logger.info("Task completed successfully")
-            self.update_state(
-                state='SUCCESS',
-                meta={'result': result, 'status': 'Video processing completed'}
-            )
-            return result
+            raise ProcessVideoTaskError(str(result["error"]))
+
+        logger.info("Task completed successfully")
+        return result
             
     except ImportError as e:
         error_msg = f"Failed to import sync_process_video_task: {str(e)}"
         logger.error(error_msg)
-        self.update_state(
-            state='FAILURE',
-            meta={'error': error_msg}
-        )
-        raise Exception(error_msg)
+        raise ProcessVideoTaskError(error_msg) from e
+    except ProcessVideoTaskError:
+        raise
     except Exception as e:
         error_msg = f"Unexpected error in Celery task: {str(e)}"
         logger.error(error_msg, exc_info=True)
-        self.update_state(
-            state='FAILURE',
-            meta={'error': error_msg}
-        )
         raise
+
+
+@celery_app.task(bind=True, name="process_project_job")
+def process_project_job(self, task_id: int):
+    """Celery task for processing project workflow jobs."""
+
+    logger = logging.getLogger("project_job")
+    logger.info("=== Starting project job Celery task for task_id: %s ===", task_id)
+
+    self.update_state(
+        state='PROGRESS',
+        meta={'current': 0, 'total': 100, 'status': 'Starting project workflow...'}
+    )
+
+    try:
+        logger.info("Importing sync_process_project_job function...")
+        sync_process_project_job = _load_sync_process_project_job()
+        logger.info("Successfully imported sync_process_project_job")
+
+        logger.info("Calling sync_process_project_job with task_id: %s", task_id)
+        result = sync_process_project_job(task_id)
+        logger.info("sync_process_project_job returned: %s", result)
+
+        if isinstance(result, dict) and "error" in result:
+            logger.error("Project job failed with error: %s", result["error"])
+            raise ProcessVideoTaskError(str(result["error"]))
+
+        logger.info("Project job completed successfully")
+        return result
+    except ImportError as e:
+        error_msg = f"Failed to import sync_process_project_job: {str(e)}"
+        logger.error(error_msg)
+        raise ProcessVideoTaskError(error_msg) from e
+    except ProcessVideoTaskError:
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error in project job Celery task: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise ProcessVideoTaskError(error_msg) from e
 
 
 # Task monitoring and management tasks

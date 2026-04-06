@@ -183,16 +183,8 @@ export const TaskApiMocks = {
       title: 'AI Video Generation',
       status: 'processing',
       progress_percentage: 45,
-      current_stage: 'script_generation',
+      current_step: 'script_generation',
       current_agent: 'script-writer',
-      agent_status: {
-        'concept-generator': { status: 'completed', progress: 100 },
-        'script-writer': { status: 'working', progress: 75 },
-        'image-generator': { status: 'waiting', progress: 0 },
-        'voice-synthesizer': { status: 'waiting', progress: 0 },
-        'video-composer': { status: 'waiting', progress: 0 },
-        'quality-controller': { status: 'waiting', progress: 0 }
-      },
       estimated_time_remaining: 180, // 3 minutes
       created_at: new Date(Date.now() - 120000).toISOString(), // 2 minutes ago
       updated_at: new Date().toISOString()
@@ -266,38 +258,27 @@ export const FileApiMocks = {
 // WebSocket message mocks
 export const WebSocketMocks = {
   progressUpdate: (taskId: string, progress: number, agentId?: string) => ({
-    type: 'progress-update',
-    data: {
-      task_id: taskId,
-      overall_progress: progress,
-      agent_id: agentId,
-      agent_progress: agentId ? progress : undefined,
-      current_stage: progress < 20 ? 'concept_generation' :
-                    progress < 40 ? 'script_writing' :
-                    progress < 60 ? 'image_generation' :
-                    progress < 80 ? 'voice_synthesis' :
-                    progress < 95 ? 'video_composition' : 'quality_control',
-      estimated_time_remaining: Math.max(0, Math.floor((100 - progress) * 2)), // 2 seconds per percent
-      updated_at: new Date().toISOString()
+    type: 'event.progress',
+    agent_type: normalizeAgentId(agentId),
+    payload: {
+      progress,
+      current_step: progress < 20 ? 'concept_generation' :
+        progress < 40 ? 'script_writing' :
+        progress < 60 ? 'image_generation' :
+        progress < 80 ? 'voice_synthesis' :
+        progress < 95 ? 'video_composition' : 'quality_control',
     },
     timestamp: new Date().toISOString(),
-    request_id: taskId
+    requestId: taskId
   }),
 
   agentStatusUpdate: (agentId: string, status: string, progress: number, currentTask?: string) => ({
-    type: 'agent-status-update',
-    data: {
-      agent_id: agentId,
+    type: 'event.state',
+    agent_name: normalizeAgentId(agentId),
+    payload: {
       status,
       progress,
-      current_task: currentTask,
-      estimated_time: status === 'working' ? Math.floor((100 - progress) * 1.5) : undefined,
-      capabilities_used: ['analysis', 'generation', 'optimization'],
-      resource_usage: {
-        cpu: Math.random() * 100,
-        memory: Math.random() * 8192, // MB
-        gpu: Math.random() * 100
-      }
+      current_step: currentTask,
     },
     timestamp: new Date().toISOString()
   }),
@@ -305,47 +286,24 @@ export const WebSocketMocks = {
   resultReady: (taskId: string, resultType: string, resultData: any) => ({
     type: 'result-ready',
     data: {
-      task_id: taskId,
-      result_type: resultType,
-      result_id: `result-${Date.now()}`,
+      requestId: taskId,
+      type: resultType,
+      id: `result-${Date.now()}`,
       status: 'completed',
-      output: resultData,
-      metadata: {
-        generation_time: Math.floor(Math.random() * 30) + 10, // 10-40 seconds
-        quality_score: 0.8 + Math.random() * 0.2, // 0.8-1.0
-        confidence: 0.85 + Math.random() * 0.15, // 0.85-1.0
-        model_version: '2.1.0',
-        parameters_used: {
-          temperature: 0.7,
-          top_p: 0.9,
-          max_tokens: 2048
-        }
-      },
-      agent: getAgentForResultType(resultType)
+      content: resultData,
+      createdAt: new Date().toISOString(),
+      agent: getAgentForResultType(resultType),
+      confidence: 0.85 + Math.random() * 0.15, // 0.85-1.0
     },
     timestamp: new Date().toISOString(),
-    request_id: taskId
+    requestId: taskId
   }),
 
   systemMessage: (messageType: string, title: string, message: string, severity: string = 'info') => ({
     type: 'system-message',
     data: {
-      message_type: messageType,
-      title,
       message,
-      severity,
-      display_duration: severity === 'error' ? 0 : 5000, // 0 = persistent
-      actions: severity === 'error' ? [
-        { type: 'retry', label: 'Retry' },
-        { type: 'report', label: 'Report Issue' }
-      ] : [
-        { type: 'dismiss', label: 'Dismiss' }
-      ],
-      metadata: {
-        component: 'system',
-        category: 'notification',
-        priority: severity === 'error' ? 'high' : 'normal'
-      }
+      level: severity,
     },
     timestamp: new Date().toISOString()
   }),
@@ -353,29 +311,19 @@ export const WebSocketMocks = {
   errorMessage: (errorCode: string, message: string, taskId?: string, agentId?: string) => ({
     type: 'error',
     data: {
-      error_code: errorCode,
-      error_message: message,
-      task_id: taskId,
-      agent_id: agentId,
-      retry_available: !['AUTH_FAILED', 'QUOTA_EXCEEDED'].includes(errorCode),
-      suggested_actions: getSuggestedActions(errorCode),
-      error_details: getErrorDetails(errorCode),
-      support_reference: `SUP-${Date.now()}`
+      code: errorCode,
+      error: message,
+      requestId: taskId,
+      agentId,
     },
     timestamp: new Date().toISOString(),
-    request_id: taskId
+    requestId: taskId
   }),
 
   connectionStatus: (status: string, reason?: string) => ({
-    type: 'connection-status',
-    data: {
-      status, // 'connected', 'disconnected', 'reconnecting', 'error'
-      reason,
-      server_time: new Date().toISOString(),
-      connection_id: `conn-${Date.now()}`,
-      retry_count: status === 'reconnecting' ? Math.floor(Math.random() * 3) + 1 : 0,
-      next_retry_in: status === 'reconnecting' ? Math.floor(Math.random() * 5) + 1 : undefined
-    },
+    type: status === 'connected' ? 'connection_established' : 'system_notification',
+    message: reason || `Connection status: ${status}`,
+    level: status === 'error' ? 'error' : 'info',
     timestamp: new Date().toISOString()
   })
 }
@@ -458,6 +406,21 @@ export const HealthApiMocks = {
 }
 
 // Helper functions
+function normalizeAgentId(agentId?: string): string | undefined {
+  if (!agentId) return undefined
+
+  const agentMap: Record<string, string> = {
+    'concept-generator': 'concept_planner',
+    'script-writer': 'script_writer',
+    'image-generator': 'image_generator',
+    'voice-synthesizer': 'voice_synthesizer',
+    'video-composer': 'video_composer',
+    'quality-controller': 'quality_checker',
+  }
+
+  return agentMap[agentId] || agentId
+}
+
 function getAgentForResultType(resultType: string): string {
   const agentMap: Record<string, string> = {
     'concept': 'concept-generator',
@@ -469,32 +432,6 @@ function getAgentForResultType(resultType: string): string {
     'thumbnail': 'video-composer'
   }
   return agentMap[resultType] || 'unknown'
-}
-
-function getSuggestedActions(errorCode: string): string[] {
-  const actionMap: Record<string, string[]> = {
-    'NETWORK_ERROR': ['Check internet connection', 'Try again later'],
-    'SERVER_ERROR': ['Try again in a few minutes', 'Contact support if problem persists'],
-    'VALIDATION_ERROR': ['Check input parameters', 'Review form data'],
-    'AUTH_FAILED': ['Log in again', 'Check credentials'],
-    'QUOTA_EXCEEDED': ['Upgrade plan', 'Wait for quota reset'],
-    'AGENT_FAILURE': ['Simplify prompt', 'Try different parameters'],
-    'TIMEOUT': ['Try again', 'Use shorter content']
-  }
-  return actionMap[errorCode] || ['Try again', 'Contact support']
-}
-
-function getErrorDetails(errorCode: string): any {
-  const detailsMap: Record<string, any> = {
-    'NETWORK_ERROR': { category: 'connectivity', retriable: true },
-    'SERVER_ERROR': { category: 'server', retriable: true },
-    'VALIDATION_ERROR': { category: 'client', retriable: false },
-    'AUTH_FAILED': { category: 'authentication', retriable: false },
-    'QUOTA_EXCEEDED': { category: 'limits', retriable: false },
-    'AGENT_FAILURE': { category: 'processing', retriable: true },
-    'TIMEOUT': { category: 'performance', retriable: true }
-  }
-  return detailsMap[errorCode] || { category: 'unknown', retriable: true }
 }
 
 // Mock response factory

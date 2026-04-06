@@ -1,14 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { VideoRequest, VideoStyle, AspectRatio } from '@/types';
-import { generateId } from '@/lib/utils';
-import { ApiClient } from '@/lib/api';
+import { ApiClient, type QuickCurrentRunResponse } from '@/lib/api';
+import { getOrCreateQuickWorkspaceSessionId } from '@/lib/utils';
 import {
+  AlertCircle,
   Upload,
   Image,
   FileText,
+  Loader2,
   Music,
   Sparkles,
   Play,
@@ -20,8 +22,14 @@ import ParameterControls from './ParameterControls';
 import { useI18n } from '@/i18n/I18nProvider';
 
 const VideoRequestForm: React.FC = () => {
-  const { setCurrentRequest, setCurrentStep, addNotification } = useAppStore();
+  const { setCurrentRequest, setCurrentStep, setQuickRuntime, addNotification } = useAppStore();
   const { t } = useI18n();
+  const [workspaceSessionId, setWorkspaceSessionId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [resumingExistingRun, setResumingExistingRun] = useState(false);
+  const [loadingExistingRun, setLoadingExistingRun] = useState(true);
+  const [existingRun, setExistingRun] = useState<QuickCurrentRunResponse | null>(null);
+  const [existingRunDismissed, setExistingRunDismissed] = useState(false);
   
   const [formData, setFormData] = useState({
     title: '',
@@ -40,6 +48,153 @@ const VideoRequestForm: React.FC = () => {
 
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [currentTab, setCurrentTab] = useState<'basic' | 'style' | 'music' | 'advanced'>('basic');
+  const hasPendingRunChoice = !loadingExistingRun && !!existingRun?.task && !existingRunDismissed;
+  const existingRunResumeControl = existingRun?.runtime?.resume_control;
+
+  useEffect(() => {
+    const currentSessionId = getOrCreateQuickWorkspaceSessionId();
+    setWorkspaceSessionId(currentSessionId);
+
+    let cancelled = false;
+
+    const loadExistingRun = async () => {
+      setLoadingExistingRun(true);
+      try {
+        const result = await ApiClient.getCurrentQuickRun(currentSessionId);
+        if (!cancelled) {
+          setExistingRun(result);
+          setExistingRunDismissed(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to discover current quick run:', error);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingExistingRun(false);
+        }
+      }
+    };
+
+    void loadExistingRun();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const mapQuickRunToRequest = (run: QuickCurrentRunResponse): VideoRequest | null => {
+    if (!run.task) {
+      return null;
+    }
+
+    const inputParameters = run.task.input_parameters || {};
+    const rawPrompt = String(
+      inputParameters.user_prompt ||
+        run.task.description ||
+        run.task.title ||
+        ''
+    );
+    const lines = rawPrompt
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const title = lines[0] || run.task.title || '未命名任务';
+    const description = lines.slice(1).join('\n\n') || rawPrompt || title;
+
+    return {
+      id: run.task.task_id,
+      sessionId: run.task.session_id || workspaceSessionId,
+      title,
+      description,
+      style: formData.style || {
+        id: 'default',
+        name: 'Default',
+        description: 'Clean and professional style',
+        thumbnail: '',
+        category: 'corporate',
+      },
+      duration: Number(inputParameters.duration || 30),
+      resolution: String(inputParameters.resolution || '720p'),
+      aspectRatio: (String(inputParameters.aspect_ratio || '16:9') as AspectRatio),
+      musicSettings: {
+        enabled: true,
+        genre: 'corporate',
+        mood: 'upbeat',
+        volume: 0.3,
+      },
+      createdAt: new Date(run.task.created_at),
+      updatedAt: new Date(run.task.updated_at),
+    };
+  };
+
+  const attachExistingRunToWorkspace = (
+    run: QuickCurrentRunResponse,
+    notification?: {
+      type: 'success' | 'error' | 'warning' | 'info';
+      title: string;
+      message: string;
+      autoClose?: number;
+    } | null
+  ) => {
+    const request = mapQuickRunToRequest(run);
+    if (!request) return;
+
+    setExistingRunDismissed(true);
+    setCurrentRequest(request);
+    setQuickRuntime(run.runtime);
+    setCurrentStep('processing');
+    if (notification) {
+      addNotification(notification);
+    }
+  };
+
+  const handleViewExistingRun = () => {
+    if (!existingRun) return;
+
+    console.info('ATTACH_EXISTING_RUN_VIEW selected', { taskId: existingRun.task.task_id });
+    attachExistingRunToWorkspace(existingRun, {
+      type: 'info',
+      title: '已恢复工作台视图',
+      message: `当前正在查看任务 ${existingRun.task.task_id}；如需恢复后端执行，请使用明确的“恢复执行”按钮。`,
+      autoClose: 4000,
+    });
+  };
+
+  const handleResumeExistingRun = async () => {
+    if (!existingRun) return;
+
+    console.info('RESUME_EXISTING_RUN selected', { taskId: existingRun.task.task_id });
+    attachExistingRunToWorkspace(existingRun, null);
+    try {
+      setResumingExistingRun(true);
+      const result = await ApiClient.resumeTaskRuntime(existingRun.task.task_id);
+      setQuickRuntime(result.runtime);
+      setExistingRun(null);
+      addNotification({
+        type: 'success',
+        title: '已请求恢复执行',
+        message: `任务 ${existingRun.task.task_id} 已重新进入执行流程。`,
+        autoClose: 3000,
+      });
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: '恢复执行失败',
+        message: error instanceof Error ? error.message : '恢复执行失败，请稍后重试',
+        autoClose: 6000,
+      });
+    } finally {
+      setResumingExistingRun(false);
+    }
+  };
+
+  const handleCreateNewRun = () => {
+    console.info('CREATE_NEW_RUN selected', { sessionId: workspaceSessionId || existingRun?.task?.session_id || 'unknown' });
+    setExistingRunDismissed(true);
+    setQuickRuntime(null);
+    setCurrentRequest(null);
+  };
 
   const handleInputChange = (field: string, value: any) => {
     setFormData(prev => ({
@@ -49,10 +204,11 @@ const VideoRequestForm: React.FC = () => {
   };
 
   const handleNestedChange = (section: string, field: string, value: any) => {
+    const sectionValue = (formData[section as keyof typeof formData] as Record<string, any>) || {};
     setFormData(prev => ({
       ...prev,
       [section]: {
-        ...prev[section as keyof typeof prev],
+        ...sectionValue,
         [field]: value,
       },
     }));
@@ -60,6 +216,16 @@ const VideoRequestForm: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    if (hasPendingRunChoice) {
+      addNotification({
+        type: 'warning',
+        title: '请先选择任务操作',
+        message: '请先选择查看当前任务、恢复执行，或点击“新建运行”后再提交新的测试 run。',
+        autoClose: 5000,
+      });
+      return;
+    }
     
     console.log('🎬 Form submission started');
     console.log('Current API URL:', process.env.NEXT_PUBLIC_API_URL);
@@ -87,7 +253,14 @@ const VideoRequestForm: React.FC = () => {
     }
 
     try {
+      setIsSubmitting(true);
+      setExistingRunDismissed(true);
+      setQuickRuntime(null);
       setCurrentStep('processing');
+      console.info('FORM_SUBMIT creating new quick task', {
+        sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
+        title: formData.title,
+      });
       console.log('✅ Validation passed, submitting form with data:', formData);
       console.log('📡 About to call ApiClient.createTask...');
       
@@ -98,13 +271,14 @@ const VideoRequestForm: React.FC = () => {
         duration: formData.duration,
         resolution: formData.resolution,
         aspect_ratio: formData.aspectRatio,
-        session_id: undefined, // Can be used for tracking
+        session_id: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
       });
       
       console.log('🎉 API call successful, response:', taskResponse);
 
       const request: VideoRequest = {
         id: taskResponse.task_id,
+        sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
         title: formData.title,
         description: formData.description,
         style: formData.style || {
@@ -127,6 +301,7 @@ const VideoRequestForm: React.FC = () => {
 
       setCurrentRequest(request);
       setCurrentStep('processing');
+      setExistingRun(null);
       
       addNotification({
         type: 'success',
@@ -148,6 +323,8 @@ const VideoRequestForm: React.FC = () => {
         autoClose: 8000,
       });
       setCurrentStep('input');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -170,6 +347,69 @@ const VideoRequestForm: React.FC = () => {
         </p>
       </div>
 
+      {hasPendingRunChoice && (
+        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-700 mt-0.5" />
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-amber-900">检测到未完成任务</div>
+              <p className="mt-1 text-sm text-amber-800">
+                当前 workspace 下存在一条未终态 run：`{existingRun.task.task_id}`。你可以先恢复工作台视图，再决定是否显式恢复后端执行；或者保留当前输入并启动一条新的测试 run。
+              </p>
+              {existingRunResumeControl?.state === 'resume_available' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 存在合法 continuation checkpoint，control-plane 允许显式恢复执行。
+                </p>
+              )}
+              {existingRunResumeControl?.state === 'resume_blocked' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 缺少可消费的 continuation checkpoint，不能把“查看当前任务”当成恢复执行。
+                </p>
+              )}
+              {existingRunResumeControl?.state === 'view_only_running' && (
+                <p className="mt-2 text-xs text-amber-700">
+                  检测结果：当前 run 仍被 control-plane 视为活跃，或恢复已进入调度中；“查看当前任务”只会重新附着工作台视图，不会触发新的后端执行。
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={handleViewExistingRun}
+                  disabled={resumingExistingRun}
+                  className="inline-flex items-center gap-2 rounded-lg bg-amber-700 px-4 py-2 text-sm font-medium text-white hover:bg-amber-800"
+                >
+                  查看当前任务
+                </button>
+                {existingRunResumeControl?.can_resume && (
+                  <button
+                    type="button"
+                    onClick={() => void handleResumeExistingRun()}
+                    disabled={resumingExistingRun}
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-950 disabled:opacity-60"
+                  >
+                    {resumingExistingRun ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                    恢复执行
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCreateNewRun}
+                  disabled={resumingExistingRun}
+                  className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+                >
+                  新建运行
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-amber-700">
+                在做出选择前，新的测试表单已被锁定，避免误触发表单提交创建额外 run。
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasPendingRunChoice && (
+        <>
       {/* Tab Navigation */}
       <div className="flex space-x-1 bg-gray-100 p-1 rounded-lg mb-6">
         {tabs.map((tab) => {
@@ -306,7 +546,10 @@ const VideoRequestForm: React.FC = () => {
         {currentTab === 'music' && (
           <ParameterControls
             enabled={formData.musicEnabled}
-            settings={formData.musicSettings}
+            settings={{
+              enabled: formData.musicEnabled,
+              ...formData.musicSettings,
+            }}
             onEnabledChange={(enabled) => handleInputChange('musicEnabled', enabled)}
             onSettingsChange={(field, value) => handleNestedChange('musicSettings', field, value)}
           />
@@ -337,13 +580,16 @@ const VideoRequestForm: React.FC = () => {
           </button>
           <button
             type="submit"
-            className="px-8 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors flex items-center space-x-2 font-medium"
+            disabled={isSubmitting}
+            className="px-8 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors flex items-center space-x-2 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Play className="w-4 h-4" />
-            <span>{t('form.btn.generate')}</span>
+            {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            <span>{isSubmitting ? '提交中…' : t('form.btn.generate')}</span>
           </button>
         </div>
       </form>
+        </>
+      )}
     </div>
   );
 };

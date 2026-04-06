@@ -5,6 +5,7 @@
 import json
 import httpx
 import asyncio
+import time
 from typing import Dict, Any, List, Optional, Union
 import logging
 
@@ -15,9 +16,11 @@ from .service_interfaces import (
     ServiceProvider,
     PromptCapability,
     VideoCapabilities,
+    ImageGenerationCapabilities,
     EnumCapability,
 )
 from ....core.config import settings
+from ....services.execution_host_lease import ExecutionHostKeepaliveLostError
 
 
 class ZhipuLLMService(LLMServiceInterface):
@@ -40,7 +43,7 @@ class ZhipuLLMService(LLMServiceInterface):
         
         # 支持的模型
         self.supported_models = [
-            "glm-4.5", "glm-4.5-air", "glm-4-plus", 
+            "glm-4.7", "glm-4.5", "glm-4.5-air", "glm-4-plus",
             "glm-4-0520", "glm-4-air", "glm-4-flash"
         ]
         self.default_model = self.config.get("default_model", "glm-4.5")
@@ -70,6 +73,155 @@ class ZhipuLLMService(LLMServiceInterface):
     def get_supported_models(self) -> List[str]:
         """获取支持的LLM模型列表"""
         return self.supported_models.copy()
+
+    def _resolve_effective_timeout(
+        self,
+        *,
+        model: Optional[str],
+        request_timeout: Optional[Union[int, float]],
+    ) -> float:
+        """Resolve the total deadline budget for a single provider call."""
+        effective_timeout: Optional[float] = None
+        try:
+            if request_timeout is not None:
+                effective_timeout = float(request_timeout)
+            elif model:
+                try:
+                    from ....core.ai_config import get_ai_config  # type: ignore
+
+                    mc = get_ai_config().get_model_config(model)
+                    if mc and getattr(mc, "timeout", None):
+                        effective_timeout = float(mc.timeout)
+                except Exception:
+                    pass
+
+            if effective_timeout is None:
+                effective_timeout = float(self.timeout)
+            else:
+                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
+        except Exception:
+            effective_timeout = float(self.timeout)
+        return effective_timeout
+
+    def _remaining_fallback_budget(self, total_timeout: float, started_at: float) -> float:
+        elapsed = max(0.0, time.monotonic() - started_at)
+        safety_margin = max(0.0, float(getattr(settings, "LLM_REQUEST_SAFETY_MARGIN", 5) or 5))
+        remaining = max(0.0, float(total_timeout) - elapsed)
+        if remaining > safety_margin:
+            remaining -= safety_margin
+        return max(0.0, remaining)
+
+    async def _post_with_shared_deadline(
+        self,
+        *,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        total_timeout: float,
+        log_prefix: str,
+    ) -> Dict[str, Any]:
+        async def _post_once(timeout_val: float, trust_env: bool = True):
+            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"{log_prefix} API error: {resp.status_code} - {resp.text}")
+                return resp.json()
+
+        fallback_enabled = bool(getattr(settings, "NETWORK_DIRECT_FALLBACK_ON_TIMEOUT", False))
+        if not fallback_enabled:
+            return await _post_once(float(total_timeout), True)
+
+        primary_ratio = float(getattr(settings, "LLM_PRIMARY_TIMEOUT_RATIO", 0.5) or 0.5)
+        primary_ratio = max(0.1, min(1.0, primary_ratio))
+        primary_timeout = max(5.0, min(float(total_timeout), float(total_timeout) * primary_ratio))
+        started_at = time.monotonic()
+
+        try:
+            result = await _post_once(primary_timeout, True)
+            try:
+                self.logger.info(
+                    "%s completed mode=proxy allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                    log_prefix,
+                    primary_timeout,
+                    max(0.0, time.monotonic() - started_at),
+                    False,
+                    self._remaining_fallback_budget(float(total_timeout), started_at),
+                )
+            except Exception:
+                pass
+            return result
+        except httpx.TimeoutException:
+            remaining_budget = self._remaining_fallback_budget(float(total_timeout), started_at)
+            min_remaining = min(
+                float(total_timeout),
+                max(1.0, float(getattr(settings, "LLM_FALLBACK_TIMEOUT_MIN", 20) or 20)),
+            )
+            if remaining_budget < min_remaining:
+                raise RuntimeError(f"{log_prefix} request timeout (budget exhausted before direct fallback)")
+            try:
+                self.logger.warning(
+                    "%s proxy timeout; fallback direct with remaining_budget=%.1fs total_budget=%.1fs elapsed=%.1fs",
+                    log_prefix,
+                    remaining_budget,
+                    float(total_timeout),
+                    max(0.0, time.monotonic() - started_at),
+                )
+            except Exception:
+                pass
+            try:
+                result = await _post_once(remaining_budget, False)
+                try:
+                    self.logger.info(
+                        "%s completed mode=direct allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                        log_prefix,
+                        remaining_budget,
+                        max(0.0, time.monotonic() - started_at),
+                        True,
+                        self._remaining_fallback_budget(float(total_timeout), started_at),
+                    )
+                except Exception:
+                    pass
+                return result
+            except httpx.TimeoutException:
+                raise RuntimeError(f"{log_prefix} request timeout")
+            except Exception as e2:
+                raise RuntimeError(f"{log_prefix} failed: {str(e2)}")
+        except httpx.ConnectError as conn_err:
+            remaining_budget = self._remaining_fallback_budget(float(total_timeout), started_at)
+            min_remaining = min(
+                float(total_timeout),
+                max(1.0, float(getattr(settings, "LLM_FALLBACK_TIMEOUT_MIN", 20) or 20)),
+            )
+            if remaining_budget < min_remaining:
+                raise RuntimeError(
+                    f"{log_prefix} connection failed and budget exhausted before direct fallback: {str(conn_err)}"
+                )
+            try:
+                self.logger.warning(
+                    "%s proxy connect error; fallback direct with remaining_budget=%.1fs total_budget=%.1fs (%s)",
+                    log_prefix,
+                    remaining_budget,
+                    float(total_timeout),
+                    conn_err,
+                )
+            except Exception:
+                pass
+            try:
+                result = await _post_once(remaining_budget, False)
+                try:
+                    self.logger.info(
+                        "%s completed mode=direct allocated_timeout=%.1fs elapsed=%.2fs fallback_used=%s remaining_budget_after=%.1fs",
+                        log_prefix,
+                        remaining_budget,
+                        max(0.0, time.monotonic() - started_at),
+                        True,
+                        self._remaining_fallback_budget(float(total_timeout), started_at),
+                    )
+                except Exception:
+                    pass
+                return result
+            except Exception as e2:
+                raise RuntimeError(f"{log_prefix} failed: {str(e2)}")
     
     async def chat_completion(
         self, 
@@ -110,65 +262,28 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
-        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
-        effective_timeout = None
+        effective_timeout = self._resolve_effective_timeout(
+            model=model,
+            request_timeout=kwargs.get("request_timeout"),
+        )
         try:
-            req_to = kwargs.get("request_timeout")
-            if req_to is not None:
-                effective_timeout = float(req_to)
-            else:
-                # 尝试读取模型级超时
-                if model:
-                    try:
-                        from ....core.ai_config import get_ai_config  # type: ignore
-                        mc = get_ai_config().get_model_config(model)
-                        if mc and getattr(mc, 'timeout', None):
-                            effective_timeout = float(mc.timeout)
-                    except Exception:
-                        pass
-            if effective_timeout is None:
-                effective_timeout = float(self.timeout)
-            else:
-                # 不超过provider默认；也允许更小，以适配回退场景的剩余时间
-                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
-            try:
-                self.logger.info(f"Zhipu.chat_completion using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
-            except Exception:
-                pass
+            self.logger.info(
+                "Zhipu.chat_completion using response_format=%s max_tokens=%s timeout=%s",
+                payload.get("response_format"),
+                payload.get("max_tokens"),
+                effective_timeout,
+            )
         except Exception:
-            effective_timeout = float(self.timeout)
+            pass
 
-        # 统一：遵循系统/进程代理（trust_env=True），使用单一超时；读超时下先同配置重试一次，再按需直连兜底
-        async def _post_once(timeout_val: float, trust_env: bool = True):
-            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                )
-                if resp.status_code != 200:
-                    raise RuntimeError(
-                        f"Zhipu LLM API error: {resp.status_code} - {resp.text}"
-                    )
-                return resp.json()
-
-        # 简化版：一次按系统代理请求，超时则（可选）再直连一次；不做时间切分
         try:
-            result = await _post_once(float(effective_timeout), True)
-        except httpx.TimeoutException:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.chat_completion proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except httpx.TimeoutException:
-                    raise RuntimeError("Zhipu LLM API request timeout")
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e2)}")
-            else:
-                raise RuntimeError("Zhipu LLM API request timeout")
+            result = await self._post_with_shared_deadline(
+                endpoint=f"{self.base_url}/chat/completions",
+                headers=headers,
+                payload=payload,
+                total_timeout=float(effective_timeout),
+                log_prefix="Zhipu LLM API",
+            )
         except Exception as e:
             raise RuntimeError(f"Zhipu LLM chat completion failed: {str(e)}")
 
@@ -221,13 +336,27 @@ class ZhipuLLMService(LLMServiceInterface):
         if "thinking" in kwargs and kwargs["thinking"] is not None:
             payload["thinking"] = kwargs["thinking"]
 
-        # 透传 response_format（若供应商支持则生效）
-        # 说明：即便在 FC 模式下，部分场景（如 tools 为空或直接文本响应）依然需要结构化输出约束
-        # 因此这里与 chat_completion 保持一致支持 response_format 透传
-        if "response_format" in kwargs and kwargs["response_format"]:
+        # response_format 透传（若供应商支持则生效）。
+        # 是否允许在 tools 非空时使用 response_format 由协议层（调用方）约束；本层不做“静默忽略”。
+        rf = kwargs.get("response_format")
+        # 协议约束：tools 非空时不要携带 response_format（在部分供应商/模式下会抑制 tool_calls）。
+        if rf and tools:
             try:
-                payload["response_format"] = kwargs["response_format"]
-                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')}")
+                self.logger.warning(
+                    "Zhipu.function_call: dropping response_format because tools are present (to avoid suppressing tool_calls): %s",
+                    rf,
+                )
+            except Exception:
+                pass
+            rf = None
+        if rf:
+            try:
+                payload["response_format"] = rf
+                self.logger.info(
+                    "Zhipu.function_call using response_format=%s max_tokens=%s",
+                    payload.get("response_format"),
+                    payload.get("max_tokens"),
+                )
             except Exception:
                 pass
         # 诊断：打印工具schema数量与前几个函数名
@@ -250,62 +379,28 @@ class ZhipuLLMService(LLMServiceInterface):
             "Content-Type": "application/json"
         }
         
-        # 计算本次请求的有效超时：优先 request_timeout；否则按模型配置；最后退回 provider 级
-        effective_timeout = None
+        effective_timeout = self._resolve_effective_timeout(
+            model=model,
+            request_timeout=kwargs.get("request_timeout"),
+        )
         try:
-            req_to = kwargs.get("request_timeout")
-            if req_to is not None:
-                effective_timeout = float(req_to)
-            else:
-                if model:
-                    try:
-                        from ....core.ai_config import get_ai_config  # type: ignore
-                        mc = get_ai_config().get_model_config(model)
-                        if mc and getattr(mc, 'timeout', None):
-                            effective_timeout = float(mc.timeout)
-                    except Exception:
-                        pass
-            if effective_timeout is None:
-                effective_timeout = float(self.timeout)
-            else:
-                effective_timeout = max(5.0, min(float(self.timeout), effective_timeout))
-            try:
-                self.logger.info(f"Zhipu.function_call using response_format={payload.get('response_format')} max_tokens={payload.get('max_tokens')} timeout={effective_timeout}")
-            except Exception:
-                pass
+            self.logger.info(
+                "Zhipu.function_call using response_format=%s max_tokens=%s timeout=%s",
+                payload.get("response_format"),
+                payload.get("max_tokens"),
+                effective_timeout,
+            )
         except Exception:
-            effective_timeout = float(self.timeout)
+            pass
 
-        async def _post_once(timeout_val: float, trust_env: bool = True):
-            async with httpx.AsyncClient(timeout=timeout_val, trust_env=trust_env) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                )
-                if resp.status_code != 200:
-                    raise RuntimeError(
-                        f"Zhipu Function Call API error: {resp.status_code} - {resp.text}"
-                    )
-                return resp.json()
-
-        # 简化版：一次按系统代理请求，超时则（可选）再直连一次
         try:
-            result = await _post_once(float(effective_timeout), True)
-        except httpx.TimeoutException:
-            if getattr(settings, 'NETWORK_DIRECT_FALLBACK_ON_TIMEOUT', False):
-                try:
-                    try:
-                        self.logger.warning(
-                            f"Zhipu.function_call proxy timeout; fallback direct with timeout={float(effective_timeout):.1f}s"
-                        )
-                    except Exception:
-                        pass
-                    result = await _post_once(float(effective_timeout), False)
-                except httpx.TimeoutException:
-                    raise RuntimeError("Zhipu Function Call API request timeout")
-                except Exception as e2:
-                    raise RuntimeError(f"Zhipu Function Call failed: {str(e2)}")
-            else:
-                raise RuntimeError("Zhipu Function Call API request timeout")
+            result = await self._post_with_shared_deadline(
+                endpoint=f"{self.base_url}/chat/completions",
+                headers=headers,
+                payload=payload,
+                total_timeout=float(effective_timeout),
+                log_prefix="Zhipu Function Call API",
+            )
         except Exception as e:
             raise RuntimeError(f"Zhipu Function Call failed: {str(e)}")
 
@@ -326,9 +421,19 @@ class ZhipuLLMService(LLMServiceInterface):
                 "has_function_call": False,
             }
 
-            if choice.get("finish_reason") == "tool_calls" and msg.get("tool_calls"):
-                response_data["tool_calls"] = msg.get("tool_calls")
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                # 兼容：部分供应商在 response_format/特定模式下可能仍返回 tool_calls 但 finish_reason=stop
+                response_data["tool_calls"] = tool_calls
                 response_data["has_function_call"] = True
+                try:
+                    if choice.get("finish_reason") != "tool_calls":
+                        self.logger.info(
+                            "Zhipu.function_call: tool_calls present but finish_reason=%s",
+                            choice.get("finish_reason"),
+                        )
+                except Exception:
+                    pass
 
             try:
                 clen = len(content or "") if isinstance(content, str) else 0
@@ -396,6 +501,14 @@ class ZhipuVLMService(VLMServiceInterface):
             "vision": self.vision_models.copy(),
             "generation": self.generation_models.copy()
         }
+
+    def get_capabilities(self) -> ImageGenerationCapabilities:
+        return ImageGenerationCapabilities(
+            size=EnumCapability(
+                options=["1024x1024", "1024x1792", "1792x1024"],
+                description_suffix="当前 Zhipu 图像生成支持的 canonical size 列表",
+            )
+        )
     
     async def image_understanding(
         self,
@@ -475,7 +588,7 @@ class ZhipuVLMService(VLMServiceInterface):
         self,
         prompt: str,
         model: str = None,
-        size: str = "1024x1024",
+        size: str | None = None,
         style: str = "vivid",
         quality: str = "standard",
         **kwargs
@@ -571,14 +684,20 @@ class ZhipuVideoService(VideoModelServiceInterface):
         self.base_url = self.config.get("base_url", "https://open.bigmodel.cn/api/paas/v4")
         self.timeout = self.config.get("timeout", 600)  # 视频生成需要很长时间
         
-        # 支持的模型和能力
-        self.supported_models = ["cogvideox", "cogvideox-3"]
+        # 支持的模型和能力（模型清单由 provider 配置动态提供）
+        self.supported_models = []
         # CogVideoX支持的离散时长，从配置读取，避免写死
         self.duration_capabilities = getattr(settings, "AVAILABLE_SCENE_DURATIONS", [5, 10])
-        self.supports_first_last = True  # CogVideoX-3支持首尾帧模式
+        self.supports_first_last = True
         provider_key = self.config.get("provider_key") or getattr(settings, "ZHIPU_VIDEO_PROVIDER_KEY", None)
         if not provider_key or not str(provider_key).strip():
-            provider_key = "cogvideox-3"
+            vg_provider = str(getattr(settings, "VIDEO_GENERATION_PROVIDER", "") or "").strip().lower()
+            if vg_provider in {"cogvideox-3", "cogvideox-2"}:
+                provider_key = vg_provider
+            elif vg_provider == "zhipu":
+                provider_key = "cogvideox-3"
+            else:
+                provider_key = "cogvideox-3"
         self.provider_key = str(provider_key).strip()
     
     def _get_api_key(self) -> Optional[str]:
@@ -605,7 +724,22 @@ class ZhipuVideoService(VideoModelServiceInterface):
     
     def get_supported_models(self) -> List[str]:
         """获取支持的视频模型列表"""
-        return self.supported_models.copy()
+        try:
+            from ....core.video_config_manager import get_video_config
+            models = get_video_config().get_provider_supported_models(self.provider_key)
+            if models:
+                return models
+        except Exception:
+            pass
+
+        models: List[str] = []
+        for candidate in (getattr(settings, "COGVIDEOX3_MODEL", None), getattr(settings, "COGVIDEOX2_MODEL", None)):
+            if not isinstance(candidate, str):
+                continue
+            model = candidate.strip()
+            if model and model not in models:
+                models.append(model)
+        return models
     
     def get_duration_capabilities(self) -> List[int]:
         """获取支持的视频时长选项"""
@@ -613,6 +747,9 @@ class ZhipuVideoService(VideoModelServiceInterface):
     
     def supports_first_last_frame(self) -> bool:
         """是否支持首尾帧模式"""
+        cfg = self._get_provider_config()
+        if cfg is not None:
+            return bool(getattr(cfg, "supports_first_last_frame", self.supports_first_last))
         return self.supports_first_last
 
     def _get_provider_config(self):
@@ -627,6 +764,43 @@ class ZhipuVideoService(VideoModelServiceInterface):
             return cfg
         except Exception:
             return None
+
+    def _resolve_mode_model(
+        self,
+        *,
+        mode: str,
+        explicit_model: Optional[str] = None,
+    ) -> str:
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            return explicit_model.strip()
+
+        try:
+            from ....core.video_config_manager import get_video_config
+            resolved = get_video_config().resolve_model_for_mode(
+                self.provider_key,
+                mode=mode,
+                explicit_model=None,
+                default_model=None,
+            )
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        except Exception:
+            pass
+
+        provider_cfg = self._get_provider_config()
+        if provider_cfg is not None and isinstance(getattr(provider_cfg, "model_name", None), str):
+            model_name = provider_cfg.model_name.strip()
+            if model_name:
+                return model_name
+
+        fallback = getattr(settings, "COGVIDEOX3_MODEL", None)
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback.strip()
+
+        raise RuntimeError(
+            f"Zhipu video model is not configured for mode={mode}; "
+            "please configure COGVIDEOX3_MODEL/COGVIDEOX2_MODEL or provider mode_model_mapping"
+        )
 
     def get_capabilities(self) -> VideoCapabilities:
         caps = VideoCapabilities()
@@ -695,9 +869,21 @@ class ZhipuVideoService(VideoModelServiceInterface):
         
         if not self.is_available():
             raise RuntimeError("ZhipuVideoService not available - API key required")
-        
+
+        if first_frame_image and last_frame_image:
+            generation_mode = "first_last_frame"
+        elif image_url:
+            generation_mode = "single_image"
+        else:
+            generation_mode = "text_only"
+
+        mode_key_map = {
+            "text_only": "text_to_video",
+            "single_image": "image_to_video",
+            "first_last_frame": "first_last_frame",
+        }
         payload = {
-            "model": model or "cogvideox",
+            "model": self._resolve_mode_model(mode=mode_key_map[generation_mode], explicit_model=model),
             "prompt": prompt
         }
 
@@ -710,17 +896,12 @@ class ZhipuVideoService(VideoModelServiceInterface):
             normalized_size = size_param.strip()
             payload["size"] = resolution_aliases.get(normalized_size, normalized_size)
 
-        target_model = payload["model"]
         prompt_bytes = prompt.encode("utf-8") if isinstance(prompt, str) else b""
         limit_bytes = prompt_limits.get("max_bytes") or self.PROMPT_MAX_BYTES
         approx_cn = prompt_limits.get("approx_chinese_chars")
         approx_en = prompt_limits.get("approx_english_chars")
 
-        if (
-            target_model in {"cogvideox", "cogvideox-3"}
-            and limit_bytes
-            and len(prompt_bytes) > int(limit_bytes)
-        ):
+        if limit_bytes and len(prompt_bytes) > int(limit_bytes):
             hint_parts: List[str] = []
             if approx_cn:
                 hint_parts.append(f"约{approx_cn}个中文字符")
@@ -735,28 +916,26 @@ class ZhipuVideoService(VideoModelServiceInterface):
         if duration:
             payload["duration"] = duration
         
-        # 优先使用首尾帧模式（CogVideoX-3）
-        if first_frame_image and last_frame_image:
+        # 首尾帧模式
+        if generation_mode == "first_last_frame":
             payload["image_url"] = [first_frame_image, last_frame_image]
-            # 强制使用CogVideoX-3模型
-            payload["model"] = "cogvideox-3"
-            generation_mode = "first_last_frame"
-            self.logger.info("Using CogVideoX-3 first/last frame mode")
+            self.logger.info("Using first/last frame mode with model: %s", payload["model"])
         
-        # 添加参考图片（传统单图模式）
-        elif image_url:
+        # 单图模式
+        elif generation_mode == "single_image":
             payload["image_url"] = image_url
-            generation_mode = "single_image"
-            self.logger.info("Using traditional single image mode")
-        else:
-            generation_mode = "text_only"
+            self.logger.info("Using single image mode with model: %s", payload["model"])
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        execution_liveness_probe = kwargs.get("execution_liveness_probe")
         
         try:
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.base_url}/videos/generations", 
@@ -778,7 +957,10 @@ class ZhipuVideoService(VideoModelServiceInterface):
                 self.logger.info(f"Video generation task started: {video_id}")
                 
                 # 轮询获取视频生成结果
-                video_url = await self._poll_video_result(video_id)
+                video_url = await self._poll_video_result(
+                    video_id,
+                    execution_liveness_probe=execution_liveness_probe,
+                )
                 
                 # 处理轮询结果
                 if video_url:
@@ -800,6 +982,8 @@ class ZhipuVideoService(VideoModelServiceInterface):
                     "provider": self.get_provider_name()
                 }
                 
+        except ExecutionHostKeepaliveLostError:
+            raise
         except httpx.TimeoutException:
             raise RuntimeError("Zhipu video generation API request timeout")
         except Exception as e:
@@ -852,13 +1036,15 @@ class ZhipuVideoService(VideoModelServiceInterface):
         except Exception as e:
             raise RuntimeError(f"Failed to get video status: {str(e)}")
     
-    async def _poll_video_result(self, video_id: str) -> str:
+    async def _poll_video_result(self, video_id: str, *, execution_liveness_probe=None) -> str:
         """轮询视频生成结果"""
         
         max_attempts = 18  # 最多轮询3分钟 (18次 * 10秒)
         attempt = 0
         
         while attempt < max_attempts:
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
             try:
                 status_info = await self.get_generation_status(video_id)
                 
@@ -879,6 +1065,8 @@ class ZhipuVideoService(VideoModelServiceInterface):
                 await asyncio.sleep(10)  # 等待10秒
                 attempt += 1
                 
+            except ExecutionHostKeepaliveLostError:
+                raise
             except Exception as e:
                 self.logger.error(f"Error polling video result: {e}")
                 await asyncio.sleep(10)

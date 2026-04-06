@@ -2,38 +2,42 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from .concept_planner import ConceptPlannerAgent
 from .orchestrator import OrchestratorAgent
-from .utils.llm_policy import LLMPolicyManager
-from ..models import Task, AgentExecution, AgentType, TaskStatus, TaskType
+from ..models import Task, AgentType, TaskStatus, TaskType
 from ..core.config import settings
-from ..core.workflow_state import workflow_manager
 from ..core.story_plan import (
     EpisodePlan,
-    EpisodeStatus,
+    EpisodeEditorialStatus,
+    EpisodeExecutionStatus,
     ProjectState,
     merge_character_bibles,
-    normalize_character_elements,
     project_state_repository,
 )
-from ..services.style_taxonomy import summarize_style_taxonomy
+from ..services.character_reference_images import ensure_project_character_reference_images
+from ..services.memory_provider import MemoryServices, build_memory_services
 
 
 class EpisodeOrchestratorAgent(BaseAgent):
     """Sequentially executes approved episodes while reusing the 1-minute MAS workflow."""
 
+    @classmethod
+    def create_default(cls) -> "EpisodeOrchestratorAgent":
+        return cls(memory_services=build_memory_services())
+
     def __init__(
         self,
+        memory_services: Optional[MemoryServices] = None,
         llms=None,
         orchestrator: Optional[OrchestratorAgent] = None,
-        concept_planner: Optional[ConceptPlannerAgent] = None,
     ) -> None:
+        if memory_services is None:
+            raise ValueError("memory_services is required for EpisodeOrchestratorAgent")
+        self._memory_services = memory_services
         super().__init__(
             agent_type=AgentType.EPISODE_ORCHESTRATOR,
             agent_name="episode_orchestrator",
@@ -41,38 +45,14 @@ class EpisodeOrchestratorAgent(BaseAgent):
             max_retries=1,
             tools=[],
             llms=llms,
+            memory_services=self._memory_services,
         )
-        self._base_orchestrator = orchestrator or OrchestratorAgent()
-        base_policy = getattr(self._base_orchestrator, "_llm_policy", None)
-        if base_policy is None:
-            policy_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'llm_policies.yaml')
-            base_policy = LLMPolicyManager(policy_file)
-        self._llm_policy = base_policy
-
-        if concept_planner is not None:
-            self._concept_agent = concept_planner
-        else:
-            llms = None
-            try:
-                llms = self._llm_policy.build_llms_for_agent("concept_planner")
-            except Exception:
-                llms = None
-            self._concept_agent = ConceptPlannerAgent(llms=llms)
-
-        try:
-            concept_llms = self._llm_policy.build_llms_for_agent("concept_planner")
-            existing_llms = getattr(self._concept_agent, "_llms", {}) or {}
-            merged = dict(concept_llms)
-            merged.update(existing_llms)
-            self._concept_agent._llms = merged
-        except Exception:
-            pass
+        self._base_orchestrator = orchestrator or OrchestratorAgent(memory_services=self._memory_services)
 
     async def _execute_impl(
         self,
         task: Task,
         input_data: Dict[str, Any],
-        execution: AgentExecution,
         db: Session,
     ) -> Dict[str, Any]:
         self._validate_input(input_data, ["project_id"])
@@ -82,7 +62,13 @@ class EpisodeOrchestratorAgent(BaseAgent):
         if not project_state:
             raise AgentError(f"Project state not found: {project_id}")
 
-        await self._ensure_project_foundation(task, project_state, db)
+        task.error_message = None
+        task.status = TaskStatus.IN_PROGRESS.value
+        task.update_progress("Episode orchestration started", 0)
+        db.commit()
+
+        self._sync_project_foundation(project_state)
+        await self._ensure_project_character_reference_images(project_state, input_data)
 
         episodes_to_run = self._resolve_episode_selection(project_state, input_data)
         if not episodes_to_run:
@@ -94,46 +80,46 @@ class EpisodeOrchestratorAgent(BaseAgent):
         results: List[Dict[str, Any]] = []
         total = len(episodes_to_run)
 
-        task.error_message = None
-        
-        task.status = TaskStatus.IN_PROGRESS.value
-        task.update_progress("Episode orchestration started", 0)
-        db.commit()
-
         for idx, episode in enumerate(episodes_to_run, start=1):
             runtime = project_state.ensure_runtime_state(episode.episode_id)
 
-            if auto_approve and runtime.status in {
-                EpisodeStatus.DRAFT,
-                EpisodeStatus.PENDING_APPROVAL,
+            if auto_approve and episode.status in {
+                EpisodeEditorialStatus.DRAFT,
+                EpisodeEditorialStatus.PENDING_APPROVAL,
             }:
-                runtime.status = EpisodeStatus.APPROVED
-                episode.status = EpisodeStatus.APPROVED
+                episode.status = EpisodeEditorialStatus.APPROVED
 
-            if runtime.status == EpisodeStatus.GENERATING:
-                runtime.status = EpisodeStatus.APPROVED
-                episode.status = EpisodeStatus.APPROVED
+            if runtime.status == EpisodeExecutionStatus.GENERATING:
+                runtime.status = EpisodeExecutionStatus.STALE
+
+            if episode.status != EpisodeEditorialStatus.APPROVED:
+                results.append(
+                    {
+                        "episode_id": episode.episode_id,
+                        "status": runtime.status.value,
+                        "skipped": True,
+                        "reason": "Episode script not approved for generation",
+                    }
+                )
+                continue
 
             if not force_rerun and runtime.status not in {
-                EpisodeStatus.APPROVED,
-                EpisodeStatus.NEEDS_REVISION,
+                EpisodeExecutionStatus.IDLE,
+                EpisodeExecutionStatus.STALE,
+                EpisodeExecutionStatus.FAILED,
+                EpisodeExecutionStatus.COMPLETED,
             }:
                 results.append(
                     {
                         "episode_id": episode.episode_id,
                         "status": runtime.status.value,
                         "skipped": True,
-                        "reason": "Episode not approved for generation",
+                        "reason": "Episode runtime is not ready for generation",
                     }
                 )
                 continue
 
-            await self._update_progress(
-                execution,
-                int((idx - 1) / total * 90),
-                f"Generating episode {idx}/{total}",
-                db,
-            )
+            await self._update_progress(int((idx - 1) / total * 90), f"Generating episode {idx}/{total}", db)
             task.update_progress(f"Generating episode {idx}/{total}", int((idx - 1) / total * 90))
             db.commit()
 
@@ -141,28 +127,21 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 base_task=task,
                 episode=episode,
                 project_state=project_state,
-                runtime_overrides=input_data.get("runtime_overrides", {}),
                 db=db,
             )
             results.append(episode_result)
 
-            await self._update_progress(
-                execution,
-                int(idx / total * 90),
-                f"Episode {idx}/{total} completed",
-                db,
-            )
+            await self._update_progress(int(idx / total * 90), f"Episode {idx}/{total} completed", db)
             task.update_progress(f"Episode {idx}/{total} completed", int(idx / total * 90))
             db.commit()
 
         project_state_repository.save(project_state)
-        execution.output_data = {"episodes": results}
         db.commit()
 
-        await self._update_progress(execution, 100, "Episode orchestration finished", db)
+        await self._update_progress(100, "Episode orchestration finished", db)
         task.update_progress("Episode orchestration finished", 100)
 
-        if any(res.get("status") == EpisodeStatus.FAILED.value for res in results):
+        if any(res.get("status") == EpisodeExecutionStatus.FAILED.value for res in results):
             task.status = TaskStatus.FAILED.value
             task.error_message = "One or more episodes failed during orchestration"
         else:
@@ -171,6 +150,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
         db.commit()
 
         return {
+            "status": task.status,
             "project_id": project_id,
             "episodes": results,
             "total_completed": project_state.completed_episodes,
@@ -198,96 +178,62 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 selected.append(episode)
         return selected
 
-    async def _ensure_project_foundation(
-        self,
-        base_task: Task,
-        project_state: ProjectState,
-        db: Session,
-    ) -> None:
-        """Run a project-level concept pass to lock style and character bible."""
-
-        if project_state.style_profile and project_state.character_bible:
-            return
+    def _sync_project_foundation(self, project_state: ProjectState) -> None:
+        """Keep project-level foundation aligned with the canonical story-plan surface."""
 
         story_plan = project_state.story_plan
-        taxonomy_summary = summarize_style_taxonomy()
-        style_preference = project_state.global_settings.get("style_preference")
+        changed = False
 
-        workflow_state = workflow_manager.create_workflow(
-            user_prompt=story_plan.user_prompt,
-            style_preference=style_preference,
-            duration=story_plan.target_duration_seconds,
-            aspect_ratio=story_plan.aspect_ratio,
-            resolution=project_state.global_settings.get("resolution")
-            or settings.DEFAULT_VIDEO_RESOLUTION,
+        merged_characters = merge_character_bibles(
+            story_plan.character_bible or {},
+            project_state.character_bible or {},
         )
+        if (
+            merged_characters != (project_state.character_bible or {})
+            or project_state.character_bible is not merged_characters
+        ):
+            project_state.character_bible = merged_characters
+            changed = True
+        if (
+            merged_characters != (story_plan.character_bible or {})
+            or story_plan.character_bible is not merged_characters
+        ):
+            story_plan.character_bible = merged_characters
+            changed = True
 
-        concept_payload = {
-            "user_prompt": story_plan.user_prompt,
-            "duration": story_plan.target_duration_seconds,
-            "aspect_ratio": story_plan.aspect_ratio,
-            "workflow_state_id": workflow_state.task_id,
-            "style_preference": style_preference,
-            "concept_mode": "project",
-            "style_taxonomy_summary": taxonomy_summary,
-        }
+        style_profile = dict(project_state.style_profile or {})
+        story_style = dict(story_plan.visual_style or {})
+        if not style_profile and story_style:
+            project_state.style_profile = dict(story_style)
+            changed = True
+        elif style_profile and style_profile != story_style:
+            story_plan.visual_style = dict(style_profile)
+            changed = True
 
-        concept_task = Task(
-            title=f"Project concept foundation {project_state.project_id}",
-            description=story_plan.user_prompt,
-            # 使用现有类型以避免数据库 ENUM 迁移需求
-            task_type=TaskType.SCRIPT_WRITING,
-            status=TaskStatus.PENDING.value,
-            session_id=base_task.session_id,
-            user_id=base_task.user_id,
-            input_parameters=concept_payload.copy(),
+        if changed:
+            project_state_repository.save(project_state)
+
+    async def _ensure_project_character_reference_images(
+        self,
+        project_state: ProjectState,
+        input_data: Dict[str, Any],
+    ) -> None:
+        """Delegate optional character-reference generation to the project service."""
+
+        requested = input_data.get("project_character_reference_images_enabled")
+        enabled = (
+            bool(requested)
+            if requested is not None
+            else bool(getattr(settings, "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", False))
         )
-        db.add(concept_task)
-        db.commit()
-        db.refresh(concept_task)
-
-        try:
-            result = await self._concept_agent.execute(
-                task=concept_task,
-                input_data=concept_payload,
-                db=db,
-            )
-            concept_task.status = TaskStatus.COMPLETED.value
-            concept_task.error_message = None
-            db.commit()
-        except Exception as concept_exc:
-            concept_task.status = TaskStatus.FAILED.value
-            concept_task.error_message = str(concept_exc)
-            db.commit()
-            workflow_manager.remove_workflow(workflow_state.task_id)
-            raise
-        else:
-            workflow_manager.remove_workflow(workflow_state.task_id)
-
-        concept_plan = result.get("concept_plan", {}) or {}
-        style_profile = concept_plan.get("intelligent_style_design") or {}
-        if style_profile:
-            project_state.style_profile = style_profile
-            project_state.story_plan.visual_style = dict(style_profile)
-
-        content_elements = concept_plan.get("content_elements")
-        characters_payload = None
-        if isinstance(content_elements, dict):
-            characters_payload = content_elements.get("characters")
-
-        sanitized_characters, normalized_characters = normalize_character_elements(characters_payload)
-
-        if isinstance(content_elements, dict) and characters_payload is not None:
-            content_elements["characters"] = sanitized_characters
-
-        if normalized_characters:
-            project_state.character_bible = merge_character_bibles(
-                project_state.character_bible,
-                normalized_characters,
-            )
-            project_state.story_plan.merge_character_profiles(normalized_characters)
-
-        project_state_repository.save(project_state)
+        await ensure_project_character_reference_images(
+            project_state.project_id,
+            enabled=enabled,
+            logger=self.logger,
+        )
+        refreshed_state = project_state_repository.get(project_state.project_id)
+        if refreshed_state is not None:
+            project_state.sync_from(refreshed_state)
 
 
     async def _run_single_episode(
@@ -295,18 +241,15 @@ class EpisodeOrchestratorAgent(BaseAgent):
         base_task: Task,
         episode: EpisodePlan,
         project_state: ProjectState,
-        runtime_overrides: Dict[str, Any],
         db: Session,
     ) -> Dict[str, Any]:
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
-        runtime_state.status = EpisodeStatus.GENERATING
+        runtime_state.status = EpisodeExecutionStatus.GENERATING
         runtime_state.error = None
-        episode.status = EpisodeStatus.GENERATING
 
         episode_payload = self._build_episode_payload(
             episode=episode,
             project_state=project_state,
-            runtime_overrides=runtime_overrides,
         )
 
         episode_task = Task(
@@ -332,32 +275,30 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 execution_order=1,
             )
         except Exception as exc:  # noqa: BLE001 - preserve MAS errors
-            runtime_state.status = EpisodeStatus.FAILED
+            runtime_state.status = EpisodeExecutionStatus.FAILED
             runtime_state.error = str(exc)
-            episode.status = EpisodeStatus.FAILED
             episode_task.status = TaskStatus.FAILED.value
             episode_task.error_message = str(exc)
             db.commit()
             project_state_repository.save(project_state)
             return {
                 "episode_id": episode.episode_id,
-                "status": EpisodeStatus.FAILED.value,
+                "status": EpisodeExecutionStatus.FAILED.value,
                 "error": str(exc),
             }
 
-        runtime_state.status = EpisodeStatus.COMPLETED
+        runtime_state.status = EpisodeExecutionStatus.COMPLETED
         runtime_state.workflow_task_id = orchestrator_result.get("workflow_state_id")
         runtime_state.output_assets = self._extract_episode_assets(orchestrator_result)
-        episode.status = EpisodeStatus.COMPLETED
         episode_task.status = TaskStatus.COMPLETED.value
         db.commit()
 
-        project_state.mark_episode_status(episode.episode_id, EpisodeStatus.COMPLETED)
+        project_state.mark_episode_runtime_status(episode.episode_id, EpisodeExecutionStatus.COMPLETED)
         project_state_repository.save(project_state)
 
         return {
             "episode_id": episode.episode_id,
-            "status": EpisodeStatus.COMPLETED.value,
+            "status": EpisodeExecutionStatus.COMPLETED.value,
             "assets": runtime_state.output_assets,
             "workflow_state_id": runtime_state.workflow_task_id,
             "task_id": episode_task.task_id,
@@ -367,7 +308,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         self,
         episode: EpisodePlan,
         project_state: ProjectState,
-        runtime_overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
         story_plan = project_state.story_plan
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
@@ -454,7 +394,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         payload["project_context"] = project_context
 
         payload.setdefault("concept_mode", "episode")
-        payload.update(runtime_overrides or {})
         return payload
 
     def _extract_episode_characters(

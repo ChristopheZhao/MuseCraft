@@ -6,6 +6,11 @@
 ## 概念骨架（Skeleton JSON）
 {{ skeleton_json }}
 
+{% if review_guidance %}
+## 当前审阅反馈
+{{ review_guidance }}
+{% endif %}
+
 {% if style_preference %}
 ## 用户额外风格偏好
 {{ style_preference }}
@@ -104,9 +109,11 @@
     ]
   },
   "consistency_hints": {
-    "visual": "跨场景需要保持的视觉要点",
-    "narrative": "叙事连贯性提醒",
-    "color_palette": ["主题色1", "主题色2"],
+    "visual_language": "镜头与画面语言的一致性（镜头大小/运动/构图/景别/节奏）",
+    "lighting_and_tone": "光线方向/强度/对比/色温/时段的一致性",
+    "character_continuity": "角色外观/服饰/妆发/道具/行为一致性提醒",
+    "set_and_props_continuity": "场景陈设/道具位置与状态的一致性提醒",
+    "motion_style_and_pacing": "动作风格/节奏/转场约定",
     "risks": ["潜在冲突或易出错点"]
   }
 }
@@ -115,4 +122,5 @@
 1. 所有要素需与骨架中的场景、主题保持一致。
 2. 若信息不足，可做合理假设并在 `consistency_hints.risks` 中说明。
 3. `visual_traits`、`style_preferences`、`voice_profile`、`reference_assets`、`metadata` 必须是对象（object），不得输出为数组或字符串；其中 `metadata.origin` 必须是 JSON 字符串，并且取值严格限定为 `"project_existing"`、`"project_new"` 或 `"episode_extra"`。
-4. 确保输出为合法 JSON，不要额外解释。
+4. 数组中的文本项必须是 JSON 字符串，任何包含《》的文本也必须放在双引号内。
+5. 确保输出为合法 JSON，不要额外解释。

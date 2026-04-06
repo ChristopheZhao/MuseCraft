@@ -41,6 +41,7 @@ class SceneData:
     duration_reasoning: str = ""  # 动态时长计算理由
     
     # 概念相关
+    scene_thesis: str = ""
     visual_description: str = ""
     narrative_description: str = ""
     mood_and_atmosphere: str = ""

@@ -18,7 +18,7 @@ import redis.asyncio as redis
 from app.main import app
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.models import Task, AgentExecution, Scene, Resource
+from app.models import Task, Scene, Resource
 from app.services.celery_app import celery_app
 from app.services.websocket import websocket_manager
 
@@ -353,23 +353,6 @@ def task_factory():
     
     return _create_task
 
-
-@pytest.fixture
-def agent_execution_factory():
-    """Factory for creating test agent executions."""
-    def _create_execution(**kwargs):
-        defaults = {
-            'agent_type': 'concept_planner',
-            'agent_name': 'test_agent',
-            'status': 'pending',
-            'input_data': {},
-            'output_data': {},
-            'execution_metadata': {}
-        }
-        defaults.update(kwargs)
-        return AgentExecution(**defaults)
-    
-    return _create_execution
 
 
 # Pytest configuration

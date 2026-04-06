@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from app.services.global_memory_service import global_memory_service
+from app.services.memory_provider import build_memory_services, set_memory_services
 
 async def test_memory_service_updates():
     """测试记忆服务的新数据结构支持"""
@@ -77,7 +77,10 @@ async def test_memory_service_updates():
         ]
     }
     
-    success = await global_memory_service.store_creative_guidance(
+    services = build_memory_services()
+    set_memory_services(services)
+    gms = services.global_service
+    success = await gms.store_creative_guidance(
         workflow_id=workflow_id,
         concept_plan=enhanced_concept_plan,
         agent_name="concept_planner"
@@ -89,7 +92,7 @@ async def test_memory_service_updates():
     print("\n📋 测试2：检索增强的创意指导")
     print("-" * 40)
     
-    guidance = await global_memory_service.retrieve_creative_guidance(
+    guidance = await gms.retrieve_creative_guidance(
         workflow_id=workflow_id,
         scene_number=1
     )
@@ -138,7 +141,7 @@ async def test_memory_service_updates():
         }
     }
     
-    ref_success = await global_memory_service.store_scene_references(
+    ref_success = await gms.store_scene_references(
         workflow_id=workflow_id,
         scene_number=1,
         scene_references=scene_references,
@@ -151,7 +154,7 @@ async def test_memory_service_updates():
     print("\n📋 测试4：检索ScriptWriter场景参考")
     print("-" * 40)
     
-    retrieved_refs = await global_memory_service.retrieve_scene_references(
+    retrieved_refs = await gms.retrieve_scene_references(
         workflow_id=workflow_id,
         scene_number=1,
         agent_name="image_generator"
@@ -185,7 +188,7 @@ async def test_memory_service_updates():
     print("\n📋 测试5：工作流记忆统计")
     print("-" * 40)
     
-    stats = await global_memory_service.get_workflow_memory_stats(workflow_id)
+    stats = await gms.get_workflow_memory_stats(workflow_id)
     
     workflow_stats = stats.get("workflow_specific", {})
     if workflow_stats:

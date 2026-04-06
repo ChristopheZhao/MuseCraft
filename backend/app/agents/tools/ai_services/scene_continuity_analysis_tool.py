@@ -159,13 +159,16 @@ class SceneContinuityAnalysisTool(AsyncTool):
                 else:
                     response_content = payload.get("content", payload.get("raw_content", "{}"))
             
-            # 解析JSON响应
+            # 解析JSON响应（统一工具，必要时保留兜底）
+            from ...utils.json_utils import safe_json_loads
             try:
-                analysis_result = json.loads(response_content.strip())
-            except json.JSONDecodeError as e:
-                # 尝试提取JSON内容
+                analysis_result = safe_json_loads(response_content, logger=self.logger, context="scene_continuity", allow_fallback=False)
+                if not isinstance(analysis_result, dict):
+                    raise ValueError("not a JSON object")
+            except Exception as e:
+                # 尝试提取JSON内容作为兜底
                 import re
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_content, re.DOTALL)
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_content or "", re.DOTALL)
                 if json_match:
                     analysis_result = json.loads(json_match.group(1))
                 else:

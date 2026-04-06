@@ -244,8 +244,8 @@ class MultiAgentSystemChecker:
         self.logger.info("检查记忆管理系统...")
         
         try:
-            from backend.app.agents.memory.memory_manager import MemoryManager
-            from backend.app.agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+            from backend.app.agents.memory.long_term.manager import MemoryManager
+            from backend.app.agents.memory.long_term.stores import MemoryItem, MemoryType, MemoryImportance
             
             # 创建记忆管理器
             memory_manager = MemoryManager()
@@ -391,7 +391,6 @@ class MultiAgentSystemChecker:
                 "has_websocket_manager": hasattr(orchestrator, 'websocket_manager'),
                 "has_progress_update": hasattr(orchestrator, '_update_progress'),
                 "has_send_progress": hasattr(orchestrator, '_send_progress_update'),
-                "has_workflow_status": hasattr(orchestrator, 'get_workflow_status')
             }
             
             return {

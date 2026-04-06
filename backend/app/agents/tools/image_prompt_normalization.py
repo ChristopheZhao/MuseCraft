@@ -1,0 +1,298 @@
+"""Shared still/reference normalization helpers for image prompt contracts."""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List
+
+
+VIDEO_ONLY_MARKERS = (
+    "快速切换",
+    "混剪",
+    "闪回",
+    "闪现",
+    "剪辑",
+    "分镜",
+    "转场",
+    "标题",
+    "上映日期",
+    "字幕",
+    "片名",
+)
+
+STILL_HINT_MARKERS = ("定格", "特写", "凝视", "站立", "静止", "肖像", "立绘")
+
+HIGH_RISK_MARKERS = (
+    "扑向",
+    "突袭",
+    "袭来",
+    "战斗",
+    "激战",
+    "对决",
+    "对抗",
+    "迎击",
+    "轰击",
+    "爆炸",
+    "炸裂",
+    "崩碎",
+    "吞噬",
+    "巨口",
+    "血",
+    "杀",
+)
+
+REFERENCE_TASK_DIRECTIONS = {"avatar", "headshot", "portrait", "full_body", "full-body"}
+
+PURPOSE_ALIASES = {
+    "scene_opening_anchor": "scene_opening_anchor",
+    "opening_anchor": "scene_opening_anchor",
+    "opening_state": "scene_opening_anchor",
+    "scene_still": "scene_opening_anchor",
+    "still": "scene_opening_anchor",
+    "action_keyframe": "action_keyframe",
+    "action_frame": "action_keyframe",
+    "action_peak": "action_keyframe",
+    "climax_peak": "climax_peak",
+    "peak_frame": "climax_peak",
+    "continuity_bridge": "continuity_bridge",
+    "bridge_frame": "continuity_bridge",
+    "emotional_lock": "emotional_lock",
+    "emotion_lock": "emotional_lock",
+    "character_reference": "character_reference",
+    "character_ref": "character_reference",
+    "reference": "character_reference",
+}
+
+
+def clip_text(value: Any, max_len: int = 120) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[: max_len - 3] + "..."
+
+
+def as_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return [str(value).strip()]
+    return []
+
+
+def dedup(values: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for item in values:
+        if not item:
+            continue
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def canonicalize_image_purpose(value: Any, *, task_direction: str = "") -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized and task_direction in REFERENCE_TASK_DIRECTIONS:
+        normalized = "character_reference"
+    return PURPOSE_ALIASES.get(normalized, "scene_opening_anchor")
+
+
+def infer_image_purpose(
+    scene_data: Dict[str, Any],
+    *,
+    explicit_value: Any = "",
+    task_direction: str = "",
+) -> str:
+    explicit = str(explicit_value or scene_data.get("image_purpose") or "").strip()
+    if explicit:
+        return canonicalize_image_purpose(explicit, task_direction=task_direction)
+
+    normalized_direction = str(task_direction or "").strip().lower()
+    if normalized_direction in REFERENCE_TASK_DIRECTIONS:
+        return "character_reference"
+
+    action_phases = scene_data.get("action_phases") or []
+    motion_beats = scene_data.get("motion_beats") or []
+    depends_on_scene = scene_data.get("depends_on_scene") or scene_data.get("depends_on")
+    duration = scene_data.get("duration")
+    try:
+        duration_value = float(duration or 0)
+    except Exception:
+        duration_value = 0.0
+
+    action_candidates = [
+        scene_data.get("scene_thesis"),
+        scene_data.get("frame_thesis"),
+        scene_data.get("event_trigger"),
+        scene_data.get("end_state"),
+        *(phase.get("observable_actions") for phase in action_phases if isinstance(phase, dict)),
+        *(beat.get("beat_summary") for beat in motion_beats if isinstance(beat, dict)),
+    ]
+    strong_action = any(contains_high_risk_action_language(candidate) for candidate in action_candidates)
+    multi_beat_scene = len([phase for phase in action_phases if isinstance(phase, dict)]) >= 2
+
+    if strong_action:
+        if contains_high_risk_action_language(scene_data.get("end_state")):
+            return "climax_peak"
+        return "action_keyframe"
+    if multi_beat_scene and duration_value >= 8:
+        return "action_keyframe"
+    if depends_on_scene is not None and (
+        multi_beat_scene
+        or len([beat for beat in motion_beats if isinstance(beat, dict)]) >= 2
+        or str(scene_data.get("end_state") or "").strip()
+    ):
+        return "continuity_bridge"
+    return canonicalize_image_purpose("", task_direction=normalized_direction)
+
+
+def contains_video_only_language(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return any(marker in text for marker in VIDEO_ONLY_MARKERS)
+
+
+def contains_high_risk_action_language(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return any(marker in text for marker in HIGH_RISK_MARKERS)
+
+
+def normalize_still_text(value: Any, *, max_len: int | None = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    clauses = [
+        part.strip(" ，,；;。.!?！？")
+        for part in re.split(r"[，,；;。.!?！？\n]+", text)
+    ]
+    kept = [clause for clause in clauses if clause and not contains_video_only_language(clause)]
+    normalized = "，".join(kept).strip(" ，,；;。.!?！？")
+    if not normalized:
+        normalized = "" if contains_video_only_language(text) else text.strip(" ，,；;。.!?！？")
+    if max_len is not None:
+        return clip_text(normalized, max_len)
+    return normalized
+
+
+def select_scene_opening_root(scene_data: Dict[str, Any], *, fallback_title: str = "单帧静态画面") -> str:
+    action_phases = scene_data.get("action_phases") or []
+    visual_desc = str(
+        scene_data.get("visual_description")
+        or scene_data.get("description")
+        or scene_data.get("title")
+        or ""
+    ).strip()
+    opening_state = str(scene_data.get("opening_state") or "").strip()
+    content_focus = str(scene_data.get("content_focus") or "").strip()
+    montage_like = any(
+        contains_video_only_language(candidate)
+        for candidate in [
+            visual_desc,
+            opening_state,
+            scene_data.get("event_trigger"),
+            scene_data.get("camera_language"),
+            scene_data.get("camera_angle"),
+            *(phase.get("observable_actions") for phase in action_phases if isinstance(phase, dict)),
+        ]
+    )
+
+    if montage_like and isinstance(action_phases, list):
+        for phase in reversed(action_phases):
+            if not isinstance(phase, dict):
+                continue
+            for key in ("observable_actions", "visual_focus"):
+                candidate = normalize_still_text(phase.get(key))
+                raw = str(phase.get(key) or "").strip()
+                if candidate and (candidate != raw or any(marker in raw for marker in STILL_HINT_MARKERS)):
+                    return candidate
+
+    projected_opening = normalize_still_text(opening_state)
+    if opening_state and not contains_high_risk_action_language(opening_state):
+        return projected_opening or opening_state
+
+    end_state = normalize_still_text(scene_data.get("end_state"))
+    if end_state:
+        return end_state
+
+    if isinstance(action_phases, list):
+        for phase in action_phases:
+            if not isinstance(phase, dict):
+                continue
+            actions = normalize_still_text(phase.get("observable_actions"))
+            if actions:
+                return actions
+
+    motion_beats = scene_data.get("motion_beats") or []
+    if isinstance(motion_beats, list):
+        for beat in motion_beats:
+            if not isinstance(beat, dict):
+                continue
+            focus = normalize_still_text(beat.get("visual_focus"))
+            if focus:
+                return focus
+
+    if visual_desc:
+        return normalize_still_text(visual_desc) or visual_desc
+    if content_focus:
+        return normalize_still_text(content_focus) or content_focus
+    return str(fallback_title or "单帧静态画面").strip()
+
+
+def select_frame_thesis(
+    scene_data: Dict[str, Any],
+    *,
+    image_purpose: str,
+    fallback_title: str = "单帧静态画面",
+) -> str:
+    explicit = normalize_still_text(scene_data.get("frame_thesis"))
+    if explicit:
+        return explicit
+
+    purpose = canonicalize_image_purpose(image_purpose)
+    if purpose == "scene_opening_anchor":
+        return select_scene_opening_root(scene_data, fallback_title=fallback_title)
+
+    action_phases = scene_data.get("action_phases") or []
+    motion_beats = scene_data.get("motion_beats") or []
+    candidates: List[Any] = []
+
+    if purpose in {"action_keyframe", "climax_peak"}:
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                *(phase.get("observable_actions") for phase in reversed(action_phases) if isinstance(phase, dict)),
+                *(beat.get("visual_focus") for beat in reversed(motion_beats) if isinstance(beat, dict)),
+                scene_data.get("event_trigger"),
+            ]
+        )
+    elif purpose == "continuity_bridge":
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                scene_data.get("opening_state"),
+                scene_data.get("event_trigger"),
+            ]
+        )
+    elif purpose == "emotional_lock":
+        candidates.extend(
+            [
+                scene_data.get("end_state"),
+                scene_data.get("opening_state"),
+                scene_data.get("content_focus"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = normalize_still_text(candidate)
+        if normalized:
+            return normalized
+
+    return select_scene_opening_root(scene_data, fallback_title=fallback_title)

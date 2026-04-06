@@ -21,7 +21,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
-from app.models import Task, AgentExecution, Scene, Resource
+from app.models import Task, Scene, Resource
 
 
 @pytest.mark.performance
@@ -322,7 +322,8 @@ class TestPerformanceLoad:
         message_count = 100
         message_latencies = []
         
-        with websocket_test_client.websocket_connect("/ws?session_id=perf-test") as websocket:
+        with websocket_test_client.websocket_connect("/api/v1/ws/connect") as websocket:
+            websocket.receive_json()
             # Send messages and measure latency
             for i in range(message_count):
                 start_time = time.time()

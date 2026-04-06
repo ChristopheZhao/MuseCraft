@@ -1,0 +1,53 @@
+{
+  "id": "EXP-20260310-0002",
+  "created_at": "2026-03-10T10:01:58Z",
+  "updated_at": "2026-03-10T10:01:58Z",
+  "title": "MAS 重构中识别伪去规则化与 context rot",
+  "problem_signature": "长周期 multi-agent/MAS 架构重构中，规则中心从 orchestrator 平移到 policy/controller/adapter，且多轮修正后计划出现 context rot，导致局部 seam cleanup 被误判为架构收口",
+  "problem_signature_norm": "长周期 multi-agent/mas 架构重构中，规则中心从 orchestrator 平移到 policy/controller/adapter，且多轮修正后计划出现 context rot，导致局部 seam cleanup 被误判为架构收口",
+  "decision_rules": [
+    "判断重构是否成功看 ownership 是否迁出，而不是函数是否拆分或文件是否变少",
+    "规则可以保留为约束、事实和门控，但不得直接生成 active_pool/standby_pool/actions 等编排结果",
+    "只要 orchestrator 主循环仍主动拉 gate、主动组织 replan、直接改 queue/specs，就不能判定为 llm-decision-based orchestration",
+    "当同一计划多轮修正后出现明显 context rot，应做 checkpoint 固化现状，再开更窄的新计划继续，而不是硬推旧计划到完成"
+  ],
+  "review_checklist": [
+    "检查 orchestrator 主循环是否仍直接串 report -> gate -> decision -> apply",
+    "检查 controller 是否仍在补造 fallback spec、维护 queue 或 activation 策略",
+    "检查 protocol 是否在缺少显式 report 时静默默认成功态",
+    "检查 adapter/observation 模块是否重新承接了隐藏规则中心"
+  ],
+  "source_event_refs": [
+    "docs/architecture/mas_refactor_checkpoint_20260310.md#what-is-still-not-solved",
+    "docs/plans/active/PLAN-20260310-004.md#1-current-problem"
+  ],
+  "doc_refs": [
+    "docs/architecture/mas_refactor_checkpoint_20260310.md",
+    "docs/plans/active/PLAN-20260308-003.md",
+    "docs/plans/active/PLAN-20260310-004.md"
+  ],
+  "tags": [
+    "mas-refactor",
+    "orchestrator",
+    "anti-hardcode",
+    "context-rot",
+    "checkpoint-planning"
+  ],
+  "context_constraints": [
+    "适用于长周期 multi-agent/MAS 架构重构，且系统已进入多轮实现-复核-修正循环"
+  ],
+  "anti_patterns": [
+    "把规则中心从 orchestrator 平移到 policy service、controller、adapter 或 helper 文件",
+    "把局部 seam cleanup 当成整体架构收口",
+    "在 context rot 明显后仍继续沿用原计划和旧线程硬推到完成"
+  ],
+  "outcome": "形成了 checkpoint + successor plan 的治理模式，并把 residual ownership 聚焦到 orchestrator 主循环、runtime controller、protocol 强边界与主循环 E2E 覆盖",
+  "confidence": "high",
+  "owner": "codex",
+  "capture_meta": {
+    "trigger_mode": "manual-explicit",
+    "confirmed_by_user": true,
+    "confirmation_note": "用户明确要求进行经验沉淀，并同意将本轮 MAS 重构复盘形成记录。",
+    "confirmed_at": "2026-03-10T10:01:58Z"
+  }
+}

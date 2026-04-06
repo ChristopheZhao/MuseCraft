@@ -229,47 +229,13 @@ class RoleAnalysisTool(AsyncTool):
         if not content or not isinstance(content, str):
             raise ToolError("Empty role analysis content", self.metadata.name)
 
-        # 解析严格JSON；兼容 ```json 包裹
+        # 解析严格JSON（统一安全解析），失败抛 ToolError，保留一次兜底已在上文 generate_text
         if parsed_obj is None:
-            text = (content or "").strip()
-            if text.startswith("```"):
-                try:
-                    fence = text.split("\n", 1)[0]
-                    if fence.startswith("```json"):
-                        text = text[len(fence):].strip()
-                    if text.endswith("```"):
-                        text = text[:-3].strip()
-                except Exception:
-                    pass
-            import json, re
+            from ...utils.json_utils import safe_json_loads
             try:
-                data = json.loads(text) if text else {}
-            except json.JSONDecodeError:
-                # 二次兜底：尝试提取最外层JSON对象片段
-                try:
-                    m = re.search(r"\{[\s\S]*\}\s*\Z", text)
-                    if m:
-                        data = json.loads(m.group())
-                    else:
-                        raise
-                except Exception:
-                    # 若此前未执行 generate_text 兜底，则再尝试一次
-                    if (not fallback_info) or (fallback_info == "fallback_failed"):
-                        try:
-                            res3 = await provider.execute(TI(action="generate_text", parameters={
-                                "prompt": prompt,
-                                **({"model": model} if model else {}),
-                                "temperature": temp_cfg,
-                                "max_tokens": max_tokens,
-                                "response_format": {"type": "json_object"}
-                            }))
-                            payload3 = getattr(res3, 'result', res3)
-                            text3 = ((payload3 or {}).get("content") or "").strip() if isinstance(payload3, dict) else ""
-                            data = json.loads(text3) if text3 else {}
-                            fallback_info = "fallback:generate_text_reparse"
-                        except Exception as _:
-                            # 最终失败，抛出ToolError由上层处理
-                            raise ToolError("Role analysis JSON parsing failed after fallback", self.metadata.name)
+                data = safe_json_loads(content, logger=self.logger, context="role_analysis", allow_fallback=False)
+            except Exception as exc:
+                raise ToolError(f"Role analysis JSON parsing failed: {exc}", self.metadata.name)
         else:
             data = parsed_obj
         if not isinstance(data, dict):

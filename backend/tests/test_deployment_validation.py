@@ -96,13 +96,13 @@ class TestDeploymentValidation:
         
         # Test database schema
         try:
-            from app.models import Task, AgentExecution, Scene, Resource
+            from app.models import Task, Scene, Resource
             from sqlalchemy import inspect
             
             inspector = inspect(test_db_session.bind)
             tables = inspector.get_table_names()
             
-            required_tables = ['tasks', 'agent_executions', 'scenes', 'resources']
+            required_tables = ['tasks', 'scenes', 'resources']
             schema_valid = all(table in tables for table in required_tables)
             
             # Test table constraints and indexes

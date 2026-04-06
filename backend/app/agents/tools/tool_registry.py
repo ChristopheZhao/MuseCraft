@@ -136,6 +136,55 @@ class ToolRegistry:
         
         self.logger.info(f"Registered tool: {tool_name} ({metadata.tool_type.value})")
         return tool_name
+
+    def register_composite_tool(
+        self,
+        module_path: str,
+        class_name: str,
+        *,
+        name: Optional[str] = None,
+        deps: Optional[List[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        is_singleton: bool = True,
+        auto_load: bool = False,
+        aliases: Optional[List[str]] = None,
+    ) -> str:
+        """Register a composite tool with delayed import and dependency tracking.
+
+        - Lazily import the tool module/class to avoid circular imports during bootstrap.
+        - Merge declared dependencies for diagnostics/policy checks; does not force-load deps.
+        - Defaults to not auto-load the tool instance to keep init order flexible.
+        """
+        try:
+            module = importlib.import_module(f".{module_path}", package=__package__)
+        except Exception as e:
+            raise ToolError(f"Failed to import module .{module_path}: {e}")
+
+        try:
+            tool_class = getattr(module, class_name)
+        except Exception as e:
+            raise ToolError(f"Failed to load class {class_name} from {module_path}: {e}")
+
+        registered_name = self.register_tool(
+            tool_class=tool_class,
+            name=name,
+            config=config or {},
+            is_singleton=is_singleton,
+            auto_load=auto_load,
+            aliases=aliases,
+        )
+
+        # Record dependencies (best-effort)
+        if deps:
+            dep_set = self._dependencies.get(registered_name, set())
+            dep_set.update(deps)
+            self._dependencies[registered_name] = dep_set
+            missing = [d for d in deps if d not in self._tools]
+            if missing:
+                self.logger.warning(
+                    f"Composite tool '{registered_name}' declared deps not registered yet: {missing}"
+                )
+        return registered_name
     
     def unregister_tool(self, name: str):
         """
@@ -503,6 +552,20 @@ class ToolRegistry:
                 is_singleton=True,
                 auto_load=False
             )
+
+            # 注册通用脚本生成工具（兼容旧名）
+            try:
+                from .ai_services.script_generation_tool import ScriptGenerationTool
+                self.register_tool(
+                    tool_class=ScriptGenerationTool,
+                    name="script_generation",
+                    config={},
+                    is_singleton=True,
+                    auto_load=False
+                )
+            except Exception:
+                # 若工具不可用，不阻断注册流程
+                pass
             
             # 注册叙事结构生成工具
             from .ai_services.narrative_structure_generation_tool import NarrativeStructureGenerationTool
@@ -533,6 +596,18 @@ class ToolRegistry:
                 is_singleton=True,
                 auto_load=False
             )
+
+            # 注册视频合成组合工具（确定性顺序的高阶封装）
+            try:
+                self.register_composite_tool(
+                    module_path="video_composition.composition_tool",
+                    class_name="CompositionTool",
+                    name="composition_tool",
+                    deps=["ffmpeg_tool"],
+                    auto_load=False,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to register composition_tool: {e}")
             
             self.logger.info("🤖 原子性AI服务工具注册完成")
             

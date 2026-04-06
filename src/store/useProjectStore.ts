@@ -140,12 +140,19 @@ export const useProjectStore = create<ProjectStoreState>()(
 
           const runtime = project.episodes_runtime || {};
           const idsToCheck = targets ?? Object.keys(runtime);
-          const stillGenerating = idsToCheck.some((id) => {
+          const episodesStillGenerating = idsToCheck.some((id) => {
             const status = runtime[id]?.status;
             return status === 'generating';
           });
 
-          if (!stillGenerating) {
+          const planningStatus = project.progress?.planning?.status;
+          const refsStatus = project.progress?.character_references?.status;
+          const planningInProgress =
+            planningStatus === 'queued' ||
+            planningStatus === 'in_progress' ||
+            refsStatus === 'in_progress';
+
+          if (!episodesStillGenerating && !planningInProgress) {
             stopPollingProject();
           }
         } catch (error) {

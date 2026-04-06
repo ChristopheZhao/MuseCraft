@@ -10,15 +10,38 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
+from types import SimpleNamespace
+
 from app.agents.image_generator import ImageGeneratorAgent
-from app.core.workflow_state import SceneData
+from app.agents.tools.tool_registry import get_tool_registry
+from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
+from app.agents.tools.consistency_tool import ConsistencyTool
+from app.agents.tools.storage.file_storage_tool import FileStorageTool
+
+from app.agents.tools.ai_services.zhipu_client import ZhipuClientTool
+
+
+def _ensure_tools_registered():
+    registry = get_tool_registry()
+    registry.register_tool(ZhipuClientTool, name="zhipu_client", auto_load=False)
+    for cls, name in [
+        (ImageGenerationTool, "image_generation"),
+        (ConsistencyTool, "consistency_tool"),
+        (FileStorageTool, "file_storage_tool"),
+    ]:
+        try:
+            registry.get_tool(name)
+        except Exception:
+            registry.register_tool(tool_class=cls, name=name, auto_load=False)
 
 def test_image_generator_tool_system():
     """测试ImageGenerator使用工具系统而非直接AI服务调用"""
     
     print("🧪 测试ImageGenerator工具系统重构")
     print("=" * 60)
-    
+
+    _ensure_tools_registered()
+
     # 创建ImageGenerator实例
     image_gen = ImageGeneratorAgent()
     
@@ -37,16 +60,16 @@ def test_image_generator_tool_system():
     
     print()
     
-    # 测试服务选择逻辑
-    print("🔧 测试图像服务选择:")
+    # 验证工具装载结果
+    print("🔧 工具注册验证:")
     print("-" * 30)
-    
-    try:
-        selected_service = image_gen._select_image_service()
-        print(f"✅ 选择的图像服务: {selected_service}")
-    except Exception as e:
-        print(f"⚠️ 服务选择错误: {e}")
-        selected_service = "glm"  # 默认值
+    allocated = image_gen.allocated_tools
+    print(f"   已分配工具: {allocated}")
+    assert "image_generation" in allocated
+    assert "consistency_tool" in allocated
+    assert "file_storage_tool" in allocated
+    ig_tool = image_gen._available_tools["image_generation"]
+    print(f"   image_generation 可用动作: {ig_tool.get_available_actions()}")
     
     # 测试参数生成
     print()
@@ -54,7 +77,7 @@ def test_image_generator_tool_system():
     print("-" * 30)
     
     # 模拟场景数据
-    scene_data = SceneData(
+    scene_data = SimpleNamespace(
         scene_number=1,
         scene_type="main_content",
         title="Pool Party",
@@ -62,10 +85,10 @@ def test_image_generator_tool_system():
         visual_description="Dynamic water activities with friends laughing",
         duration=8.0,
         props_and_objects=["swimming pool", "clear water"],
-        mood_and_atmosphere="joyful and energetic"
+        mood_and_atmosphere="joyful and energetic",
     )
     
-    # 模拟创意指导
+    # 模拟创意指导（现行 agent 在 PLAN 阶段由 LLM 决策，不提供直接参数生成接口）
     creative_guidance = {
         "overall_guidance": {
             "production_guidance": {
@@ -77,10 +100,8 @@ def test_image_generator_tool_system():
         "scene_guidance": {},
         "has_guidance": True
     }
-    
-    generation_params = image_gen._get_generation_parameters_with_guidance(scene_data, creative_guidance)
-    print(f"✅ 生成参数: {generation_params}")
-    
+    print("ℹ️ 生成参数：现行 ImageGenerator 由 PLAN LLM 决策，不暴露 _get_generation_parameters_with_guidance 接口")
+
     # 测试提示词增强
     print()
     print("🎨 测试MAS协作模式提示词增强:")
@@ -105,21 +126,9 @@ def test_image_generator_tool_system():
     
     base_prompt = scene_data.visual_description
     
-    # 测试首帧增强
-    first_frame_enhanced = image_gen._enhance_prompt_for_first_frame(
-        base_prompt, scene_data, creative_guidance
-    )
-    print(f"🎬 首帧增强提示词:")
-    print(f"   原始: {base_prompt}")
-    print(f"   增强: ...{first_frame_enhanced[-100:]}")  # 显示最后100个字符
-    
-    # 测试尾帧增强
-    last_frame_enhanced = image_gen._enhance_prompt_for_last_frame(
-        base_prompt, scene_data, creative_guidance
-    )
-    print(f"🏁 尾帧增强提示词:")
-    print(f"   原始: {base_prompt}")
-    print(f"   增强: ...{last_frame_enhanced[-100:]}")   # 显示最后100个字符
+    # 提示词增强接口已移除，交由 PLAN LLM 决策，仅保留场景参考打印
+    print("🎬 首尾帧增强：已由 PLAN LLM 自主构建提示词，不再提供本地增强接口")
+    print(f"   原始描述: {base_prompt}")
     
     print()
     

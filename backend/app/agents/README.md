@@ -1,132 +1,24 @@
-# Agent系统架构说明
+# Agent 系统说明
 
-## 📁 目录结构
+本目录只保留当前 canonical MAS agent surface 的简要说明。
 
-```
-agents/
-├── __init__.py                    # Agent模块初始化
-├── README.md                      # 架构说明文档
-├── 
-├── core/                          # 核心组件
-│   ├── __init__.py
-│   ├── base_agent.py             # Agent基类
-│   ├── agent_registry.py         # Agent注册管理
-│   ├── execution_engine.py       # 执行引擎
-│   └── exceptions.py             # 异常定义
-│
-├── orchestrators/                 # 编排器agents
-│   ├── __init__.py
-│   ├── pipeline_orchestrator.py  # 管道式编排器
-│   ├── react_orchestrator.py     # ReAct编排器
-│   └── hybrid_orchestrator.py    # 混合编排器
-│
-├── specialists/                   # 专业智能体
-│   ├── __init__.py
-│   ├── concept_planner.py        # 概念规划
-│   ├── script_writer.py          # 脚本编写
-│   ├── image_generator.py        # 图像生成
-│   ├── video_generator.py        # 视频生成
-│   ├── video_composer.py         # 视频合成
-│   └── quality_checker.py        # 质量检查
-│
-├── tools/                         # 工具模块
-│   ├── __init__.py
-│   ├── base_tool.py              # 工具基类
-│   ├── tool_registry.py          # 工具注册
-│   ├── 
-│   ├── ai_services/              # AI服务工具
-│   │   ├── __init__.py
-│   │   ├── openai_client.py      # OpenAI集成
-│   │   ├── stability_client.py   # Stability AI集成
-│   │   ├── runway_client.py      # Runway ML集成
-│   │   └── anthropic_client.py   # Anthropic集成
-│   │
-│   ├── media_processing/         # 媒体处理工具
-│   │   ├── __init__.py
-│   │   ├── image_processor.py    # 图像处理
-│   │   ├── video_processor.py    # 视频处理
-│   │   ├── audio_processor.py    # 音频处理
-│   │   └── ffmpeg_wrapper.py     # FFmpeg封装
-│   │
-│   ├── file_management/          # 文件管理工具
-│   │   ├── __init__.py
-│   │   ├── storage_manager.py    # 存储管理
-│   │   ├── file_validator.py     # 文件验证
-│   │   └── cloud_uploader.py     # 云存储上传
-│   │
-│   └── utilities/                # 通用工具
-│       ├── __init__.py
-│       ├── text_processor.py     # 文本处理
-│       ├── json_parser.py        # JSON解析
-│       ├── validator.py          # 数据验证
-│       └── formatter.py          # 格式化工具
-│
-├── memory/                        # 记忆管理模块
-│   ├── __init__.py
-│   ├── base_memory.py            # 记忆基类
-│   ├── memory_manager.py         # 记忆管理器
-│   ├── 
-│   ├── stores/                   # 存储实现
-│   │   ├── __init__.py
-│   │   ├── redis_store.py        # Redis存储
-│   │   ├── postgres_store.py     # PostgreSQL存储
-│   │   └── vector_store.py       # 向量数据库存储
-│   │
-│   └── retrievers/               # 检索器
-│       ├── __init__.py
-│       ├── semantic_retriever.py # 语义检索
-│       ├── keyword_retriever.py  # 关键词检索
-│       └── hybrid_retriever.py   # 混合检索
-│
-├── prompts/                       # 提示词模板管理
-│   ├── __init__.py
-│   ├── template_manager.py       # 模板管理器
-│   ├── prompt_builder.py         # 提示词构建器
-│   ├── 
-│   ├── templates/                # 模板文件
-│   │   ├── concept_planning/     # 概念规划模板
-│   │   │   ├── basic.yaml
-│   │   │   ├── creative.yaml
-│   │   │   └── technical.yaml
-│   │   ├── script_writing/       # 脚本编写模板
-│   │   │   ├── narrative.yaml
-│   │   │   ├── educational.yaml
-│   │   │   └── commercial.yaml
-│   │   ├── quality_assessment/   # 质量评估模板
-│   │   │   ├── content.yaml
-│   │   │   ├── technical.yaml
-│   │   │   └── creative.yaml
-│   │   └── react_reasoning/      # ReAct推理模板
-│   │       ├── observe.yaml
-│   │       ├── think.yaml
-│   │       ├── plan.yaml
-│   │       └── reflect.yaml
-│   │
-│   └── validators/               # 模板验证器
-│       ├── __init__.py
-│       ├── syntax_validator.py   # 语法验证
-│       └── content_validator.py  # 内容验证
-│
-└── utils/                         # 工具函数
-    ├── __init__.py
-    ├── logging.py                # 日志工具
-    ├── metrics.py                # 指标收集
-    ├── decorators.py             # 装饰器
-    └── helpers.py                # 辅助函数
-```
+## 当前主线
+- `OrchestratorAgent` 是唯一的 single-episode canonical mainline。
+- `EpisodeOrchestratorAgent` 只是 project / multi-episode wrapper，不是并列 orchestrator engine。
+- specialist agents 继续作为 leaf execution actors 存在。
 
-## 🏗️ 架构设计原则
+## 已退役语义
+- `react_orchestrator.py`
+- `enhanced_orchestrator.py`
+- 与其绑定的 testing harness / prompt assets
 
-### 1. 分离关注点
-- **Agents**: 专注于业务逻辑和决策
-- **Tools**: 专注于具体功能实现
-- **Memory**: 专注于信息存储和检索
-- **Prompts**: 专注于AI交互优化
+这些旧宿主语义已从 `backend/app` 退役，不再视为可选 app-surface orchestrator。
 
-### 2. 可扩展性
-- 工具系统支持插件化扩展
-- 记忆模块支持多种存储后端
-- 提示词模板支持版本管理和A/B测试
+## 权威架构文档
+- `docs/architecture/single_episode_harness_architecture_20260311.md`
+- `docs/architecture/mas_architecture_alignment_note_20260323.md`
+- `docs/architecture/mas_runtime_control_plane_detailed_design_20260308.md`
+- `docs/architecture/mas_runtime_contracts_detailed_design_20260308.md`
 
 ### 3. 复用性
 - 工具可在多个Agent间共享

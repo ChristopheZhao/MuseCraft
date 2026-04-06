@@ -1,7 +1,6 @@
 """
 Task Queue Service using Celery for background processing
 """
-import asyncio
 import logging
 import time
 from typing import Dict, Any
@@ -9,12 +8,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 
 from ..core.config import settings
-from ..core.database import get_sync_db
+from ..core.constants import GenerationMode
+from ..core.generation_mode import resolve_generation_mode
 from ..models import Task, TaskStatus
-from ..agents import OrchestratorAgent
-from ..core.logging_utils import configure_mas_logging
-
-configure_mas_logging()
+from ..services.runtime_session_service import RuntimeSessionService
+from .queued_task_execution_host import run_generation_in_host
+from .task_execution_policy import get_queue_execution_block_reason
 
 
 # Create synchronous database session for Celery tasks
@@ -25,6 +24,13 @@ if settings.DATABASE_URL.startswith("mysql://"):
 
 sync_engine = create_engine(sync_database_url)
 SyncSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
+
+
+def _resolve_task_execution_route(payload: Dict[str, Any]) -> tuple[GenerationMode, str]:
+    mode = resolve_generation_mode((payload or {}).get("mode"))
+    if mode != GenerationMode.QUICK:
+        return mode, "non_quick_mode"
+    return mode, "orchestrator_mainline"
 
 
 class TaskQueueService:
@@ -39,13 +45,43 @@ class TaskQueueService:
         try:
             # Import here to avoid circular imports
             from .celery_app import process_video_task
+
+            db = SyncSessionLocal()
+            try:
+                task = db.query(Task).filter(Task.id == task_id).first()
+                if task is None:
+                    self.logger.warning("Skip queueing task %s because it no longer exists", task_id)
+                    return None
+                task_payload = dict(task.input_parameters or {})
+                mode = resolve_generation_mode(task_payload.get("mode"))
+                runtime_session = None
+                if mode == GenerationMode.QUICK:
+                    runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(db, task.id)
+
+                block_reason = get_queue_execution_block_reason(task, runtime_session)
+                if block_reason:
+                    self.logger.info(
+                        "Skip queueing task %s because it is not execution-eligible (%s)",
+                        task_id,
+                        block_reason,
+                    )
+                    return None
             
-            # Queue the task with Celery
-            result = process_video_task.delay(task_id)
-            
-            self.logger.info(f"Queued task {task_id} for processing. Celery task ID: {result.id}")
-            
-            return result.id
+                # Queue the task with Celery
+                result = process_video_task.delay(task_id)
+
+                task = db.query(Task).filter(Task.id == task_id).first()
+                if task is not None:
+                    output_metadata = dict(task.output_metadata or {})
+                    output_metadata["celery_task_id"] = result.id
+                    task.output_metadata = output_metadata
+                    if task.status == TaskStatus.PENDING.value:
+                        task.status = TaskStatus.QUEUED.value
+                    db.commit()
+                self.logger.info(f"Queued task {task_id} for processing. Celery task ID: {result.id}")
+                return result.id
+            finally:
+                db.close()
             
         except Exception as e:
             self.logger.error(f"Failed to queue task {task_id}: {str(e)}")
@@ -61,12 +97,6 @@ def sync_process_video_task(task_id: int):
     logger.info(f"=== 🔥 WORKER RESTART: sync_process_video_task called for task_id: {task_id} (v6.0 - MULTI-QUEUE WORKER!) ===")
     
     try:
-        # CRITICAL: Initialize tool registry for Celery worker
-        logger.info("Initializing tool registry for Celery worker...")
-        from ..agents.tools import register_default_tools
-        register_default_tools()
-        logger.info("✅ Tool registry initialized for Celery worker")
-        
         logger.info("Creating database session...")
         # Get database session
         db = SyncSessionLocal()
@@ -107,51 +137,58 @@ def sync_process_video_task(task_id: int):
         
         logger.info(f"Found task: {task.title} with status: {task.status}")
         logger.info(f"Task input parameters: {task.input_parameters}")
-        
-        logger.info(f"Updating task status to IN_PROGRESS...")
-        # Update task status
-        task.status = TaskStatus.IN_PROGRESS.value
-        db.commit()
-        logger.info("Task status updated successfully")
-        
-        logger.info("Setting up asyncio event loop...")
-        # Convert async execution to sync using asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        logger.info("Event loop created and set")
-        
-        logger.info("Creating OrchestratorAgent...")
-        # Create orchestrator and run workflow
-        orchestrator = OrchestratorAgent()
-        logger.info(f"OrchestratorAgent created: {orchestrator}")
-        
+
+        task_payload = dict(task.input_parameters or {})
+        mode, route = _resolve_task_execution_route(task_payload)
+        runtime_session = None
+        if mode == GenerationMode.QUICK:
+            runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(db, task.id)
+
+        block_reason = get_queue_execution_block_reason(
+            task,
+            runtime_session if mode == GenerationMode.QUICK else None,
+        )
+        if block_reason:
+            logger.info(
+                "Skipping queued worker execution for task %s because it is not execution-eligible (%s)",
+                task.id,
+                block_reason,
+            )
+            db.close()
+            return {
+                "status": "skipped",
+                "skip_reason": block_reason,
+                "route": route,
+                "mode": mode.value,
+            }
+
         try:
             logger.info("=== Starting multi-agent execution ===")
-            # Execute the workflow
-            result = loop.run_until_complete(
-                orchestrator.execute(
-                    task=task,
-                    input_data=task.input_parameters or {},
-                    db=db,
-                    execution_order=0
-                )
+            runtime_session, dispatch_payload = RuntimeSessionService.prepare_dispatch_payload_for_task_sync(
+                db,
+                task,
+                mode=mode,
             )
-            
+            if runtime_session is not None:
+                logger.info(f"Loaded runtime session {runtime_session.id} for task {task.id}")
+
+            result = run_generation_in_host(
+                mode,
+                task=task,
+                input_data=dispatch_payload,
+                db=db,
+                route=route,
+                execution_order=1,
+            )
             logger.info(f"=== Multi-agent execution completed ===")
-            logger.info(f"Orchestrator result: {result}")
+            logger.info(f"Kernel result: {result}")
             
-            # Update task status to completed
-            task.status = TaskStatus.COMPLETED.value
-            db.commit()
-            logger.info(f"Task {task_id} marked as completed")
-            
-            return {"status": "completed", "result": result}
+            return result
             
         finally:
-            logger.info("Closing event loop and database session...")
-            loop.close()
+            logger.info("Closing database session...")
             db.close()
-            logger.info("Resources cleaned up")
+            logger.info("Database session cleaned up")
     
     except Exception as e:
         logger.error(f"Error processing task {task_id}: {str(e)}", exc_info=True)
@@ -162,10 +199,13 @@ def sync_process_video_task(task_id: int):
             db = SyncSessionLocal()
             task = db.query(Task).filter(Task.id == task_id).first()
             if task:
-                task.status = TaskStatus.FAILED.value
-                task.error_message = str(e)
-                db.commit()
-                logger.info("Task marked as failed with error message")
+                runtime_session = RuntimeSessionService.mark_task_execution_failed_sync(
+                    db,
+                    task,
+                    error_message=str(e),
+                )
+                if runtime_session is not None:
+                    logger.info("Task marked as failed with runtime session error message")
             db.close()
         except Exception as db_error:
             logger.error(f"Failed to update task with error: {str(db_error)}")

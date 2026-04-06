@@ -2,6 +2,7 @@
 from typing import Any, Dict, List, Optional
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError
+from ..tool_registry import get_tool_registry
 from ....services.voice_service import voice_service, VoiceSynthesisRequest, VoiceServiceError
 from ....core.config import settings
 
@@ -26,10 +27,10 @@ class VoiceSynthesisTool(AsyncTool):
         self.logger.info("VoiceSynthesisTool ready (router based)")
 
     def get_available_actions(self) -> List[str]:
-        return ["synthesize_voice", "list_voices"]
+        return ["synthesize_voice", "synthesize_voice_aligned", "list_voices"]
 
     def get_fc_visibility(self) -> Dict[str, Any]:
-        return {"expose": True, "allowed_actions": ["synthesize_voice"]}
+        return {"expose": True, "allowed_actions": ["synthesize_voice", "synthesize_voice_aligned"]}
 
     def get_action_schema(self, action: str) -> Dict[str, Any]:
         if action == "synthesize_voice":
@@ -37,6 +38,7 @@ class VoiceSynthesisTool(AsyncTool):
             return {
                 "type": "object",
                 "properties": {
+                    "scene_number": {"type": "integer", "description": "场景编号（用于归档/去重）"},
                     "text": {"type": "string", "description": "待合成的配音文本"},
                     "voice_id": {
                         "type": "string",
@@ -70,7 +72,49 @@ class VoiceSynthesisTool(AsyncTool):
                         "description": "附加元数据，将透传到结果中",
                     },
                 },
-                "required": ["text", "voice_id"],
+                "required": ["scene_number", "text", "voice_id"],
+            }
+        if action == "synthesize_voice_aligned":
+            voice_enum, voice_enum_names = self._build_voice_enums()
+            return {
+                "type": "object",
+                "properties": {
+                    "scene_number": {"type": "integer", "description": "场景编号（用于归档/去重）"},
+                    "text": {"type": "string", "description": "待合成的配音文本"},
+                    "voice_id": {
+                        "type": "string",
+                        "description": "目标音色ID",
+                        "enum": voice_enum or None,
+                        "enumNames": voice_enum_names or None,
+                    },
+                    "language": {"type": "string", "description": "语言代码，如 zh-CN"},
+                    "speed": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 1.5,
+                        "description": "语速比例，1.0 为默认语速",
+                    },
+                    "pitch": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 1.5,
+                        "description": "音调比例，1.0 为默认音调",
+                    },
+                    "style": {"type": "string", "description": "供应商定义的风格标签"},
+                    "sample_rate": {"type": "integer", "description": "采样率（Hz）"},
+                    "audio_format": {
+                        "type": "string",
+                        "enum": ["wav", "mp3", "pcm"],
+                        "description": "输出格式",
+                    },
+                    "target_duration": {"type": "number", "description": "目标时长（秒）"},
+                    "reference_id": {"type": "string", "description": "场景/任务参考ID"},
+                    "metadata": {
+                        "type": "object",
+                        "description": "附加元数据，将透传到结果中",
+                    },
+                },
+                "required": ["scene_number", "text", "voice_id", "target_duration"],
             }
         if action == "list_voices":
             return {
@@ -78,6 +122,56 @@ class VoiceSynthesisTool(AsyncTool):
                 "properties": {},
             }
         return {}
+
+    @staticmethod
+    def _extract_tool_payload(
+        output: Any,
+        *,
+        tool_name: str,
+        action: str,
+        caller_tool: str,
+    ) -> Dict[str, Any]:
+        """Unwrap tool output and preserve failure diagnostics across wrapper layers."""
+        if hasattr(output, "success"):
+            success = bool(getattr(output, "success", False))
+            if not success:
+                err = str(getattr(output, "error", "") or "unknown error")
+                meta = getattr(output, "metadata", {}) or {}
+                error_type = meta.get("error_type") if isinstance(meta, dict) else None
+                details_raw = meta.get("error_details_struct") if isinstance(meta, dict) else None
+                details = details_raw if isinstance(details_raw, dict) else {}
+                raise ToolError(
+                    f"{tool_name}.{action} failed: {err}",
+                    caller_tool,
+                    error_code=error_type,
+                    details=details,
+                )
+            payload = getattr(output, "result", None)
+            if not isinstance(payload, dict):
+                raise ToolError(f"{tool_name}.{action} returned empty payload", caller_tool)
+            return payload
+
+        if isinstance(output, dict):
+            if output.get("success") is False:
+                err = str(output.get("error") or "unknown error")
+                meta = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+                error_type = meta.get("error_type") if isinstance(meta, dict) else None
+                details_raw = meta.get("error_details_struct") if isinstance(meta, dict) else None
+                details = details_raw if isinstance(details_raw, dict) else {}
+                raise ToolError(
+                    f"{tool_name}.{action} failed: {err}",
+                    caller_tool,
+                    error_code=error_type,
+                    details=details,
+                )
+            if isinstance(output.get("result"), dict):
+                return output["result"]
+            return output
+
+        raise ToolError(
+            f"{tool_name}.{action} returned invalid output type: {type(output).__name__}",
+            caller_tool,
+        )
 
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         action = tool_input.action
@@ -100,6 +194,70 @@ class VoiceSynthesisTool(AsyncTool):
                 # omit raw_audio bytes to avoid flooding logs; consumers rely on file path
                 "metadata": result.metadata,
             }
+        if action == "synthesize_voice_aligned":
+            request = self._build_request(params)
+            target_duration = params.get("target_duration")
+            if target_duration is None:
+                raise ToolError("target_duration is required", self.metadata.name)
+            try:
+                target_duration = float(target_duration)
+            except (TypeError, ValueError):
+                raise ToolError("target_duration must be numeric", self.metadata.name)
+            if target_duration <= 0:
+                raise ToolError("target_duration must be greater than 0", self.metadata.name)
+
+            try:
+                result = await voice_service.synthesize(request)
+            except VoiceServiceError as exc:
+                raise ToolError(str(exc), self.metadata.name)
+
+            audio_path = result.local_path
+            audio_tool = get_tool_registry().get_tool("audio_processor")
+            align_input = ToolInput(
+                action="ensure_duration",
+                parameters={
+                    "input_path": audio_path,
+                    "target_duration": target_duration,
+                    "sample_rate": result.sample_rate,
+                    "audio_format": result.audio_format,
+                    "fade_out": float(getattr(settings, "AUDIO_FADE_OUT_DURATION", 0.5)),
+                },
+                context=tool_input.context or {},
+            )
+            try:
+                align_result = await audio_tool.execute(align_input)
+            except Exception as exc:
+                raise ToolError(f"ensure_duration failed: {exc}", self.metadata.name)
+
+            payload = self._extract_tool_payload(
+                align_result,
+                tool_name="audio_processor",
+                action="ensure_duration",
+                caller_tool=self.metadata.name,
+            )
+            aligned_path = payload.get("output_path") or audio_path
+            final_duration = payload.get("final_duration") or payload.get("target_duration") or result.duration
+
+            metadata = dict(result.metadata or {})
+            metadata.setdefault("alignment", {})
+            if isinstance(metadata.get("alignment"), dict):
+                metadata["alignment"].update(
+                    {
+                        "target_duration": target_duration,
+                        "adjusted": bool(payload.get("adjusted")),
+                    }
+                )
+
+            return {
+                "audio_path": aligned_path,
+                "provider": result.provider,
+                "voice_id": result.voice_id,
+                "sample_rate": result.sample_rate,
+                "audio_format": result.audio_format,
+                "duration": final_duration,
+                "original_duration": result.duration,
+                "metadata": metadata,
+            }
 
         if action == "list_voices":
             catalog = await voice_service.list_voices()
@@ -118,6 +276,7 @@ class VoiceSynthesisTool(AsyncTool):
         if not self._is_voice_allowed(voice_id):
             raise ToolError(f"voice_id {voice_id} is not allowed", self.metadata.name)
 
+        scene_number = params.get("scene_number")
         language = str(params.get("language") or "zh-CN")
         speed = float(params.get("speed", 1.0))
         pitch = float(params.get("pitch", 1.0))
@@ -126,6 +285,12 @@ class VoiceSynthesisTool(AsyncTool):
         audio_format = str(params.get("audio_format", settings.VOICE_DEFAULT_FORMAT))
         reference_id = params.get("reference_id")
         metadata = params.get("metadata") or {}
+        if scene_number is not None and isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.setdefault("scene_number", scene_number)
+        if reference_id and isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.setdefault("reference_id", reference_id)
 
         return VoiceSynthesisRequest(
             text=text,

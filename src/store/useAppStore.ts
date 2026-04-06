@@ -7,7 +7,8 @@ import {
   UIState, 
   Notification,
   ModalState,
-  GenerationStep 
+  GenerationStep,
+  TaskRuntimeView,
 } from '@/types';
 
 interface AppState {
@@ -22,15 +23,10 @@ interface AppState {
   
   // 生成结果
   results: GenerationResult[];
+  quickRuntime: TaskRuntimeView | null;
   
   // UI状态
   ui: UIState;
-
-  // 概念规划：场景数（粗粒度状态）
-  scenesPlanned: number | null;
-  // 产物计数：图片/视频（粗粒度）
-  imagesGenerated: number | null;
-  videosGenerated: number | null;
   
   // WebSocket连接状态
   wsConnected: boolean;
@@ -42,6 +38,7 @@ interface AppState {
   addResult: (result: GenerationResult) => void;
   updateResult: (resultId: string, updates: Partial<GenerationResult>) => void;
   setCurrentStep: (step: GenerationStep) => void;
+  setQuickRuntime: (runtime: TaskRuntimeView | null) => void;
   addNotification: (notification: Omit<Notification, 'id' | 'timestamp'>) => void;
   removeNotification: (id: string) => void;
   setModal: (modal: ModalState | null) => void;
@@ -49,23 +46,20 @@ interface AppState {
   setLoading: (loading: boolean) => void;
   setWSConnected: (connected: boolean) => void;
   setFinalVideoUrl: (url?: string) => void;
-  setScenesPlanned: (count: number | null) => void;
-  setImagesGenerated: (count: number | null) => void;
-  setVideosGenerated: (count: number | null) => void;
   
   // 重置状态
   reset: () => void;
 }
 
-const initialUIState: UIState = {
+const createInitialUIState = (): UIState => ({
   isLoading: false,
   currentStep: 'input',
   sidebarCollapsed: false,
   notifications: [],
   modal: null,
-};
+});
 
-const initialAgents: Agent[] = [
+const createInitialAgents = (): Agent[] => [
   {
     id: 'concept-generator',
     name: '概念生成',
@@ -138,12 +132,10 @@ export const useAppStore = create<AppState>()(
       currentRequest: null,
       finalVideoUrl: undefined,
       mode: 'quick',
-      agents: initialAgents,
+      agents: createInitialAgents(),
       results: [],
-      ui: initialUIState,
-      scenesPlanned: null,
-      imagesGenerated: null,
-      videosGenerated: null,
+      quickRuntime: null,
+      ui: createInitialUIState(),
       wsConnected: false,
 
       // Actions
@@ -179,6 +171,9 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           ui: { ...state.ui, currentStep: step },
         }), false, 'setCurrentStep'),
+
+      setQuickRuntime: (runtime) =>
+        set({ quickRuntime: runtime }, false, 'setQuickRuntime'),
 
       addNotification: (notification) => {
         const newNotification: Notification = {
@@ -228,22 +223,14 @@ export const useAppStore = create<AppState>()(
       setWSConnected: (connected) =>
         set({ wsConnected: connected }, false, 'setWSConnected'),
 
-      setScenesPlanned: (count) =>
-        set({ scenesPlanned: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setScenesPlanned'),
-
-      setImagesGenerated: (count) =>
-        set({ imagesGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setImagesGenerated'),
-
-      setVideosGenerated: (count) =>
-        set({ videosGenerated: typeof count === 'number' ? Math.max(0, Math.floor(count)) : null }, false, 'setVideosGenerated'),
-
       reset: () =>
         set({
           currentRequest: null,
           finalVideoUrl: undefined,
-          agents: initialAgents,
+          agents: createInitialAgents(),
           results: [],
-          ui: initialUIState,
+          quickRuntime: null,
+          ui: createInitialUIState(),
           wsConnected: false,
         }, false, 'reset'),
     })),

@@ -1,0 +1,69 @@
+<mxfile host="app.diagrams.net" modified="2024-05-21T00:00:00" agent="CodexCLI" version="23.1.6" editor="dotnet" type="device">
+  <diagram name="MuseCraft Agents" id="gR1uU7pB7zdlN8kU4qP9">
+    <mxGraphModel dx="1564" dy="1001" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="组织协调智能体&#xa;AgentOrchestrator / react_orchestrator.py&#xa;• 任务编排、工具配额 (fc_policies.yaml)&#xa;• ReAct 循环 + 进度监控" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B1D32;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="210" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="概念规划智能体&#xa;concept_planner.py&#xa;• 视觉/叙事蓝图&#xa;• 引用 style_taxonomy.yaml" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B1D32;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="280" y="120" width="210" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="剧本创作智能体&#xa;script_writer.py + episode_script_planner.py&#xa;• 场景拆分与镜头脚本&#xa;• story_plan / mode_router 输入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B1D32;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="520" y="120" width="230" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="角色设计智能体&#xa;image_generator.py + reference_bank.py&#xa;• 角色视觉统一&#xa;• 输出多视角参考" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B1D32;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="780" y="120" width="220" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="视频生成智能体&#xa;video_generator.py + video_generation_tool_v2.py&#xa;• 场景级视频生成&#xa;• motion/script prompts 输入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B243A;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="220" y="320" width="240" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="音频生成智能体&#xa;voice_synthesizer.py + audio_generator.py&#xa;• 配音与 BGM 设计&#xa;• Composer 前的等长音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B243A;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="500" y="320" width="240" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="合成加工智能体&#xa;video_composer.py&#xa;• 多轨混合、ducking、对齐&#xa;• artifacts.py 构建交付物" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0B243A;fontColor=#FFFFFF;strokeColor=#4FFFB0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="780" y="320" width="230" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="质量控制智能体&#xa;quality_checker.py + consistency_tool.py&#xa;• 成品检测、自动修正&#xa;• 反馈 orchestrator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#112240;fontColor=#FFFFFF;strokeColor=#F900BF;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="320" width="230" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="10" value="共享基础设施 (AGENTS.md 指南)&#xa;• Tool Registry / agent_tool_allocation / fc_policies.yaml&#xa;• ContextAssembler + MemoryWriter 确保记忆解耦&#xa;• WorkingMemory / SharedMemory 提供事实视图&#xa;• Tools-First、Prompt Neutrality、Contract-First" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#172A45;fontColor=#FFFFFF;strokeColor=#4FFFB0;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="470" width="1250" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="20" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;" edge="1" parent="1" source="2" target="3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="21" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;" edge="1" parent="1" source="3" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="22" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;" edge="1" parent="1" source="4" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="23" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="5" target="6">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="900" y="280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="24" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="4" target="6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="25" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="4" target="7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="26" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;" edge="1" parent="1" source="6" target="8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="27" style="endArrow=block;endFill=1;strokeColor=#4FFFB0;strokeWidth=2;" edge="1" parent="1" source="7" target="8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="28" style="endArrow=block;endFill=1;strokeColor=#F900BF;strokeWidth=2;" edge="1" parent="1" source="8" target="9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="29" style="endArrow=block;endFill=1;strokeColor=#F900BF;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="9" target="2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

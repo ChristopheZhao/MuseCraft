@@ -30,7 +30,7 @@
   - After Hook：调用 `MemoryWriter`，将关键输出写回记忆。
 
 - 默认持久化（SQLite）
-  - 新增：`backend/app/agents/memory/sqlite_memory_store.py`
+  - 新增：`backend/app/agents/memory/long_term/stores/sqlite_store.py`
   - 默认将记忆后端设置为 SQLite（路径：`backend/storage/memory.sqlite`），不可用时自动回退到内存后端（Dict）。
   - 后端选择逻辑：`backend/app/services/global_memory_service.py`。
 

@@ -1,8 +1,8 @@
 """
 FastAPI main application
 """
+import asyncio
 import logging
-import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,17 +12,14 @@ from fastapi.exceptions import RequestValidationError
 import os
 
 from .core.config import settings
-from .core.logging_utils import configure_mas_logging
+from .core.logging_config import configure_logging
 from .api.v1.api import api_router
 from .services.websocket import websocket_manager
+from .events.setup import setup_event_listeners
 
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-configure_mas_logging()
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +35,26 @@ async def lifespan(app: FastAPI):
     from .agents.tools import register_default_tools
     register_default_tools()
     logger.info("✅ Tool registry initialized")
+
+    # Register event listeners (WS; persistence/episodic sinks可按需注入)
+    from .events.provider import get_event_bus
+    from .services.event_handlers import handle_persistence_event
+    event_bus = setup_event_listeners(
+        websocket_manager=websocket_manager,
+        persistence_sink=handle_persistence_event,
+        episodic_log_path=settings.EPISODIC_EVENT_LOG_PATH if getattr(settings, "EPISODIC_EVENT_ENABLED", False) else None,
+        bus=get_event_bus(),
+    )
+    app.state.event_bus = event_bus
+    logger.info("✅ Event bus initialized with default listeners")
     
     # Create storage directories
     os.makedirs(settings.UPLOAD_PATH, exist_ok=True)
     os.makedirs(settings.GENERATED_PATH, exist_ok=True)
     os.makedirs(settings.TEMP_PATH, exist_ok=True)
     
-    # Start periodic cleanup task for WebSocket connections
-    import asyncio
+    # Start API-local maintenance tasks only. Runtime reconcile stays explicit
+    # control-plane maintenance and must not be owned by API startup.
     cleanup_task = asyncio.create_task(periodic_websocket_cleanup())
     
     yield
@@ -80,23 +89,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Request logging middleware for debugging (DISABLED - causing hanging)
-# @app.middleware("http")
-# async def log_requests(request: Request, call_next):
-#     """Log all requests for debugging"""
-#     if request.method == "POST":
-#         # Read body for POST requests (always log, not just in DEBUG)
-#         body = await request.body()
-#         logger.info(f"POST {request.url.path} - Request body: {body.decode('utf-8') if body else 'empty'}")
-#         # Recreate request with body
-#         import io
-#         request._body = body
-#         request._stream = io.BytesIO(body)
-#     
-#     response = await call_next(request)
-#     return response
-
 
 # Exception handlers
 @app.exception_handler(RequestValidationError)
@@ -178,9 +170,7 @@ if os.path.exists(settings.FINAL_OUTPUT_ROOT):
 # Periodic tasks
 async def periodic_websocket_cleanup():
     """Periodic cleanup of stale WebSocket connections"""
-    
-    import asyncio
-    
+
     while True:
         try:
             await asyncio.sleep(300)  # 5 minutes
@@ -191,35 +181,51 @@ async def periodic_websocket_cleanup():
             logger.error(f"WebSocket cleanup error: {str(e)}")
 
 
-# Middleware for request logging
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all HTTP requests"""
-    
-    start_time = time.time()
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Log request
-    process_time = time.time() - start_time
-    logger.info(
-        f"{request.method} {request.url.path} - "
-        f"Status: {response.status_code} - "
-        f"Time: {process_time:.3f}s"
-    )
-    
-    return response
+def run_quick_runtime_reconcile_once():
+    """Run the explicit control-plane reconcile entrypoint once."""
+
+    from .core.database import SessionLocal
+    from .services.runtime_session_service import RuntimeSessionService
+
+    db = SessionLocal()
+    try:
+        return RuntimeSessionService.reconcile_irrecoverable_quick_runtimes_sync(
+            db,
+            limit=settings.QUICK_RUNTIME_RECONCILER_BATCH_LIMIT,
+        )
+    finally:
+        db.close()
+
+
+async def periodic_runtime_reconcile():
+    """Periodically reconcile irrecoverable quick runtimes."""
+
+    while True:
+        try:
+            summary = await asyncio.to_thread(run_quick_runtime_reconcile_once)
+            if summary.get("failed", 0) > 0:
+                logger.warning(
+                    "Reconciled stale quick runtimes: inspected=%s failed=%s skipped=%s",
+                    summary.get("inspected", 0),
+                    summary.get("failed", 0),
+                    summary.get("skipped", 0),
+                )
+            await asyncio.sleep(max(1, int(settings.QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS)))
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Quick runtime reconcile loop failed")
+            await asyncio.sleep(max(1, int(settings.QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS)))
 
 
 if __name__ == "__main__":
     import uvicorn
-    import time
     
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
         reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
+        log_level=settings.LOG_LEVEL.lower(),
+        log_config=None,
     )

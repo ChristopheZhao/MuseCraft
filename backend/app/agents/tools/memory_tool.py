@@ -12,13 +12,27 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
-from ...services.global_memory_service import GlobalMemoryService
+from ...services.memory_provider import MemoryServices, build_memory_services
 from ...core.scene_continuity_memory import get_scene_continuity_memory
-from ...agents.memory.base_memory import MemoryType, MemoryImportance
+from ...agents.memory.long_term.stores import MemoryType, MemoryImportance
 from ...services.monitoring_service import MonitoringService, MetricType
 
 
 class MemoryTool(AsyncTool):
+    @classmethod
+    def create_default(cls) -> "MemoryTool":
+        return cls(memory_services=build_memory_services())
+
+    def __init__(self, memory_services: Optional[MemoryServices] = None):
+        super().__init__()
+        if memory_services is None:
+            raise ValueError("memory_services is required for MemoryTool")
+        self._memory_services = memory_services
+
+    @property
+    def long_term_service(self):
+        return self._long_term
+
     @classmethod
     def get_metadata(cls) -> ToolMetadata:
         return ToolMetadata(
@@ -33,7 +47,10 @@ class MemoryTool(AsyncTool):
         )
 
     def _initialize(self):
-        self.gms = GlobalMemoryService()
+        self.gms = self._memory_services.global_service
+        self._long_term = getattr(self._memory_services, "long_term", None)
+        if self._long_term is None:
+            raise ToolError("long_term memory service is required for MemoryTool")
         self._max_items = int(os.getenv("MEMORY_TOOL_MAX_ITEMS", "5"))
         self._mon = MonitoringService()
 
@@ -123,7 +140,7 @@ class MemoryTool(AsyncTool):
             except Exception:
                 memory_type = None
 
-        items = await self.gms.memory_manager.retrieve_memories(
+        items = await self._long_term.retrieve_memories(
             tags=tags or None,
             memory_type=memory_type,
             task_id=workflow_id,
@@ -134,7 +151,7 @@ class MemoryTool(AsyncTool):
     async def _act_get_recent(self, p: Dict[str, Any]) -> Dict[str, Any]:
         workflow_id = p["workflow_id"]
         limit = int(p.get("limit") or self._max_items)
-        items = await self.gms.memory_manager.retrieve_memories(
+        items = await self._long_term.retrieve_memories(
             task_id=workflow_id, limit=limit
         )
         return {"results": [it.to_dict() for it in items]}
@@ -156,7 +173,7 @@ class MemoryTool(AsyncTool):
         except Exception:
             importance_val = MemoryImportance.MEDIUM
 
-        mem_id = await self.gms.memory_manager.store_memory(
+        mem_id = await self._long_term.store_memory(
             content=content,
             memory_type=memory_type,
             importance=importance_val,

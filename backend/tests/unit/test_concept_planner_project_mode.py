@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents.concept_planner import ConceptPlannerAgent
-from app.core.workflow_state import workflow_manager
 
 
 class _StubSession:
@@ -83,8 +82,6 @@ async def test_project_mode_skips_scene_generation(monkeypatch):
     monkeypatch.setattr(agent, "_generate_scene_details", fail_scene_details)
     monkeypatch.setattr(agent, "_create_scenes_in_workflow_state", fail_create_scenes)
 
-    wf = workflow_manager.create_workflow("项目需求")
-
     task = SimpleNamespace(
         task_id="task-id",
         status="pending",
@@ -98,7 +95,7 @@ async def test_project_mode_skips_scene_generation(monkeypatch):
             "user_prompt": "制作史诗动漫项目",
             "duration": 180,
             "aspect_ratio": "16:9",
-            "workflow_state_id": wf.task_id,
+            "workflow_state_id": "wf-project-mode",
             "concept_mode": "project",
             "style_taxonomy_summary": "动漫风格",
         },
@@ -109,5 +106,3 @@ async def test_project_mode_skips_scene_generation(monkeypatch):
     concept_plan = result["concept_plan"]
     assert concept_plan["intelligent_style_design"]["style_name"] == "Anime"
     assert concept_plan["scenes"] == []
-
-    workflow_manager.remove_workflow(wf.task_id)

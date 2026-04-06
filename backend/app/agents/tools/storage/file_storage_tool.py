@@ -14,20 +14,11 @@ from urllib.parse import urlparse
 import httpx
 import base64
 import asyncio
+from importlib.util import find_spec
 
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-    BOTO3_AVAILABLE = True
-except ImportError:
-    BOTO3_AVAILABLE = False
-
-try:
-    from minio import Minio
-    from minio.error import S3Error
-    MINIO_AVAILABLE = True
-except ImportError:
-    MINIO_AVAILABLE = False
+# Lazy dependency checks: avoid importing heavy SDKs at module import time.
+BOTO3_AVAILABLE = find_spec("boto3") is not None
+MINIO_AVAILABLE = find_spec("minio") is not None
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
 try:
@@ -109,6 +100,13 @@ class FileStorageTool(AsyncTool):
         """初始化S3客户端"""
         if not BOTO3_AVAILABLE:
             raise ToolError("boto3 not installed, required for S3 storage", self.metadata.name)
+
+        try:
+            import boto3  # type: ignore
+            from botocore.exceptions import ClientError  # type: ignore
+        except Exception as exc:
+            raise ToolError("boto3 not installed, required for S3 storage", self.metadata.name) from exc
+        self._s3_client_error = ClientError
         
         self.s3_bucket = self.config.get("s3_bucket")
         self.s3_region = self.config.get("s3_region", "us-east-1")
@@ -129,6 +127,13 @@ class FileStorageTool(AsyncTool):
         """初始化MinIO客户端"""
         if not MINIO_AVAILABLE:
             raise ToolError("minio not installed, required for MinIO storage", self.metadata.name)
+
+        try:
+            from minio import Minio  # type: ignore
+            from minio.error import S3Error  # type: ignore
+        except Exception as exc:
+            raise ToolError("minio not installed, required for MinIO storage", self.metadata.name) from exc
+        self._minio_error = S3Error
         
         self.minio_endpoint = self.config.get("minio_endpoint")
         self.minio_access_key = self.config.get("minio_access_key")
@@ -156,6 +161,7 @@ class FileStorageTool(AsyncTool):
         return [
             "upload_file",
             "download_file",
+            "download_from_url",
             "upload_from_url",
             "upload_base64",
             "generate_download_url",
@@ -198,6 +204,16 @@ class FileStorageTool(AsyncTool):
                 },
                 "required": ["url"]
             },
+            "download_from_url": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "源文件URL"},
+                    "destination_key": {"type": "string", "description": "本地保存相对路径（相对于local_storage_dir）"},
+                    "overwrite": {"type": "boolean", "description": "若目标已存在是否覆盖"},
+                    "metadata": {"type": "object", "description": "附加元数据（可选）"},
+                },
+                "required": ["url"],
+            },
             "upload_base64": {
                 "type": "object",
                 "properties": {
@@ -228,6 +244,8 @@ class FileStorageTool(AsyncTool):
             return await self._upload_file(params)
         elif action == "download_file":
             return await self._download_file(params)
+        elif action == "download_from_url":
+            return await self._download_from_url(params)
         elif action == "upload_from_url":
             return await self._upload_from_url(params)
         elif action == "upload_base64":
@@ -338,6 +356,7 @@ class FileStorageTool(AsyncTool):
     async def _upload_to_s3(self, file_path: str, destination_key: str, content_type: str, metadata: Dict[str, Any], public: bool) -> Dict[str, Any]:
         """上传到S3"""
         try:
+            ClientError = getattr(self, "_s3_client_error", Exception)
             extra_args = {
                 "ContentType": content_type,
                 "Metadata": {k: str(v) for k, v in metadata.items()}
@@ -376,6 +395,7 @@ class FileStorageTool(AsyncTool):
     async def _upload_to_minio(self, file_path: str, destination_key: str, content_type: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """上传到MinIO"""
         try:
+            S3Error = getattr(self, "_minio_error", Exception)
             self.minio_client.fput_object(
                 self.minio_bucket,
                 destination_key,
@@ -406,6 +426,7 @@ class FileStorageTool(AsyncTool):
             url = params["url"]
             destination_key = params.get("destination_key")
             metadata = params.get("metadata", {})
+            public = bool(params.get("public", False))
             
             # 下载文件到临时位置
             # 可配置超时：默认120s，避免大文件或慢速网络超时报错
@@ -445,7 +466,8 @@ class FileStorageTool(AsyncTool):
                                     "file_path": temp_file,
                                     "destination_key": destination_key,
                                     "content_type": content_type,
-                                    "metadata": {**metadata, "source_url": url}
+                                    "metadata": {**metadata, "source_url": url},
+                                    "public": public,
                                 }
                                 result = await self._upload_file(upload_params)
                             finally:
@@ -466,6 +488,183 @@ class FileStorageTool(AsyncTool):
                 
         except Exception as e:
             raise ToolError(f"URL upload failed: {str(e)}", self.metadata.name)
+
+    def _safe_local_path(self, destination_key: str) -> str:
+        """Build a safe local path within local_storage_dir, preventing path traversal."""
+        key = (destination_key or "").lstrip("/").strip()
+        if not key:
+            raise ToolValidationError("destination_key cannot be empty", self.metadata.name)
+        # Prevent traversal
+        if ".." in key.replace("\\", "/").split("/"):
+            raise ToolValidationError("destination_key contains invalid path traversal", self.metadata.name)
+        base = Path(self.local_storage_dir).resolve()
+        target = (base / key).resolve()
+        if not str(target).startswith(str(base)):
+            raise ToolValidationError("destination_key resolves outside local_storage_dir", self.metadata.name)
+        return str(target)
+
+    def _infer_file_extension(self, content_type: str, url: str) -> str:
+        """Infer file extension from content-type or URL path. Best-effort and safe."""
+        ctype = (content_type or "").split(";")[0].strip().lower()
+        mapping = {
+            "audio/mpeg": ".mp3",
+            "audio/mp3": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/aac": ".aac",
+            "audio/mp4": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/flac": ".flac",
+            "audio/ogg": ".ogg",
+            "audio/opus": ".opus",
+            "video/mp4": ".mp4",
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+        }
+        ext = mapping.get(ctype)
+        if ext:
+            return ext
+        try:
+            path = urlparse(url).path
+            suffix = Path(path).suffix
+            if suffix and len(suffix) <= 6:
+                return suffix
+        except Exception:
+            pass
+        return ".bin"
+
+    async def _download_from_url(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Download a remote URL to local storage and return a local file path.
+
+        This action is intentionally storage-backend agnostic: it always produces a
+        local file (for downstream ffmpeg mixing) and does not upload to S3/MinIO.
+        """
+        try:
+            url = params["url"]
+            destination_key = params.get("destination_key")
+            overwrite = bool(params.get("overwrite", False))
+            metadata = params.get("metadata", {}) or {}
+
+            if not isinstance(url, str) or not url.strip():
+                raise ToolValidationError("url is required for download_from_url", self.metadata.name)
+            url = url.strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                raise ToolValidationError("url must be http/https for download_from_url", self.metadata.name)
+
+            # Configurable timeout / retries
+            try:
+                from ....core.config import settings as _app_settings
+                http_timeout = int(getattr(_app_settings, "FILE_STORAGE_HTTP_TIMEOUT", 120))
+            except Exception:
+                http_timeout = 120
+            timeout = httpx.Timeout(timeout=http_timeout)
+            try:
+                from ....core.config import settings as _dl_settings
+                max_retries = int(getattr(_dl_settings, "FILE_STORAGE_DOWNLOAD_RETRIES", 3))
+            except Exception:
+                max_retries = 3
+
+            # Prepare destination path
+            if destination_key:
+                final_path = self._safe_local_path(str(destination_key))
+                os.makedirs(os.path.dirname(final_path), exist_ok=True)
+                if os.path.exists(final_path) and not overwrite:
+                    return {
+                        "storage_type": "local_cache",
+                        "local_path": final_path,
+                        "file_path": final_path,
+                        "url": f"file://{final_path}",
+                        "source_url": url,
+                        "metadata": dict(metadata),
+                        "cached": True,
+                    }
+            else:
+                os.makedirs(os.path.join(self.local_storage_dir, "downloads"), exist_ok=True)
+                url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+                base_no_ext = os.path.join(self.local_storage_dir, "downloads", f"url_{url_hash}")
+                final_path = base_no_ext + ".bin"
+
+            attempt = 0
+            last_err: Optional[Exception] = None
+            while attempt < max_retries:
+                try:
+                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                        async with client.stream("GET", url) as response:
+                            response.raise_for_status()
+                            content_type = response.headers.get("content-type", "application/octet-stream")
+                            content_length = response.headers.get("content-length")
+                            if content_length and int(content_length) > self.max_file_size:
+                                raise ToolError(f"File too large: {content_length} bytes", self.metadata.name)
+
+                            # If destination_key not provided, infer extension from headers/url.
+                            if not destination_key:
+                                ext = self._infer_file_extension(content_type, url)
+                                final_path = base_no_ext + ext
+                                if os.path.exists(final_path) and not overwrite:
+                                    return {
+                                        "storage_type": "local_cache",
+                                        "local_path": final_path,
+                                        "file_path": final_path,
+                                        "url": f"file://{final_path}",
+                                        "source_url": url,
+                                        "metadata": dict(metadata),
+                                        "cached": True,
+                                    }
+
+                            temp_path = os.path.join(self.local_storage_dir, f"temp_{uuid.uuid4()}")
+                            hash_sha256 = hashlib.sha256()
+                            size = 0
+                            try:
+                                with open(temp_path, "wb") as f:
+                                    async for chunk in response.aiter_bytes():
+                                        if not chunk:
+                                            continue
+                                        size += len(chunk)
+                                        if size > self.max_file_size:
+                                            raise ToolError(
+                                                f"File too large: {size} bytes (max: {self.max_file_size})",
+                                                self.metadata.name,
+                                            )
+                                        hash_sha256.update(chunk)
+                                        f.write(chunk)
+                                # Atomic move into place
+                                os.makedirs(os.path.dirname(final_path), exist_ok=True)
+                                if os.path.exists(final_path) and overwrite:
+                                    os.unlink(final_path)
+                                shutil.move(temp_path, final_path)
+                            finally:
+                                if os.path.exists(temp_path):
+                                    try:
+                                        os.unlink(temp_path)
+                                    except Exception:
+                                        pass
+
+                            return {
+                                "storage_type": "local_cache",
+                                "local_path": final_path,
+                                "file_path": final_path,
+                                "url": f"file://{final_path}",
+                                "source_url": url,
+                                "content_type": content_type,
+                                "file_size": int(size),
+                                "file_hash": hash_sha256.hexdigest(),
+                                "metadata": dict(metadata),
+                                "cached": False,
+                            }
+                except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError) as e:
+                    last_err = e
+                    attempt += 1
+                    backoff = min(3.0, 0.5 * (2 ** (attempt - 1)))
+                    self.logger.warning(f"Download failed (attempt {attempt}/{max_retries}) for URL {url}: {e}")
+                    await asyncio.sleep(backoff)
+                except Exception as e:
+                    raise ToolError(f"URL download failed: {str(e)}", self.metadata.name)
+
+            raise ToolError(f"URL download failed after {max_retries} retries: {last_err}", self.metadata.name)
+        except Exception as e:
+            raise ToolError(f"URL download failed: {str(e)}", self.metadata.name)
     
     async def _upload_base64(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """上传Base64编码的文件"""
@@ -576,6 +775,10 @@ class FileStorageTool(AsyncTool):
         elif action == "upload_from_url":
             if not parameters.get("url"):
                 raise ToolValidationError("url is required for upload_from_url")
+
+        elif action == "download_from_url":
+            if not parameters.get("url"):
+                raise ToolValidationError("url is required for download_from_url")
         
         elif action == "upload_base64":
             if not parameters.get("base64_data"):

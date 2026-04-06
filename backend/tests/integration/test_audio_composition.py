@@ -8,7 +8,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.agents.audio_generator import AudioGeneratorAgent
-from app.models import Task, AgentExecution
+from app.models import Task
 
 
 async def test_audio_composition():
@@ -23,11 +23,21 @@ async def test_audio_composition():
     print(f"✅ 找到视频文件: {video_path}")
     
     # 创建 AudioGenerator 实例
-    audio_generator = AudioGeneratorAgent()
+    agent = AudioGeneratorAgent()
     
     try:
-        print("🎵 测试获取视频时长...")
-        duration = await audio_generator._get_video_duration(video_path)
+        print("🎵 测试通过工具获取视频时长...")
+        calls_probe = [{
+            "function": {
+                "name": "ffmpeg_tool.get_video_info",
+                "arguments": {"file_path": video_path}
+            }
+        }]
+        executed_probe = await agent.execute_tool_calls(calls_probe)
+        probe_rec = executed_probe[0] if executed_probe else {}
+        probe_out = probe_rec.get("result")
+        probe_payload = getattr(probe_out, 'result', probe_out) if probe_out is not None else None
+        duration = float(probe_payload.get("duration", 0.0)) if isinstance(probe_payload, dict) else 0.0
         print(f"📹 视频时长: {duration:.1f}秒")
         
         # 创建一个模拟的背景音乐文件路径（用于测试）
@@ -59,12 +69,22 @@ async def test_audio_composition():
             mock_execution = MockExecution()
             
             # 测试合成功能
-            output_path = await audio_generator._compose_video_with_audio(
-                video_path=video_path,
-                audio_path=audio_path,
-                video_duration=duration,
-                execution=mock_execution
-            )
+            output_filename = f"final_video_with_audio_{mock_execution.id}.mp4"
+            calls = [{
+                "function": {
+                    "name": "ffmpeg_tool.add_audio",
+                    "arguments": {
+                        "video_file": video_path,
+                        "audio_file": audio_path,
+                        "output_filename": output_filename
+                    }
+                }
+            }]
+            executed = await agent.execute_tool_calls(calls)
+            rec = executed[0] if executed else {}
+            tool_out = rec.get("result")
+            payload = getattr(tool_out, 'result', tool_out) if tool_out is not None else None
+            output_path = payload.get("output_path") if isinstance(payload, dict) else None
             
             if output_path and os.path.exists(output_path):
                 print(f"✅ 音频合成成功!")

@@ -44,13 +44,13 @@ class AgentToolAllocator:
                 "script_generation",                 # 脚本生成 - 匹配注册名称
                 "scene_script_generation_tool",      # 场景脚本生成 - 匹配注册名称
                 "scene_continuity_analysis_tool",    # 场景连续性分析 - 匹配注册名称
-                "narrative_structure_generation_tool" # 叙事结构生成 - 匹配注册名称
+                "narrative_structure_generation_tool", # 叙事结构生成 - 匹配注册名称
+                "role_analysis_tool"                 # 角色分析（用于角色一致性与记忆写回）
             ],
             
             # 图像生成Agent - 视觉创作和图像处理
             AgentType.IMAGE_GENERATOR: [
-                "image_generation",             # 图像生成工具（业务逻辑封装）
-                "consistency_tool",             # 一致性提示资产查询
+                "image_prompt_composer",        # 图像提示词合成 + 一致性注入 + 生成
                 # Image 阶段不做连续性判定，移除 continuity 分析相关工具
             ],
             
@@ -58,8 +58,7 @@ class AgentToolAllocator:
             AgentType.VIDEO_GENERATOR: [
                 "video_generation",                    # 视频生成（核心工具）
                 "image_generation",                    # 补充图像生成（用于敏感图替换）
-                "scene_continuity_preparation",       # 连续性准备（组合工具）
-                "consistency_tool",                   # 一致性资产查询与注册
+                "video_prompt_composer",               # 提示词构建（含一致性注入）
                 "file_storage_tool"                   # 文件存储
             ],
             
@@ -85,7 +84,8 @@ class AgentToolAllocator:
                 # 使用已注册、可用的工具：ffmpeg 进行合成、file_storage 做本地URL
                 "ffmpeg_tool",
                 "audio_processor",
-                "file_storage_tool"
+                "file_storage_tool",
+                "composition_tool"
             ],
             
             # 质量检查Agent - 质量评估和优化

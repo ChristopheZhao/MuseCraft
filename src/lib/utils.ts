@@ -59,6 +59,23 @@ export function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
+const QUICK_WORKSPACE_SESSION_STORAGE_KEY = 'svm.quick.workspace_session_id';
+
+export function getOrCreateQuickWorkspaceSessionId(): string {
+  const fallback = `quick-${generateId()}`;
+  if (typeof window === 'undefined') {
+    return fallback;
+  }
+
+  const existing = window.localStorage.getItem(QUICK_WORKSPACE_SESSION_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  window.localStorage.setItem(QUICK_WORKSPACE_SESSION_STORAGE_KEY, fallback);
+  return fallback;
+}
+
 export function getFileType(file: File): 'image' | 'video' | 'audio' | 'document' {
   const type = file.type.toLowerCase();
   

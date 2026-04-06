@@ -1,69 +1,43 @@
-"""
-Global Memory Service - System-level memory management for multi-agent collaboration
-"""
+"""Global Memory Service facade with injectable dependencies."""
+
+from __future__ import annotations
 
 import logging
-import os
-from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from ..agents.memory.memory_manager import MemoryManager
-from ..agents.memory.dict_memory_store import DictMemoryStore
-try:
-    from ..agents.memory.sqlite_memory_store import SQLiteMemoryStore  # optional
-except Exception:
-    SQLiteMemoryStore = None  # type: ignore
-from ..agents.memory.base_memory import MemoryItem, MemoryType, MemoryImportance
+from ..agents.memory.long_term.stores import MemoryImportance, MemoryItem, MemoryType
+from ..agents.memory.managers import (
+    MemoryManagement,
+    build_memory_management,
+    get_default_memory_management,
+)
+from ..agents.memory.services.long_term import SimpleLongTermMemoryService
 
 
 class GlobalMemoryService:
-    """
-    系统级记忆服务 - 为所有Agent提供统一的记忆管理
-    
-    设计原则：
-    1. 单例模式：确保整个系统只有一个记忆实例
-    2. 线程安全：支持并发的Agent访问
-    3. 工作流隔离：不同工作流的记忆相互隔离
-    """
-    
-    _instance = None
-    _initialized = False
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
-        
+    """System-level facade that coordinates shared slots and long-term stores."""
+
+    def __init__(
+        self,
+        management: MemoryManagement,
+        *,
+        long_term_service: Optional[SimpleLongTermMemoryService] = None,
+    ) -> None:
         self.logger = logging.getLogger("global_memory_service")
-        
-        # 初始化记忆管理器（禁用后台任务避免事件循环问题）
-        # 默认使用 SQLite 持久化；如需覆盖可设置 MEMORY_BACKEND=dict
-        backend = os.getenv("MEMORY_BACKEND", "sqlite").lower()
-        if backend == "sqlite" and SQLiteMemoryStore is not None:
-            default_store = SQLiteMemoryStore()
-            self.logger.info("Using SQLiteMemoryStore as default memory backend")
-        else:
-            default_store = DictMemoryStore()
-            if backend == "sqlite" and SQLiteMemoryStore is None:
-                self.logger.warning("MEMORY_BACKEND=sqlite set but SQLite backend unavailable, fallback to DictMemoryStore")
-        self.memory_manager = MemoryManager(
-            stores={"default": default_store},
-            config={
-                "enable_consolidation": False,  # 禁用后台任务
-                "enable_cleanup": False
-            }
-        )
-        
-        # 工作流记忆统计
-        self.workflow_stats = {}
-        
-        self._initialized = True
-        self.logger.info("🧠 Global Memory Service initialized")
-    
+        self._management = management
+        # 底层 manager 仅供内部使用；对外只暴露受控 long_term 接口
+        self._long_term_manager = management.long_term_manager
+        self._long_term = long_term_service or SimpleLongTermMemoryService(self._long_term_manager)
+        self.workflow_stats: Dict[str, Any] = {}
+        self.logger.info("🧠 Global Memory Service initialised with injected management bundle")
+
+    @property
+    def long_term(self) -> SimpleLongTermMemoryService:
+        """受控长记忆接口，屏蔽底层 LongTermMemoryManager。"""
+        return self._long_term
+
     async def store_creative_guidance(
         self,
         workflow_id: str,
@@ -96,7 +70,7 @@ class GlobalMemoryService:
                 "timestamp": datetime.now().isoformat()
             }
             
-            overall_memory_id = await self.memory_manager.store_memory(
+            overall_memory_id = await self._long_term.store_memory(
                 content=overall_guidance,
                 memory_type=MemoryType.CONCEPTUAL,
                 importance=MemoryImportance.HIGH,
@@ -138,7 +112,7 @@ class GlobalMemoryService:
                     "timestamp": datetime.now().isoformat()
                 }
                 
-                scene_memory_id = await self.memory_manager.store_memory(
+                scene_memory_id = await self._long_term.store_memory(
                     content=scene_guidance,
                     memory_type=MemoryType.EPISODIC,
                     importance=MemoryImportance.MEDIUM,
@@ -194,7 +168,7 @@ class GlobalMemoryService:
             }
             
             # 检索整体创意指导
-            overall_memories = await self.memory_manager.retrieve_memories(
+            overall_memories = await self._long_term.retrieve_memories(
                 tags=["creative_direction", "visual_guidance"],
                 memory_type=MemoryType.CONCEPTUAL,
                 task_id=workflow_id,
@@ -208,7 +182,7 @@ class GlobalMemoryService:
             
             # 检索特定场景指导（如果指定了场景编号）
             if scene_number is not None:
-                scene_memories = await self.memory_manager.retrieve_memories(
+                scene_memories = await self._long_term.retrieve_memories(
                     tags=["scene_design", f"scene_{scene_number}"],
                     memory_type=MemoryType.EPISODIC,
                     task_id=workflow_id,
@@ -261,7 +235,7 @@ class GlobalMemoryService:
                 "timestamp": datetime.now().isoformat()
             }
             
-            memory_id = await self.memory_manager.store_memory(
+            memory_id = await self._long_term.store_memory(
                 content=scene_ref_data,
                 memory_type=MemoryType.EPISODIC,
                 importance=MemoryImportance.HIGH,
@@ -301,7 +275,7 @@ class GlobalMemoryService:
             场景参考数据
         """
         try:
-            scene_ref_memories = await self.memory_manager.retrieve_memories(
+            scene_ref_memories = await self._long_term.retrieve_memories(
                 tags=["scene_references", f"scene_{scene_number}"],
                 memory_type=MemoryType.EPISODIC,
                 task_id=workflow_id,
@@ -368,7 +342,7 @@ class GlobalMemoryService:
         """获取工作流记忆统计信息"""
         try:
             # 从memory manager获取统计
-            memory_stats = await self.memory_manager.get_memory_stats()
+            memory_stats = await self._long_term.get_memory_stats()
             
             # 组合工作流特定统计
             workflow_specific = self.workflow_stats.get(workflow_id, {})
@@ -396,5 +370,30 @@ class GlobalMemoryService:
             return False
 
 
-# 全局单例实例
-global_memory_service = GlobalMemoryService()
+def create_global_memory_service(
+    *,
+    management: Optional[MemoryManagement] = None,
+    slots_path: Optional[Path | str] = None,
+    backend: Optional[str] = None,
+) -> GlobalMemoryService:
+    """Factory helper to build a service with explicit dependencies."""
+
+    if management is None:
+        if slots_path is not None or backend is not None:
+            path_arg: Optional[Path]
+            if isinstance(slots_path, Path):
+                path_arg = slots_path
+            elif slots_path is not None:
+                path_arg = Path(slots_path)
+            else:
+                path_arg = None
+            management = build_memory_management(
+                slots_path=path_arg,
+                storage_backend=backend,
+            )
+        else:
+            management = get_default_memory_management()
+    return GlobalMemoryService(management)
+
+
+__all__ = ["GlobalMemoryService", "create_global_memory_service"]

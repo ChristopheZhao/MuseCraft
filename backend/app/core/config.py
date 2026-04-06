@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     DEBUG: bool = config("DEBUG", default=False, cast=bool)
     SECRET_KEY: str = config("SECRET_KEY", default="your-secret-key-here")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = config("ACCESS_TOKEN_EXPIRE_MINUTES", default=30, cast=int)
+    TOOL_REGISTRY_LOG_LEVEL: str = config("TOOL_REGISTRY_LOG_LEVEL", default="WARNING")
+    HTTPX_LOG_LEVEL: str = config("HTTPX_LOG_LEVEL", default="WARNING")
+    SUPPRESS_UVICORN_RUNTIME_POLLING_ACCESS_LOGS: bool = config(
+        "SUPPRESS_UVICORN_RUNTIME_POLLING_ACCESS_LOGS",
+        default=True,
+        cast=bool,
+    )
+
+    # API Server Configuration
+    API_HOST: str = config("API_HOST", default="0.0.0.0")
+    API_PORT: int = config("API_PORT", default=8000, cast=int)
     
     # CORS Settings
     BACKEND_CORS_ORIGINS: List[str] = [
@@ -70,7 +81,7 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = config("MAX_FILE_SIZE", default=100, cast=int)  # MB
     # File download/upload robustness
     FILE_STORAGE_HTTP_TIMEOUT: int = config("FILE_STORAGE_HTTP_TIMEOUT", default=120, cast=int)
-    FILE_STORAGE_TOOL_TIMEOUT: int = config("FILE_STORAGE_TOOL_TIMEOUT", default=120, cast=int)
+    FILE_STORAGE_TOOL_TIMEOUT: int = config("FILE_STORAGE_TOOL_TIMEOUT", default=240, cast=int)
     FILE_STORAGE_DOWNLOAD_RETRIES: int = config("FILE_STORAGE_DOWNLOAD_RETRIES", default=3, cast=int)
     
     # AWS S3 Settings
@@ -105,6 +116,10 @@ class Settings(BaseSettings):
     GLM_API_KEY: Optional[str] = config("GLM_API_KEY", default=None)
     GLM_BASE_URL: str = config("GLM_BASE_URL", default="https://open.bigmodel.cn/api/paas/v4")
     GLM_DEFAULT_MODEL: str = config("GLM_DEFAULT_MODEL", default="glm-4-plus")
+    GLM_LIGHT_MODEL: str = config("GLM_LIGHT_MODEL", default="glm-4.5-air")
+    DEEPSEEK_API_KEY: Optional[str] = config("DEEPSEEK_API_KEY", default=None)
+    DEEPSEEK_BASE_URL: str = config("DEEPSEEK_BASE_URL", default="https://api.deepseek.com")
+    DEEPSEEK_DEFAULT_MODEL: str = config("DEEPSEEK_DEFAULT_MODEL", default="deepseek-chat")
     DOUBAO_API_KEY: Optional[str] = config("DOUBAO_API_KEY", default=None)
     DOUBAO_BASE_URL: str = config("DOUBAO_BASE_URL", default="https://ark.cn-beijing.volces.com")
     # Doubao (Volcengine) Video/Image API path overrides (tenant-specific gateways)
@@ -123,22 +138,21 @@ class Settings(BaseSettings):
         default="/api/v3/contents/generations/tasks/{task_id}",
     )
     # Optional: model overrides per mode (text-to-video, single image-to-video, first/last frame)
-    # Recommended defaults (can be overridden per tenant):
-    # - PRO (text-to-video, and supports first-frame i2v): doubao-seedance-1-0-pro-250528
-    # - Lite i2v (first/last-frame and reference image): doubao-seedance-1-0-lite-i2v-250428
-    # - Lite t2v: doubao-seedance-1-0-lite-t2v-250428
-    DOUBAO_T2V_MODEL: str = config("DOUBAO_T2V_MODEL", default="doubao-seedance-1-0-pro-250528")
-    # doubao-seedance-1-0-lite-i2v-250428
-    DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    # doubao-seedance-1-0-pro-250528
-    # DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="doubao-seedance-1-0-pro-250528")
-    DOUBAO_I2V_SINGLE_ALTER_MODEL: str = config("DOUBAO_I2V_SINGLE_ALTER_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="doubao-seedance-1-0-lite-i2v-250428")
-    # Doubao image generation (Seedream)
-    DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
+    # NOTE: model ids are configured only via env/config; code should not hardcode version strings.
+    DOUBAO_T2V_MODEL: str = config("DOUBAO_T2V_MODEL", default="")
+    DOUBAO_I2V_SINGLE_MODEL: str = config("DOUBAO_I2V_SINGLE_MODEL", default="")
+    DOUBAO_I2V_SINGLE_ALTER_MODEL: str = config("DOUBAO_I2V_SINGLE_ALTER_MODEL", default="")
+    DOUBAO_I2V_FLF_MODEL: str = config("DOUBAO_I2V_FLF_MODEL", default="")
+    # Doubao image generation model id (configured via env/config)
+    DOUBAO_IMAGE_MODEL: str = config("DOUBAO_IMAGE_MODEL", default="")
 
     # Orchestration defaults
     DEFAULT_GENERATION_MODE: str = config("DEFAULT_GENERATION_MODE", default="quick")
+    VIDEO_COMPOSER_MAX_ITERATIONS: int = config("VIDEO_COMPOSER_MAX_ITERATIONS", default=6, cast=int)
+    VIDEO_COMPOSER_TIMEOUT_SECONDS: int = config("VIDEO_COMPOSER_TIMEOUT_SECONDS", default=600, cast=int)
+    # 轨迹事件日志：是否启用 episodic 事件落文件
+    EPISODIC_EVENT_ENABLED: bool = config("EPISODIC_EVENT_ENABLED", default=True, cast=bool)
+    EPISODIC_EVENT_LOG_PATH: str = config("EPISODIC_EVENT_LOG_PATH", default="./logs/episodic_events.log")
 
     # Image Generation APIs
     MIDJOURNEY_API_KEY: Optional[str] = config("MIDJOURNEY_API_KEY", default=None)
@@ -148,14 +162,21 @@ class Settings(BaseSettings):
     # Video Generation APIs
     MINIMAX_API_KEY: Optional[str] = config("MINIMAX_API_KEY", default=None)
     MINIMAX_BASE_URL: str = config("MINIMAX_BASE_URL", default="https://api.minimaxi.com/v1")
+    # Video model ids are configured via env/config only; do not hardcode versioned defaults in code.
+    MINIMAX_VIDEO_MODEL: str = config("MINIMAX_VIDEO_MODEL", default="")
     HUNYUAN_VIDEO_API_KEY: Optional[str] = config("HUNYUAN_VIDEO_API_KEY", default=None)
     HUNYUAN_VIDEO_BASE_URL: str = config("HUNYUAN_VIDEO_BASE_URL", default="https://api.hunyuan.cloud.tencent.com/v1")
     DOUBAO_VIDEO_API_KEY: Optional[str] = config("DOUBAO_VIDEO_API_KEY", default=None)
     DOUBAO_VIDEO_BASE_URL: str = config("DOUBAO_VIDEO_BASE_URL", default="https://ark.cn-beijing.volces.com")
+    COGVIDEOX3_MODEL: str = config("COGVIDEOX3_MODEL", default="")
+    COGVIDEOX2_MODEL: str = config("COGVIDEOX2_MODEL", default="")
+    RUNWAY_VIDEO_MODEL: str = config("RUNWAY_VIDEO_MODEL", default="")
+    PIKA_VIDEO_MODEL: str = config("PIKA_VIDEO_MODEL", default="")
     
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
     SUNO_BASE_URL: str = config("SUNO_BASE_URL", default="https://api.sunoapi.org")
+    AUDIO_SFX_REQUIRED_DEFAULT: bool = config("AUDIO_SFX_REQUIRED_DEFAULT", default=False, cast=bool)
 
     # Voice Synthesis configuration
     VOICE_PRIMARY_PROVIDER: str = config("VOICE_PRIMARY_PROVIDER", default="aliyun")
@@ -264,6 +285,7 @@ class Settings(BaseSettings):
     WORKFLOW_OPTIMIZATION_LEVEL: str = config("WORKFLOW_OPTIMIZATION_LEVEL", default="balanced")  # conservative, balanced, aggressive
     WORKFLOW_EXECUTION_STRATEGY: str = config("WORKFLOW_EXECUTION_STRATEGY", default="adaptive")  # sequential, parallel, adaptive, pipeline
     MAX_CONCURRENT_AGENTS: int = config("MAX_CONCURRENT_AGENTS", default=4, cast=int)
+    SCRIPT_GENERATION_MAX_CONCURRENCY: int = config("SCRIPT_GENERATION_MAX_CONCURRENCY", default=3, cast=int)
     ENABLE_WORKFLOW_CACHING: bool = config("ENABLE_WORKFLOW_CACHING", default=True, cast=bool)
     
     # Quality Control Settings
@@ -286,12 +308,59 @@ class Settings(BaseSettings):
     
     # Resource Management Settings
     MAX_MEMORY_USAGE_PERCENT: int = config("MAX_MEMORY_USAGE_PERCENT", default=85, cast=int)
+
+    # Memory backend settings
+    MEMORY_WORKFLOW_BACKEND: str = config("MEMORY_WORKFLOW_BACKEND", default="slot")
+    MEMORY_FACTS_BACKEND: str = config("MEMORY_FACTS_BACKEND", default="slot")
+    MEMORY_SLOTS_PATH: str = config(
+        "MEMORY_SLOTS_PATH",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "agents" / "memory" / "config" / "memory_slots.yaml"),
+    )
+    MEMORY_FACT_ALIASES_PATH: str = config(
+        "MEMORY_FACT_ALIASES_PATH",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "agents" / "memory" / "config" / "fact_aliases.yaml"),
+    )
     MAX_CPU_USAGE_PERCENT: int = config("MAX_CPU_USAGE_PERCENT", default=80, cast=int)
     MAX_DISK_USAGE_PERCENT: int = config("MAX_DISK_USAGE_PERCENT", default=90, cast=int)
     
     # Celery Settings
     CELERY_BROKER_URL: str = config("CELERY_BROKER_URL", default="redis://localhost:6379/1")
     CELERY_RESULT_BACKEND: str = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379/2")
+    TASKS_API_ENABLE_IN_PROCESS_RUNNER: bool = config(
+        "TASKS_API_ENABLE_IN_PROCESS_RUNNER",
+        default=False,
+        cast=bool,
+    )
+    QUICK_RUNTIME_STALL_THRESHOLD_SECONDS: int = config(
+        "QUICK_RUNTIME_STALL_THRESHOLD_SECONDS",
+        default=900,
+        cast=int,
+    )
+    RUNTIME_ATTEMPT_LEASE_SECONDS: int = config(
+        "RUNTIME_ATTEMPT_LEASE_SECONDS",
+        default=300,
+        cast=int,
+    )
+    RUNTIME_ATTEMPT_HEARTBEAT_INTERVAL_SECONDS: int = config(
+        "RUNTIME_ATTEMPT_HEARTBEAT_INTERVAL_SECONDS",
+        default=60,
+        cast=int,
+    )
+    QUICK_RUNTIME_RECONCILER_ENABLED: bool = config(
+        "QUICK_RUNTIME_RECONCILER_ENABLED",
+        default=True,
+        cast=bool,
+    )
+    QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS: int = config(
+        "QUICK_RUNTIME_RECONCILER_INTERVAL_SECONDS",
+        default=60,
+        cast=int,
+    )
+    QUICK_RUNTIME_RECONCILER_BATCH_LIMIT: int = config(
+        "QUICK_RUNTIME_RECONCILER_BATCH_LIMIT",
+        default=100,
+        cast=int,
+    )
     
     # WebSocket Settings
     WEBSOCKET_PATH: str = config("WEBSOCKET_PATH", default="/ws")
@@ -341,14 +410,17 @@ class Settings(BaseSettings):
     # Global LLM token tiers (standard vs thinking)
     LLM_MAX_TOKENS_STANDARD: int = config("LLM_MAX_TOKENS_STANDARD", default=12800, cast=int)
     LLM_MAX_TOKENS_THINKING: int = config("LLM_MAX_TOKENS_THINKING", default=20000, cast=int)
-    # LLM回退超时策略（配置优先，避免代码常量）
-    LLM_PRIMARY_TIMEOUT_RATIO: float = config("LLM_PRIMARY_TIMEOUT_RATIO", default=0.5, cast=float)  # 主调占Agent超时比例
-    LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)
-    LLM_FALLBACK_TIMEOUT_MAX: int = config("LLM_FALLBACK_TIMEOUT_MAX", default=90, cast=int)
+    # LLM request budgeting / fallback guards
+    LLM_PRIMARY_TIMEOUT_RATIO: float = config("LLM_PRIMARY_TIMEOUT_RATIO", default=0.5, cast=float)  # 首次代理请求可消费的总预算比例
+    LLM_FALLBACK_TIMEOUT_MIN: int = config("LLM_FALLBACK_TIMEOUT_MIN", default=20, cast=int)  # 触发直连回退所需的最小剩余预算
     LLM_REQUEST_SAFETY_MARGIN: int = config("LLM_REQUEST_SAFETY_MARGIN", default=5, cast=int)
+    # 结构化输出温度（response_format=json_object 等）：优先稳定性，避免格式漂移
+    LLM_JSON_TEMPERATURE: float = config("LLM_JSON_TEMPERATURE", default=0.2, cast=float)
+    LLM_JSON_TEMPERATURE_FALLBACK: float = config("LLM_JSON_TEMPERATURE_FALLBACK", default=0.2, cast=float)
 
-    # Audio mixing strategy
-    AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # composer | agent
+    # Deprecated (no longer drives orchestrator decisions; kept only for backward env compatibility).
+    AUDIO_MIXING_MODE: str = config("AUDIO_MIXING_MODE", default="composer")  # deprecated
+    VIDEO_AUDIO_STRATEGY: str = config("VIDEO_AUDIO_STRATEGY", default="adaptive")  # deprecated
     AUDIO_FADE_IN_DURATION: float = config("AUDIO_FADE_IN_DURATION", default=1.0, cast=float)
     AUDIO_FADE_OUT_DURATION: float = config("AUDIO_FADE_OUT_DURATION", default=1.0, cast=float)
     # Image/Video analysis + prompt generation token budgets
@@ -387,15 +459,31 @@ class Settings(BaseSettings):
     COMPOSER_INJECT_SILENT_AUDIO: bool = config("COMPOSER_INJECT_SILENT_AUDIO", default=True, cast=bool)
     COMPOSER_SILENT_AUDIO_SAMPLE_RATE: int = config("COMPOSER_SILENT_AUDIO_SAMPLE_RATE", default=48000, cast=int)
     COMPOSER_SILENT_AUDIO_CHANNELS: int = config("COMPOSER_SILENT_AUDIO_CHANNELS", default=2, cast=int)
+    COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT: bool = config(
+        "COMPOSER_PRESERVE_SOURCE_AUDIO_DEFAULT",
+        default=False,
+        cast=bool,
+    )
+    COMPOSER_HIDE_SCENE_AUDIO_ON_REF: bool = config(
+        "COMPOSER_HIDE_SCENE_AUDIO_ON_REF",
+        default=True,
+        cast=bool,
+    )
     
     # Agent ReAct Configuration - ReAct循环最大迭代次数配置（业务逻辑配置，不放在.env）
     VIDEO_GENERATOR_MAX_ITERATIONS: int = 14   # 视频生成Agent最大迭代次数
     CONCEPT_PLANNER_MAX_ITERATIONS: int = 4  # 概念规划Agent最大迭代次数
-    IMAGE_GENERATOR_MAX_ITERATIONS: int = 10   # 图像生成Agent最大迭代次数
+    IMAGE_GENERATOR_MAX_ITERATIONS: int = 14   # 图像生成Agent最大迭代次数
     ORCHESTRATOR_MAX_ITERATIONS: int = 10     # 编排Agent最大迭代次数
     ORCHESTRATOR_TIMEOUT_SECONDS: int = config("ORCHESTRATOR_TIMEOUT_SECONDS", default=3600, cast=int)
     # Concept Planner agent-level timeout（配置化，避免代码常量）
-    CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=240, cast=int)
+    CONCEPT_PLANNER_TIMEOUT_SECONDS: int = config("CONCEPT_PLANNER_TIMEOUT_SECONDS", default=360, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SKELETON: int = config("CONCEPT_STAGE_TIMEOUT_SKELETON", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_STYLE: int = config("CONCEPT_STAGE_TIMEOUT_STYLE", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_VOICE: int = config("CONCEPT_STAGE_TIMEOUT_VOICE", default=60, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SCENE_BATCH: int = config("CONCEPT_STAGE_TIMEOUT_SCENE_BATCH", default=90, cast=int)
+    CONCEPT_STAGE_TIMEOUT_MIN_FLOOR: int = config("CONCEPT_STAGE_TIMEOUT_MIN_FLOOR", default=15, cast=int)
+    CONCEPT_STAGE_TIMEOUT_SCENE_BATCH_FLOOR: int = config("CONCEPT_STAGE_TIMEOUT_SCENE_BATCH_FLOOR", default=45, cast=int)
     
     # Video continuity persistence (domain policy)
     VIDEO_PERSIST_LAST_FRAME: bool = config("VIDEO_PERSIST_LAST_FRAME", default=False, cast=bool)
@@ -406,12 +494,35 @@ class Settings(BaseSettings):
     REACT_IMAGE_BATCH_SIZE: int = config("REACT_IMAGE_BATCH_SIZE", default=3, cast=int)
     ORCHESTRATOR_MAX_REPEAT_PER_STEP: int = config("ORCHESTRATOR_MAX_REPEAT_PER_STEP", default=1, cast=int)
     ORCHESTRATOR_DECISION_MODEL: str = config("ORCHESTRATOR_DECISION_MODEL", default="glm-4.5-air")
+    # 当为 True 时，编排层在汇总/输出时优先读取 SharedWM.artifacts（最新记录）
+    ORCHESTRATOR_READS_ARTIFACTS: bool = config("ORCHESTRATOR_READS_ARTIFACTS", default=False, cast=bool)
+    # 单写模式：仅写 artifacts，停止更新 facts（逐步收敛到 artifacts 为单一真实来源）
+    ARTIFACTS_SINGLE_WRITE_MODE: bool = config("ARTIFACTS_SINGLE_WRITE_MODE", default=True, cast=bool)
 
     # ReAct WF observation/commit policy
     # internal: 仅使用inner_react_state判断完成；wf: 合并WorkflowState中的已完成资产（用于超时/重试后的断点续跑）
     REACT_OBSERVE_COMPLETION_SOURCE: str = config("REACT_OBSERVE_COMPLETION_SOURCE", default="internal")
     # True: 仅在任务完成时一次性写入WF；False: 每轮生成成功后即刻写入WF（便于断点续跑）
-    REACT_WRITE_WF_ON_COMPLETE_ONLY: bool = config("REACT_WRITE_WF_ON_COMPLETE_ONLY", default=True, cast=bool)
+    # 默认关闭“仅完成时写入”，启用实时写回，避免中途产物丢失
+    REACT_WRITE_WF_ON_COMPLETE_ONLY: bool = config("REACT_WRITE_WF_ON_COMPLETE_ONLY", default=False, cast=bool)
+    # 是否启用首轮 plan-only（tools=[]）回合；默认关闭，采用“单段式纯 ReAct”
+    REACT_PLAN_ONLY_ENABLED: bool = config("REACT_PLAN_ONLY_ENABLED", default=False, cast=bool)
+    # OBS 压缩与契约校验（Config over Constants）
+    REACT_OBS_SCENE_THRESHOLD: int = config("REACT_OBS_SCENE_THRESHOLD", default=8, cast=int)
+    REACT_OBS_SIZE_THRESHOLD: int = config("REACT_OBS_SIZE_THRESHOLD", default=2000, cast=int)
+    REACT_OBS_SCHEMA_STRICT: bool = config("REACT_OBS_SCHEMA_STRICT", default=True, cast=bool)
+    # 是否启用观察压缩（基于 LLM 的结构化概览）。默认关闭，保持 OBS 仅包含事实。
+    REACT_OBS_AUGMENT_ENABLED: bool = config("REACT_OBS_AUGMENT_ENABLED", default=False, cast=bool)
+    REACT_EPISODIC_LOG_ENABLED: bool = config("REACT_EPISODIC_LOG_ENABLED", default=False, cast=bool)
+    REACT_CONTEXT_INCLUDE_RECENT_STEPS: bool = config("REACT_CONTEXT_INCLUDE_RECENT_STEPS", default=True, cast=bool)
+    REACT_CONTEXT_RECENT_STEPS_K: int = config("REACT_CONTEXT_RECENT_STEPS_K", default=3, cast=int)
+    REACT_CONTEXT_INCLUDE_NOTES: bool = config("REACT_CONTEXT_INCLUDE_NOTES", default=False, cast=bool)
+    REACT_CONTEXT_NOTES_LIMIT: int = config("REACT_CONTEXT_NOTES_LIMIT", default=5, cast=int)
+    REACT_CONTEXT_INCLUDE_ARTIFACT_PREVIEW: bool = config("REACT_CONTEXT_INCLUDE_ARTIFACT_PREVIEW", default=False, cast=bool)
+    # WorkingMemory 中“最近步骤摘要”的窗口大小（k≈3–5）。
+    REACT_WM_RECENT_STEPS_K: int = config("REACT_WM_RECENT_STEPS_K", default=3, cast=int)
+    # 事件标签映射（仅用于日志标签，不驱动控制流）：JSON 字符串或 dict
+    REACT_ACTION_LABEL_MAP: Dict[str, Any] = config("REACT_ACTION_LABEL_MAP", default='{}')
     
     
     # Content preview configuration for ReAct text observations
@@ -424,10 +535,23 @@ class Settings(BaseSettings):
     REACT_SCRATCHPAD_STEPS: int = config("REACT_SCRATCHPAD_STEPS", default=2, cast=int)
     REACT_SCRATCHPAD_MAX_CHARS: int = config("REACT_SCRATCHPAD_MAX_CHARS", default=800, cast=int)
 
+    # Progress snapshot (agent-internal, per-iteration reference records)
+    ENABLE_PROGRESS_SNAPSHOT: bool = config("ENABLE_PROGRESS_SNAPSHOT", default=True, cast=bool)
+
     # Tool/runtime timeouts (config over constants)
     DEFAULT_TOOL_TIMEOUT: int = config("DEFAULT_TOOL_TIMEOUT", default=120, cast=int)  # 默认工具超时
     VIDEO_GENERATION_TOOL_TIMEOUT: int = config("VIDEO_GENERATION_TOOL_TIMEOUT", default=300, cast=int)
     IMAGE_GENERATION_TOOL_TIMEOUT: int = config("IMAGE_GENERATION_TOOL_TIMEOUT", default=180, cast=int)
+    # Project character reference images (avatar/full-body) for cross-episode reuse
+    PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED: bool = config(
+        "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", default=False, cast=bool
+    )
+    PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE: str = config(
+        "PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE", default="1024x1024"
+    )
+    PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE: str = config(
+        "PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE", default="1024x1792"
+    )
     IMAGE_TOOL_PROMPT_RULES: Dict[str, Any] = config(
         "IMAGE_TOOL_PROMPT_RULES",
         default='{"min_length": 30, "allow_weak_prompt": false, "weak_marker_length_threshold": 50, "weak_marker_threshold": 2, "weak_markers": ["高质量", "高清", "精美", "好看", "震撼", "唯美", "超清", "逼真"]}'
@@ -441,6 +565,22 @@ class Settings(BaseSettings):
     )  # 超时后是否做一次“绕过系统代理”的直连重试（默认关闭，保持供应商/环境无关）
     # Agent-level end-to-end timeouts
     VIDEO_GENERATOR_TIMEOUT_SECONDS: int = config("VIDEO_GENERATOR_TIMEOUT_SECONDS", default=1800, cast=int)
+    SCENE_JOURNAL_MAX_EVENTS: int = config("SCENE_JOURNAL_MAX_EVENTS", default=5, cast=int)
+    # LLM context budgets (model-driven)
+    LLM_CONTEXT_TOKENS_DEFAULT: int = config("LLM_CONTEXT_TOKENS_DEFAULT", default=128000, cast=int)
+    # JSON string mapping or dict; e.g. {"zhipu/glm-4.5": 128000}
+    LLM_MODEL_CONTEXT_TOKENS: Dict[str, Any] = config("LLM_MODEL_CONTEXT_TOKENS", default='{}')
+    CONTEXT_INPUT_BUDGET_RATIO: float = config("CONTEXT_INPUT_BUDGET_RATIO", default=0.6, cast=float)
+    CONTEXT_OUTPUT_RESERVE_TOKENS: int = config("CONTEXT_OUTPUT_RESERVE_TOKENS", default=4000, cast=int)
+
+    # OBS observables (Iter -> OBS attachments) configuration
+    REACT_OBS_INCLUDE_OBSERVABLES: bool = config("REACT_OBS_INCLUDE_OBSERVABLES", default=True, cast=bool)
+    # At most K scenes to inject full assets payloads into OBS per round
+    REACT_OBS_ASSETS_MAX_SCENES: int = config("REACT_OBS_ASSETS_MAX_SCENES", default=2, cast=int)
+    # Soft cap for total chars of one scene's assets payload injected into OBS
+    REACT_OBS_ASSETS_MAX_CHARS: int = config("REACT_OBS_ASSETS_MAX_CHARS", default=1024, cast=int)
+    # MemRef 严格模式：当 memref.scene_number 与调用参数不一致，或场景未知时，直接报错；默认关闭（宽松为跳过）
+    REACT_MEMREF_STRICT: bool = config("REACT_MEMREF_STRICT", default=False, cast=bool)
     
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -462,6 +602,40 @@ class Settings(BaseSettings):
                 raise ValueError("IMAGE_TOOL_PROMPT_RULES must be JSON string") from exc
             if not isinstance(parsed, dict):
                 raise ValueError("IMAGE_TOOL_PROMPT_RULES must be dict")
+            return parsed
+        return v or {}
+    
+    @field_validator("LLM_MODEL_CONTEXT_TOKENS", mode="before")
+    @classmethod
+    def parse_llm_model_context_tokens(cls, v):
+        if isinstance(v, str):
+            text = (v or "").strip()
+            if not text:
+                return {}
+            import json
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("LLM_MODEL_CONTEXT_TOKENS must be JSON string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("LLM_MODEL_CONTEXT_TOKENS must be dict")
+            return parsed
+        return v or {}
+
+    @field_validator("REACT_ACTION_LABEL_MAP", mode="before")
+    @classmethod
+    def parse_action_label_map(cls, v):
+        if isinstance(v, str):
+            text = (v or "").strip()
+            if not text:
+                return {}
+            import json
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("REACT_ACTION_LABEL_MAP must be JSON string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("REACT_ACTION_LABEL_MAP must be dict")
             return parsed
         return v or {}
     

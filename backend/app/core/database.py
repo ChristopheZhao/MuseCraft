@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from .config import settings
+from ..models.base import BaseModel as Base
 
 # Synchronous database engine
 # Support both PostgreSQL and MySQL
@@ -44,11 +45,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 AsyncSessionLocal = async_sessionmaker(
     async_engine, class_=AsyncSession, expire_on_commit=False
 )
-
-# Import Base from models to avoid circular imports
-# This will be set after models are imported
-Base = None
-
 
 # Dependency to get database session
 async def get_db() -> AsyncSession:

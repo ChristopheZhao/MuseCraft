@@ -6,6 +6,8 @@ import json
 import httpx
 import asyncio
 import uuid
+from pathlib import Path
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 
 from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolInput, ToolError, ToolValidationError
@@ -203,7 +205,7 @@ class SunoClientTool(AsyncTool):
         params = tool_input.parameters
         
         if action == "generate_background_music":
-            return await self._generate_background_music(params)
+            return await self._generate_background_music(params, context=tool_input.context)
         elif action == "generate_custom_music":
             return await self._generate_custom_music(params)
         elif action == "generate_instrumental":
@@ -215,9 +217,15 @@ class SunoClientTool(AsyncTool):
         else:
             raise ToolValidationError(f"Unknown action: {action}", self.metadata.name)
     
-    async def _generate_background_music(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _generate_background_music(
+        self,
+        params: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """生成背景音乐（专门为视频配乐优化）"""
         try:
+            context = context or {}
             # 构建音乐描述
             description = params["description"]
             mood = params.get("mood", "")
@@ -395,8 +403,17 @@ class SunoClientTool(AsyncTool):
                     error_msg = result.get("msg", "Unknown error")
                     raise ToolError(f"Suno API error: {error_msg}", self.metadata.name)
                 
+                if not audio_url:
+                    raise ToolError("Background music generation returned empty audio_url", self.metadata.name)
+                audio_path = await self._download_audio_asset(
+                    audio_url,
+                    title=title,
+                    task_id=callback_task_id,
+                    context=context,
+                )
                 return {
                     "audio_url": audio_url,
+                    "audio_path": audio_path,
                     "task_id": callback_task_id,
                     "title": title,
                     "duration": duration,
@@ -471,8 +488,17 @@ class SunoClientTool(AsyncTool):
                             # 回用原有分支（轮询/回调）简化：直接用轮询
                             audio_result = await self._poll_generation_status(api_task_id)
                             audio_url = audio_result.get("audio_url", "") if audio_result else ""
+                            if not audio_url:
+                                raise ToolError("Background music generation returned empty audio_url", self.metadata.name)
+                            audio_path = await self._download_audio_asset(
+                                audio_url,
+                                title=title,
+                                task_id=api_task_id,
+                                context=context,
+                            )
                             return {
                                 "audio_url": audio_url,
+                                "audio_path": audio_path,
                                 "task_id": api_task_id,
                                 "title": title,
                                 "duration": duration,
@@ -495,6 +521,74 @@ class SunoClientTool(AsyncTool):
             raise
         except Exception as e:
             raise ToolError(f"Background music generation failed: {str(e)}", self.metadata.name) from e
+
+    async def _download_audio_asset(
+        self,
+        audio_url: str,
+        *,
+        title: str,
+        task_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Download generated audio to local storage for downstream mixing."""
+        if not audio_url:
+            return ""
+        if audio_url.startswith("file://"):
+            return audio_url[len("file://"):]
+
+        wf_id = ""
+        if isinstance(context, dict):
+            wf_id = str(context.get("workflow_state_id") or "").strip()
+
+        safe_task_id = str(task_id or "").strip() or str(uuid.uuid4())
+        safe_task_id = safe_task_id.replace("/", "_")
+        ext = ""
+        try:
+            suffix = Path(urlparse(audio_url).path).suffix
+            if suffix and len(suffix) <= 6:
+                ext = suffix
+        except Exception:
+            ext = ""
+        if not ext:
+            ext = ".mp3"
+
+        parts = ["bgm"]
+        if wf_id:
+            parts.append(wf_id)
+        destination_key = "/".join(parts + [f"bgm_{safe_task_id}{ext}"])
+
+        try:
+            from ..tool_registry import get_tool_registry
+        except Exception as exc:
+            raise ToolError(f"file_storage_tool registry unavailable: {exc}", self.metadata.name) from exc
+
+        registry = get_tool_registry()
+        storage_tool = registry.get_tool("file_storage_tool")
+        if storage_tool is None:
+            raise ToolError("file_storage_tool not available", self.metadata.name)
+
+        res = await storage_tool.execute(
+            ToolInput(
+                action="download_from_url",
+                parameters={
+                    "url": audio_url,
+                    "destination_key": destination_key,
+                    "overwrite": False,
+                    "metadata": {
+                        "source": "suno",
+                        "title": title or "",
+                        "task_id": safe_task_id,
+                        "workflow_state_id": wf_id,
+                    },
+                },
+            )
+        )
+        payload = getattr(res, "result", res) or {}
+        audio_path = payload.get("file_path") or payload.get("local_path") or ""
+        if not isinstance(audio_path, str) or not audio_path.strip():
+            raise ToolError("download_from_url returned no local path", self.metadata.name)
+        self.logger.info("BGM_DOWNLOADED path=%s source=%s", audio_path, audio_url[:80])
+        return audio_path
     
     async def _generate_callback_url(self, task_id: str = None) -> str:
         """生成动态回调URL"""

@@ -1,0 +1,11 @@
+{
+  "topic": "video_agent working memory refactor",
+  "steps": [
+    "Implement WorkingMemory view builder (candidates + deps + failure hotspots + global metrics)",
+    "Add token budget soft cap (prioritize candidates > hotspots > deps) via config",
+    "Use WM view in observation, replacing full scenes dump",
+    "Update retry soft hint based on WM stats",
+    "Verify WF writeback & finalize contract post-refactor",
+    "Adjust tests/docs and remove state/video_runtime residuals"
+  ]
+}

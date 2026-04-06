@@ -8,7 +8,7 @@ from typing import Dict, Any
 from sqlalchemy.orm import Session
 
 from ..base import BaseAgent
-from ...models import Task, AgentExecution, AgentType
+from ...models import Task, AgentType
 
 
 class EnhancedConceptPlannerAgent(BaseAgent):
@@ -60,7 +60,6 @@ class EnhancedConceptPlannerAgent(BaseAgent):
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """
@@ -76,7 +75,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             )
             
             # Update progress
-            await self._update_progress(execution, 10, "Analyzing input", db)
+            await self._update_progress(10, "Analyzing input", db)
             
             # Retrieve relevant memories from previous tasks
             previous_concepts = await self.retrieve_memories(
@@ -86,7 +85,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             )
             
             # Update progress
-            await self._update_progress(execution, 20, "Loading context", db)
+            await self._update_progress(20, "Loading context", db)
             
             # Prepare variables for prompt template
             template_variables = {
@@ -104,7 +103,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
                 }
             
             # Update progress
-            await self._update_progress(execution, 30, "Rendering prompt", db)
+            await self._update_progress(30, "Rendering prompt", db)
             
             # Render the prompt template
             rendered_prompt = self.render_prompt(
@@ -113,7 +112,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             )
             
             # Update progress
-            await self._update_progress(execution, 50, "Generating concept", db)
+            await self._update_progress(50, "Generating concept", db)
             
             # Use OpenAI tool to generate concept
             concept_result = await self.use_tool(
@@ -133,7 +132,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             )
             
             # Update progress
-            await self._update_progress(execution, 70, "Processing response", db)
+            await self._update_progress(70, "Processing response", db)
             
             # Parse the AI response
             concept_content = concept_result.get("content", "")
@@ -150,7 +149,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
                 }
             
             # Update progress
-            await self._update_progress(execution, 80, "Storing results", db)
+            await self._update_progress(80, "Storing results", db)
             
             # Store the concept in memory with detailed tags
             concept_memory_id = await self.store_memory(
@@ -171,7 +170,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             )
             
             # Update progress
-            await self._update_progress(execution, 90, "Finalizing output", db)
+            await self._update_progress(90, "Finalizing output", db)
             
             # Prepare output with enhanced metadata
             output_data = {
@@ -187,7 +186,7 @@ class EnhancedConceptPlannerAgent(BaseAgent):
             }
             
             # Update progress
-            await self._update_progress(execution, 100, "Complete", db)
+            await self._update_progress(100, "Complete", db)
             
             return output_data
             

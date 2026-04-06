@@ -18,7 +18,15 @@ from ....services.prompt_safety.rewrite import (
     rewrite_prompt_preserving_locks as ps_rewrite_preserving_locks,
 )
 from ....services.reference_bank import get_scene_reference, store_scene_reference
+from ....services.scene_info_reference_service import (
+    SceneInfoReferenceResolutionError,
+    load_scene_info_payload,
+)
 from ....services.enhanced_ai_client import enhanced_ai_client, TaskType
+from ....services.execution_host_lease import (
+    ExecutionHostKeepaliveLostError,
+    assert_current_execution_host_keepalive_healthy,
+)
 
 
 class VideoGenerationTool(AsyncTool):
@@ -103,11 +111,7 @@ class VideoGenerationTool(AsyncTool):
             "allowed_actions": ["generate_with_continuity"]
         }
 
-    def get_action_stage(self, action: str) -> str:
-        """声明动作阶段：生成类为 act，查询类为 plan。"""
-        if action in ("generate_video", "generate_with_continuity"):
-            return "act"
-        return "plan"
+    # 取消阶段语义：工具仅具有执行属性
 
     def _fetch_capabilities(self, log_failure: bool = False):
         if not self.video_service or not hasattr(self.video_service, "get_capabilities"):
@@ -257,7 +261,7 @@ class VideoGenerationTool(AsyncTool):
                 "properties": {
                     "scene_number": {
                         "type": ["integer", "string"],
-                        "description": "可选：仅用于管道追踪，不影响生成API"
+                        "description": "场景编号：用于产物归属与尾帧登记（必填）"
                     },
                     "prompt": prompt_field,
                     "duration": {
@@ -319,14 +323,17 @@ class VideoGenerationTool(AsyncTool):
                         "description": "可选：需要避免的元素列表（将合并到提示词）"
                     }
                 },
-                "required": ["prompt", "duration"]
+                "required": ["scene_number", "prompt", "duration"]
             },
             "generate_with_continuity": {
                 "type": "object",
                 "properties": {
                     "scene_number": {"type": ["integer", "string"], "description": "可选：用于管道追踪与尾帧登记"},
+                    "scene_info_ref": {
+                        "type": "string",
+                        "description": "可选：场景信息引用路径；若提供则工具内部构建包含一致性约束的完整提示词"
+                    },
                     "emit_last_frame": {"type": "string", "enum": ["auto", "always", "never"], "description": "生成成功后是否自动提取并上传尾帧（auto按DAG出边判断）"},
-                    "workflow_state_id": {"type": "string", "description": "可选：在auto模式下用于出边计算"},
                     "prompt": prompt_field,
                     "duration": {"type": "integer", "enum": provider_config.duration_capabilities, "description": f"视频时长（秒），可选：{provider_config.duration_capabilities}"},
                     "depends_on_scene": {"type": ["integer", "string", "null"], "description": "可选：依赖的上一场景编号"},
@@ -371,7 +378,7 @@ class VideoGenerationTool(AsyncTool):
                         "description": "可选：需要避免的元素列表（将合并到提示词）"
                     }
                 },
-                "required": ["scene_number", "prompt", "duration"]
+                "required": ["scene_number", "duration"]
             },
             "get_capabilities": {
                 "type": "object",
@@ -381,6 +388,53 @@ class VideoGenerationTool(AsyncTool):
         }
         
         return schemas.get(action, {})
+
+    def _merge_execution_context_into_params(
+        self,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        merged = dict(params or {})
+        ctx = context if isinstance(context, dict) else {}
+
+        execution_contract = ctx.get("execution_contract")
+        if not isinstance(execution_contract, dict):
+            execution_contract = {}
+        storage = execution_contract.get("storage")
+        if not isinstance(storage, dict):
+            storage = {}
+        constraints = execution_contract.get("constraints")
+        if not isinstance(constraints, dict):
+            constraints = {}
+
+        explicit_workflow_state_id = str(merged.get("workflow_state_id") or "").strip()
+        bound_workflow_state_id = str(
+            storage.get("workflow_state_id") or ctx.get("workflow_state_id") or ""
+        ).strip()
+        if explicit_workflow_state_id and bound_workflow_state_id and explicit_workflow_state_id != bound_workflow_state_id:
+            raise ToolValidationError(
+                "workflow_state_id conflicts with execution context",
+                self.metadata.name,
+            )
+        if bound_workflow_state_id:
+            merged["workflow_state_id"] = bound_workflow_state_id
+
+        explicit_generate_audio = merged.get("generate_audio")
+        bound_generate_audio = constraints.get("generate_audio")
+        if isinstance(bound_generate_audio, bool):
+            if explicit_generate_audio is not None and not isinstance(explicit_generate_audio, bool):
+                raise ToolValidationError(
+                    "generate_audio must be boolean when provided",
+                    self.metadata.name,
+                )
+            if isinstance(explicit_generate_audio, bool) and explicit_generate_audio != bound_generate_audio:
+                raise ToolValidationError(
+                    "generate_audio conflicts with execution context",
+                    self.metadata.name,
+                )
+            merged["generate_audio"] = bound_generate_audio
+
+        return merged
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行视频生成工具"""
@@ -404,18 +458,28 @@ class VideoGenerationTool(AsyncTool):
             raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
         
         action = tool_input.action
-        params = tool_input.parameters
+        params = self._merge_execution_context_into_params(
+            tool_input.parameters,
+            tool_input.context,
+        )
         
+        execution_liveness_probe = assert_current_execution_host_keepalive_healthy
+
         if action == "generate_video":
-            return await self._generate_video(params)
+            return await self._generate_video(params, execution_liveness_probe=execution_liveness_probe)
         elif action == "generate_with_continuity":
-            return await self._generate_with_continuity(params)
+            return await self._generate_with_continuity(params, execution_liveness_probe=execution_liveness_probe)
         elif action == "get_capabilities":
             return await self._get_capabilities()
         else:
             raise ToolValidationError(f"Unknown action: {action}", self.metadata.name)
     
-    async def _generate_video(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _generate_video(
+        self,
+        params: Dict[str, Any],
+        *,
+        execution_liveness_probe=None,
+    ) -> Dict[str, Any]:
         """生成视频 - 纯粹的执行，不做决策"""
         # 运行时守护：若 service 丢失或接口缺失，先尝试“无条件重获服务实例”
         if (self.video_service is None) or (not hasattr(self.video_service, "generate_video")):
@@ -691,16 +755,30 @@ class VideoGenerationTool(AsyncTool):
         
         # 记录来源（供应商无关）：单图模式下明确 used_url 来源
         try:
-            pre_mode = self._determine_generation_mode(final_image_input, first_frame_image, last_frame_image)
             image_from_cont = bool(params.get('image_from_continuity'))
+            scene_strategy = self._resolve_scene_strategy(
+                params.get("scene_info_ref"),
+                params.get("scene_number"),
+            )
+            pre_mode = self._determine_generation_mode(
+                final_image_input,
+                first_frame_image,
+                last_frame_image,
+                image_from_continuity=image_from_cont,
+            )
             image_origin = (
                 "first_last_frame" if (first_frame_image and last_frame_image) else
-                ("continuity_frame" if (continuity_frame or image_from_cont) else ("reference_image" if image_url else "none"))
+                (
+                    "continuity_frame"
+                    if (continuity_frame or image_from_cont)
+                    else ("reference_image" if image_url else "none")
+                )
             )
             used_url = final_image_input if not (first_frame_image and last_frame_image) else None
             _model_disp = model if model else "(auto)"
             self.logger.info(
                 f"🎬 Generating video: duration={duration}s, model={_model_disp}, mode={pre_mode}, "
+                f"scene_strategy={scene_strategy.get('image_purpose') or 'unknown'}, "
                 f"continuity_applied={bool(continuity_frame) or image_from_cont}, image_origin={image_origin}, "
                 f"used_url={(used_url[:120] + '...') if isinstance(used_url, str) else used_url}"
             )
@@ -733,6 +811,20 @@ class VideoGenerationTool(AsyncTool):
 
         try:
             # 调用视频服务生成视频
+            native_audio = self._resolve_native_audio_request(params)
+            try:
+                self.logger.info(
+                    "NATIVE_AUDIO: strategy=%s provider=%s supports=%s requested=%s",
+                    native_audio.get("strategy"),
+                    native_audio.get("provider"),
+                    bool(native_audio.get("supports_native_audio")),
+                    bool(native_audio.get("generate_audio")),
+                )
+            except Exception:
+                pass
+            if callable(execution_liveness_probe):
+                execution_liveness_probe()
+
             result = await self.video_service.generate_video(
                 prompt=prompt,
                 model=model,
@@ -741,7 +833,9 @@ class VideoGenerationTool(AsyncTool):
                 first_frame_image=first_frame_image,
                 last_frame_image=last_frame_image,
                 resolution=resolution_applied or params.get("resolution"),
-                ratio=ratio_applied or params.get("ratio")
+                ratio=ratio_applied or params.get("ratio"),
+                generate_audio=bool(native_audio.get("generate_audio")),
+                execution_liveness_probe=execution_liveness_probe,
             )
             
             # 增强返回结果
@@ -755,6 +849,8 @@ class VideoGenerationTool(AsyncTool):
                     "prompt": prompt,
                     "duration": duration,
                     "model": model,
+                    "audio_strategy": native_audio.get("strategy"),
+                    "generate_audio": bool(native_audio.get("generate_audio")),
                     "resolution_requested": resolution_requested,
                     "resolution_applied": resolution_applied or params.get("resolution"),
                     "ratio_requested": ratio_requested,
@@ -762,15 +858,24 @@ class VideoGenerationTool(AsyncTool):
                     "has_continuity_frame": bool(continuity_frame) or bool(params.get('image_from_continuity')),
                     "has_reference_image": bool(image_url),
                     "generation_mode": self._determine_generation_mode(
-                        final_image_input, first_frame_image, last_frame_image
+                        final_image_input,
+                        first_frame_image,
+                        last_frame_image,
+                        image_from_continuity=bool(continuity_frame) or bool(params.get('image_from_continuity')),
                     ),
+                    "scene_strategy": scene_strategy.get("image_purpose", ""),
                     "image_origin": (
                         "first_last_frame" if (first_frame_image and last_frame_image) else
-                        ("continuity_frame" if (continuity_frame or params.get('image_from_continuity')) else ("reference_image" if image_url else "none"))
+                        (
+                            "continuity_frame"
+                            if (continuity_frame or params.get('image_from_continuity'))
+                            else ("reference_image" if image_url else "none")
+                        )
                     ),
                     "image_input_url": final_image_input if isinstance(final_image_input, str) else None
                 }
             })
+            result["native_audio"] = native_audio
             # 工具层最小验证：必须产生可访问 video_url，否则标记为失败并将 fallback_reason 透传为 error_type
             if not isinstance(result, dict) or not result.get('video_url'):
                 status = (result or {}).get('status') if isinstance(result, dict) else None
@@ -803,6 +908,16 @@ class VideoGenerationTool(AsyncTool):
             
             return result
 
+        except ExecutionHostKeepaliveLostError as e:
+            details = dict(getattr(e, "diagnostic", {}) or {})
+            self.logger.error("Execution host keepalive lost during video generation: %s", details or str(e))
+            raise ToolError(
+                str(e),
+                self.metadata.name,
+                error_code="execution_host_keepalive_lost",
+                details=details or None,
+            ) from e
+
         except Exception as e:
             # 针对 image_url 拉取失败（400/403）的轻量修复重试：上云后重试一次
             emsg = str(e)
@@ -827,6 +942,9 @@ class VideoGenerationTool(AsyncTool):
                     oss_url = await self._rehost_external_image_url(final_image_input)
                     if isinstance(oss_url, str) and oss_url.startswith("http"):
                         self.logger.warning("RETRY_AFTER_IMAGE_REHOST: re-invoking video generation with OSS URL")
+                        if callable(execution_liveness_probe):
+                            execution_liveness_probe()
+
                         result = await self.video_service.generate_video(
                             prompt=prompt,
                             model=model,
@@ -834,7 +952,8 @@ class VideoGenerationTool(AsyncTool):
                             image_url=oss_url,
                             first_frame_image=first_frame_image,
                             last_frame_image=last_frame_image,
-                            resolution=resolution_applied or params.get("resolution")
+                            resolution=resolution_applied or params.get("resolution"),
+                            execution_liveness_probe=execution_liveness_probe,
                         )
                         # 同样进行最小验证
                         if not isinstance(result, dict) or not result.get('video_url'):
@@ -978,6 +1097,51 @@ class VideoGenerationTool(AsyncTool):
         result["all"] = [item for item in (result["style"] + result["negative"]) if item]
         return result
 
+    def _resolve_native_audio_request(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve provider-native audio request from explicit execution params.
+
+        Boundary:
+        - tool execution only; no cross-agent orchestration policy branching here.
+        """
+        provider_cfg = self.video_config.get_current_provider_config()
+        supports_native = bool(getattr(provider_cfg, "supports_native_audio", False))
+
+        explicit_generate_audio = params.get("generate_audio")
+        if isinstance(explicit_generate_audio, str):
+            lowered = explicit_generate_audio.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                explicit_generate_audio = True
+            elif lowered in {"false", "0", "no", "off"}:
+                explicit_generate_audio = False
+            else:
+                explicit_generate_audio = None
+        elif not isinstance(explicit_generate_audio, bool):
+            explicit_generate_audio = None
+
+        if isinstance(explicit_generate_audio, bool):
+            generate_audio = explicit_generate_audio and supports_native
+            decision_source = "explicit_param"
+            strategy = "explicit"
+        else:
+            native_default = getattr(provider_cfg, "native_audio_default_enabled", None)
+            if isinstance(native_default, bool):
+                generate_audio = native_default and supports_native
+                decision_source = "provider_default"
+                strategy = "provider_default"
+            else:
+                # Conservative fallback: do not force native audio when no explicit decision is provided.
+                generate_audio = False
+                decision_source = "implicit_disabled"
+                strategy = "implicit_disabled"
+
+        return {
+            "strategy": strategy,
+            "provider": provider_cfg.provider_name,
+            "supports_native_audio": supports_native,
+            "generate_audio": bool(generate_audio),
+            "decision_source": decision_source,
+        }
+
     async def _rewrite_prompt_for_safety(
         self,
         prompt: str,
@@ -1000,10 +1164,72 @@ class VideoGenerationTool(AsyncTool):
     def _is_sensitive_error(err: ToolError) -> bool:
         return ps_is_sensitive_error(err)
 
-    async def _generate_with_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _generate_with_continuity(
+        self,
+        params: Dict[str, Any],
+        *,
+        execution_liveness_probe=None,
+    ) -> Dict[str, Any]:
         """合并连续性准备与生成（确定性）：解析上一场景尾帧 → 生成 → 可选存尾帧。"""
+        scene_number = params.get("scene_number")
+        scene_info_ref = params.get("scene_info_ref")
         prompt = params.get("prompt")
         duration = params.get("duration")
+        if not prompt and not scene_info_ref:
+            raise ToolValidationError("prompt or scene_info_ref is required", self.metadata.name)
+
+        if scene_info_ref and scene_number is not None:
+            try:
+                from ..tool_registry import get_tool_registry
+                from ..base_tool import ToolInput as TI
+
+                registry = get_tool_registry()
+                composer = registry.get_tool("video_prompt_composer")
+                if not composer:
+                    raise ToolError("video_prompt_composer unavailable", self.metadata.name)
+                resp = await composer.execute(
+                    TI(
+                        action="build_prompt",
+                        parameters={
+                            "scene_number": scene_number,
+                            "scene_info_ref": scene_info_ref,
+                        },
+                    )
+                )
+                payload = getattr(resp, "result", resp)
+                if not isinstance(payload, dict) or not payload.get("prompt_text"):
+                    raise ToolError("video_prompt_composer returned empty prompt", self.metadata.name)
+                prompt = payload.get("prompt_text")
+                params["prompt"] = prompt
+                meta = payload.get("metadata") if isinstance(payload, dict) else {}
+                injected = None
+                categories = None
+                if isinstance(meta, dict):
+                    injected = meta.get("consistency_injected")
+                    categories = meta.get("consistency_categories")
+                try:
+                    prompt_bytes_len = len(str(prompt).encode("utf-8")) if isinstance(prompt, str) else 0
+                    self.logger.info(
+                        "PROMPT_COMPOSED(generate_with_continuity): scene=%s composed_len=%d injected=%s categories=%s",
+                        scene_number,
+                        prompt_bytes_len,
+                        injected,
+                        categories,
+                    )
+                except Exception:
+                    pass
+            except ToolError:
+                raise
+            except Exception as exc:
+                raise ToolError(f"Prompt composition failed: {exc}", self.metadata.name) from exc
+
+            scene_runtime_inputs = self._resolve_scene_runtime_inputs(scene_info_ref, scene_number)
+            factual_image_url = scene_runtime_inputs.get("image_url")
+            if not params.get("image_url") and isinstance(factual_image_url, str) and factual_image_url.strip():
+                params["image_url"] = factual_image_url.strip()
+            if params.get("depends_on_scene") is None and scene_runtime_inputs.get("depends_on_scene") is not None:
+                params["depends_on_scene"] = scene_runtime_inputs.get("depends_on_scene")
+
         if not prompt or duration is None:
             raise ToolValidationError("prompt and duration are required", self.metadata.name)
 
@@ -1136,101 +1362,52 @@ class VideoGenerationTool(AsyncTool):
         except Exception:
             pass
 
-        # 解析连续性帧：优先 continuity_frame > image_url > 内存/WF尾帧 > 上游视频抽帧
+        # 解析连续性帧：优先 continuity_frame；若提供 previous_video_url 则调用连续性准备工具
         continuity_frame: Optional[str] = params.get("continuity_frame")
         image_url: Optional[str] = params.get("image_url")
-
+        previous_video_url: Optional[str] = params.get("previous_video_url")
         prev_scene_no: Optional[int] = None
         try:
-            dp = params.get("depends_on_scene")
-            if isinstance(dp, (int, str)) and str(dp).isdigit():
-                prev_scene_no = int(dp)
-            if prev_scene_no is None:
-                wf_id = params.get("workflow_state_id")
-                if wf_id:
-                    from ....core.workflow_state import workflow_manager
-                    wf = workflow_manager.get_workflow(wf_id)
-                    sn = params.get("scene_number")
-                    sn = int(sn) if sn is not None and str(sn).isdigit() else None
-                    if wf and sn is not None:
-                        sc = wf.get_scene(sn)
-                        if sc is not None:
-                            dp2 = getattr(sc, 'depends_on_scene', None)
-                            if isinstance(dp2, (int, str)) and str(dp2).isdigit():
-                                prev_scene_no = int(dp2)
+            raw_prev = params.get("depends_on_scene")
+            if raw_prev is not None and str(raw_prev).isdigit():
+                prev_scene_no = int(raw_prev)
         except Exception:
-            prev_scene_no = prev_scene_no or None
+            prev_scene_no = None
 
-        if not continuity_frame and prev_scene_no is not None:
-            # 0) 参考缓存
+        if not continuity_frame and previous_video_url and scene_key is not None:
             try:
-                ref_frame = get_scene_reference(params.get("workflow_state_id"), prev_scene_no)
-                if isinstance(ref_frame, str) and ref_frame.startswith("http"):
-                    continuity_frame = ref_frame
+                from ..tool_registry import get_tool_registry
+                from ..base_tool import ToolInput as TI
+
+                registry = get_tool_registry()
+                prep_tool = registry.get_tool("scene_continuity_preparation")
+                if not prep_tool:
+                    raise ToolError("scene_continuity_preparation not available", self.metadata.name)
+
+                prep_params: Dict[str, Any] = {
+                    "scene_number": int(scene_key),
+                    "previous_scene_video_url": previous_video_url,
+                }
+                if image_url:
+                    prep_params["fallback_image_url"] = image_url
+
+                resp = await prep_tool.execute(TI(action="prepare_scene_input", parameters=prep_params))
+                payload = getattr(resp, "result", resp)
+                if isinstance(payload, dict):
+                    continuity_frame = payload.get("image_url") or None
+                    if continuity_frame:
+                        params["image_from_continuity"] = bool(payload.get("continuity_used"))
+            except Exception as e:
+                try:
+                    self.logger.warning(f"CONTINUITY_EXTRACT_FAILED: {e}")
+                except Exception:
+                    pass
+
+        if not continuity_frame and not image_url and not previous_video_url:
+            try:
+                self.logger.info("CONTINUITY_DISABLED: no continuity or reference image; fallback to text")
             except Exception:
-                continuity_frame = continuity_frame
-            # 1) 内存优先（URL更优）
-            if not continuity_frame:
-                try:
-                    from ..tool_registry import get_tool_registry
-                    from ..base_tool import ToolInput as TI
-                    registry = get_tool_registry()
-                    final_tool = registry.get_tool("final_frame_tool")
-                    resp_mem = await final_tool.execute(TI(action="get_final_frame_from_memory", parameters={"scene_number": prev_scene_no, "prefer_url": True}))
-                    pay_mem = getattr(resp_mem, 'result', resp_mem)
-                    if isinstance(pay_mem, dict):
-                        url = pay_mem.get("url") or pay_mem.get("data_url")
-                        if isinstance(url, str) and url.startswith("http"):
-                            continuity_frame = url
-                except Exception:
-                    pass
-            # 2) WF 尾帧字段
-            if not continuity_frame:
-                try:
-                    wf_id = params.get("workflow_state_id")
-                    if wf_id:
-                        from ....core.workflow_state import workflow_manager
-                        wf = workflow_manager.get_workflow(wf_id)
-                        sc_prev = wf.get_scene(prev_scene_no) if wf else None
-                        lf = getattr(sc_prev, 'last_frame_url', '') if sc_prev else ''
-                        if isinstance(lf, str) and lf.startswith("http"):
-                            continuity_frame = lf
-                except Exception:
-                    pass
-            # 3) 上游视频抽帧（参数 > WF）
-            if not continuity_frame:
-                prev_url = params.get("previous_video_url")
-                if not prev_url:
-                    try:
-                        wf_id = params.get("workflow_state_id")
-                        if wf_id:
-                            from ....core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(wf_id)
-                            sc_prev = wf.get_scene(prev_scene_no) if wf else None
-                            prev_url = getattr(sc_prev, 'video_url', '') or getattr(sc_prev, 'video_path', '') if sc_prev else ''
-                    except Exception:
-                        prev_url = None
-                if prev_url:
-                    try:
-                        from ..tool_registry import get_tool_registry
-                        from ..base_tool import ToolInput as TI
-                        registry = get_tool_registry()
-                        final_tool = registry.get_tool("final_frame_tool")
-                        ff_params = {"video_url": prev_url, "to_base64": False}
-                        try:
-                            if prev_scene_no is not None:
-                                ff_params["scene_number"] = int(prev_scene_no)
-                        except Exception:
-                            pass
-                        resp = await final_tool.execute(TI(action="extract_final_frame_from_video", parameters=ff_params))
-                        payload = getattr(resp, 'result', resp)
-                        if isinstance(payload, dict):
-                            continuity_frame = payload.get("path") or payload.get("data_url")
-                    except Exception as e:
-                        try:
-                            self.logger.warning(f"continuity frame extraction failed: {e}")
-                        except Exception:
-                            pass
+                pass
 
         # 数据URL/本地 → 上传成外链
         if isinstance(continuity_frame, str) and continuity_frame and not (continuity_frame.startswith("http://") or continuity_frame.startswith("https://")):
@@ -1269,7 +1446,10 @@ class VideoGenerationTool(AsyncTool):
         if consistency_meta_snapshot is None and isinstance(next_params, dict):
             consistency_meta_snapshot = next_params.get("_consistency_meta")
         try:
-            gen_res = await self._generate_video(next_params)
+            gen_res = await self._generate_video(
+                next_params,
+                execution_liveness_probe=execution_liveness_probe,
+            )
         except ToolError as err:
             should_rewrite = (
                 prompt_safety_cfg
@@ -1293,7 +1473,10 @@ class VideoGenerationTool(AsyncTool):
                         rewrite_params['_consistency_meta'] = consistency_meta_snapshot
                     rewrite_params["prompt"] = rewrite_prompt
                     rewrite_params["prompt_rewrite_reason"] = "sensitive_error"
-                    gen_res = await self._generate_video(rewrite_params)
+                    gen_res = await self._generate_video(
+                        rewrite_params,
+                        execution_liveness_probe=execution_liveness_probe,
+                    )
                     if isinstance(gen_res, dict):
                         rewrite_meta = dict(gen_res.get("prompt_safety_rewrite") or {})
                         rewrite_meta.update(
@@ -1349,15 +1532,7 @@ class VideoGenerationTool(AsyncTool):
                         store_scene_reference(params.get("workflow_state_id"), scene_no, last_url)
                     except Exception:
                         pass
-                    try:
-                        wf_id = params.get("workflow_state_id")
-                        if wf_id and scene_no is not None:
-                            from ....core.workflow_state import workflow_manager
-                            wf = workflow_manager.get_workflow(wf_id)
-                            if wf:
-                                wf.update_scene(scene_no, last_frame_url=last_url)
-                    except Exception:
-                        pass
+                    # 不再更新 WorkflowState；连续性帧已写入记忆工具/Shared WM 事实
                     cont = dict(gen_res.get("continuity", {}) or {})
                     cont.update({"last_frame_url": last_url})
                     gen_res["continuity"] = cont
@@ -1419,29 +1594,14 @@ class VideoGenerationTool(AsyncTool):
             pass
 
     def _get_outdegree_from_wf_or_active(self, wf_id: Optional[str], scene_no: int) -> int:
+        """估算某场景的出度（被多少场景依赖）。调用方应提供依赖信息，工具不再读取 shared_wm。"""
         try:
-            from ....core.workflow_state import workflow_manager
-            workflows = []
-            if wf_id:
-                wf = workflow_manager.get_workflow(wf_id)
-                if wf:
-                    workflows.append(wf)
-            if not workflows:
-                workflows.extend(workflow_manager.get_active_workflows())
-            outdeg = 0
-            for wf in workflows:
-                try:
-                    for sc in getattr(wf, 'scenes', []) or []:
-                        dep = getattr(sc, 'depends_on_scene', None)
-                        if dep is not None and int(dep) == int(scene_no):
-                            outdeg += 1
-                    if outdeg > 0:
-                        break
-                except Exception:
-                    continue
-            return outdeg
+            deps = self.config.get("scene_dependencies") if isinstance(self.config, dict) else None
+            if isinstance(deps, dict):
+                return sum(1 for _, dep in deps.items() if dep is not None and int(dep) == int(scene_no))
         except Exception:
             return 0
+        return 0
 
     async def _emit_last_frame(self, video_url: str, scene_no: Optional[int] = None) -> Optional[str]:
         if not video_url:
@@ -1502,33 +1662,133 @@ class VideoGenerationTool(AsyncTool):
     async def _get_capabilities(self) -> Dict[str, Any]:
         """获取视频生成能力信息"""
         provider_config = self.video_config.get_current_provider_config()
-        
+        supported_models: List[str] = []
+        provider_model = provider_config.model_name.strip() if isinstance(provider_config.model_name, str) else ""
+        if provider_model:
+            supported_models.append(provider_model)
+        if self.video_service and hasattr(self.video_service, "get_supported_models"):
+            try:
+                service_models = self.video_service.get_supported_models()
+                if isinstance(service_models, list) and service_models:
+                    dedup: List[str] = []
+                    seen = set()
+                    for item in service_models:
+                        if not isinstance(item, str):
+                            continue
+                        model = item.strip()
+                        if not model or model in seen:
+                            continue
+                        seen.add(model)
+                        dedup.append(model)
+                    if dedup:
+                        supported_models = dedup
+            except Exception:
+                pass
+        if provider_model and provider_model not in supported_models:
+            supported_models.append(provider_model)
+
+        audio_capability = {
+            "supports_native_audio": bool(getattr(provider_config, "supports_native_audio", False)),
+            "native_audio_param_name": str(getattr(provider_config, "native_audio_param_name", "generate_audio") or "generate_audio"),
+            "native_audio_default_enabled": getattr(provider_config, "native_audio_default_enabled", None),
+        }
+
         return {
             "provider": provider_config.provider_name,
-            "supported_models": [provider_config.model_name],
+            "supported_models": supported_models,
             "duration_options": provider_config.duration_capabilities,
             "max_duration": provider_config.max_duration,
             "default_duration": provider_config.default_duration,
             "supports_first_last_frame": provider_config.supports_first_last_frame,
             "resolution_options": provider_config.resolution_options,
             "frame_rate_options": provider_config.frame_rate_options,
+            "audio_capability": audio_capability,
             "amplification_ratio": provider_config.amplification_ratio,
             "system_capability": self.video_config.get_system_duration_capability()
         }
     
     def _determine_generation_mode(
-        self, 
-        image_url: str, 
-        first_frame: str, 
-        last_frame: str
+        self,
+        image_url: str,
+        first_frame: str,
+        last_frame: str,
+        *,
+        image_from_continuity: bool = False,
     ) -> str:
         """确定生成模式"""
         if first_frame and last_frame:
             return "first_last_frame"
+        elif image_url and image_from_continuity:
+            return "image_to_video"
         elif image_url:
             return "image_to_video"
         else:
             return "text_to_video"
+
+    def _resolve_scene_strategy(self, scene_info_ref: Any, scene_number: Any) -> Dict[str, Any]:
+        if scene_number is None or not isinstance(scene_info_ref, str) or not scene_info_ref.strip():
+            return {}
+        try:
+            payload = load_scene_info_payload(scene_info_ref)
+        except (SceneInfoReferenceResolutionError, ValueError):
+            return {}
+        sn = self._coerce_scene_number(scene_number)
+        if sn is None:
+            return {}
+        for source in (
+            payload.get("scenes_to_generate") or [],
+            (payload.get("scene_overview") or {}).get("scenes") or [],
+            (payload.get("concept_plan") or {}).get("scenes") or [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for scene in source:
+                if not isinstance(scene, dict):
+                    continue
+                if self._coerce_scene_number(scene.get("scene_number")) != sn:
+                    continue
+                return {
+                    "image_purpose": str(scene.get("image_purpose") or "").strip(),
+                    "frame_thesis": str(scene.get("frame_thesis") or "").strip(),
+                }
+        return {}
+
+    def _resolve_scene_runtime_inputs(self, scene_info_ref: Any, scene_number: Any) -> Dict[str, Any]:
+        if scene_number is None or not isinstance(scene_info_ref, str) or not scene_info_ref.strip():
+            return {}
+        try:
+            payload = load_scene_info_payload(scene_info_ref)
+        except (SceneInfoReferenceResolutionError, ValueError):
+            return {}
+        sn = self._coerce_scene_number(scene_number)
+        if sn is None:
+            return {}
+        for source in (
+            payload.get("scenes_to_generate") or [],
+            (payload.get("scene_overview") or {}).get("scenes") or [],
+            (payload.get("concept_plan") or {}).get("scenes") or [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for scene in source:
+                if not isinstance(scene, dict):
+                    continue
+                if self._coerce_scene_number(scene.get("scene_number")) != sn:
+                    continue
+                return {
+                    "image_url": str(scene.get("image_url") or "").strip(),
+                    "depends_on_scene": self._coerce_scene_number(scene.get("depends_on_scene")),
+                }
+        return {}
+
+    @staticmethod
+    def _coerce_scene_number(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
     
     def _validate_action_parameters(self, action: str, parameters: Dict[str, Any]):
         """验证操作参数"""

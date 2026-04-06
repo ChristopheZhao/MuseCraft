@@ -15,10 +15,13 @@ from app.models import AgentType  # type: ignore
 
 class DummyAgent(ReActAgent):
     def __init__(self):
-        super().__init__(agent_type=AgentType.IMAGE_GENERATOR, agent_name="dummy_react", max_iterations=1)
+        super().__init__(
+            agent_type=AgentType.IMAGE_GENERATOR,
+            agent_name="dummy_react",
+            max_iterations=1,
+            tools=[],
+        )
 
-    async def _observe_current_state(self, input_data: Dict[str, Any], context: Dict[str, Any], iteration: int) -> Dict[str, Any]:
-        return {"summary": {"total": 0, "ready": 0, "pending": 0, "completed": 0, "failed": 0}, "scenes": []}
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task, execution, iteration: int) -> Dict[str, Any]:
         return {"action": "noop", "parameters": {}}
@@ -32,7 +35,7 @@ class DummyAgent(ReActAgent):
 
 def test_parse_and_apply_contract_plan_only_round():
     agent = DummyAgent()
-    agent.iteration_context = {"working_state": {}}
+    agent.iteration_context = {"agent_state": {}}
 
     contract_json = {
         "task_complete": False,
@@ -64,9 +67,9 @@ def test_parse_and_apply_contract_plan_only_round():
 
     # Apply into iteration_context
     agent._apply_react_contract(parsed)
-    ws = agent.iteration_context.get("working_state", {})
+    ws = agent.iteration_context.get("agent_state", {})
     aps = agent.iteration_context.get("agent_plan_state", {})
-    assert ws.get("goal"), "goal should be merged into working_state"
+    assert ws.get("goal"), "goal should be merged into agent_state"
     assert isinstance(aps.get("last_plan_delta"), dict), "plan_delta should be recorded in agent_plan_state"
 
     # Overlay on reflection (LLM has authority)
@@ -75,4 +78,3 @@ def test_parse_and_apply_contract_plan_only_round():
     assert merged["task_complete"] is False
     assert merged["should_stop"] is False
     assert "ready_items" in merged["context_updates"], "context updates should be carried over"
-

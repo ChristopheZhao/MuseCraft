@@ -6,7 +6,8 @@ import asyncio
 import json
 from typing import Dict, Any, List, Optional
 
-from ..base_tool import AsyncTool, ToolMetadata, ToolType
+from ..base_tool import AsyncTool, ToolMetadata, ToolType, ToolError, ToolValidationError
+from ....services.script_review_contract import format_script_review_guidance
 
 
 class ScriptGenerationTool(AsyncTool):
@@ -39,6 +40,7 @@ class ScriptGenerationTool(AsyncTool):
     def get_available_actions(self) -> List[str]:
         return [
             "generate_scene_script",
+            "generate_scene_scripts_batch",
             "generate_narrative_structure", 
             "optimize_dialogue",
             "analyze_script_continuity"
@@ -61,10 +63,17 @@ class ScriptGenerationTool(AsyncTool):
                     "type": "object",
                     "description": "场景数据，包含视觉描述、内容重点等",
                     "properties": {
+                        "scene_thesis": {"type": "string"},
                         "script_text": {"type": "string"},
+                        "title": {"type": "string"},
                         "visual_description": {"type": "string"},
                         "narrative_description": {"type": "string"},
-                        "duration": {"type": "number"}
+                        "duration": {"type": "number"},
+                        "mood_and_atmosphere": {"type": "string"},
+                        "camera_angle": {"type": "string"},
+                        "creative_intent": {"type": "string"},
+                        "characters_present": {"type": "array", "items": {"type": "string"}},
+                        "character_descriptions": {"type": "array", "items": {"type": "string"}},
                     }
                 },
                 "video_style": {
@@ -74,6 +83,14 @@ class ScriptGenerationTool(AsyncTool):
                 "context": {
                     "type": "object",
                     "description": "上下文信息"
+                },
+                "script_review_contract": {
+                    "type": "object",
+                    "description": "脚本审阅阶段生成的显式修订/重规划约束"
+                },
+                "review_guidance": {
+                    "type": "string",
+                    "description": "面向脚本生成的可读审阅指导文本"
                 },
                 # 允许调用方（Agent）通过配置传入模型与token预算
                 "model": {
@@ -86,6 +103,50 @@ class ScriptGenerationTool(AsyncTool):
                 }
             }
             base_schema["required"] = ["scene_data"]
+
+        elif action == "generate_scene_scripts_batch":
+            base_schema["properties"] = {
+                "scenes": {
+                    "type": "array",
+                    "description": "批量场景参数列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_number": {"type": "integer"},
+                            "scene_data": {
+                                "type": "object",
+                                "description": "场景数据，包含视觉描述、内容重点等",
+                                "properties": {
+                                    "scene_thesis": {"type": "string"},
+                                    "script_text": {"type": "string"},
+                                    "title": {"type": "string"},
+                                    "visual_description": {"type": "string"},
+                                    "narrative_description": {"type": "string"},
+                                    "duration": {"type": "number"},
+                                    "mood_and_atmosphere": {"type": "string"},
+                                    "camera_angle": {"type": "string"},
+                                    "creative_intent": {"type": "string"},
+                                    "characters_present": {"type": "array", "items": {"type": "string"}},
+                                    "character_descriptions": {"type": "array", "items": {"type": "string"}},
+                                }
+                            },
+                            "video_style": {"type": "string"},
+                            "context": {"type": "object"},
+                            "script_review_contract": {"type": "object"},
+                            "review_guidance": {"type": "string"},
+                            "voice_guidance": {"type": "object"},
+                            "intelligent_style_design": {"type": "object"},
+                            "model": {"type": "string"},
+                            "max_tokens": {"type": "integer"},
+                        }
+                    },
+                },
+                "max_concurrency": {
+                    "type": "integer",
+                    "description": "批量并发上限（来自配置，必要时可覆盖）",
+                },
+            }
+            base_schema["required"] = ["scenes"]
             
         elif action == "generate_narrative_structure":
             base_schema["properties"] = {
@@ -132,6 +193,8 @@ class ScriptGenerationTool(AsyncTool):
         
         if action == "generate_scene_script":
             return await self._generate_scene_script(parameters)
+        elif action == "generate_scene_scripts_batch":
+            return await self._generate_scene_scripts_batch(parameters)
         elif action == "generate_narrative_structure":
             return await self._generate_narrative_structure(parameters)
         elif action == "optimize_dialogue":
@@ -140,6 +203,80 @@ class ScriptGenerationTool(AsyncTool):
             return await self._analyze_script_continuity(parameters)
         else:
             raise ValueError(f"Unknown action: {action}")
+
+    @staticmethod
+    def _clip_text(value: Any, max_len: int = 180) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:
+            return text[:max_len]
+        return text[: max_len - 3] + "..."
+
+    def _build_context_blocks(self, context: Dict[str, Any], scene_data: Dict[str, Any]) -> Dict[str, str]:
+        if not isinstance(context, dict):
+            context = {}
+        if not isinstance(scene_data, dict):
+            scene_data = {}
+
+        lines: List[str] = []
+
+        narrative_arc = self._clip_text(context.get("narrative_arc"), 140)
+        if narrative_arc:
+            lines.append(f"- 全片主线：{narrative_arc}")
+
+        episode_context = context.get("episode_context")
+        if isinstance(episode_context, dict):
+            title = self._clip_text(episode_context.get("title"), 60)
+            summary = self._clip_text(episode_context.get("summary"), 120)
+            purpose = self._clip_text(episode_context.get("narrative_purpose"), 100)
+            if title or summary or purpose:
+                segments = [seg for seg in [title, summary, purpose] if seg]
+                lines.append("- 所属篇章：" + "；".join(segments))
+
+        project_context = context.get("project_context")
+        if isinstance(project_context, dict):
+            project_brief = self._clip_text(
+                project_context.get("project_brief") or project_context.get("summary"),
+                120,
+            )
+            global_theme = self._clip_text(project_context.get("global_theme"), 80)
+            if project_brief or global_theme:
+                segments = [seg for seg in [project_brief, global_theme] if seg]
+                lines.append("- 项目基线：" + "；".join(segments))
+
+        approved_script = self._clip_text(context.get("approved_script"), 160)
+        if approved_script:
+            lines.append(f"- 已确认脚本片段：{approved_script}")
+
+        previous_scene = self._clip_text(context.get("previous_scene"), 120)
+        if previous_scene:
+            lines.append(f"- 上一场承接：{previous_scene}")
+
+        target_duration = scene_data.get("duration")
+        try:
+            target_duration = float(target_duration)
+        except (TypeError, ValueError):
+            target_duration = None
+
+        duration_guidance = ""
+        if target_duration and target_duration > 0:
+            duration_text = (
+                str(int(target_duration))
+                if float(target_duration).is_integer()
+                else f"{target_duration:g}"
+            )
+            duration_guidance = (
+                f"本场目标时长为 {duration_text}s。脚本必须产出能支撑该时长的局部事件弧线，"
+                "不要只写人物状态、情绪说明或镜头展示。"
+            )
+
+        return {
+            "story_context_block": "\n".join(lines).strip(),
+            "duration_guidance": duration_guidance,
+        }
     
     async def _generate_scene_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成场景脚本 - 使用专业提示词模板和LLM智能决策"""
@@ -148,6 +285,10 @@ class ScriptGenerationTool(AsyncTool):
         intelligent_style_design = params.get("intelligent_style_design", {})
         video_style = params.get("video_style", "professional")  # 向后兼容
         context = params.get("context", {})
+        script_review_contract = params.get("script_review_contract") or {}
+        review_guidance = str(params.get("review_guidance") or "").strip()
+        if not review_guidance:
+            review_guidance = format_script_review_guidance(script_review_contract)
         voice_guidance = params.get("voice_guidance", {}) or {}
         should_narrate = bool(voice_guidance.get("should_narrate", True))
         pace_tag = str(voice_guidance.get("pace_tag", "")).strip().lower()
@@ -210,12 +351,20 @@ class ScriptGenerationTool(AsyncTool):
 
         template_manager = get_template_manager("script_writer")
         duration_caps_str = "、".join(str(int(cap)) for cap in _vcaps)
+        context_blocks = self._build_context_blocks(context, scene_data)
         prompt = template_manager.render_template(
             "scene_script_generation",
             {
                 "scene_number": scene_data.get("scene_number", 1),
+                "scene_thesis": scene_data.get("scene_thesis", ""),
+                "title": scene_data.get("title", ""),
                 "visual_description": scene_data.get("visual_description", ""),
                 "narrative_description": scene_data.get("narrative_description", ""),
+                "mood_and_atmosphere": scene_data.get("mood_and_atmosphere", ""),
+                "camera_angle": scene_data.get("camera_angle", ""),
+                "creative_intent": scene_data.get("creative_intent", ""),
+                "characters_present": scene_data.get("characters_present", []) or [],
+                "character_descriptions": scene_data.get("character_descriptions", []) or [],
                 "style_context": style_context,
                 "duration_capabilities": duration_caps_str,
                 "voice_expectations": voice_expectations,
@@ -223,6 +372,9 @@ class ScriptGenerationTool(AsyncTool):
                 "target_char_count": target_char_count,
                 "pace_tag": pace_tag,
                 "video_style": video_style,
+                "review_guidance": review_guidance,
+                "story_context_block": context_blocks.get("story_context_block", ""),
+                "duration_guidance": context_blocks.get("duration_guidance", ""),
             },
         )
 
@@ -272,12 +424,68 @@ class ScriptGenerationTool(AsyncTool):
                 raise ValueError(f"Failed to parse LLM response as JSON: {exc}")
                 
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"场景脚本生成失败: {str(e)}",
-                "duration": _default_dur,  # ✅ 即使错误也遵循离散时长约束
-                "duration_reasoning": "发生错误，使用默认时长"
-            }
+            raise ToolError(
+                f"场景脚本生成失败: {str(e)}",
+                error_code="scene_script_failed",
+                details={
+                    "duration": _default_dur,
+                    "duration_reasoning": "发生错误，使用默认时长",
+                },
+            )
+
+    async def _generate_scene_scripts_batch(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """批量生成场景脚本"""
+
+        scenes = params.get("scenes", [])
+        if not isinstance(scenes, list) or not scenes:
+            raise ToolValidationError("scenes must be a non-empty list", self.metadata.name)
+
+        max_concurrency = params.get("max_concurrency")
+        if not (isinstance(max_concurrency, int) and max_concurrency > 0):
+            try:
+                from ....core.config import settings as _settings
+                max_concurrency = int(getattr(_settings, "SCRIPT_GENERATION_MAX_CONCURRENCY", 3))
+            except Exception:
+                max_concurrency = 3
+        if max_concurrency < 1:
+            max_concurrency = 1
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+        scripts: Dict[str, Any] = {}
+        failures: List[Dict[str, Any]] = []
+
+        async def _run_scene(scene_params: Dict[str, Any], scene_index: int) -> None:
+            async with semaphore:
+                scene_number = scene_params.get("scene_number")
+                scene_data = scene_params.get("scene_data") if isinstance(scene_params, dict) else {}
+                if scene_number is None and isinstance(scene_data, dict):
+                    scene_number = scene_data.get("scene_number")
+                try:
+                    result = await self._generate_scene_script(scene_params)
+                    key = str(scene_number) if scene_number is not None else str(scene_index + 1)
+                    scripts[key] = result
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "scene_number": scene_number,
+                            "error": str(exc),
+                        }
+                    )
+
+        tasks = [
+            asyncio.create_task(_run_scene(scene, idx))
+            for idx, scene in enumerate(scenes)
+        ]
+        await asyncio.gather(*tasks)
+
+        return {
+            "batch_success": len(failures) == 0,
+            "scripts": scripts,
+            "failures": failures,
+            "total": len(scenes),
+            "success_count": len(scripts),
+            "failure_count": len(failures),
+        }
     
     async def _generate_narrative_structure(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """生成叙事结构"""
@@ -332,14 +540,10 @@ class ScriptGenerationTool(AsyncTool):
                     "scene_connections": ["场景间自然过渡"],
                     "emotional_curve": "渐进式情感发展",
                     "key_moments": ["各场景重点时刻"],
-                    "success": True
                 }
-                
+
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"叙事结构生成失败: {str(e)}"
-            }
+            raise ToolError(f"叙事结构生成失败: {str(e)}", error_code="narrative_structure_failed")
     
     async def _optimize_dialogue(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """优化对话内容"""
@@ -373,20 +577,11 @@ class ScriptGenerationTool(AsyncTool):
                 return {
                     "optimized_script": optimized_text,
                     "optimization_notes": "对话语调和流畅度优化",
-                    "success": True
                 }
-            return {
-                "optimized_script": script_text,
-                "optimization_notes": "优化失败，返回原始脚本",
-                "success": False
-            }
-                
+            raise ToolError("未生成优化结果", error_code="dialogue_optimize_empty")
+
         except Exception as e:
-            return {
-                "optimized_script": script_text,
-                "success": False,
-                "error": f"对话优化失败: {str(e)}"
-            }
+            raise ToolError(f"对话优化失败: {str(e)}", error_code="dialogue_optimize_failed")
     
     async def _analyze_script_continuity(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """分析脚本连续性"""
@@ -434,8 +629,6 @@ class ScriptGenerationTool(AsyncTool):
             if llm_content:
                 try:
                     analysis_data = json.loads(llm_content)
-                    if "success" not in analysis_data:
-                        analysis_data["success"] = True
                     return analysis_data
                 except json.JSONDecodeError:
                     return {
@@ -443,18 +636,12 @@ class ScriptGenerationTool(AsyncTool):
                         "analysis": llm_content,
                         "weak_points": [],
                         "suggestions": ["基于LLM分析进行优化"],
-                        "success": True
                     }
-            return {
-                "continuity_score": 0.5,
-                "analysis": "连续性分析失败",
-                "suggestions": ["手动检查脚本连贯性"],
-                "success": False
-            }
-                
+            raise ToolError(
+                "连续性分析失败",
+                error_code="continuity_analysis_failed",
+                details={"suggestions": ["手动检查脚本连贯性"]},
+            )
+
         except Exception as e:
-            return {
-                "continuity_score": 0.5,
-                "success": False,
-                "error": f"连续性分析失败: {str(e)}"
-            }
+            raise ToolError(f"连续性分析失败: {str(e)}", error_code="continuity_analysis_failed")

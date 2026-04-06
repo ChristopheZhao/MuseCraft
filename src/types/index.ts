@@ -9,6 +9,7 @@ export interface User {
 // 视频生成相关类型
 export interface VideoRequest {
   id: string;
+  sessionId?: string;
   title: string;
   description: string;
   style: VideoStyle;
@@ -62,6 +63,7 @@ export type AgentType =
   | 'concept-generator'
   | 'script-writer'
   | 'image-generator'
+  | 'video-generator'
   | 'voice-synthesizer'
   | 'video-composer'
   | 'quality-controller';
@@ -111,11 +113,18 @@ export interface WebSocketMessage {
 }
 
 export type MessageType = 
-  | 'agent-status-update'
-  | 'progress-update'
   | 'result-ready'
   | 'error'
-  | 'system-message';
+  | 'system-message'
+  // Backend Event Bus types
+  | 'event.state'
+  | 'event.progress'
+  // Direct transport/system types still consumed by the first-party client
+  | 'task_notification'
+  | 'system_notification'
+  | 'connection_established'
+  | 'subscription_confirmed'
+  ;
 
 // UI状态类型
 export interface UIState {
@@ -163,6 +172,83 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   message?: string;
+}
+
+export interface RuntimeGateDecision {
+  id: number;
+  gate_id: number;
+  action: 'approve' | 'revise' | 'replan' | string;
+  actor_type: string;
+  actor_id?: string | null;
+  feedback_text?: string | null;
+  structured_constraints: Record<string, any>;
+  invalidation_scope: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RuntimeGate {
+  id: number;
+  node_id: number;
+  attempt_id?: number | null;
+  gate_name: string;
+  gate_type: string;
+  status: string;
+  contract_version?: string;
+  artifact_refs: Array<Record<string, any>>;
+  facts: Record<string, any>;
+  result_code?: string | null;
+  reason_code?: string | null;
+  allowed_actions: string[];
+  recommended_action?: string | null;
+  latest_decision?: RuntimeGateDecision | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RuntimeNodeState {
+  id: number;
+  node_key: string;
+  node_type: string;
+  order_index: number;
+  scope_type: string;
+  scope_ref?: string | null;
+  status: string;
+  revision_index: number;
+  gate_required: boolean;
+  last_gate_id?: number | null;
+  artifact_refs: Array<Record<string, any>>;
+  diagnostics: Array<Record<string, any>>;
+}
+
+export interface RuntimeResumeControl {
+  state:
+    | 'waiting_gate'
+    | 'view_only_running'
+    | 'resume_blocked'
+    | 'resume_available'
+    | string;
+  can_resume: boolean;
+  reason_code: string;
+}
+
+export interface TaskRuntimeView {
+  session_id: number;
+  task_db_id: number;
+  mode: string;
+  project_id?: string | null;
+  episode_id?: string | null;
+  shared_memory_id?: string | null;
+  status: string;
+  current_node_key?: string | null;
+  current_attempt_id?: number | null;
+  active_gate?: RuntimeGate | null;
+  error_message?: string | null;
+  summary_output: Record<string, any>;
+  resume_control?: RuntimeResumeControl | null;
+  nodes: RuntimeNodeState[];
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 // 应用配置类型

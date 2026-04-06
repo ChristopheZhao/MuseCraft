@@ -18,8 +18,8 @@ except Exception:  # pragma: no cover
     yaml = None
 
 from ..models.task import TaskType
-from ..agents.memory.base_memory import MemoryType, MemoryImportance
-from .global_memory_service import GlobalMemoryService
+from ..agents.memory.long_term.stores import MemoryType, MemoryImportance
+from .memory_provider import MemoryServices
 from .monitoring_service import MonitoringService, MetricType
 
 
@@ -40,8 +40,13 @@ def _load_yaml(path: str) -> Optional[Dict[str, Any]]:
 
 
 class MemoryWriter:
-    def __init__(self):
-        self._gms = GlobalMemoryService()
+    def __init__(self, memory_services: MemoryServices):
+        if memory_services is None:
+            raise ValueError("memory_services is required for MemoryWriter")
+        self._gms = memory_services.global_service
+        self._long_term = memory_services.long_term
+        if self._long_term is None:
+            raise ValueError("long_term memory service is required for MemoryWriter")
         self._mon = MonitoringService()
         base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "mas")
         self._policy_path = os.path.join(base_dir, "writer_policies.yaml")
@@ -56,6 +61,13 @@ class MemoryWriter:
         output: Dict[str, Any],
     ) -> Optional[str]:
         """Write agent outputs back into memory following simple rules/policies.
+
+        Boundary contract:
+        - this writer persists only explicit long-term fact snapshots and lightweight
+          generation metadata;
+        - it must not become a sink for runtime status, gate decisions, queue state,
+          task_specs, or other control-plane/planning authority.
+        Unknown fields are ignored rather than heuristically persisted.
 
         Returns memory_id when a new item is stored; None otherwise.
         """
@@ -82,7 +94,7 @@ class MemoryWriter:
                         "voice_over_text": output.get("voice_over_text") or output.get("voice_over") or "",
                         "content_development_arc": output.get("content_development_arc") or {},
                     }
-                    mem_id = await self._gms.memory_manager.store_memory(
+                    mem_id = await self._long_term.store_memory(
                         content=payload,
                         memory_type=MemoryType.EPISODIC,
                         importance=MemoryImportance.MEDIUM,
@@ -110,7 +122,7 @@ class MemoryWriter:
                         "per_scene_roles": output.get("per_scene_roles", {}),
                         "timestamp": datetime.now().isoformat(),
                     }
-                    mem_id = await self._gms.memory_manager.store_memory(
+                    mem_id = await self._long_term.store_memory(
                         content=payload,
                         memory_type=MemoryType.EPISODIC,
                         importance=MemoryImportance.HIGH,
@@ -137,7 +149,7 @@ class MemoryWriter:
                         "scene_number": scene_number,
                         "generation_metadata": meta,
                     }
-                    mem_id = await self._gms.memory_manager.store_memory(
+                    mem_id = await self._long_term.store_memory(
                         content=payload,
                         memory_type=MemoryType.WORKING,
                         importance=MemoryImportance.LOW,
@@ -166,4 +178,4 @@ class MemoryWriter:
             return None
 
 
-memory_writer = MemoryWriter()
+memory_writer: Optional[MemoryWriter] = None

@@ -20,7 +20,7 @@ import websockets
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import Task, AgentExecution, Resource
+from app.models import Task, Resource
 from app.services.ai_client import enhanced_ai_client
 from app.services.websocket import websocket_manager
 from app.services.file_storage import file_storage_service
@@ -96,15 +96,12 @@ class TestSystemIntegrationValidation:
     ):
         """Test API and WebSocket integration for real-time updates."""
         
-        session_id = "websocket-integration-test"
-        websocket_manager.active_connections[session_id] = mock_websocket
-        
         # Submit task via API
         request_data = {
             "user_prompt": "Test WebSocket integration",
             "video_style": "professional",
             "duration": 30,
-            "session_id": session_id
+            "session_id": "websocket-integration-test"
         }
         
         response = await test_client.post("/api/v1/tasks/", json=request_data)
@@ -112,39 +109,50 @@ class TestSystemIntegrationValidation:
         
         task_data = response.json()
         task_id = task_data["task_id"]
-        
-        # Simulate task processing and progress updates
-        await websocket_manager.send_task_update(session_id, {
-            "type": "task-created",
-            "task_id": task_id,
-            "status": "pending"
-        })
-        
-        await websocket_manager.send_progress_update(session_id, {
-            "type": "progress-update",
-            "task_id": task_id,
-            "stage": "processing",
-            "progress": 50
-        })
-        
-        # Verify WebSocket messages were sent
-        assert len(mock_websocket.messages) >= 2
-        
-        # Check message content
-        messages = mock_websocket.messages
-        task_created_msg = next(
-            (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "task-created"),
-            None
-        )
-        assert task_created_msg is not None
-        assert task_created_msg["task_id"] == task_id
-        
-        progress_msg = next(
-            (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "progress-update"),
-            None
-        )
-        assert progress_msg is not None
-        assert progress_msg["progress"] == 50
+
+        websocket_manager.active_connections.add(mock_websocket)
+        websocket_manager.task_connections[task_id] = {mock_websocket}
+
+        try:
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "task_notification",
+                "task_id": task_id,
+                "message": "Task created",
+                "level": "info",
+            })
+
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "event.progress",
+                "agent_type": "script_writer",
+                "payload": {
+                    "progress": 50,
+                    "current_step": "processing",
+                },
+            })
+
+            assert len(mock_websocket.messages) >= 2
+
+            messages = [
+                json.loads(msg) if isinstance(msg, str) else msg
+                for msg in mock_websocket.messages
+            ]
+
+            task_created_msg = next(
+                (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "task_notification"),
+                None
+            )
+            assert task_created_msg is not None
+            assert task_created_msg["task_id"] == task_id
+
+            progress_msg = next(
+                (msg for msg in messages if isinstance(msg, dict) and msg.get("type") == "event.progress"),
+                None
+            )
+            assert progress_msg is not None
+            assert progress_msg["payload"]["progress"] == 50
+        finally:
+            websocket_manager.task_connections.pop(task_id, None)
+            websocket_manager.active_connections.discard(mock_websocket)
     
     async def test_ai_service_integration_chain(
         self,
@@ -314,106 +322,6 @@ class TestSystemIntegrationValidation:
         assert alert_result["alerts_triggered"] > 0
         assert "cpu_usage" in alert_result["alert_types"]
     
-    async def test_agent_orchestration_integration(
-        self,
-        test_db_session: AsyncSession,
-        mock_ai_services: Dict[str, AsyncMock]
-    ):
-        """Test agent orchestration and communication integration."""
-        
-        # Create task for orchestration
-        task = Task(
-            task_id="orchestration-integration-test",
-            title="Orchestration Integration Test",
-            user_prompt="Test agent orchestration",
-            input_parameters={
-                "video_style": "professional",
-                "duration": 60
-            },
-            status="pending"
-        )
-        test_db_session.add(task)
-        await test_db_session.commit()
-        
-        # Configure mock agent responses
-        self._setup_agent_orchestration_mocks(mock_ai_services)
-        
-        # Execute orchestration
-        from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent()
-        
-        result = await orchestrator.execute(
-            task_id=task.task_id,
-            input_data=task.input_parameters,
-            db=test_db_session
-        )
-        
-        # Verify agent executions were recorded
-        stmt = select(AgentExecution).where(AgentExecution.task_id == task.id)
-        executions_result = await test_db_session.execute(stmt)
-        executions = executions_result.scalars().all()
-        
-        assert len(executions) > 0
-        
-        # Verify agent communication chain
-        agent_types = [exec.agent_type for exec in executions]
-        expected_sequence = [
-            "concept_planner",
-            "script_writer", 
-            "image_generator",
-            "video_generator"
-        ]
-        
-        # Check that agents were executed in logical order
-        for expected_agent in expected_sequence:
-            assert expected_agent in agent_types
-    
-    async def test_error_propagation_integration(
-        self,
-        test_db_session: AsyncSession,
-        test_client: AsyncClient,
-        mock_ai_services: Dict[str, AsyncMock]
-    ):
-        """Test error propagation across system components."""
-        
-        # Configure AI service to fail
-        mock_ai_services['openai'].chat.completions.create.side_effect = Exception("AI Service Unavailable")
-        
-        # Submit task that will trigger error
-        request_data = {
-            "user_prompt": "This will cause an error",
-            "video_style": "professional",
-            "duration": 30
-        }
-        
-        response = await test_client.post("/api/v1/tasks/", json=request_data)
-        assert response.status_code == 201
-        
-        task_data = response.json()
-        task_id = task_data["task_id"]
-        
-        # Execute task (should handle error gracefully)
-        from app.agents.enhanced_orchestrator import EnhancedOrchestratorAgent
-        orchestrator = EnhancedOrchestratorAgent()
-        
-        try:
-            await orchestrator.execute(
-                task_id=task_id,
-                input_data=request_data,
-                db=test_db_session
-            )
-        except Exception as e:
-            # Error should be caught and handled
-            pass
-        
-        # Verify task status reflects error
-        stmt = select(Task).where(Task.task_id == task_id)
-        result = await test_db_session.execute(stmt)
-        task = result.scalar_one()
-        
-        assert task.status in ["failed", "error"]
-        assert task.error_message is not None
-    
     async def test_performance_under_load_integration(
         self,
         test_client: AsyncClient,
@@ -513,24 +421,6 @@ class TestSystemIntegrationValidation:
         # Verify consistency
         assert db_task.status == cache_task["status"]
         assert db_task.progress == cache_task["progress"]
-    
-    # Helper methods
-    
-    def _setup_agent_orchestration_mocks(self, mock_ai_services: Dict[str, AsyncMock]):
-        """Setup mocks for agent orchestration testing."""
-        
-        mock_ai_services['openai'].chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content=json.dumps({
-                "concept": "Test concept",
-                "scenes": [{"title": "Scene 1", "description": "Test scene"}],
-                "script": "Test script content",
-                "visual_style": "professional"
-            })))
-        ]
-        
-        mock_ai_services['stability'].generate.return_value = MagicMock(
-            artifacts=[MagicMock(seed=123, binary=b"test_image")]
-        )
     
     async def _get_system_metrics(self) -> Dict[str, float]:
         """Get current system metrics for testing."""

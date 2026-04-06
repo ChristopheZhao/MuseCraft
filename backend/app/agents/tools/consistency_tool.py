@@ -1,644 +1,525 @@
-"""Consistency Toolkit - Provides scene/style/character continuity assets.
-
-This tool aggregates consistency-related context from `WorkflowState`,
-concept plans, and scene continuity memory so that downstream agents can
-request ready-to-use prompt assets without hardcoding provider details.
-
-It also allows agents to register references (e.g., extracted frames) back
-to the shared continuity cache in a supplier-agnostic fashion.
-"""
-
+"""ConsistencyTool - gather per-scene prompt assets and continuity hints."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional, List, Tuple, TYPE_CHECKING
 
-from .base_tool import (
-    AsyncTool,
-    ToolMetadata,
-    ToolType,
-    ToolValidationError,
-)
-from ...core.workflow_state import workflow_manager, SceneData
+from .base_tool import BaseTool, ToolMetadata, ToolType, ToolInput, ToolValidationError
 from ...core.scene_continuity_memory import get_scene_continuity_memory
 
+if TYPE_CHECKING:
+    from ..memory.short_term.service import WorkingMemoryService
 
-class ConsistencyTool(AsyncTool):
-    """Tool exposing consistency-aware prompt assets and reference caching."""
+
+class _WMMemoryProvider:
+    """Default memory provider using scene_continuity_memory."""
+
+    async def retrieve_scene_references(self, workflow_state_id: str, scene_number: int, agent_name: str) -> Dict[str, Any]:
+        return {}
+
+    async def retrieve_motion_guidance(self, workflow_state_id: str, scene_number: int, agent_name: str) -> Dict[str, Any]:
+        return {}
+
+    async def store_scene_final_frame(self, scene_number: int, frame_url: str) -> None:
+        memory = get_scene_continuity_memory()
+        await memory.store_scene_final_frame(scene_number, frame_url)
+
+    async def retrieve_previous_frame_url(self, scene_number: int) -> Optional[str]:
+        memory = get_scene_continuity_memory()
+        return await memory.get_previous_scene_final_frame(scene_number)
+
+    async def get_scene_continuity_info(self, workflow_state_id: str, scene_number: int) -> Dict[str, Any]:
+        memory = get_scene_continuity_memory()
+        return await memory.get_scene_continuity_info(scene_number)
+
+
+class ConsistencyTool(BaseTool):
+    """Collects style/character/environment/continuity assets for prompts."""
+
+    def __init__(
+        self,
+        *,
+        facts_provider: Optional[Any] = None,
+        memory_provider: Optional[Any] = None,
+        short_term_service: Optional["WorkingMemoryService"] = None,
+        **kwargs: Any,
+    ):
+        self._short_term_service = short_term_service
+        self._facts_provider = facts_provider
+        self._memory_provider = memory_provider or _WMMemoryProvider()
+        self._asset_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        super().__init__(
+            metadata=ToolMetadata(
+                name="consistency_tool",
+                version="1.0",
+                description="Collect prompt assets for consistency (style/characters/environment/continuity)",
+                tool_type=ToolType.ANALYSIS,
+            ),
+            config=kwargs.get("config"),
+            logger=kwargs.get("logger"),
+        )
 
     @classmethod
     def get_metadata(cls) -> ToolMetadata:
         return ToolMetadata(
             name="consistency_tool",
-            version="1.0.0",
-            description=(
-                "Aggregate style/character continuity assets and register references "
-                "for multi-scene workflows"
-            ),
+            version="1.0",
+            description="Collect prompt assets for consistency (style/characters/environment/continuity)",
             tool_type=ToolType.ANALYSIS,
-            author="system",
-            tags=["consistency", "style", "character", "workflow"],
-            dependencies=[],
-            capabilities=["prompt_asset_lookup", "continuity_reference_cache"],
         )
 
-    def __init__(self, **kwargs):
-        kwargs.pop("metadata", None)
-        metadata = self.get_metadata()
-        super().__init__(metadata=metadata, **kwargs)
-        self._asset_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
-        self._reference_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
-        self._continuity_memory = get_scene_continuity_memory()
-
-    def _initialize(self) -> None:  # pragma: no cover - nothing to initialize yet
-        """Initialize tool resources (none required)."""
+    def _initialize(self):
         return
 
     def get_available_actions(self) -> List[str]:
-        return [
-            "get_prompt_assets",
-            "register_reference",
-            "get_reference_snapshot",
-        ]
+        return ["get_prompt_assets", "register_reference"]
 
-    def get_fc_visibility(self) -> Dict[str, Any]:
-        # Expose read action by default; write action can be opened via policy when needed.
-        return {
-            "expose": True,
-            "allowed_actions": ["get_prompt_assets"],
-        }
-
-    def get_action_stage(self, action: str) -> str:
+    def get_output_contract(self, action: str) -> Dict[str, Any]:
         if action == "get_prompt_assets":
-            return "plan"
-        return "act"
+            # Contract-first: declare how to write tool outputs into agent-scoped WM slots.
+            # NOTE: This is *not* a final artifact/output; it is a prepared/cached input for planning.
+            return {
+                "scene_path": "scene_number",
+                "memory_slots": {
+                    "prepared_assets": {
+                        "enabled": True,
+                        "path": "assets",
+                        "value_spec": {
+                            "fields": {
+                                "style": {
+                                    "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "style_guidelines": {"max_text": 160},
+                                                "headline": {"max_text": 120},
+                                                "style_tags": {"max_items": 8},
+                                                "color_palette": {"max_items": 8},
+                                                "object_guidelines": {"max_text": 160},
+                                            },
+                                        },
+                                        "color_palette": {"max_items": 8},
+                                        "mood": {"max_text": 120},
+                                        "intelligent_style_design": {
+                                            "fields": {
+                                                "style_name": {"max_text": 120},
+                                                "style_description": {"max_text": 240},
+                                                "style_tags": {"max_items": 8},
+                                                "color_palette": {"max_items": 8},
+                                            },
+                                        },
+                                    },
+                                },
+                                "characters": {
+                                    "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "guidelines": {"max_text": 160},
+                                                "stable_traits": {"max_items": 12},
+                                            },
+                                        },
+                                        "scene_cast": {
+                                            "fields": {
+                                                "present": {"max_items": 8},
+                                                "descriptions": {"max_items": 8},
+                                            },
+                                        },
+                                        "characters": {
+                                            "max_items": 8,
+                                            "items": {
+                                                "fields": {
+                                                    "prompt_snippet": {"max_text": 240},
+                                                    "description": {"max_text": 240},
+                                                    "abstract_traits": {"max_items": 12},
+                                                    "key_traits": {"max_items": 12},
+                                                    "traits": {"max_items": 12},
+                                                    "aliases": {"max_items": 8},
+                                                },
+                                            },
+                                        }
+                                    },
+                                },
+                                "environment": {
+                                    "fields": {
+                                        "global_lock": {
+                                            "fields": {
+                                                "guidelines": {"max_text": 160},
+                                            },
+                                        },
+                                        "opening_anchor": {
+                                            "fields": {
+                                                "opening_state": {"max_text": 240},
+                                                "visual_description": {"max_text": 240},
+                                                "mood_and_atmosphere": {"max_text": 160},
+                                                "camera_angle": {"max_text": 120},
+                                                "reference_image": {"max_text": 240},
+                                            },
+                                        },
+                                        "visual_description": {"max_text": 400},
+                                        "narrative_description": {"max_text": 240},
+                                    },
+                                },
+                                "continuity": {
+                                    "fields": {
+                                        "local_continuity": {
+                                            "fields": {
+                                                "enabled": {},
+                                                "depends_on_scene": {},
+                                                "previous_frame_available": {},
+                                                "previous_frame_url": {"max_text": 240},
+                                                "transition_notes": {"max_text": 200},
+                                            },
+                                        },
+                                        "motion_guidance": {
+                                            "max_text": 400,
+                                            "fields": {
+                                                "has_guidance": {},
+                                                "guidance": {"max_text": 400},
+                                                "text": {"max_text": 400},
+                                                "motion_guidance": {"max_text": 400},
+                                            },
+                                            "default_field_spec": {"max_text": 400},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "prepared_assets_diagnostics": {
+                        "enabled": True,
+                        "path": "diagnostics",
+                        "allow_null_scene": True,
+                        "value_spec": {"max_dict_items": 20, "default_field_spec": {"max_text": 200}},
+                    },
+                },
+            }
+        return {}
 
     def get_action_schema(self, action: str) -> Dict[str, Any]:
-        base_schema: Dict[str, Any] = {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": True,
-        }
-
         if action == "get_prompt_assets":
-            base_schema["properties"] = {
-                "scene_number": {
-                    "type": ["integer", "string"],
-                    "description": "Target scene number",
+            return {
+                "type": "object",
+                "properties": {
+                    "scene_number": {"type": "integer"},
+                    "scene_info_ref": {"type": "string"},
+                    "use_cache": {"type": "boolean"},
                 },
-                "workflow_state_id": {
-                    "type": "string",
-                    "description": "WorkflowState identifier (falls back to context if omitted)",
-                },
-                "asset_categories": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional whitelist of asset categories to return",
-                },
-                "use_cache": {
-                    "type": "boolean",
-                    "description": "Allow cached result (default true)",
-                },
+                "required": ["scene_number", "scene_info_ref"],
             }
-            base_schema["required"] = ["scene_number"]
-            base_schema["x-examples"] = [
-                {
-                    "scene_number": 3,
-                    "asset_categories": ["style", "characters", "continuity"],
-                }
-            ]
-        elif action == "register_reference":
-            base_schema["properties"] = {
-                "scene_number": {
-                    "type": ["integer", "string"],
-                    "description": "Scene to associate with the reference",
+        if action == "register_reference":
+            return {
+                "type": "object",
+                "properties": {
+                    "scene_number": {"type": "integer"},
+                    "reference_type": {"type": "string"},
+                    "reference_value": {"type": "string"},
                 },
-                "workflow_state_id": {
-                    "type": "string",
-                    "description": "WorkflowState identifier (optional)",
-                },
-                "reference_type": {
-                    "type": "string",
-                    "description": "Reference category, e.g. final_frame | palette | embedding",
-                },
-                "reference_value": {
-                    "type": ["string", "object"],
-                    "description": "Reference payload (URL/path/structured data)",
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Auxiliary metadata for diagnostics",
-                },
-                "persist_continuity": {
-                    "type": "boolean",
-                    "description": "Store in continuity memory when applicable (default true)",
-                },
+                "required": ["scene_number", "reference_type", "reference_value"],
             }
-            base_schema["required"] = ["scene_number", "reference_type", "reference_value"]
-            base_schema["x-examples"] = [
-                {
-                    "scene_number": 2,
-                    "reference_type": "final_frame",
-                    "reference_value": "https://storage/scene_2_tailframe.jpg",
-                }
-            ]
-        elif action == "get_reference_snapshot":
-            base_schema["properties"] = {
-                "scene_number": {
-                    "type": ["integer", "string"],
-                    "description": "Optional scene filter",
-                },
-                "workflow_state_id": {
-                    "type": "string",
-                    "description": "WorkflowState identifier (optional)",
-                },
-            }
-        return base_schema
+        return {}
+
+    def get_fc_visibility(self) -> Dict[str, Any]:
+        return {"expose": True, "allowed_actions": self.get_available_actions()}
 
     def _validate_action_parameters(self, action: str, parameters: Dict[str, Any]):
-        if action in {"get_prompt_assets", "register_reference"}:
-            if "scene_number" not in parameters:
-                raise ToolValidationError(
-                    "scene_number is required",
-                    tool_name=self.metadata.name,
-                )
-
+        if action == "get_prompt_assets":
+            if parameters.get("scene_number") is None:
+                raise ToolValidationError("scene_number is required", self.metadata.name)
+            if not isinstance(parameters.get("scene_info_ref"), str) or not parameters.get("scene_info_ref"):
+                raise ToolValidationError("scene_info_ref is required", self.metadata.name)
         if action == "register_reference":
-            if not parameters.get("reference_type"):
-                raise ToolValidationError(
-                    "reference_type is required",
-                    tool_name=self.metadata.name,
-                )
-            if "reference_value" not in parameters:
-                raise ToolValidationError(
-                    "reference_value is required",
-                    tool_name=self.metadata.name,
-                )
+            if parameters.get("scene_number") is None:
+                raise ToolValidationError("scene_number is required", self.metadata.name)
+            if not parameters.get("reference_type") or not parameters.get("reference_value"):
+                raise ToolValidationError("reference_type/reference_value is required", self.metadata.name)
 
-    async def _execute_impl(self, tool_input):
+    async def _execute_impl(self, tool_input: ToolInput) -> Any:
         action = tool_input.action
         params = tool_input.parameters or {}
         context = tool_input.context or {}
+        wf_id = str(context.get("workflow_state_id") or params.get("workflow_state_id") or "")
 
         if action == "get_prompt_assets":
-            return await self._handle_get_prompt_assets(params, context)
-        if action == "register_reference":
-            return await self._handle_register_reference(params, context)
-        if action == "get_reference_snapshot":
-            return self._handle_get_reference_snapshot(params, context)
-        raise ToolValidationError(
-            f"Unsupported action '{action}'",
-            tool_name=self.metadata.name,
-        )
-
-    async def _handle_get_prompt_assets(
-        self,
-        params: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        scene_number = self._normalize_scene_number(params.get("scene_number"))
-        requested_categories = self._normalize_categories(params.get("asset_categories"))
-        use_cache = bool(params.get("use_cache", True))
-        workflow_state_id = self._resolve_workflow_state_id(params, context)
-
-        can_cache = bool(workflow_state_id)
-        cache_key: Optional[Tuple[str, int]] = (
-            (workflow_state_id, scene_number) if can_cache else None
-        )
-
-        if use_cache and cache_key and cache_key in self._asset_cache:
-            cached = self._asset_cache[cache_key]
-            await self._ensure_cache_coverage(
-                cache_key,
-                cached,
-                workflow_state_id,
+            scene_number = int(params.get("scene_number") or 0)
+            scene_info_ref = params.get("scene_info_ref") or ""
+            # Default to cache-on for idempotent prompt-asset collection
+            # Read path only: prompt asset collection must not mutate continuity state.
+            use_cache = True if "use_cache" not in params else bool(params.get("use_cache"))
+            payload, diagnostics = await self._collect_assets(
+                wf_id,
+                scene_info_ref,
                 scene_number,
-                requested_categories,
+                use_cache=use_cache,
             )
-            return self._filter_categories(cached, requested_categories)
+            return {
+                "workflow_state_id": wf_id,
+                "scene_number": scene_number,
+                "assets": payload,
+                "diagnostics": diagnostics,
+            }
 
-        assets, diagnostics = await self._build_assets(
+        if action == "register_reference":
+            scene_number = int(params.get("scene_number") or 0)
+            ref_value = params.get("reference_value") or ""
+            # Explicit write path only: register the final-frame reference for later
+            # continuity use without taking runtime/planning ownership.
+            await self._memory_provider.store_scene_final_frame(scene_number, ref_value)
+            for key in list(self._asset_cache.keys()):
+                if isinstance(key, tuple) and len(key) == 2 and key[1] == scene_number:
+                    self._asset_cache.pop(key, None)
+            return {"stored": True, "scene_number": scene_number}
+
+        raise ValueError(f"Unsupported action: {action}")
+
+    async def _collect_assets(
+        self,
+        workflow_state_id: str,
+        scene_info_ref: str,
+        scene_number: int,
+        *,
+        use_cache: bool,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        cache_scope = workflow_state_id or scene_info_ref
+        cache_key = (cache_scope, scene_number)
+        diagnostics: Dict[str, Any] = {
+            "cached_full": False,
+            "cached_categories": [],
+            "source": "scene_info_ref",
+            "scene_info_ref": scene_info_ref,
+        }
+        if use_cache and cache_key in self._asset_cache:
+            diagnostics["cached_full"] = True
+            diagnostics["cached_categories"] = list(self._asset_cache[cache_key].keys())
+            return self._asset_cache[cache_key], diagnostics
+
+        scene_info = self._load_scene_info(scene_info_ref)
+        scene_entry = self._extract_scene_entry(scene_info, scene_number) or {}
+        previous_frame_url = await self._memory_provider.retrieve_previous_frame_url(scene_number)
+        continuity_info = await self._memory_provider.get_scene_continuity_info(
             workflow_state_id,
             scene_number,
-            requested_categories,
         )
-        diagnostics["cached_categories"] = list(assets.keys())
-        diagnostics["cached_full"] = requested_categories is None
-        diagnostics["cache_enabled"] = can_cache
-        result = {
-            "scene_number": scene_number,
-            "workflow_state_id": workflow_state_id,
-            "assets": assets,
-            "diagnostics": diagnostics,
-        }
-        if cache_key:
-            self._asset_cache[cache_key] = result
-        return self._filter_categories(result, requested_categories)
-
-    async def _handle_register_reference(
-        self,
-        params: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        scene_number = self._normalize_scene_number(params.get("scene_number"))
-        workflow_state_id = self._resolve_workflow_state_id(params, context)
-        reference_type = str(params.get("reference_type") or "").strip()
-        reference_value = params.get("reference_value")
-        metadata = params.get("metadata") or {}
-        persist = params.get("persist_continuity", True)
-
-        can_cache = bool(workflow_state_id)
-        cache_key: Optional[Tuple[str, int]] = (
-            (workflow_state_id, scene_number) if can_cache else None
-        )
-
-        if cache_key:
-            bucket = self._reference_cache.setdefault(cache_key, {})
-            bucket[reference_type] = {
-                "value": reference_value,
-                "metadata": metadata,
-            }
-
-        if persist and reference_type in {"final_frame", "continuity_frame"}:
-            await self._persist_continuity_reference(scene_number, reference_value)
-
-        # 一致性引用更新后，移除相关缓存，确保后续查询获取最新数据
-        if cache_key:
-            self._asset_cache.pop(cache_key, None)
-
-        return {
-            "scene_number": scene_number,
-            "workflow_state_id": workflow_state_id,
-            "reference_type": reference_type,
-            "stored": True,
-        }
-
-    def _handle_get_reference_snapshot(
-        self,
-        params: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        workflow_state_id = self._resolve_workflow_state_id(params, context)
-        scene_number = params.get("scene_number")
-        scene_key = None
-        if scene_number is not None and workflow_state_id:
-            scene_key = (workflow_state_id, self._normalize_scene_number(scene_number))
-
-        if scene_key:
-            return {
-                "scene_number": scene_key[1],
-                "workflow_state_id": workflow_state_id,
-                "references": self._reference_cache.get(scene_key, {}),
-            }
-
-        # Return a lightweight snapshot of all cached references.
-        payload = {
-            "workflow_state_id": workflow_state_id,
-            "entries": [
-                {
-                    "scene_number": key[1],
-                    "references": value,
-                }
-                for key, value in self._reference_cache.items()
-                if workflow_state_id is None or key[0] == workflow_state_id
-            ],
-        }
-        return payload
-
-    async def _build_assets(
-        self,
-        workflow_state_id: Optional[str],
-        scene_number: int,
-        asset_categories: Optional[List[str]],
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        workflow_state = workflow_manager.get_workflow(workflow_state_id) if workflow_state_id else None
-        scene = self._resolve_scene(workflow_state, scene_number)
-
-        diagnostics: Dict[str, Any] = {
-            "workflow_state_found": workflow_state is not None,
-            "scene_found": scene is not None,
-        }
 
         assets: Dict[str, Any] = {}
+        assets["style"] = self._extract_style_assets(scene_info)
+        assets["characters"] = self._extract_character_assets(scene_info, scene_entry)
+        assets["environment"] = self._extract_environment_assets(scene_info, scene_entry, scene_number)
+        assets["continuity"] = self._extract_continuity_assets(
+            scene_entry,
+            continuity_info=continuity_info,
+            previous_frame_url=previous_frame_url,
+        )
 
-        if self._include_category(asset_categories, "style"):
-            assets["style"] = self._collect_style_assets(workflow_state, scene)
-
-        if self._include_category(asset_categories, "characters"):
-            assets["characters"] = self._collect_character_assets(workflow_state, scene)
-
-        if self._include_category(asset_categories, "environment"):
-            assets["environment"] = self._collect_environment_assets(workflow_state, scene)
-
-        if self._include_category(asset_categories, "continuity"):
-            assets["continuity"] = await self._collect_continuity_assets(scene_number)
-
-        diagnostics["categories"] = list(assets.keys())
+        self._asset_cache[cache_key] = assets
+        diagnostics["cached_categories"] = list(assets.keys())
         return assets, diagnostics
 
-    def _collect_style_assets(
-        self,
-        workflow_state,
-        scene: Optional[SceneData],
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-
-        if workflow_state:
-            style_design = getattr(workflow_state, "intelligent_style_design", None)
-            if isinstance(style_design, dict):
-                result["intelligent_style_design"] = {
-                    key: value
-                    for key, value in style_design.items()
-                    if isinstance(value, (str, list, dict)) and value
-                }
-
-            consistency_hints = getattr(workflow_state, "consistency_hints", None)
-            if isinstance(consistency_hints, dict) and consistency_hints:
-                result["consistency_hints"] = consistency_hints
-
-            concept_plan = getattr(workflow_state, "concept_plan", None)
-            if isinstance(concept_plan, dict):
-                guidelines = concept_plan.get("consistency_guidelines")
-                if isinstance(guidelines, dict) and guidelines:
-                    result["consistency_guidelines"] = guidelines
-
-        if scene:
-            palette = getattr(scene, "color_palette", None)
-            if palette:
-                result["color_palette"] = list(palette)
-            art_style = getattr(scene, "art_style", None)
-            if art_style:
-                result.setdefault("scene_modifiers", {})["art_style"] = art_style
-            lighting = getattr(scene, "lighting_style", None)
-            if lighting:
-                result.setdefault("scene_modifiers", {})["lighting"] = lighting
-
-        return result
-
-    def _collect_character_assets(
-        self,
-        workflow_state,
-        scene: Optional[SceneData],
-    ) -> Dict[str, Any]:
-        characters: List[Dict[str, Any]] = []
-        character_notes: List[str] = []
-
-        scene_names = []
-        scene_descriptions = []
-        if scene:
-            scene_names = [
-                str(name).strip()
-                for name in getattr(scene, "characters_present", []) or []
-                if str(name).strip()
-            ]
-            scene_descriptions = [
-                str(desc).strip()
-                for desc in getattr(scene, "character_descriptions", []) or []
-                if str(desc).strip()
-            ]
-
-        concept_plan = getattr(workflow_state, "concept_plan", None) if workflow_state else None
-        role_manifest = []
-        if isinstance(concept_plan, dict):
-            role_manifest = concept_plan.get("roles") or concept_plan.get("role_manifest") or []
-
-        # Helper to normalize definition lookups
-        def match_role(name: str) -> Optional[Dict[str, Any]]:
-            normalized = name.lower()
-            for candidate in role_manifest:
-                if not isinstance(candidate, dict):
-                    continue
-                aliases = candidate.get("aliases") or []
-                names_to_check = [candidate.get("name"), candidate.get("display_name")] + aliases
-                for item in names_to_check:
-                    if isinstance(item, str) and item.lower() == normalized:
-                        return candidate
-            return None
-
-        for name in scene_names:
-            role_entry = match_role(name)
-            entry: Dict[str, Any] = {"name": name}
-
-            if role_entry:
-                for key in [
-                    "display_name",
-                    "archetype_or_identity",
-                    "signature_outfit_or_props",
-                    "key_traits",
-                    "species_or_breed",
-                ]:
-                    value = role_entry.get(key)
-                    if value:
-                        entry[key] = value
-                prompt_snippet = role_entry.get("prompt_snippet")
-                if prompt_snippet:
-                    character_notes.append(str(prompt_snippet))
-
-            if scene_descriptions:
-                entry.setdefault("descriptions", list(scene_descriptions))
-
-            characters.append(entry)
-
-        if not characters and scene_descriptions:
-            characters.append({"name": "scene_characters", "descriptions": list(scene_descriptions)})
-
-        result: Dict[str, Any] = {"characters": characters}
-
-        if concept_plan:
-            guidelines = concept_plan.get("consistency_guidelines")
-            if isinstance(guidelines, dict):
-                char_guideline = guidelines.get("character_consistency")
-                if isinstance(char_guideline, str) and char_guideline.strip():
-                    character_notes.append(char_guideline.strip())
-
-        if character_notes:
-            result["guidance"] = character_notes
-
-        return result
-
-    def _collect_environment_assets(
-        self,
-        workflow_state,
-        scene: Optional[SceneData],
-    ) -> Dict[str, Any]:
-        environment: Dict[str, Any] = {}
-
-        if scene:
-            environment["title"] = getattr(scene, "title", "")
-            environment["visual_description"] = getattr(scene, "visual_description", "")
-            environment["narrative_description"] = getattr(scene, "narrative_description", "")
-            environment["props"] = list(getattr(scene, "props_and_objects", []) or [])
-
-        concept_plan = getattr(workflow_state, "concept_plan", None) if workflow_state else None
-        if isinstance(concept_plan, dict):
-            guidelines = concept_plan.get("consistency_guidelines")
-            if isinstance(guidelines, dict):
-                env_guideline = guidelines.get("environment_consistency")
-                if env_guideline:
-                    environment["guidance"] = env_guideline
-
-        return environment
-
-    async def _collect_continuity_assets(self, scene_number: int) -> Dict[str, Any]:
-        info = await self._continuity_memory.get_scene_continuity_info(scene_number)
-        return info or {}
-
-    async def _persist_continuity_reference(self, scene_number: int, reference_value: Any) -> None:
-        if reference_value is None:
-            return
+    def _load_scene_info(self, ref: str) -> Dict[str, Any]:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ToolValidationError("scene_info_ref is empty", self.metadata.name)
+        path = ref.strip()
+        if path.startswith("file://"):
+            path = path[len("file://"):]
+        candidate_paths: List[Path] = []
         try:
-            if isinstance(reference_value, str):
-                await self._continuity_memory.store_scene_final_frame(scene_number, reference_value)
-        except Exception as exc:  # pragma: no cover - guardrail
-            self.logger.warning(
-                "Failed to persist continuity reference for scene %s: %s",
-                scene_number,
-                exc,
-            )
+            candidate = Path(path)
+        except Exception as exc:
+            raise ToolValidationError(f"scene_info_ref parse failed: {exc}", self.metadata.name) from exc
+        if candidate is not None:
+            if candidate.is_absolute():
+                candidate_paths.append(candidate)
+            else:
+                candidate_paths.append(candidate)
+                try:
+                    backend_root = Path(__file__).resolve().parents[3]
+                    candidate_paths.append(backend_root / candidate)
+                except Exception:
+                    pass
+        resolved_path = None
+        for cand in candidate_paths:
+            try:
+                if cand and cand.exists():
+                    resolved_path = cand
+                    break
+            except Exception:
+                continue
+        if resolved_path is None:
+            raise ToolValidationError(f"scene_info_ref not found: {path}", self.metadata.name)
+        try:
+            payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ToolValidationError(f"scene_info_ref load failed: {exc}", self.metadata.name) from exc
+        if not isinstance(payload, dict):
+            raise ToolValidationError("scene_info_ref must be a JSON object", self.metadata.name)
+        return payload
 
-    def _resolve_workflow_state_id(
-        self,
-        params: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Optional[str]:
-        candidate = params.get("workflow_state_id") or context.get("workflow_state_id")
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+    def _extract_scene_entry(self, scene_info: Dict[str, Any], scene_number: int) -> Optional[Dict[str, Any]]:
+        sn = self._coerce_int(scene_number)
+        if sn is None:
+            return None
+        for source in (
+            scene_info.get("scenes_to_generate") or [],
+            (scene_info.get("scene_overview") or {}).get("scenes") or [],
+            (scene_info.get("concept_plan") or {}).get("scenes") or [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for scene in source:
+                if not isinstance(scene, dict):
+                    continue
+                if self._coerce_int(scene.get("scene_number")) == sn:
+                    return scene
         return None
 
-    def _normalize_scene_number(self, value: Any) -> int:
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.strip():
-            try:
-                return int(value.strip())
-            except ValueError as exc:
-                raise ToolValidationError(
-                    f"Invalid scene_number: {value}",
-                    tool_name=self.metadata.name,
-                ) from exc
-        raise ToolValidationError(
-            "scene_number must be int or numeric string",
-            tool_name=self.metadata.name,
-        )
+    def _extract_style_assets(self, scene_info: Dict[str, Any]) -> Dict[str, Any]:
+        style_assets: Dict[str, Any] = {}
+        concept_plan = scene_info.get("concept_plan") or {}
+        design = {}
+        guidelines = {}
+        if isinstance(concept_plan, dict):
+            if concept_plan.get("consistency_guidelines"):
+                guidelines = concept_plan.get("consistency_guidelines") or {}
+                style_assets["consistency_guidelines"] = guidelines
+            if concept_plan.get("intelligent_style_design"):
+                design = concept_plan.get("intelligent_style_design") or {}
+                style_assets["intelligent_style_design"] = design
+        if scene_info.get("intelligent_style"):
+            style_assets["intelligent_style"] = scene_info.get("intelligent_style") or {}
+        if scene_info.get("intelligent_style_design") and "intelligent_style_design" not in style_assets:
+            design = scene_info.get("intelligent_style_design") or {}
+            style_assets["intelligent_style_design"] = design
+        style_assets["global_lock"] = {
+            "style_guidelines": str((guidelines or {}).get("style_consistency") or "").strip(),
+            "headline": str((design or {}).get("headline") or (design or {}).get("summary") or (design or {}).get("style_name") or "").strip(),
+            "style_tags": list((design or {}).get("style_tags") or (design or {}).get("tags") or []),
+            "color_palette": list((design or {}).get("color_palette") or []),
+            "object_guidelines": str((guidelines or {}).get("object_consistency") or "").strip(),
+        }
+        return style_assets
 
-    def _resolve_scene(
-        self,
-        workflow_state,
-        scene_number: int,
-    ) -> Optional[SceneData]:
-        if workflow_state is None:
-            return None
-        try:
-            return workflow_state.get_scene(scene_number)
-        except Exception:
-            return None
-
-    async def _ensure_cache_coverage(
-        self,
-        cache_key: Tuple[str, int],
-        cached_entry: Dict[str, Any],
-        workflow_state_id: Optional[str],
-        scene_number: int,
-        requested_categories: Optional[List[str]],
-    ) -> None:
-        diagnostics = dict(cached_entry.get("diagnostics", {}))
-        cached_assets = dict(cached_entry.get("assets", {}))
-        cached_categories = set(
-            diagnostics.get("cached_categories")
-            or diagnostics.get("categories")
-            or cached_assets.keys()
-        )
-
-        if not requested_categories:
-            if diagnostics.get("cached_full"):
-                return
-            assets_update, diag_update = await self._build_assets(
-                workflow_state_id,
-                scene_number,
-                None,
-            )
-            cached_assets.update(assets_update)
-            diagnostics.update(diag_update)
-            cached_categories = set(cached_assets.keys())
-            diagnostics["categories"] = sorted(cached_categories)
-            diagnostics["cached_categories"] = sorted(cached_categories)
-            diagnostics["cached_full"] = True
-            cached_entry["assets"] = cached_assets
-            cached_entry["diagnostics"] = diagnostics
-            self._asset_cache[cache_key] = cached_entry
-            return
-
-        requested_set = set(requested_categories)
-        missing = requested_set - cached_categories
-        if not missing:
-            return
-
-        assets_update, diag_update = await self._build_assets(
-            workflow_state_id,
-            scene_number,
-            list(missing),
-        )
-        cached_assets.update(assets_update)
-        diagnostics.update(diag_update)
-        cached_categories = set(cached_assets.keys())
-        diagnostics["categories"] = sorted(cached_categories)
-        diagnostics["cached_categories"] = sorted(cached_categories)
-        diagnostics["cached_full"] = diagnostics.get("cached_full", False)
-        cached_entry["assets"] = cached_assets
-        cached_entry["diagnostics"] = diagnostics
-        self._asset_cache[cache_key] = cached_entry
-
-    def _normalize_categories(self, categories: Any) -> Optional[List[str]]:
-        if categories is None:
-            return None
-        if isinstance(categories, (list, tuple, set)):
-            raw = [str(cat).strip() for cat in categories if str(cat).strip()]
-        else:
-            normalized = str(categories).strip()
-            raw = [normalized] if normalized else []
-
-        seen = set()
-        ordered: List[str] = []
-        for item in raw:
-            if item and item not in seen:
-                seen.add(item)
-                ordered.append(item)
-        return ordered or None
-
-    def _include_category(
-        self,
-        requested: Optional[List[str]],
-        category: str,
-    ) -> bool:
-        if not requested:
-            return True
-        return category in requested
-
-    def _filter_categories(
-        self,
-        cached_result: Dict[str, Any],
-        requested_categories: Optional[List[str]],
-    ) -> Dict[str, Any]:
-        source_assets = cached_result.get("assets", {}) or {}
-        if requested_categories:
-            filtered_assets = {
-                key: value
-                for key, value in source_assets.items()
-                if key in requested_categories
-            }
-        else:
-            filtered_assets = dict(source_assets)
-
-        original_diag = cached_result.get("diagnostics", {}) or {}
-        diagnostics = dict(original_diag)
-        diagnostics["categories"] = list(filtered_assets.keys())
-
+    def _extract_character_assets(self, scene_info: Dict[str, Any], scene_entry: Dict[str, Any]) -> Dict[str, Any]:
+        concept_plan = scene_info.get("concept_plan") or {}
+        characters: List[Dict[str, Any]] = []
+        if isinstance(concept_plan, dict):
+            for role in concept_plan.get("roles") or []:
+                if isinstance(role, dict):
+                    characters.append(role)
+        present = scene_entry.get("characters_present") or []
+        descriptions = scene_entry.get("character_descriptions") or []
+        guidelines = ""
+        if isinstance(concept_plan, dict):
+            guidelines = (concept_plan.get("consistency_guidelines") or {}).get("character_consistency", "")
+        stable_traits: List[str] = []
+        for role in characters:
+            if not isinstance(role, dict):
+                continue
+            for key in ("abstract_traits", "key_traits", "traits"):
+                values = role.get(key)
+                if isinstance(values, list):
+                    stable_traits.extend(str(item).strip() for item in values if str(item).strip())
         return {
-            "scene_number": cached_result.get("scene_number"),
-            "workflow_state_id": cached_result.get("workflow_state_id"),
-            "assets": filtered_assets,
-            "diagnostics": diagnostics,
+            "characters": characters,
+            "present": present,
+            "descriptions": descriptions,
+            "guidelines": guidelines,
+            "global_lock": {
+                "guidelines": str(guidelines or "").strip(),
+                "stable_traits": list(dict.fromkeys(stable_traits))[:12],
+            },
+            "scene_cast": {
+                "present": list(present) if isinstance(present, list) else [],
+                "descriptions": list(descriptions) if isinstance(descriptions, list) else [],
+            },
         }
 
+    def _extract_environment_assets(
+        self,
+        scene_info: Dict[str, Any],
+        scene_entry: Dict[str, Any],
+        scene_number: int,
+    ) -> Dict[str, Any]:
+        env: Dict[str, Any] = {
+            "scene_number": scene_number,
+            "visual_description": "",
+            "narrative_description": "",
+            "guidelines": "",
+            "global_lock": {
+                "guidelines": "",
+            },
+            "opening_anchor": {
+                "opening_state": "",
+                "visual_description": "",
+                "mood_and_atmosphere": "",
+                "camera_angle": "",
+                "reference_image": "",
+            },
+        }
+        if isinstance(scene_entry, dict) and scene_entry:
+            env.update(
+                {
+                    "visual_description": scene_entry.get("visual_description", ""),
+                    "narrative_description": scene_entry.get("narrative_description", ""),
+                }
+            )
+            env["opening_anchor"] = {
+                "opening_state": scene_entry.get("opening_state") or scene_entry.get("visual_description") or "",
+                "visual_description": scene_entry.get("visual_description", ""),
+                "mood_and_atmosphere": scene_entry.get("mood_and_atmosphere", ""),
+                "camera_angle": scene_entry.get("camera_angle") or scene_entry.get("camera_language") or "",
+                "reference_image": scene_entry.get("image_url") or "",
+            }
+        concept_plan = scene_info.get("concept_plan") or {}
+        if isinstance(concept_plan, dict):
+            guidelines = (concept_plan.get("consistency_guidelines") or {}).get("environment_consistency", "")
+            if isinstance(guidelines, str) and guidelines.strip():
+                env["guidelines"] = guidelines.strip()
+                env["global_lock"]["guidelines"] = guidelines.strip()
+        return env
 
-__all__ = ["ConsistencyTool"]
+    def _extract_continuity_assets(
+        self,
+        scene_entry: Dict[str, Any],
+        *,
+        continuity_info: Optional[Dict[str, Any]] = None,
+        previous_frame_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        depends_on = None
+        if isinstance(scene_entry, dict):
+            depends_on = scene_entry.get("depends_on_scene") or scene_entry.get("depends_on")
+        try:
+            depends_on = int(depends_on) if depends_on is not None else None
+        except Exception:
+            depends_on = None
+        continuity_info = continuity_info or {}
+        previous_frame_url = previous_frame_url or continuity_info.get("previous_frame_path") or continuity_info.get("previous_frame_url")
+        transition_notes = (
+            scene_entry.get("continuity_reason")
+            or continuity_info.get("transition_notes")
+            or continuity_info.get("reason")
+            or ""
+        )
+        enabled = bool(
+            continuity_info.get("requires_continuity")
+            or depends_on is not None
+            or previous_frame_url
+        )
+        return {
+            "depends_on_scene": depends_on,
+            "local_continuity": {
+                "enabled": enabled,
+                "depends_on_scene": depends_on,
+                "previous_frame_available": bool(previous_frame_url),
+                "previous_frame_url": str(previous_frame_url or "").strip(),
+                "transition_notes": str(transition_notes or "").strip(),
+            },
+            "motion_guidance": continuity_info.get("motion_guidance") or {},
+        }
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None

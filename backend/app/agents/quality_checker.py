@@ -7,9 +7,8 @@ from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentExecution, AgentType, Resource, ResourceType
-from ..services.ai_client import AIClient
-from ..services.file_storage import FileStorageService
+from ..models import Task, AgentType
+from .utils.media_runtime import resolve_local_public_path
 
 
 class QualityCheckerAgent(BaseAgent):
@@ -18,110 +17,79 @@ class QualityCheckerAgent(BaseAgent):
     and adherence to requirements
     """
     
-    def __init__(self, llms=None):
+    def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.QUALITY_CHECKER,
             agent_name="quality_checker",
             timeout_seconds=180,  # 3 minutes for quality analysis
             max_retries=1,
             tools=["quality_analysis_tool"],  # 🚀 Phase 1.3 - 使用原子性质量分析工具
-            llms=llms
+            llms=llms,
+            memory_services=memory_services,
         )
-        # 移除直接AI客户端依赖
-        self.file_storage = FileStorageService()
     
     async def _execute_impl(
         self, 
         task: Task, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution,
         db: Session
     ) -> Dict[str, Any]:
         """Perform comprehensive quality check on the final video"""
         
         # Validate input
         self._validate_input(input_data, ["workflow_state_id"])
+
+        quality_inputs = self._require_quality_inputs(input_data)
+        view = quality_inputs["scene_overview"]
+        concept_plan = quality_inputs["concept_plan"]
+        original_requirements = quality_inputs["original_requirements"]
+        final_video_url = quality_inputs["final_video_url"]
+        final_video_path = quality_inputs["final_video_path"]
+        composition_timeline = quality_inputs["composition_timeline"]
+        video_metadata = quality_inputs["video_metadata"]
+        context_diagnostics = quality_inputs["context_diagnostics"]
+
+        await self._update_progress(10, "Loading final video from workflow", db)
+
+        if not (final_video_path or final_video_url):
+            raise AgentError(
+                f"No final video content available for quality check "
+                f"(diagnostics={context_diagnostics})"
+            )
         
-        workflow_state_id = input_data["workflow_state_id"]
-        
-        # 🧠 Phase 1.2 - 实现MAS记忆共享：QualityChecker检索创意指导和质量标准
-        original_concept_plan = {}
-        try:
-            retrieved_guidance = await self.retrieve_creative_guidance(workflow_state_id)
-            if retrieved_guidance:
-                original_concept_plan = retrieved_guidance
-                self.logger.info(f"🧠 QualityChecker: 成功检索到原始创意指导，用于质量对比验证")
-            else:
-                self.logger.warning(f"⚠️ QualityChecker: 未找到创意指导记忆，无法进行原始需求对比")
-        except Exception as e:
-            self.logger.warning(f"⚠️ QualityChecker: 记忆检索失败 - {e}")
-        
-        # 通过 workflow_manager 获取 WorkflowState
-        from ..core.workflow_state import workflow_manager
-        workflow_state = workflow_manager.get_workflow(workflow_state_id)
-        if not workflow_state:
-            raise AgentError(f"WorkflowState {workflow_state_id} not found")
-        
-        await self._update_progress(execution, 10, "Loading final video from workflow", db)
-        
-        # Get final video from WorkflowState
-        final_video_url = workflow_state.final_video_url
-        concept_plan = workflow_state.concept_plan
-        composition_timeline = workflow_state.composition_timeline or []
-        video_metadata = workflow_state.video_metadata or {}
-        
-        if not final_video_url:
-            # If no final video, try to get from scenes (fallback)
-            scenes_data = workflow_state.scenes
-            if scenes_data and len(scenes_data) > 0:
-                # Use first scene video as temporary final video for quality check
-                first_scene = scenes_data[0]
-                if first_scene.video_url:
-                    final_video_url = first_scene.video_url
-                    self.logger.warning("Using first scene video for quality check - no final composed video available")
-                else:
-                    # 检查是否有图像可用（降级场景）
-                    if any(scene.image_path or scene.image_url for scene in scenes_data):
-                        self.logger.warning("No videos available, performing image-based quality check")
-                        return await self._perform_image_based_quality_check(scenes_data, input_data, execution, db)
-                    else:
-                        raise AgentError("No video content available for quality check")
-            else:
-                raise AgentError("No video content found in workflow state")
-        
-        await self._update_progress(execution, 20, "Performing technical analysis", db)
+        await self._update_progress(20, "Performing technical analysis", db)
         
         # Perform technical quality checks
         technical_quality = await self._analyze_technical_quality(
-            final_video_url, video_metadata
+            final_video_path or final_video_url, video_metadata
         )
         
-        await self._update_progress(execution, 40, "Analyzing content quality", db)
+        await self._update_progress(40, "Analyzing content quality", db)
         
         # Perform content quality analysis
         content_quality = await self._analyze_content_quality(
             concept_plan,
             composition_timeline,
-            final_video_url,
-            original_concept_plan,
+            final_video_url or final_video_path,
+            original_requirements,
             video_metadata
         )
         
-        await self._update_progress(execution, 60, "Checking requirement compliance", db)
+        await self._update_progress(60, "Checking requirement compliance", db)
         
         # Check compliance with original requirements
         compliance_check = await self._check_requirement_compliance(
             task, concept_plan, composition_timeline, video_metadata
         )
         
-        await self._update_progress(execution, 80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report", db)
         
         # Generate overall quality score and recommendations
         quality_assessment = await self._generate_quality_assessment(
-            technical_quality, content_quality, compliance_check, execution
+            technical_quality, content_quality, compliance_check
         )
         
-        await self._update_progress(execution, 95, "Finalizing quality check", db)
+        await self._update_progress(95, "Finalizing quality check", db)
         
         # Update task with quality information
         task.quality_score = quality_assessment["overall_score"]
@@ -138,36 +106,94 @@ class QualityCheckerAgent(BaseAgent):
             "compliance_check": compliance_check,
             "quality_assessment": quality_assessment,
             "recommendations": quality_assessment["recommendations"],
-            "approval_status": quality_assessment["approval_status"]
+            "approval_status": quality_assessment["approval_status"],
+            "input_diagnostics": context_diagnostics,
         }
         
-        await self._update_progress(execution, 100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed", db)
         
         return output_data
+
+    def _require_quality_inputs(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        static_context = input_data.get("static_context") if isinstance(input_data, dict) else {}
+        if not isinstance(static_context, dict) or not static_context:
+            raise AgentError(
+                "quality_checker static_context missing; orchestrator/context assembler boundary is required"
+            )
+
+        final_video = static_context.get("final_video")
+        final_video = dict(final_video) if isinstance(final_video, dict) else {}
+        final_video_path = str(final_video.get("path") or "").strip()
+        final_video_url = str(final_video.get("url") or "").strip()
+        if not final_video_path and final_video_url:
+            final_video_path = resolve_local_public_path(final_video_url)
+
+        diagnostics = static_context.get("context_diagnostics")
+        diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+        if diagnostics:
+            status = str(diagnostics.get("status") or "").strip().lower()
+            if status and status != "resolved":
+                self.logger.warning("quality_checker boundary diagnostics: %s", diagnostics)
+
+        scene_overview = static_context.get("scene_overview")
+        concept_plan = static_context.get("concept_plan")
+        original_requirements = static_context.get("original_requirements")
+        composition_timeline = static_context.get("composition_timeline")
+        video_metadata = static_context.get("video_metadata")
+
+        return {
+            "scene_overview": dict(scene_overview) if isinstance(scene_overview, dict) else {"scenes": []},
+            "concept_plan": dict(concept_plan) if isinstance(concept_plan, dict) else {},
+            "original_requirements": (
+                dict(original_requirements)
+                if isinstance(original_requirements, dict)
+                else {}
+            ),
+            "final_video_path": final_video_path,
+            "final_video_url": final_video_url,
+            "composition_timeline": (
+                list(composition_timeline)
+                if isinstance(composition_timeline, list)
+                else []
+            ),
+            "video_metadata": dict(video_metadata) if isinstance(video_metadata, dict) else {},
+            "context_diagnostics": diagnostics,
+        }
     
     async def _perform_image_based_quality_check(
         self, 
         scenes_data: List, 
         input_data: Dict[str, Any], 
-        execution: AgentExecution, 
         db: Session
     ) -> Dict[str, Any]:
         """对图像进行质量检查（当没有视频时的降级方案）"""
         
-        await self._update_progress(execution, 30, "Analyzing image quality", db)
+        await self._update_progress(30, "Analyzing image quality", db)
         
-        # 收集所有可用图像
+        # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
         available_images = []
         for scene in scenes_data:
-            if scene.image_path or scene.image_url:
-                available_images.append({
-                    "scene_number": scene.scene_number,
-                    "image_path": scene.image_path,
-                    "image_url": scene.image_url,
-                    "description": getattr(scene, 'visual_description', '')
-                })
+            if isinstance(scene, dict):
+                url = scene.get("image_url", "") or ""
+                path = scene.get("image_path", "") or ""
+                desc = scene.get("visual_description", "") or ""
+                sn = scene.get("scene_number")
+            else:
+                url = getattr(scene, "image_url", "") or ""
+                path = getattr(scene, "image_path", "") if hasattr(scene, "image_path") else ""
+                desc = getattr(scene, "visual_description", "") or ""
+                sn = getattr(scene, "scene_number", None)
+            if path or url:
+                available_images.append(
+                    {
+                        "scene_number": sn,
+                        "image_path": path,
+                        "image_url": url,
+                        "description": desc,
+                    }
+                )
         
-        await self._update_progress(execution, 60, "Evaluating content appropriateness", db)
+        await self._update_progress(60, "Evaluating content appropriateness", db)
         
         # 简化的质量检查
         quality_score = 75  # 图像质量默认分数
@@ -185,7 +211,7 @@ class QualityCheckerAgent(BaseAgent):
             if any(word in description for word in ["violent", "inappropriate", "explicit"]):
                 content_issues.append(f"Scene {img['scene_number']} may contain inappropriate content")
         
-        await self._update_progress(execution, 80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report", db)
         
         # 生成建议
         suggestions = []
@@ -224,7 +250,7 @@ class QualityCheckerAgent(BaseAgent):
             "fallback_reason": "no_videos_available"
         }
         
-        await self._update_progress(execution, 100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed", db)
         
         return output_data
     
@@ -248,6 +274,8 @@ class QualityCheckerAgent(BaseAgent):
         # Check file exists and is accessible
         # Convert URL to local path if needed
         video_path = video_url.replace("file://", "") if video_url.startswith("file://") else video_url
+        if video_path.startswith("/files/"):
+            video_path = resolve_local_public_path(video_path) or video_path
         if not os.path.exists(video_path):
             technical_checks["file_integrity"] = False
             issues.append("Video file not found or inaccessible")
@@ -322,13 +350,16 @@ class QualityCheckerAgent(BaseAgent):
             issues.append(f"Missing scenes: expected {expected_scenes}, got {actual_scenes}")
         
         # Analyze scene types distribution
-        scene_types = [entry.get("scene_type", "main_content") for entry in composition_timeline]
-        
-        if "intro" not in scene_types:
-            issues.append("Missing introduction scene")
-        
-        if "outro" not in scene_types and len(composition_timeline) > 2:
-            issues.append("Missing conclusion scene")
+        scene_type_evidence = self._analyze_scene_type_evidence(composition_timeline)
+        explicit_scene_types = scene_type_evidence["explicit_scene_types"]
+        intro_outro_check_applied = scene_type_evidence["label_status"] == "complete"
+
+        if intro_outro_check_applied:
+            if "intro" not in explicit_scene_types:
+                issues.append("Missing introduction scene")
+            
+            if "outro" not in explicit_scene_types and len(composition_timeline) > 2:
+                issues.append("Missing conclusion scene")
         
         # Calculate content score
         passed_checks = sum(1 for check in content_analysis.values() if check)
@@ -347,8 +378,12 @@ class QualityCheckerAgent(BaseAgent):
             "analysis": content_analysis,
             "issues": issues,
             "scene_breakdown": self._analyze_scene_breakdown(composition_timeline),
+            "scene_type_diagnostics": {
+                **scene_type_evidence,
+                "intro_outro_check_applied": intro_outro_check_applied,
+            },
             "ai_analysis": ai_content_analysis,
-            "recommendations": self._get_content_recommendations(issues, scene_types)
+            "recommendations": self._get_content_recommendations(issues, scene_type_evidence)
         }
     
     async def _ai_content_analysis(
@@ -365,7 +400,9 @@ class QualityCheckerAgent(BaseAgent):
             analysis_prompt = self.render_prompt(
                 "video_quality_analysis",
                 concept_plan=json.dumps(concept_plan, indent=2),
-                composition_timeline=json.dumps(composition_timeline, indent=2)
+                composition_timeline=json.dumps(composition_timeline, indent=2),
+                original_requirements=json.dumps(original_requirements, indent=2),
+                video_metadata=json.dumps(video_metadata, indent=2),
             )
             
             # 使用AI配置管理器获取适合的模型
@@ -486,7 +523,6 @@ class QualityCheckerAgent(BaseAgent):
         technical_quality: Dict[str, Any], 
         content_quality: Dict[str, Any],
         compliance_check: Dict[str, Any],
-        execution: AgentExecution
     ) -> Dict[str, Any]:
         """Generate overall quality assessment and recommendations"""
         
@@ -562,19 +598,56 @@ class QualityCheckerAgent(BaseAgent):
         
         total_scenes = len(composition_timeline)
         total_duration = sum(entry["duration"] for entry in composition_timeline)
-        
-        scene_types = {}
-        for entry in composition_timeline:
-            scene_type = entry.get("scene_type", "main_content")
-            scene_types[scene_type] = scene_types.get(scene_type, 0) + 1
+        scene_type_evidence = self._analyze_scene_type_evidence(composition_timeline)
         
         return {
             "total_scenes": total_scenes,
             "total_duration": total_duration,
             "average_scene_duration": total_duration / total_scenes if total_scenes > 0 else 0,
-            "scene_type_distribution": scene_types,
+            "scene_type_distribution": scene_type_evidence["scene_type_distribution"],
+            "scene_type_label_status": scene_type_evidence["label_status"],
+            "labeled_scene_count": scene_type_evidence["labeled_scene_count"],
+            "unlabeled_scene_count": scene_type_evidence["unlabeled_scene_count"],
             "shortest_scene": min((entry["duration"] for entry in composition_timeline), default=0),
             "longest_scene": max((entry["duration"] for entry in composition_timeline), default=0)
+        }
+
+    def _analyze_scene_type_evidence(self, composition_timeline: List[Dict]) -> Dict[str, Any]:
+        """Classify how much explicit scene-type evidence is available."""
+
+        explicit_scene_types: List[str] = []
+        scene_type_distribution: Dict[str, int] = {}
+        unlabeled_scene_numbers: List[int] = []
+
+        for entry in composition_timeline:
+            scene_type = str(entry.get("scene_type") or "").strip()
+            if scene_type:
+                explicit_scene_types.append(scene_type)
+                scene_type_distribution[scene_type] = scene_type_distribution.get(scene_type, 0) + 1
+                continue
+            try:
+                unlabeled_scene_numbers.append(int(entry.get("scene_number")))
+            except Exception:
+                continue
+
+        total_scenes = len(composition_timeline)
+        labeled_scene_count = len(explicit_scene_types)
+        unlabeled_scene_count = max(0, total_scenes - labeled_scene_count)
+
+        if total_scenes <= 0 or labeled_scene_count <= 0:
+            label_status = "missing"
+        elif unlabeled_scene_count > 0:
+            label_status = "partial"
+        else:
+            label_status = "complete"
+
+        return {
+            "label_status": label_status,
+            "explicit_scene_types": explicit_scene_types,
+            "scene_type_distribution": scene_type_distribution,
+            "labeled_scene_count": labeled_scene_count,
+            "unlabeled_scene_count": unlabeled_scene_count,
+            "unlabeled_scene_numbers": unlabeled_scene_numbers,
         }
     
     def _get_technical_recommendations(self, issues: List[str]) -> List[str]:
@@ -596,10 +669,16 @@ class QualityCheckerAgent(BaseAgent):
         
         return recommendations
     
-    def _get_content_recommendations(self, issues: List[str], scene_types: List[str]) -> List[str]:
+    def _get_content_recommendations(
+        self,
+        issues: List[str],
+        scene_type_evidence: Dict[str, Any],
+    ) -> List[str]:
         """Generate content recommendations based on issues"""
         
         recommendations = []
+        label_status = str(scene_type_evidence.get("label_status") or "").strip().lower()
+        explicit_scene_types = list(scene_type_evidence.get("explicit_scene_types") or [])
         
         if "Missing introduction scene" in issues:
             recommendations.append("Add an engaging introduction scene")
@@ -610,7 +689,12 @@ class QualityCheckerAgent(BaseAgent):
         if any("Missing scenes" in issue for issue in issues):
             recommendations.append("Regenerate missing scenes to complete the narrative")
         
-        if len(set(scene_types)) < 2:
+        if label_status != "complete":
+            recommendations.append(
+                "Provide explicit scene_type labels if intro/outro structure needs automated verification"
+            )
+        
+        if label_status == "complete" and len(set(explicit_scene_types)) < 2:
             recommendations.append("Add variety in scene types for better engagement")
         
         return recommendations

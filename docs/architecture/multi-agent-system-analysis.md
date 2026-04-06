@@ -1,5 +1,11 @@
 # 🤖 多智能体系统完整功能分析报告
 
+> 历史说明
+>
+> 本文是早期分析快照，不是当前 canonical architecture SoT。
+> `react_orchestrator.py`、`enhanced_orchestrator.py`、`testing_framework.py` 及其绑定 prompt assets 已于 2026-03-25 从 `backend/app` 退役。
+> 当前权威口径请以 `single_episode_harness_architecture_20260311.md`、`mas_architecture_alignment_note_20260323.md`、`mas_runtime_control_plane_detailed_design_20260308.md`、`mas_runtime_contracts_detailed_design_20260308.md` 为准。
+
 基于代码审查和架构分析，本报告详细评估了短视频生成平台的多智能体系统功能。
 
 ## 📋 系统架构总览
@@ -143,7 +149,7 @@ async def use_tool(self, tool_name: str, action: str, parameters: Dict[str, Any]
 
 #### 记忆架构 `backend/app/agents/memory/`
 
-**基础组件** `memory/base_memory.py`: ✅
+**基础组件** `memory/long_term/stores/base.py`: ✅
 - **MemoryItem**: 记忆项数据结构
 - **MemoryType**: 短期/长期/情景/语义记忆类型
 - **MemoryImportance**: 重要性级别(LOW/MEDIUM/HIGH/CRITICAL)

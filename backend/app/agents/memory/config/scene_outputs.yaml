@@ -1,0 +1,136 @@
+scene_outputs:
+  image:
+    fields:
+      scene_number:
+        source: scene_number
+        required: true
+        coerce: int
+      image_url:
+        source:
+          - image_url
+      image_path:
+        source:
+          - image_path
+          - file_path
+          - output_path
+          - local_path
+      prompt_text:
+        source: prompt_text
+      metadata:
+        source: metadata
+    return_fields:
+      - scene_number
+      - image_url
+      - image_path
+      - prompt_text
+      - metadata
+
+  video:
+    fields:
+      scene_number:
+        source:
+          - scene_number
+          - args.scene_number
+        required: true
+        coerce: int
+      video_url:
+        source:
+          - video_url
+      video_path:
+        source:
+          - video_path
+          - file_path
+          - output_path
+          - local_path
+      duration_sec:
+        source:
+          - duration_sec
+          - duration
+          - final_duration
+        coerce: float
+      prompt_text:
+        source:
+          - prompt_text
+      metadata:
+        source:
+          - metadata
+    return_fields:
+      - scene_number
+      - video_url
+      - video_path
+      - duration_sec
+      - prompt_text
+      - metadata
+  audio:
+    fields:
+      scene_number:
+        source:
+          - scene_number
+          - args.scene_number
+        required: true
+        coerce: int
+      audio_url:
+        source:
+          - audio_url
+      audio_path:
+        source:
+          - audio_path
+          - file_path
+          - output_path
+          - local_path
+      duration_sec:
+        source:
+          - duration_sec
+          - duration
+          - final_duration
+        coerce: float
+      prompt_text:
+        source:
+          - prompt_text
+      metadata:
+        source:
+          - metadata
+    return_fields:
+      - scene_number
+      - audio_url
+      - audio_path
+      - duration_sec
+      - prompt_text
+      - metadata
+
+  voice:
+    fields:
+      scene_number:
+        source:
+          - scene_number
+          - args.scene_number
+        required: true
+        coerce: int
+      audio_url:
+        source:
+          - audio_url
+      audio_path:
+        source:
+          - audio_path
+          - file_path
+          - output_path
+          - local_path
+      duration_sec:
+        source:
+          - duration_sec
+          - duration
+          - final_duration
+        coerce: float
+      prompt_text:
+        source:
+          - prompt_text
+      metadata:
+        source:
+          - metadata
+    return_fields:
+      - scene_number
+      - audio_url
+      - audio_path
+      - duration_sec
+      - prompt_text
+      - metadata

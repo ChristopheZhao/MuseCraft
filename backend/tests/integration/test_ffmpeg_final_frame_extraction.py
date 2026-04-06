@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.append('/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend')
 
 from app.agents.video_generator import VideoGeneratorAgent
+from types import SimpleNamespace
 
 async def test_ffmpeg_final_frame_extraction():
     """测试FFmpeg最后一帧提取功能"""
@@ -77,14 +78,9 @@ async def test_ffmpeg_final_frame_extraction():
         # 模拟Scene 2的连续性检查
         print(f"\n🔄 模拟Scene 2连续性检查...")
         
-        from app.core.workflow_state import SceneData
-        scene2 = SceneData(
-            scene_number=2,
-            requires_continuity_from=1,
-            continuity_reason="测试连续性"
-        )
-        
-        continuity_frame = await video_generator._check_scene_continuity_requirements(scene2)
+        # 使用简单命名空间模拟场景，避免依赖 WorkflowState/SceneData
+        scene2 = SimpleNamespace(scene_number=2, requires_continuity_from=1, continuity_reason="测试连续性")
+        continuity_frame = await video_generator._check_scene_continuity_requirements(scene2)  # 该方法内部已基于记忆/WM
         
         if continuity_frame:
             print(f"✅ Scene 2连续性检查成功!")

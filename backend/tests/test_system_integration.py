@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import redis.asyncio as redis
 
-from app.models import Task, AgentExecution, Scene, Resource, TaskStatus
+from app.models import Task, Scene, Resource, TaskStatus
 from app.core.database import get_db
 from app.services.websocket import websocket_manager
 from app.services.file_storage import FileStorageService
@@ -227,29 +227,23 @@ class TestSystemIntegration:
         task_id = task_data["task_id"]
         
         # Test WebSocket connection
-        with websocket_test_client.websocket_connect(f"/ws?session_id=test-session") as websocket:
-            # Send a message
-            test_message = {
-                "type": "subscribe",
-                "task_id": task_id
-            }
-            websocket.send_json(test_message)
-            
-            # Simulate sending progress update
-            await websocket_manager.send_progress_update(
-                session_id="test-session",
-                task_id=task_id,
-                progress=50,
-                status="processing",
-                agent_name="script_writer"
-            )
-            
-            # Receive message
+        with websocket_test_client.websocket_connect(f"/api/v1/ws/connect?task_id={task_id}") as websocket:
+            websocket.receive_json()
+
+            await websocket_manager.broadcast_to_task(task_id, {
+                "type": "event.progress",
+                "agent_type": "script_writer",
+                "payload": {
+                    "progress": 50,
+                    "current_step": "Drafting integration-test script",
+                },
+            })
+
             received_message = websocket.receive_json()
             
-            assert received_message["type"] == "progress-update"
-            assert received_message["data"]["task_id"] == task_id
-            assert received_message["data"]["progress"] == 50
+            assert received_message["type"] == "event.progress"
+            assert received_message["agent_type"] == "script_writer"
+            assert received_message["payload"]["progress"] == 50
     
     async def test_database_transaction_integrity(
         self,
@@ -307,17 +301,6 @@ class TestSystemIntegration:
                 resources.append(resource)
                 test_db_session.add(resource)
             
-            # Create agent executions
-            agent_execution = AgentExecution(
-                task_id=task.id,
-                agent_type="concept_planner",
-                agent_name="test_agent",
-                status="completed",
-                input_data={"prompt": "test"},
-                output_data={"result": "success"},
-                execution_metadata={"duration": 5.0}
-            )
-            test_db_session.add(agent_execution)
         
         # Verify all objects were created
         await test_db_session.commit()
@@ -333,12 +316,6 @@ class TestSystemIntegration:
         result = await test_db_session.execute(stmt)
         created_resources = result.scalars().all()
         assert len(created_resources) == 3
-        
-        # Check agent executions
-        stmt = select(AgentExecution).where(AgentExecution.task_id == task.id)
-        result = await test_db_session.execute(stmt)
-        created_executions = result.scalars().all()
-        assert len(created_executions) == 1
     
     async def test_error_handling_across_components(
         self,

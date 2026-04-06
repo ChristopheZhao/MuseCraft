@@ -118,7 +118,7 @@ class ImageGeneratorAgent(ReActAgent):
         if not workflow_state:
             raise AgentError(f"WorkflowState {workflow_state_id} not found")
         
-        await self._update_progress(execution, 10, "Loading scenes", db)
+        await self._update_progress(10, "Loading scenes", db)
         
         # Get scenes from WorkflowState instead of database
         scenes_data = workflow_state.scenes
@@ -182,7 +182,7 @@ class ImageGeneratorAgent(ReActAgent):
                     "is_placeholder": True
                 })
         
-        await self._update_progress(execution, 95, "Finalizing image generation", db)
+        await self._update_progress(95, "Finalizing image generation", db)
         
         # Generate summary statistics
         successful_generations = len([img for img in generated_images if not img.get("is_placeholder")])
@@ -197,7 +197,7 @@ class ImageGeneratorAgent(ReActAgent):
             "workflow_state_id": workflow_state_id  # 传递给下一个Agent
         }
         
-        await self._update_progress(execution, 100, "Image generation completed", db)
+        await self._update_progress(100, "Image generation completed", db)
         
         return output_data
     

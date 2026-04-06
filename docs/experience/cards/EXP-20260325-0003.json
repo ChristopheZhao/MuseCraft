@@ -1,0 +1,62 @@
+{
+  "id": "EXP-20260325-0003",
+  "created_at": "2026-03-25T02:47:43Z",
+  "updated_at": "2026-03-25T02:47:43Z",
+  "title": "Vibe Coding 中防止 helper/adapter 放大架构漂移",
+  "problem_signature": "在持续 vibe coding 的增量开发里，新增实现若不先冻结 canonical architecture、authority object 与宿主归属，就会沿旧 helper、compat adapter、summary surface 继续扩展，形成与主路并列的旁路逻辑，最终表现为代码堆积，实质是架构设计未被转化为硬约束。",
+  "problem_signature_norm": "在持续 vibe coding 的增量开发里，新增实现若不先冻结 canonical architecture、authority object 与宿主归属，就会沿旧 helper、compat adapter、summary surface 继续扩展，形成与主路并列的旁路逻辑，最终表现为代码堆积，实质是架构设计未被转化为硬约束。",
+  "decision_rules": [
+    "每次实现前先冻结四件事：业务问题、authoritative object、所属层级、正式宿主；没有这四项，不进入编码。",
+    "一个业务问题只能有一个权威 surface；其余只能是 projection、diagnostics 或受控过渡态，不能让调用方自己猜哪个更真。",
+    "新增 helper/adapter 必须同时声明宿主性质和退役计划；如果不能说明何时退休，默认不应新增。",
+    "发现越层时优先做 ownership 回迁和旧路径收缩，不用 wrapper、compat bridge 或 summary helper 掩盖错误宿主。",
+    "评审顺序固定为 belongs -> authority -> contract -> behavior，不能只看功能通过与否。",
+    "把架构规则写成验收门槛：禁止 optional authority contract、禁止 dual-surface 回答同一问题、禁止 projection 回流成行为真值。"
+  ],
+  "review_checklist": [
+    "这次改动回答的业务问题是什么，对应的唯一 authoritative object 是否已明确？",
+    "新增代码是否落在 canonical architecture 允许的宿主里，而不是挂在旧 helper、adapter 或 wrapper 上？",
+    "是否新增了第二条并列 surface 去回答同一个状态、契约或阶段输入问题？",
+    "是否把 fallback、summary、projection 重新引入了 active decision 或 UI truth-routing？",
+    "如果删掉这条新旁路，主路是否仍成立；若不能，说明它已经偷偷变成主路。",
+    "这次改动是否同步削弱或退休旧路径，而不只是继续叠加一层兼容逻辑？",
+    "前后端是否仍存在 optional authority、双表面 contract 或让 consumer 自己 merge truth 的行为？"
+  ],
+  "source_event_refs": [
+    "docs/experience/sources/2026-03-25-vibe-coding-architecture-drift-thread.md#problem",
+    "docs/experience/sources/2026-03-25-vibe-coding-architecture-drift-thread.md#decision-rules"
+  ],
+  "doc_refs": [
+    "docs/plans/active/PLAN-20260323-016.md",
+    "docs/plans/active/PLAN-20260324-017.md",
+    "docs/plans/active/PLAN-20260324-019.md",
+    "docs/architecture/single_episode_harness_architecture_20260311.md",
+    "docs/architecture/mas_architecture_alignment_note_20260323.md"
+  ],
+  "tags": [
+    "vibe-coding",
+    "architecture-drift",
+    "adapter-sprawl",
+    "authority-boundary",
+    "review-discipline"
+  ],
+  "context_constraints": [
+    "适用于已有既定 canonical architecture 的增量开发场景",
+    "适用于多轮对话驱动、快速试探式实现和 coding agent 参与的工程流程"
+  ],
+  "anti_patterns": [
+    "把旧 helper、compat adapter 或 summary surface 当成默认扩展宿主",
+    "只验功能通路，不验逻辑归属、authority surface 和 contract 单一性",
+    "新增兼容层却没有旧路径退役计划",
+    "让 frontend 或下游 consumer 通过 fallback/merge 自己推断哪个对象更权威"
+  ],
+  "outcome": "将“屎山堆积”重新识别为架构真值未冻结、质量门控不严和增量扩展路径依赖的共同结果，可用于后续实现前的架构防漂移审查。",
+  "confidence": "high",
+  "owner": "codex",
+  "capture_meta": {
+    "trigger_mode": "manual-explicit",
+    "confirmed_by_user": true,
+    "confirmed_at": "2026-03-25T02:47:43Z",
+    "confirmation_note": "用户明确要求将本轮关于 vibe coding 与架构漂移的复盘整理为可复用经验。"
+  }
+}

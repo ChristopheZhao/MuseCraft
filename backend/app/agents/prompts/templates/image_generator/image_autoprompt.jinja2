@@ -1,14 +1,14 @@
-场景描述：
+{{ root_label or "单帧构图" }}：
 {{ scene_description }}
 {% if scene_focus %}
 
-补充要素：
+{{ focus_label or "画面焦点" }}：
 {% for item in scene_focus %}- {{ item }}
 {% endfor %}
 {% endif %}
 {% if character_sections %}
 
-角色设定：
+{{ character_label or "主体锁定" }}：
 {% for block in character_sections %}- {{ block }}
 {% endfor %}
 {% endif %}
@@ -20,7 +20,7 @@
 {% endif %}
 {% if mood_sections %}
 
-情绪与氛围：
+{{ mood_label or "光线与氛围" }}：
 {% for block in mood_sections %}- {{ block }}
 {% endfor %}
 {% endif %}
@@ -32,7 +32,7 @@
 {% endif %}
 {% if props_sections %}
 
-道具与细节：
+{{ props_label or "关键细节" }}：
 {% for block in props_sections %}- {{ block }}
 {% endfor %}
 {% endif %}
@@ -43,4 +43,4 @@
 {% endfor %}
 {% endif %}
 
-画面要求：高质量，细节清晰，构图平衡
+画面要求：{{ render_requirements or "高质量，细节清晰，构图平衡" }}
