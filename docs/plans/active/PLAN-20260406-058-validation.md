@@ -59,6 +59,41 @@
   - `npm run type-check`
   - `npm run build`
 
+## Sprint 2 Amendment Gate: Layout and information-hierarchy polish
+- [x] Processing workspace keeps the center focus area readable under a common desktop viewport
+- [x] Right-side runtime context is demoted out of the primary visual hierarchy
+- [x] Long runtime fields no longer rely on `break-all`-style fragmentation
+- [x] Running and HITL states both keep the current-node workspace as the primary focus
+- [x] Top shell height is reduced during quick-mode processing
+
+## Sprint 2 Amendment Evidence Design
+- Playwright Firefox:
+  - Drive a mocked running runtime through the real quick-mode form and verify the center workspace no longer collapses under left/right chrome on a 1366x900 viewport
+  - Switch the same mocked run into `awaiting_human` / script-review state and verify the HITL decision workspace remains the primary focus without a competing raw diagnostics column
+- Supporting checks:
+  - `npx tsc -p tsconfig.frontend-runtime-check.json --noEmit`
+  - `npm run build`
+
+## Sprint 1 Residual Amendment Gate: completed-result finalization and download entry consistency
+- [x] Switching to a different task invalidates stale `finalVideoUrl`, `quickRuntime`, and result-ready modal state
+- [x] `runtime completed` does not advance into review/export until a fresh browser-safe final video URL resolves
+- [x] When the final video URL is still missing, the workspace stays in processing and surfaces a neutral completion-waiting cue instead of prematurely opening review/export
+- [x] The overlay player download entry and the review/export download entry both exercise the same real browser-side download chain
+- [x] Live browser proof was attempted against the real backend before falling back to a bounded deterministic supplement
+
+## Sprint 1 Residual Amendment Evidence Design
+- Playwright Firefox, primary proof:
+  - Attempt a real `/console` submit against the running backend and record whether the live task can progress to completed
+  - If the live task is blocked by an unrelated backend/runtime failure, capture that separately and do not treat it as frontend amendment failure
+- Playwright Firefox, bounded supplement:
+  - Drive a real browser session through the quick-mode form while mocking only `tasks/runtime/detail/resources`
+  - Verify the missing-URL completed case stays in processing with no review/export transition
+  - Verify the success case exercises the overlay-player and review/export download entries through the same browser `fetch -> blob -> anchor download` path
+- Supporting checks:
+  - `npx tsc -p tsconfig.frontend-runtime-check.json --noEmit`
+  - `timeout 45s npm test -- --runInBand __tests__/integration/app-store-result-finalization.test.ts __tests__/integration/use-task-polling-completion.test.tsx`
+  - `npm run build`
+
 ## Sprint 3 Gate: Infinite-canvas Spike
 - [ ] Sprint 3 starts only after Sprint 2 completion and explicit need confirmation
 - [ ] Prototype stays isolated from the stable quick-mode path
@@ -140,3 +175,51 @@
   - Test-runner status:
     - `timeout 45s npx jest --runInBand --selectProjects integration --runTestsByPath __tests__/integration/runtime-gate-sync.test.tsx __tests__/integration/export-interface.test.tsx --verbose --forceExit` still timed out with exit `124`
     - the timeout remains a runner-level issue, so Sprint 2 acceptance stays anchored on the focused type-check and Playwright Firefox browser proof
+- 2026-04-06T14:40:00Z Sprint 2 amendment validation evidence recorded:
+  - Browser validation:
+    - Playwright Firefox on `http://127.0.0.1:3001/console` drove the real quick-mode form into a mocked runtime-backed processing state using `.playwright-cli/058-amendment-validate.js`
+    - running-state screenshot `output/playwright/058-amendment/running.png` shows the amended two-stage layout:
+      - left storyboard rail compressed to a narrower track
+      - center hero and `CURRENT NODE` workspace remain visibly dominant at 1366x900
+      - the old always-visible third diagnostic column is no longer competing with the center panel
+    - HITL screenshot `output/playwright/058-amendment/hitl.png` shows the script review workspace still centered while the shell stays compact and the side context remains de-emphasized
+  - Display note:
+    - the Linux headless Firefox environment used for Playwright validation resolves `sans-serif:lang=zh-cn` to `DejaVu Sans`, so the stored screenshots are reliable for layout/spacing proof but not for Chinese glyph rendering fidelity
+  - Static/build checks:
+    - `npx tsc -p tsconfig.frontend-runtime-check.json --noEmit` passed
+    - `npm run build` passed
+- 2026-04-07T09:50:00Z Sprint 1 residual amendment validation evidence recorded:
+  - Static/test checks:
+    - `npx tsc -p tsconfig.frontend-runtime-check.json --noEmit` passed
+    - `npm run build` passed, with the repo's pre-existing ESLint config warning still printed during the Next build phase
+    - `timeout 45s npm test -- --runInBand __tests__/integration/app-store-result-finalization.test.ts __tests__/integration/use-task-polling-completion.test.tsx` still timed out with exit `124`; the runner hang remains test-infrastructure noise rather than this amendment's behavioral signal
+  - Focused state proof:
+    - `__tests__/integration/app-store-result-finalization.test.ts` now covers cross-task invalidation of `finalVideoUrl`, `quickRuntime`, and result-ready modal state at the store boundary
+    - `__tests__/integration/use-task-polling-completion.test.tsx` covers the completed-but-no-URL branch and the completed-with-browser-safe-URL branch in the polling hook
+  - Playwright Firefox, real page primary attempt:
+    - direct Firefox automation opened the live `/console` page without route mocks and submitted a real quick-mode task
+    - evidence screenshots: `output/playwright/058-real-download/processing-after-submit.png` and `output/playwright/058-real-download/terminal-failed.png`
+    - the live run failed before entering the first workflow node because of an unrelated backend runtime issue:
+      - backend log `backend/logs/mas/mas_workflow.log` shows task `c5b082d8-008a-4273-a5a2-fa31511f110d` failed with `[Errno 5] Input/output error`
+      - the traceback points to `backend/app/agents/memory/long_term/manager/memory_manager.py` printing while no running event loop is available, which is outside this frontend-only amendment scope
+  - Playwright Firefox, bounded browser supplement:
+    - one-off Firefox automation on the real `/console` page mocked only `tasks/runtime/detail/resources`, leaving the final video file request pointed at the real backend static media URL
+    - missing-URL completed case remained in processing and rendered the neutral waiting cue instead of opening review/export:
+      - evidence screenshot: `output/playwright/058-completed-finalization/missing-url-processing.png`
+    - success case exercised both download entries through the same browser-side chain:
+      - evidence screenshot: `output/playwright/058-completed-finalization/review-download-ready.png`
+      - probe log: `output/playwright/058-completed-finalization/download-probe.json`
+      - both `overlayProbe` and `exportProbe` recorded:
+        - `fetch-start` to `http://127.0.0.1:8005/files/outputs/videos/time_reverse_capsule_final.mp4`
+        - `fetch` with `status: 200`
+        - `object-url`
+        - `anchor-click` with `download: "time_reverse_capsule_final.mp4"`
+    - this keeps the main user-facing proof browser-based while reserving deterministic mocking only for the unstable negative branch that the real backend attempt could not stably reach
+- 2026-04-07T13:23:11Z Cross-plan backend defect discovery recorded during live `058` validation:
+  - the live Playwright Firefox attempt exposed an independent backend bootstrap defect outside the frontend-only amendment scope
+  - recent successful quick runs on `2026-04-06` still passed the same orchestrator/memory bootstrap path:
+    - task `1064` entered quick orchestrator mainline and initialized memory services successfully before completing
+    - task `1071` also completed successfully and served the final video download
+  - the new failing run on `2026-04-07` was task `1072`, which failed before the first workflow node because `LongTermMemoryManager._start_background_tasks()` hit the no-running-loop downgrade path and its raw `print(...)` raised `OSError: [Errno 5] Input/output error`
+  - this evidence confirms the defect is backend-owned and intermittent/runtime-context-sensitive rather than a regression introduced by the frontend amendment
+  - follow-on backend repair is isolated into [PLAN-20260407-061.md](/mnt/d/code/agent/opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260407-061.md) so `058` remains frontend-only
