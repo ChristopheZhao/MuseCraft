@@ -1,0 +1,42 @@
+{
+  "overlayProbe": [
+    {
+      "type": "fetch-start",
+      "url": "http://127.0.0.1:8005/files/outputs/videos/time_reverse_capsule_final.mp4"
+    },
+    {
+      "type": "fetch",
+      "url": "http://127.0.0.1:8005/files/outputs/videos/time_reverse_capsule_final.mp4",
+      "status": 200
+    },
+    {
+      "type": "object-url",
+      "size": 11711136
+    },
+    {
+      "type": "anchor-click",
+      "href": "blob:http://127.0.0.1:3000/05003fd1-4a4e-4752-bfb7-325efd47fdcc",
+      "download": "time_reverse_capsule_final.mp4"
+    }
+  ],
+  "exportProbe": [
+    {
+      "type": "fetch-start",
+      "url": "http://127.0.0.1:8005/files/outputs/videos/time_reverse_capsule_final.mp4"
+    },
+    {
+      "type": "fetch",
+      "url": "http://127.0.0.1:8005/files/outputs/videos/time_reverse_capsule_final.mp4",
+      "status": 200
+    },
+    {
+      "type": "object-url",
+      "size": 11711136
+    },
+    {
+      "type": "anchor-click",
+      "href": "blob:http://127.0.0.1:3000/f1e9cf61-cafd-4ad8-a50e-25d395931151",
+      "download": "time_reverse_capsule_final.mp4"
+    }
+  ]
+}

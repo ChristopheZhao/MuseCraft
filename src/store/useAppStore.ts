@@ -148,8 +148,26 @@ export const useAppStore = create<AppState>()(
       setQuickProcessingContext: (context) =>
         set({ quickProcessingContext: context }, false, 'setQuickProcessingContext'),
 
-      setCurrentRequest: (request) => 
-        set({ currentRequest: request }, false, 'setCurrentRequest'),
+      setCurrentRequest: (request) =>
+        set((state) => {
+          const previousTaskId = state.currentRequest?.id ?? null;
+          const nextTaskId = request?.id ?? null;
+          const taskChanged = previousTaskId !== nextTaskId;
+
+          if (!taskChanged) {
+            return { currentRequest: request };
+          }
+
+          return {
+            currentRequest: request,
+            finalVideoUrl: undefined,
+            quickRuntime: null,
+            ui: {
+              ...state.ui,
+              modal: null,
+            },
+          };
+        }, false, 'setCurrentRequest'),
 
       setFinalVideoUrl: (url) =>
         set({ finalVideoUrl: url }, false, 'setFinalVideoUrl'),

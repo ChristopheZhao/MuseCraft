@@ -26,9 +26,14 @@ export function useTaskPolling() {
   const lastStatusRef = useRef<string | null>(null);
   const lastGateIdRef = useRef<number | null>(null);
   const lastRuntimeReadErrorRef = useRef<string | null>(null);
+  const completedAwaitingVideoSinceRef = useRef<number | null>(null);
+  const completedAwaitingVideoNotifiedRef = useRef(false);
 
   useEffect(() => {
     const intervalMs = Number(process.env.NEXT_PUBLIC_TASK_POLL_INTERVAL_MS || 3000);
+    const finalVideoResolveTimeoutMs = Number(
+      process.env.NEXT_PUBLIC_FINAL_VIDEO_READY_TIMEOUT_MS || 15000
+    );
 
     const clear = () => {
       if (timerRef.current) {
@@ -36,6 +41,12 @@ export function useTaskPolling() {
         timerRef.current = null as any;
       }
     };
+
+    lastStatusRef.current = null;
+    lastGateIdRef.current = null;
+    lastRuntimeReadErrorRef.current = null;
+    completedAwaitingVideoSinceRef.current = null;
+    completedAwaitingVideoNotifiedRef.current = false;
 
     if (!currentRequest) {
       clear();
@@ -68,7 +79,10 @@ export function useTaskPolling() {
       });
     };
 
-    const openCompletedResult = async (taskId: string, runtime?: Record<string, any> | null) => {
+    const openCompletedResult = async (
+      taskId: string,
+      runtime?: Record<string, any> | null
+    ): Promise<boolean> => {
       const candidates: Array<string | undefined> = [];
       const summaryOutput = runtime?.summary_output || {};
       candidates.push(
@@ -82,7 +96,6 @@ export function useTaskPolling() {
 
       try {
         const detail = await ApiClient.getTaskDetail(taskId);
-        lastStatusRef.current = 'completed';
         candidates.push(
           detail?.output_metadata?.final_video_url,
           detail?.output_metadata?.final_video_path,
@@ -101,11 +114,14 @@ export function useTaskPolling() {
 
       const picked = candidates.find((c) => typeof c === 'string' && c.length > 0);
       const publicUrl = resolvePublicMediaUrl(picked as string | undefined);
-      if (publicUrl) {
-        setFinalVideoUrl(publicUrl);
-      } else if (picked) {
-        setFinalVideoUrl(String(picked));
+      if (!publicUrl) {
+        return false;
       }
+
+      completedAwaitingVideoSinceRef.current = null;
+      completedAwaitingVideoNotifiedRef.current = false;
+      lastStatusRef.current = 'completed';
+      setFinalVideoUrl(publicUrl);
 
       setModal({
         type: 'result-ready',
@@ -116,6 +132,7 @@ export function useTaskPolling() {
         },
       });
       clear();
+      return true;
     };
 
     const tick = async () => {
@@ -143,14 +160,47 @@ export function useTaskPolling() {
 
           const runtimeTerminalStatus = getRuntimeTerminalStatus(runtime);
           if (runtimeTerminalStatus === 'failed') {
+            completedAwaitingVideoSinceRef.current = null;
+            completedAwaitingVideoNotifiedRef.current = false;
             notifyFailure(getRuntimeFailureMessage(runtime, '后端任务失败') || '后端任务失败');
             return;
           }
 
           if (runtimeTerminalStatus === 'completed') {
-            await openCompletedResult(taskId, runtime);
+            const opened = await openCompletedResult(taskId, runtime);
+            if (opened) {
+              return;
+            }
+
+            const now = Date.now();
+            if (completedAwaitingVideoSinceRef.current === null) {
+              completedAwaitingVideoSinceRef.current = now;
+              addNotification({
+                type: 'info',
+                title: '正在整理成片资源',
+                message: '运行已完成，正在等待当前成片地址就绪。',
+                autoClose: 4000,
+              });
+              return;
+            }
+
+            if (
+              !completedAwaitingVideoNotifiedRef.current &&
+              now - completedAwaitingVideoSinceRef.current >= finalVideoResolveTimeoutMs
+            ) {
+              completedAwaitingVideoNotifiedRef.current = true;
+              addNotification({
+                type: 'error',
+                title: '成片地址未就绪',
+                message: '运行已完成，但当前成片地址仍未准备好；前端会继续自动重试。',
+                autoClose: 6000,
+              });
+            }
             return;
           }
+
+          completedAwaitingVideoSinceRef.current = null;
+          completedAwaitingVideoNotifiedRef.current = false;
         } catch (error) {
           notifyRuntimeReadError(
             error instanceof Error ? error.message : 'Failed to get task runtime'

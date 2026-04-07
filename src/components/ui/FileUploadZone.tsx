@@ -1,17 +1,30 @@
 'use client';
 
 import React, { useCallback } from 'react';
-import { useDropzone } from 'react-dropzone';
+import { useDropzone, type Accept } from 'react-dropzone';
 import { Upload, X, File, Image as ImageIcon, Video, FileText } from 'lucide-react';
 import { cn, formatFileSize, getFileType } from '@/lib/utils';
 import { useI18n } from '@/i18n/I18nProvider';
 
 interface FileUploadZoneProps {
   onFilesSelected: (files: File[]) => void;
-  acceptedTypes: string[];
+  acceptedTypes: Accept | string[];
   maxFiles?: number;
   maxSize?: number;
   className?: string;
+}
+
+function normalizeAcceptedTypes(acceptedTypes: Accept | string[]): Accept {
+  if (!Array.isArray(acceptedTypes)) {
+    return acceptedTypes;
+  }
+
+  return acceptedTypes.reduce<Accept>((acc, type) => {
+    if (!type.startsWith('.')) {
+      acc[type] = [];
+    }
+    return acc;
+  }, {});
 }
 
 const FileUploadZone: React.FC<FileUploadZoneProps> = ({
@@ -38,7 +51,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
 
   const { getRootProps, getInputProps, isDragActive, fileRejections } = useDropzone({
     onDrop,
-    accept: acceptedTypes.reduce((acc, type) => ({ ...acc, [type]: [] }), {}),
+    accept: normalizeAcceptedTypes(acceptedTypes),
     maxSize,
     maxFiles: maxFiles - selectedFiles.length,
   });

@@ -11,6 +11,13 @@
 
   body {
     @apply bg-gray-50 text-gray-900 antialiased;
+    font-family:
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Microsoft YaHei",
+      "Noto Sans SC",
+      "Segoe UI",
+      sans-serif;
   }
 
   * {

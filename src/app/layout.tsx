@@ -1,9 +1,6 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
 import { I18nProvider } from '@/i18n/I18nProvider';
 import './globals.css';
-
-const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: 'MuseCraft AI — 多智能体动漫生成平台',
@@ -31,7 +28,7 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <meta name="theme-color" content="#0ea5e9" />
       </head>
-      <body className={inter.className}>
+      <body>
         <I18nProvider defaultLang="zh">{children}</I18nProvider>
       </body>
     </html>

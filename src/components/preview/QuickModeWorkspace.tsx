@@ -281,7 +281,7 @@ const ContextSection: React.FC<{
   <section className="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-card">
     <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{eyebrow}</div>
     <h3 className="mt-2 text-base font-semibold text-slate-900">{title}</h3>
-    <div className="mt-4 space-y-3 text-sm text-slate-600">{children}</div>
+    <div className="mt-4 space-y-2 text-sm text-slate-600">{children}</div>
   </section>
 );
 
@@ -289,9 +289,9 @@ const KeyValueRow: React.FC<{
   label: string;
   value: React.ReactNode;
 }> = ({ label, value }) => (
-  <div className="flex items-start justify-between gap-3">
-    <span className="text-slate-500">{label}</span>
-    <span className="max-w-[180px] text-right font-medium text-slate-900 break-all">{value}</span>
+  <div className="rounded-2xl bg-slate-50 px-4 py-3">
+    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+    <div className="mt-1 text-sm font-medium leading-6 text-slate-900 break-words">{value}</div>
   </div>
 );
 
@@ -302,7 +302,6 @@ const QuickModeWorkspace: React.FC = () => {
     quickRuntime,
     setQuickRuntime,
     addNotification,
-    wsConnected,
   } = useAppStore();
   const [feedbackText, setFeedbackText] = useState('');
   const [submittingAction, setSubmittingAction] = useState<string | null>(null);
@@ -585,7 +584,7 @@ const QuickModeWorkspace: React.FC = () => {
   const renderFocusBody = () => {
     if (focusMode === 'hitl') {
       return (
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_340px]">
+        <div className="grid gap-5 2xl:grid-cols-[minmax(0,1.2fr)_320px]">
           <div className="space-y-5">
             {renderNodeSnapshot('current node', '当前主线已进入脚本审核 gate。人工决策会直接改变后续 runtime 走向。')}
             <div className="rounded-[24px] border border-amber-200 bg-amber-50/80 p-5">
@@ -670,7 +669,7 @@ const QuickModeWorkspace: React.FC = () => {
 
     if (focusMode === 'resume_available') {
       return (
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
+        <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_280px]">
           <div className="space-y-5">
             {renderNodeSnapshot('resume checkpoint', '当前页面附着的是既有 runtime。control-plane 已确认 continuation checkpoint 存在，可以显式续跑。')}
             <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/80 p-5 text-sm leading-6 text-emerald-900">
@@ -739,7 +738,7 @@ const QuickModeWorkspace: React.FC = () => {
       return (
         <div className="space-y-5">
           {renderNodeSnapshot('delivery summary', '当前 run 已完成。工作台会把用户送往结果评审与下载，而不是继续停留在固定节点骨架上。')}
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 2xl:grid-cols-2">
             <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/80 p-5 text-sm leading-6 text-emerald-900">
               <div className="font-semibold">结果已可交付</div>
               <p className="mt-2">轮询会在拿到最终视频地址后把页面切到结果评审与导出视图。</p>
@@ -751,7 +750,7 @@ const QuickModeWorkspace: React.FC = () => {
                   summaryHighlights.map((item) => (
                     <div key={item.key}>
                       <div className="font-medium text-slate-900">{item.key}</div>
-                      <div className="mt-1 break-all text-slate-600">{item.value}</div>
+                      <div className="mt-1 break-words text-slate-600">{item.value}</div>
                     </div>
                   ))
                 ) : (
@@ -773,7 +772,7 @@ const QuickModeWorkspace: React.FC = () => {
     }
 
     return (
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_300px]">
         <div className="space-y-5">
           {renderNodeSnapshot('current node', '主焦点只跟随当前节点和已发生轨迹。未来节点不会预占版面，直到 runtime 真正推进到那里。')}
           <div className="rounded-[24px] border border-slate-200 bg-white p-5">
@@ -818,8 +817,8 @@ const QuickModeWorkspace: React.FC = () => {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[260px_minmax(0,1fr)_300px]">
-        <aside className="space-y-4">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[220px_minmax(0,1fr)] 2xl:grid-cols-[220px_minmax(0,1fr)_280px]">
+        <aside className="min-w-0 space-y-4">
           <section className="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-card">
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">storyboard rail</div>
             <h2 className="mt-2 text-lg font-semibold text-slate-900">执行轨迹</h2>
@@ -845,13 +844,13 @@ const QuickModeWorkspace: React.FC = () => {
                       <div className={cn('absolute left-0 top-5 h-3 w-3 rounded-full', status.railDotClass)} />
                       <div
                         className={cn(
-                          'ml-7 rounded-[22px] border bg-white p-4 transition',
+                          'ml-6 rounded-[22px] border bg-white p-3.5 transition',
                           isCurrent ? 'border-primary-300 ring-2 ring-primary-100' : 'border-slate-200'
                         )}
                       >
                         <div className="flex items-start gap-3">
-                          <div className={cn('flex h-10 w-10 items-center justify-center rounded-2xl', meta.iconClass)}>
-                            <Icon className="h-5 w-5" />
+                          <div className={cn('flex h-9 w-9 items-center justify-center rounded-2xl', meta.iconClass)}>
+                            <Icon className="h-4.5 w-4.5" />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
@@ -873,9 +872,13 @@ const QuickModeWorkspace: React.FC = () => {
                               </span>
                               <span>rev {node.revision_index}</span>
                             </div>
-                            <p className="mt-3 text-sm leading-6 text-slate-600">{meta.description}</p>
+                            {isCurrent ? (
+                              <p className="mt-3 text-xs leading-5 text-slate-500">
+                                当前节点的详细操作面板已在中央展开。
+                              </p>
+                            ) : null}
                             {activeGate?.node_id === node.id && activeGate?.status === 'awaiting_human' && (
-                              <p className="mt-3 text-xs font-medium text-amber-700">该节点等待人工审核后继续。</p>
+                              <p className="mt-3 text-xs font-medium text-amber-700">等待人工审核后继续。</p>
                             )}
                           </div>
                         </div>
@@ -892,7 +895,7 @@ const QuickModeWorkspace: React.FC = () => {
           </section>
         </aside>
 
-        <main className="space-y-5">
+        <main className="min-w-0 space-y-5">
           <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-white/95 shadow-card">
             <div className={cn('relative overflow-hidden bg-slate-950 px-6 py-6 text-white', `bg-gradient-to-r ${focusNodeMeta.accentClass}`)}>
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.12),transparent_45%)]" />
@@ -938,7 +941,7 @@ const QuickModeWorkspace: React.FC = () => {
           </section>
         </main>
 
-        <aside className="space-y-4">
+        <aside className="min-w-0 space-y-4 lg:col-span-2 2xl:col-span-1">
           <ContextSection eyebrow="runtime snapshot" title="运行上下文">
             <KeyValueRow label="任务" value={currentRequest?.id || '-'} />
             <KeyValueRow label="session" value={quickRuntime?.session_id ?? '-'} />
@@ -947,11 +950,15 @@ const QuickModeWorkspace: React.FC = () => {
             <KeyValueRow label="更新时间" value={formatTimestamp(quickRuntime?.updated_at)} />
           </ContextSection>
 
-          <ContextSection eyebrow="control plane" title="控制面诊断">
-            <KeyValueRow label="resume_state" value={resumeControl?.state || '-'} />
-            <KeyValueRow label="resume_reason" value={resumeControl?.reason_code || '-'} />
-            <KeyValueRow label="gate" value={activeGate?.gate_name || '-'} />
-            <KeyValueRow label="future_hidden" value={workspace.futureNodes.length} />
+          <ContextSection eyebrow="runtime guidance" title="当前提示">
+            <KeyValueRow label="当前 gate" value={activeGate?.gate_name || '无'} />
+            <KeyValueRow label="未来节点" value={`${workspace.futureNodes.length} 个隐藏节点`} />
+            {(focusMode === 'resume_available' || focusMode === 'resume_blocked') && (
+              <KeyValueRow label="恢复状态" value={resumeControl?.state || '-'} />
+            )}
+            {focusMode === 'resume_blocked' && (
+              <KeyValueRow label="缺失原因" value={resumeControl?.reason_code || 'missing_checkpoint'} />
+            )}
             {workspace.futureNodes.length > 0 && (
               <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
                 未来节点不会预占页面。它们只会在 runtime 真正到达时进入轨迹和焦点区。
@@ -976,16 +983,6 @@ const QuickModeWorkspace: React.FC = () => {
                 本次主线没有跳过节点。
               </div>
             )}
-          </ContextSection>
-
-          <ContextSection eyebrow="telemetry" title="轻量遥测">
-            <KeyValueRow label="ws" value={wsConnected ? 'connected' : 'polling'} />
-            <KeyValueRow label="arrived" value={workspace.arrivedNodes.length} />
-            <KeyValueRow label="skipped" value={workspace.skippedNodes.length} />
-            <KeyValueRow label="summary_keys" value={summaryHighlights.length} />
-            <div className="rounded-2xl bg-slate-950 px-4 py-3 text-sm leading-6 text-slate-200">
-              业务进度仍然只以 runtime read-model 为准；WS 和 polling 只是同步通道，不再冒充工作流 truth。
-            </div>
           </ContextSection>
         </aside>
       </div>

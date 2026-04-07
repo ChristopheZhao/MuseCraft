@@ -13,6 +13,8 @@
     "src/i18n/I18nProvider.tsx",
     "src/pages/HomePage.tsx",
     "__tests__/integration/runtime-gate-sync.test.tsx",
-    "__tests__/integration/export-interface.test.tsx"
+    "__tests__/integration/export-interface.test.tsx",
+    "__tests__/integration/app-store-result-finalization.test.ts",
+    "__tests__/integration/use-task-polling-completion.test.tsx"
   ]
 }

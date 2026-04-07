@@ -1,0 +1,157 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - button "收起侧边栏" [ref=e5] [cursor=pointer]:
+          - img [ref=e6]
+        - generic [ref=e8]:
+          - img [ref=e10]
+          - generic [ref=e13]:
+            - heading "MuseCraft AI" [level=1] [ref=e14]
+            - paragraph [ref=e15]: 企业级多智能体动漫生成平台
+      - generic [ref=e16]:
+        - img [ref=e17]
+        - generic [ref=e19]: 系统就绪
+      - generic [ref=e21]:
+        - button "通知" [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+        - button "语言" [ref=e27] [cursor=pointer]: 中文
+        - button "设置" [ref=e28] [cursor=pointer]:
+          - img [ref=e29]
+        - generic [ref=e32]:
+          - generic [ref=e33]:
+            - paragraph [ref=e34]: John Doe
+            - paragraph [ref=e35]: 专业版
+          - button [ref=e36] [cursor=pointer]:
+            - img [ref=e37]
+    - generic [ref=e40]:
+      - complementary [ref=e41]:
+        - generic [ref=e42]:
+          - navigation [ref=e43]:
+            - button "控制台" [ref=e44] [cursor=pointer]:
+              - img [ref=e45]
+              - generic [ref=e48]: 控制台
+            - button "我的项目 3" [ref=e49] [cursor=pointer]:
+              - img [ref=e50]
+              - generic [ref=e56]: 我的项目
+              - generic [ref=e57]: "3"
+            - button "模板中心" [ref=e58] [cursor=pointer]:
+              - img [ref=e59]
+              - generic [ref=e65]: 模板中心
+            - button "媒体素材库" [ref=e66] [cursor=pointer]:
+              - img [ref=e67]
+              - generic [ref=e71]: 媒体素材库
+            - button "已生成视频 12" [ref=e72] [cursor=pointer]:
+              - img [ref=e73]
+              - generic [ref=e76]: 已生成视频
+              - generic [ref=e77]: "12"
+            - button "分析报表" [ref=e78] [cursor=pointer]:
+              - img [ref=e79]
+              - generic [ref=e84]: 分析报表
+            - button "历史记录" [ref=e85] [cursor=pointer]:
+              - img [ref=e86]
+              - generic [ref=e90]: 历史记录
+            - generic [ref=e92]:
+              - heading "AI 智能体" [level=3] [ref=e93]
+              - generic [ref=e94]:
+                - generic [ref=e97]: 概念规划
+                - generic [ref=e100]: 剧本创作
+                - generic [ref=e103]: 视觉创作
+          - generic [ref=e104]:
+            - button "帮助与支持" [ref=e105] [cursor=pointer]:
+              - img [ref=e106]
+              - generic [ref=e110]: 帮助与支持
+            - button "设置" [ref=e111] [cursor=pointer]:
+              - img [ref=e112]
+              - generic [ref=e115]: 设置
+          - generic [ref=e116]:
+            - generic [ref=e117]:
+              - generic [ref=e118]: 用量统计
+              - generic [ref=e119]: 1,240 / 2,000
+            - button "升级套餐" [ref=e122] [cursor=pointer]
+      - main [ref=e124]:
+        - generic [ref=e126]:
+          - generic [ref=e128]:
+            - button "快速创作" [ref=e129] [cursor=pointer]
+            - button "项目模式" [ref=e130] [cursor=pointer]
+          - generic [ref=e132]:
+            - generic [ref=e133]: 产品步骤
+            - generic [ref=e134]:
+              - generic [ref=e136]:
+                - generic [ref=e137]: "1"
+                - generic [ref=e138]: 创建需求
+              - generic [ref=e141]:
+                - generic [ref=e142]: "2"
+                - generic [ref=e143]: AI生成
+              - generic [ref=e146]:
+                - generic [ref=e147]: "3"
+                - generic [ref=e148]: 结果评审
+              - generic [ref=e151]:
+                - generic [ref=e152]: "4"
+                - generic [ref=e153]: 导出与分享
+          - generic [ref=e155]:
+            - generic [ref=e156]:
+              - heading "创建新视频" [level=2] [ref=e157]
+              - paragraph [ref=e158]: 填写关键信息，MuseCraft 多智能体将为你自动完成从概念到成片的全流程生成。
+            - generic [ref=e159]:
+              - button "基本信息" [ref=e160] [cursor=pointer]:
+                - img [ref=e161]
+                - generic [ref=e167]: 基本信息
+              - button "风格" [ref=e168] [cursor=pointer]:
+                - img [ref=e169]
+                - generic [ref=e175]: 风格
+              - button "音乐" [ref=e176] [cursor=pointer]:
+                - img [ref=e177]
+                - generic [ref=e181]: 音乐
+              - button "高级" [ref=e182] [cursor=pointer]:
+                - img [ref=e183]
+                - generic [ref=e186]: 高级
+            - generic [ref=e187]:
+              - generic [ref=e188]:
+                - generic [ref=e189]:
+                  - generic [ref=e190]: 视频标题 *
+                  - textbox "例如：新品发布会预热视频" [active] [ref=e191]
+                - generic [ref=e192]:
+                  - generic [ref=e193]: 创意与内容描述 *
+                  - textbox "请输入目标受众、核心信息、场景风格等…" [ref=e194]
+                  - paragraph [ref=e195]: 0/500 字符
+                - generic [ref=e196]:
+                  - generic [ref=e197]: 参考素材（可选）
+                  - generic [ref=e198]:
+                    - generic [ref=e199] [cursor=pointer]:
+                      - button "Choose File" [ref=e200]
+                      - img [ref=e201]
+                      - generic [ref=e205]:
+                        - paragraph [ref=e206]: 拖拽文件到此处，或点击选择
+                        - paragraph [ref=e207]: 支持图片、视频和文档（每个文件最大 10 MB）
+                    - generic [ref=e208]:
+                      - paragraph [ref=e209]: • 最多 5 个文件，每个不超过 10 MB
+                      - paragraph [ref=e210]: • 支持格式：图片（JPG、PNG、GIF）、视频（MP4、MOV）、文档（PDF、DOC）
+                - generic [ref=e211]:
+                  - generic [ref=e212]:
+                    - generic [ref=e213]: 时长（秒）
+                    - combobox [ref=e214]:
+                      - option "15 秒"
+                      - option "30 秒" [selected]
+                      - option "45 秒"
+                      - option "1 分钟"
+                      - option "80 秒"
+                  - generic [ref=e215]:
+                    - generic [ref=e216]: 输出分辨率
+                    - combobox [ref=e217]:
+                      - option "720p（高清）" [selected]
+                      - option "1080p（全高清）"
+                    - paragraph [ref=e218]: 动漫场景推荐 720p，兼顾画质与生成速度。
+                  - generic [ref=e219]:
+                    - generic [ref=e220]: 画幅比例
+                    - combobox [ref=e221]:
+                      - option "16:9（横屏）" [selected]
+                      - option "9:16（竖屏/移动端）"
+                      - option "1:1（正方形）"
+                      - option "4:3（传统）"
+              - generic [ref=e222]:
+                - button "保存草稿" [ref=e223] [cursor=pointer]
+                - button "开始生成" [ref=e224] [cursor=pointer]:
+                  - img [ref=e225]
+                  - generic [ref=e227]: 开始生成
+  - alert [ref=e228]

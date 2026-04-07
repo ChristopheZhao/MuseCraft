@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import { CheckCircle, Clock, Copy, Download, Facebook, Film, Instagram, Linkedin, Twitter, Youtube } from 'lucide-react';
 
+import { useCurrentVideoDownload } from '@/hooks/useCurrentVideoDownload';
 import { useI18n } from '@/i18n/I18nProvider';
-import { getMediaDownloadFilename } from '@/lib/mediaPaths';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
 
@@ -27,50 +27,10 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
 }) => {
   const { t } = useI18n();
   const { currentRequest, addNotification } = useAppStore();
-  const [isDownloading, setIsDownloading] = useState(false);
-
-  const handleDownloadCurrentVideo = async () => {
-    if (!videoUrl || isDownloading) {
-      return;
-    }
-
-    const filename = getMediaDownloadFilename(videoUrl, currentRequest?.title || 'generated-video');
-
-    try {
-      setIsDownloading(true);
-      const response = await fetch(videoUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to download video: ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = blobUrl;
-      anchor.download = filename;
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(blobUrl);
-
-      addNotification({
-        type: 'success',
-        title: t('export.notify.downloadStarted.title'),
-        message: t('export.notify.downloadStarted.msg').replace('{filename}', filename),
-        autoClose: 4000,
-      });
-    } catch (error) {
-      addNotification({
-        type: 'error',
-        title: t('export.notify.downloadFailed.title'),
-        message: error instanceof Error ? error.message : t('export.notify.downloadFailed.msg'),
-        autoClose: 6000,
-      });
-    } finally {
-      setIsDownloading(false);
-    }
-  };
+  const { isDownloading, downloadCurrentVideo } = useCurrentVideoDownload(
+    videoUrl,
+    currentRequest?.title
+  );
 
   const handleShare = (platform: string) => {
     addNotification({
@@ -126,7 +86,7 @@ const ExportInterface: React.FC<ExportInterfaceProps> = ({
 
           <div className="flex flex-col sm:flex-row gap-4">
             <button
-              onClick={() => void handleDownloadCurrentVideo()}
+              onClick={() => void downloadCurrentVideo()}
               disabled={isDownloading}
               className={cn(
                 'flex-1 flex items-center justify-center space-x-2 px-6 py-3 rounded-lg font-medium transition-colors',

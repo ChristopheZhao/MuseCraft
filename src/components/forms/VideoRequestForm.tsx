@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import type { Accept } from 'react-dropzone';
 import { useAppStore } from '@/store/useAppStore';
 import { VideoRequest, VideoStyle, AspectRatio } from '@/types';
 import { ApiClient, type QuickCurrentRunResponse } from '@/lib/api';
@@ -20,6 +21,14 @@ import FileUploadZone from '../ui/FileUploadZone';
 import StyleSelector from './StyleSelector';
 import ParameterControls from './ParameterControls';
 import { useI18n } from '@/i18n/I18nProvider';
+
+const referenceUploadAccept: Accept = {
+  'image/*': [],
+  'video/*': [],
+  'application/pdf': ['.pdf'],
+  'application/msword': ['.doc'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+};
 
 const VideoRequestForm: React.FC = () => {
   const {
@@ -485,7 +494,7 @@ const VideoRequestForm: React.FC = () => {
               </label>
               <FileUploadZone
                 onFilesSelected={setUploadedFiles}
-                acceptedTypes={['image/*', 'video/*', '.pdf', '.doc', '.docx']}
+                acceptedTypes={referenceUploadAccept}
                 maxFiles={5}
                 maxSize={10 * 1024 * 1024} // 10MB
               />

@@ -11,11 +11,13 @@ import { useTaskPolling } from '@/hooks/useTaskPolling';
 import ResultOverlay from '@/components/video/ResultOverlay';
 import ProjectModeView from '@/components/project/ProjectModeView';
 import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
+import { cn } from '@/lib/utils';
 
 const HomePage: React.FC = () => {
   const { ui, currentRequest, finalVideoUrl, mode, setMode, setCurrentStep } = useAppStore();
   const { currentStep } = ui;
   const { t } = useI18n();
+  const isProcessingWorkspace = mode === 'quick' && currentStep === 'processing';
 
   // Initialize WebSocket connection (URL auto-resolved inside hook)
   useWebSocket();
@@ -127,11 +129,21 @@ const HomePage: React.FC = () => {
   }
 
   return (
-    <div className="h-full flex-1 w-full flex flex-col p-6 gap-6 relative">
+    <div
+      className={cn(
+        'h-full flex-1 w-full flex flex-col relative',
+        isProcessingWorkspace ? 'gap-4 p-4 lg:gap-5 lg:p-5' : 'gap-6 p-6'
+      )}
+    >
       {renderModeTabs()}
 
       <div className="flex items-center justify-center">
-        <div className="inline-flex flex-col items-center gap-3 rounded-[28px] border border-white/70 bg-white/70 px-5 py-4 shadow-sm backdrop-blur">
+        <div
+          className={cn(
+            'inline-flex flex-col items-center border border-white/70 bg-white/70 shadow-sm backdrop-blur',
+            isProcessingWorkspace ? 'gap-2 rounded-[24px] px-4 py-3' : 'gap-3 rounded-[28px] px-5 py-4'
+          )}
+        >
           <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
             产品步骤
           </div>
