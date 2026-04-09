@@ -151,6 +151,10 @@ build/
 dist/
 *.tsbuildinfo
 
+# Playwright 临时产物与验证截图
+.playwright-cli/
+output/playwright/
+
 # 大体积营销媒体文件（避免提交到仓库）
 public/marketing/*.mp4
 

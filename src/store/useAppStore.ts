@@ -13,6 +13,7 @@ import {
 
 interface AppState {
   mode: 'quick' | 'project';
+  quickProcessingContext: 'fresh_submit' | 'attached_runtime' | null;
   // 当前视频请求
   currentRequest: VideoRequest | null;
   // 最终合成视频地址（可选，本地路径或URL）
@@ -34,6 +35,7 @@ interface AppState {
   // Actions
   setCurrentRequest: (request: VideoRequest | null) => void;
   setMode: (mode: 'quick' | 'project') => void;
+  setQuickProcessingContext: (context: 'fresh_submit' | 'attached_runtime' | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
   addResult: (result: GenerationResult) => void;
   updateResult: (resultId: string, updates: Partial<GenerationResult>) => void;
@@ -132,6 +134,7 @@ export const useAppStore = create<AppState>()(
       currentRequest: null,
       finalVideoUrl: undefined,
       mode: 'quick',
+      quickProcessingContext: null,
       agents: createInitialAgents(),
       results: [],
       quickRuntime: null,
@@ -142,8 +145,29 @@ export const useAppStore = create<AppState>()(
       setMode: (mode) =>
         set({ mode }, false, 'setMode'),
 
-      setCurrentRequest: (request) => 
-        set({ currentRequest: request }, false, 'setCurrentRequest'),
+      setQuickProcessingContext: (context) =>
+        set({ quickProcessingContext: context }, false, 'setQuickProcessingContext'),
+
+      setCurrentRequest: (request) =>
+        set((state) => {
+          const previousTaskId = state.currentRequest?.id ?? null;
+          const nextTaskId = request?.id ?? null;
+          const taskChanged = previousTaskId !== nextTaskId;
+
+          if (!taskChanged) {
+            return { currentRequest: request };
+          }
+
+          return {
+            currentRequest: request,
+            finalVideoUrl: undefined,
+            quickRuntime: null,
+            ui: {
+              ...state.ui,
+              modal: null,
+            },
+          };
+        }, false, 'setCurrentRequest'),
 
       setFinalVideoUrl: (url) =>
         set({ finalVideoUrl: url }, false, 'setFinalVideoUrl'),
@@ -227,6 +251,7 @@ export const useAppStore = create<AppState>()(
         set({
           currentRequest: null,
           finalVideoUrl: undefined,
+          quickProcessingContext: null,
           agents: createInitialAgents(),
           results: [],
           quickRuntime: null,

@@ -51,7 +51,7 @@ A comprehensive backend API for AI-powered short video generation using multi-ag
   ```
 
 ### Python Requirements
-- Python 3.8+
+- Python 3.11.x
 - PostgreSQL 12+
 - Redis 6+
 
@@ -84,7 +84,7 @@ A comprehensive backend API for AI-powered short video generation using multi-ag
 ### Manual Installation
 
 1. **Prerequisites**:
-   - Python 3.11+
+   - Python 3.11.x
    - MySQL 8.0+ (or PostgreSQL 13+)
    - Redis 6+
    - FFmpeg
@@ -96,9 +96,13 @@ A comprehensive backend API for AI-powered short video generation using multi-ag
    ```bash
    # Install UV if not already installed
    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # If you're in mainland China and Astral/PyPI access is slow, temporarily use Aliyun mirror instead
+   python -m pip install -U uv -i https://mirrors.aliyun.com/pypi/simple
+   export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
    
-   # Sync dependencies using UV
-   uv sync
+   # Create the project environment from pyproject.toml and sync dev dependencies
+   uv sync --extra dev
    ```
 
 3. **Setup environment**:

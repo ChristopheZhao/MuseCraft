@@ -17,6 +17,10 @@ function isHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url);
 }
 
+function sanitizeFilename(value: string): string {
+  return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').trim();
+}
+
 /**
  * Normalize raw path/URL returned by backend/tooling to a browser-accessible URL.
  * Handles:
@@ -74,4 +78,28 @@ export function resolvePublicMediaUrl(raw?: string | null): string | undefined {
   }
 
   return undefined;
+}
+
+export function getMediaDownloadFilename(raw?: string | null, fallbackBase = 'generated-video'): string {
+  if (raw) {
+    try {
+      const pathname = isHttpUrl(raw) ? new URL(raw).pathname : raw;
+      const candidate = decodeURIComponent(
+        pathname
+          .replace(/\\/g, '/')
+          .replace(/^file:\/\//i, '')
+          .split(/[?#]/, 1)[0]
+          .split('/')
+          .pop() || ''
+      );
+      if (candidate.includes('.')) {
+        return sanitizeFilename(candidate);
+      }
+    } catch {
+      // Fall through to the fallback filename below.
+    }
+  }
+
+  const safeBase = sanitizeFilename(fallbackBase) || 'generated-video';
+  return safeBase.endsWith('.mp4') ? safeBase : `${safeBase}.mp4`;
 }

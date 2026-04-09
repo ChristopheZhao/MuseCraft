@@ -556,22 +556,35 @@ class LongTermMemoryManager:
     
     def _start_background_tasks(self):
         """Start background consolidation and cleanup tasks"""
+        consolidation_enabled = self.config.get("enable_consolidation", True)
+        cleanup_enabled = self.config.get("enable_cleanup", True)
+
+        if not consolidation_enabled and not cleanup_enabled:
+            self._consolidation_task = None
+            self._cleanup_task = None
+            return
+
         try:
-            # 检查是否有运行的事件循环
-            loop = asyncio.get_running_loop()
-            
-            if self.config.get("enable_consolidation", True):
+            # Background maintenance is optional; only start tasks when a loop is actively running.
+            asyncio.get_running_loop()
+
+            if consolidation_enabled:
                 self._consolidation_task = asyncio.create_task(
                     self._consolidation_loop()
                 )
             
-            if self.config.get("enable_cleanup", True):
+            if cleanup_enabled:
                 self._cleanup_task = asyncio.create_task(
                     self._cleanup_loop()
                 )
         except RuntimeError:
-            # 没有运行的事件循环，在同步环境中跳过后台任务
-            print("LongTermMemoryManager: No running event loop, skipping background tasks")
+            # No running event loop is expected in sync bootstrap paths; degrade without aborting startup.
+            try:
+                self.logger.info(
+                    "No running event loop available; skipping long-term memory background tasks"
+                )
+            except Exception:
+                pass
             self._consolidation_task = None
             self._cleanup_task = None
     

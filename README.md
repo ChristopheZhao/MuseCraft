@@ -154,14 +154,16 @@ cd backend
 # 自动安装uv并设置环境
 python scripts/setup_uv_environment.py
 
-# 或手动安装uv
+# 或手动安装 uv
 curl -LsSf https://astral.sh/uv/install.sh | sh  # Linux/macOS
 # 或 Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# 创建环境并安装依赖
-uv venv
-uv pip install -e .
-uv pip install -e ".[dev]"
+# 国内网络如果访问 astral / PyPI 较慢，可临时切到阿里源：
+python -m pip install -U uv -i https://mirrors.aliyun.com/pypi/simple
+export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
+
+# 根据 pyproject.toml 创建 3.11 环境并同步开发依赖
+uv sync --extra dev
 
 # 方法2: 传统pip方式
 pip install -r requirements.txt

@@ -2630,6 +2630,153 @@
           "text": "User confirmed closeout after fresh live API verification; bounded QC semantic repair is complete and validated."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260406-058",
+      "title": "Quick-mode frontend runtime UX repair and workspace evolution",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260406-058.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-06T08:05:26Z",
+      "updated_at": "2026-04-07T14:03:12Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-06T09:00:11Z",
+          "text": "Sprint 1 execution started with Playwright Firefox reproduction as first gate"
+        },
+        {
+          "at": "2026-04-06T12:44:40Z",
+          "text": "Infinite-canvas work was lifted out of 058; this plan now remains the Sprint 1/Sprint 2 frontend baseline only, with follow-on discovery moved to PLAN-20260406-059"
+        },
+        {
+          "at": "2026-04-06T12:56:57Z",
+          "text": "Sprint 1 and Sprint 2 delivered and validated; awaiting final closure after scope split to PLAN-20260406-059"
+        },
+        {
+          "at": "2026-04-06T12:57:12Z",
+          "text": "User confirmed closure; Sprint 1 and Sprint 2 accepted, and infinite-canvas follow-on moved to PLAN-20260406-059"
+        },
+        {
+          "at": "2026-04-06T14:15:55Z",
+          "text": "Reopened on new viewport evidence: Sprint 2 stable workspace still has layout and information-hierarchy defects under real processing-state screens; amendment scope is limited to frontend workspace polish, not canvas or contract work"
+        },
+        {
+          "at": "2026-04-06T14:47:00Z",
+          "text": "Sprint 2 amendment implemented and browser-validated: processing workspace layout now preserves center focus at common desktop width, raw diagnostics are demoted, and top shell height is reduced; awaiting user review before closure"
+        },
+        {
+          "at": "2026-04-07T08:37:01Z",
+          "text": "Reopened on completed-result evidence: owner remains in the frontend quick-mode result-finalization chain; amendment scope is limited to stale finalVideoUrl invalidation, completed gating, and download-entry consistency"
+        },
+        {
+          "at": "2026-04-07T13:23:11Z",
+          "text": "Live validation also exposed an independent backend memory bootstrap defect; follow-on repair was split into PLAN-20260407-061 so 058 stays frontend-only"
+        },
+        {
+          "at": "2026-04-07T14:03:12Z",
+          "text": "User confirmed final closure; frontend-only scope is complete and later backend defects were split to PLAN-20260407-061 and PLAN-20260407-062 without reopening 058"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260406-059",
+      "title": "Quick-mode canvas workspace discovery and contract assessment",
+      "kind": "feature",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260406-059.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-06T12:41:14Z",
+      "updated_at": "2026-04-06T12:44:40Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-06T12:44:40Z",
+          "text": "Created as the dedicated discovery/contract-first successor for infinite-canvas evaluation after scope split from PLAN-20260406-058"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260406-060",
+      "title": "Frontend startup font dependency and upload accept warning fix",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260406-060.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-06T13:07:41Z",
+      "updated_at": "2026-04-06T14:07:54Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-06T13:09:59Z",
+          "text": "Started standalone frontend hygiene fix for dev font dependency and upload accept warnings"
+        },
+        {
+          "at": "2026-04-06T13:18:24Z",
+          "text": "Implemented local/system font fallback and MIME-based upload accept mapping; validated with isolated dev server on port 3001 and frontend runtime type-check"
+        },
+        {
+          "at": "2026-04-06T14:07:54Z",
+          "text": "User confirmed the frontend hygiene fix; font dependency and upload accept warnings are closed"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260407-061",
+      "title": "Backend memory bootstrap downgrade-path fix for quick runs",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260407-061.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-07T13:23:11Z",
+      "updated_at": "2026-04-07T14:03:12Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-07T13:23:11Z",
+          "text": "Created as a bounded backend follow-on after 058 live validation exposed an intermittent memory bootstrap downgrade failure before the first workflow node"
+        },
+        {
+          "at": "2026-04-07T13:23:11Z",
+          "text": "Execution started with scope frozen to the LongTermMemoryManager downgrade path and focused backend regression coverage"
+        },
+        {
+          "at": "2026-04-07T13:47:36Z",
+          "text": "Bounded fix implemented and smoke/live-validated: the old Errno 5 downgrade-path failure no longer reproduces, while a new independent SQLite storage bootstrap error now appears later in startup"
+        },
+        {
+          "at": "2026-04-07T14:03:12Z",
+          "text": "User confirmed closure; 061 remains complete and the newly surfaced SQLiteMemoryStore bootstrap issue is split to PLAN-20260407-062"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260407-062",
+      "title": "SQLite memory store bootstrap stability follow-on",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P2",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260407-062.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-04-07T14:03:12Z",
+      "updated_at": "2026-04-07T14:03:12Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-07T14:03:12Z",
+          "text": "Opened as a non-blocking follow-on for the intermittent SQLiteMemoryStore bootstrap failure after 061 fixed the separate memory bootstrap downgrade-path bug"
+        }
+      ]
     }
   ]
 }

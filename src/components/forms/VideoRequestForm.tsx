@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import type { Accept } from 'react-dropzone';
 import { useAppStore } from '@/store/useAppStore';
 import { VideoRequest, VideoStyle, AspectRatio } from '@/types';
 import { ApiClient, type QuickCurrentRunResponse } from '@/lib/api';
@@ -21,8 +22,22 @@ import StyleSelector from './StyleSelector';
 import ParameterControls from './ParameterControls';
 import { useI18n } from '@/i18n/I18nProvider';
 
+const referenceUploadAccept: Accept = {
+  'image/*': [],
+  'video/*': [],
+  'application/pdf': ['.pdf'],
+  'application/msword': ['.doc'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+};
+
 const VideoRequestForm: React.FC = () => {
-  const { setCurrentRequest, setCurrentStep, setQuickRuntime, addNotification } = useAppStore();
+  const {
+    setCurrentRequest,
+    setCurrentStep,
+    setQuickRuntime,
+    setQuickProcessingContext,
+    addNotification,
+  } = useAppStore();
   const { t } = useI18n();
   const [workspaceSessionId, setWorkspaceSessionId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -143,6 +158,7 @@ const VideoRequestForm: React.FC = () => {
     setExistingRunDismissed(true);
     setCurrentRequest(request);
     setQuickRuntime(run.runtime);
+    setQuickProcessingContext('attached_runtime');
     setCurrentStep('processing');
     if (notification) {
       addNotification(notification);
@@ -193,6 +209,7 @@ const VideoRequestForm: React.FC = () => {
     console.info('CREATE_NEW_RUN selected', { sessionId: workspaceSessionId || existingRun?.task?.session_id || 'unknown' });
     setExistingRunDismissed(true);
     setQuickRuntime(null);
+    setQuickProcessingContext(null);
     setCurrentRequest(null);
   };
 
@@ -256,7 +273,7 @@ const VideoRequestForm: React.FC = () => {
       setIsSubmitting(true);
       setExistingRunDismissed(true);
       setQuickRuntime(null);
-      setCurrentStep('processing');
+      setQuickProcessingContext(null);
       console.info('FORM_SUBMIT creating new quick task', {
         sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
         title: formData.title,
@@ -300,6 +317,7 @@ const VideoRequestForm: React.FC = () => {
       };
 
       setCurrentRequest(request);
+      setQuickProcessingContext('fresh_submit');
       setCurrentStep('processing');
       setExistingRun(null);
       
@@ -322,6 +340,7 @@ const VideoRequestForm: React.FC = () => {
         message: error instanceof Error ? error.message : t('notify.submitFailed.msg'),
         autoClose: 8000,
       });
+      setQuickProcessingContext(null);
       setCurrentStep('input');
     } finally {
       setIsSubmitting(false);
@@ -475,7 +494,7 @@ const VideoRequestForm: React.FC = () => {
               </label>
               <FileUploadZone
                 onFilesSelected={setUploadedFiles}
-                acceptedTypes={['image/*', 'video/*', '.pdf', '.doc', '.docx']}
+                acceptedTypes={referenceUploadAccept}
                 maxFiles={5}
                 maxSize={10 * 1024 * 1024} // 10MB
               />

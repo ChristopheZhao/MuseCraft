@@ -1,11 +1,20 @@
 {
   "extends": "./tsconfig.json",
   "include": [
+    "src/store/useAppStore.ts",
+    "src/components/forms/VideoRequestForm.tsx",
     "src/hooks/useTaskPolling.ts",
     "src/hooks/useWebSocket.ts",
     "src/components/preview/QuickModeWorkspace.tsx",
+    "src/components/video/ExportInterface.tsx",
     "src/lib/api.ts",
+    "src/lib/mediaPaths.ts",
+    "src/lib/runtimeReadModel.ts",
     "src/i18n/I18nProvider.tsx",
-    "__tests__/integration/runtime-gate-sync.test.tsx"
+    "src/pages/HomePage.tsx",
+    "__tests__/integration/runtime-gate-sync.test.tsx",
+    "__tests__/integration/export-interface.test.tsx",
+    "__tests__/integration/app-store-result-finalization.test.ts",
+    "__tests__/integration/use-task-polling-completion.test.tsx"
   ]
 }

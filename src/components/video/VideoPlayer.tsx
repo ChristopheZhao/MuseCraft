@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { cn, formatTime } from '@/lib/utils';
+import { useCurrentVideoDownload } from '@/hooks/useCurrentVideoDownload';
 import { 
   Play, 
   Pause, 
@@ -44,6 +45,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onEnded,
 }) => {
   const { t } = useI18n();
+  const { isDownloading, downloadCurrentVideo } = useCurrentVideoDownload(src, title);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -272,8 +274,19 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <button className="p-2 text-white/80 hover:text-white transition-colors">
               <Share2 className="w-5 h-5" />
             </button>
-            <button className="p-2 text-white/80 hover:text-white transition-colors">
-              <Download className="w-5 h-5" />
+            <button
+              onClick={() => void downloadCurrentVideo()}
+              disabled={!src || isDownloading}
+              aria-label={t('export.downloadCurrent')}
+              title={t('export.downloadCurrent')}
+              className={cn(
+                'p-2 transition-colors',
+                !src || isDownloading
+                  ? 'cursor-not-allowed text-white/40'
+                  : 'text-white/80 hover:text-white'
+              )}
+            >
+              <Download className={cn('w-5 h-5', isDownloading && 'animate-pulse')} />
             </button>
           </div>
         </div>

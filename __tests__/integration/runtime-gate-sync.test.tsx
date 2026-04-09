@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
@@ -113,6 +113,7 @@ const renderWorkspace = (storeOverrides: Record<string, any> = {}) => {
       id: 'task-123',
       title: '测试单集任务',
     },
+    quickProcessingContext: 'attached_runtime',
     quickRuntime: baseRuntime,
     agents: [
       {
@@ -152,11 +153,12 @@ describe('runtime gate sync', () => {
     renderWorkspace();
 
     expect(screen.getByText('脚本工作台')).toBeInTheDocument();
-    expect(screen.getByText('等待脚本确认')).toBeInTheDocument();
+    expect(screen.getByText('等待人工确认')).toBeInTheDocument();
     expect(screen.getByText('场景 1：主角登场\\n场景 2：冲突展开')).toBeInTheDocument();
     expect(screen.getAllByText('脚本创作').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('pending_gate').length).toBeGreaterThan(0);
+    expect(screen.getByText('执行轨迹')).toBeInTheDocument();
     expect(screen.getByText(/该节点等待人工审核后继续/)).toBeInTheDocument();
+    expect(screen.queryByText('图像生成')).not.toBeInTheDocument();
   });
 
   it('submits approve and writes resumed runtime state back to store', async () => {
@@ -246,5 +248,103 @@ describe('runtime gate sync', () => {
     expect(screen.getByText('运行失败')).toBeInTheDocument();
     expect(screen.getByText('step-0 failed before entering first node')).toBeInTheDocument();
     expect(screen.getByText('失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。')).toBeInTheDocument();
+  });
+
+  it('keeps fresh-submit bootstrap separate from resume-blocked workspace state', () => {
+    renderWorkspace({
+      quickProcessingContext: 'fresh_submit',
+      quickRuntime: buildRuntime({
+        status: 'queued',
+        current_node_key: null,
+        current_attempt_id: null,
+        active_gate: null,
+        resume_control: {
+          state: 'resume_blocked',
+          can_resume: false,
+          reason_code: 'missing_current_attempt',
+        },
+        nodes: buildRuntime().nodes.map((node) => ({
+          ...node,
+          status: 'queued',
+        })),
+      }),
+    });
+
+    expect(screen.getByText('正在连接运行时')).toBeInTheDocument();
+    expect(screen.queryByText('恢复条件缺失')).not.toBeInTheDocument();
+  });
+
+  it('folds skipped nodes into the side summary instead of the main storyboard rail', () => {
+    renderWorkspace({
+      quickRuntime: buildRuntime({
+        status: 'running',
+        current_node_key: 'compose',
+        current_attempt_id: 91,
+        active_gate: null,
+        nodes: [
+          {
+            id: 1,
+            node_key: 'concept',
+            node_type: 'agent',
+            order_index: 0,
+            scope_type: 'episode',
+            scope_ref: null,
+            status: 'completed',
+            revision_index: 0,
+            gate_required: false,
+            last_gate_id: null,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+          {
+            id: 2,
+            node_key: 'script',
+            node_type: 'agent',
+            order_index: 1,
+            scope_type: 'episode',
+            scope_ref: null,
+            status: 'completed',
+            revision_index: 0,
+            gate_required: true,
+            last_gate_id: 78,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+          {
+            id: 3,
+            node_key: 'voice',
+            node_type: 'agent',
+            order_index: 2,
+            scope_type: 'episode',
+            scope_ref: null,
+            status: 'skipped',
+            revision_index: 0,
+            gate_required: false,
+            last_gate_id: null,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+          {
+            id: 4,
+            node_key: 'compose',
+            node_type: 'agent',
+            order_index: 3,
+            scope_type: 'episode',
+            scope_ref: null,
+            status: 'running',
+            revision_index: 0,
+            gate_required: false,
+            last_gate_id: null,
+            artifact_refs: [],
+            diagnostics: [],
+          },
+        ],
+      }),
+    });
+
+    const skippedSection = screen.getByText('本次未走通道').closest('section');
+    expect(skippedSection).not.toBeNull();
+    expect(within(skippedSection as HTMLElement).getByText('语音合成')).toBeInTheDocument();
+    expect(screen.queryAllByText('语音合成')).toHaveLength(1);
   });
 });
