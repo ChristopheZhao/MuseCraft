@@ -6,7 +6,7 @@ authors = [
     {name = "Short Video Maker Team"}
 ]
 readme = "README.md"
-requires-python = ">=3.8.1"
+requires-python = ">=3.11,<3.12"
 license = {text = "MIT"}
 
 dependencies = [
@@ -100,7 +100,7 @@ packages = ["app"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38']
+target-version = ['py311']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -125,7 +125,7 @@ line_length = 100
 known_first_party = ["app"]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
