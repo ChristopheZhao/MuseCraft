@@ -1654,13 +1654,13 @@
       "id": "PLAN-20260328-032",
       "title": "HITL continuation snapshot and single-path resume recovery alignment",
       "kind": "fix",
-      "status": "awaiting_user_confirmation",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260328-032.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-28T02:54:28Z",
-      "updated_at": "2026-03-28T03:12:40Z",
+      "updated_at": "2026-04-25T14:08:22Z",
       "archived_at": null,
       "notes": [
         {
@@ -1686,6 +1686,10 @@
         {
           "at": "2026-03-28T04:05:39Z",
           "text": "Completed Phase 6 live smoke on the current-code 8006 API: a real quick task reached script_review, accepted approve, resumed into image, and persisted decision_id=8 onto workflow_node_attempts.continuation_checkpoint; the earlier 8005 failure is now classified as stale dev-process drift rather than a surviving continuation-path regression"
+        },
+        {
+          "at": "2026-04-25T14:08:22Z",
+          "text": "User confirmed closeout after reviewing Phase 4 implementation verification, Phase 5 MySQL migration, and Phase 6 live approve/resume smoke evidence."
         }
       ]
     },
@@ -2404,13 +2408,13 @@
       "id": "PLAN-20260403-050",
       "title": "Orchestrator runtime resume/bootstrap boundary slimming follow-on",
       "kind": "refactor",
-      "status": "awaiting_user_confirmation",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260403-050.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-04-03T13:53:49Z",
-      "updated_at": "2026-04-04T02:10:47Z",
+      "updated_at": "2026-04-25T14:13:21Z",
       "archived_at": null,
       "notes": [
         {
@@ -2436,6 +2440,10 @@
         {
           "at": "2026-04-04T02:10:47Z",
           "text": "Implementation and bounded validation are complete; user approved moving 050 to awaiting_user_confirmation while a separate SQL governance follow-on will be opened next."
+        },
+        {
+          "at": "2026-04-25T14:13:21Z",
+          "text": "User confirmed closeout after reviewing Stage A/B/C boundary extraction and owner-boundary validation evidence."
         }
       ]
     },

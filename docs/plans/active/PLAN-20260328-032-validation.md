@@ -2,7 +2,7 @@
 
 - Plan ID: PLAN-20260328-032
 - Recorded At: 2026-03-28T02:54:28Z
-- Status: in_progress
+- Status: completed
 
 ## Purpose
 - Record phase-by-phase verification for [PLAN-20260328-032](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260328-032.md).
@@ -159,3 +159,4 @@
 - 2026-03-28T03:32:27Z completed Phase 4 implementation verification. The accepted implementation preserves the handoff boundaries: queue/worker remain transport-only, `WorkflowNodeAttempt.continuation_checkpoint` becomes the only new control-plane carrier, `WorkflowGateDecision.id` remains decision authority, and fresh-WM resume is now verified by clearing the fake Shared WM in orchestrator mainline tests before approve/revise/replan continuation runs.
 - 2026-03-28T03:41:44Z completed Phase 5 live schema rollout. The migration was applied to the actual MySQL dev database configured in `backend/alembic.ini`, current revision now matches `9e4b7c1a2d3f (head)`, and the new `workflow_node_attempts.continuation_checkpoint` column was verified via SQLAlchemy inspection rather than inferred from Alembic state alone.
 - 2026-03-28T04:05:39Z completed Phase 6 live approve/resume smoke. The acceptance bar is now higher than unit coverage: a real task on the current-code `8006` API reached `script_review`, accepted `approve`, resumed through control-plane checkpoint loading, advanced into `image`, and persisted `decision_id = 8` back onto the attempt checkpoint in dev MySQL. This closes the original `missing persisted workflow.task_specs` regression on the intended single recovery path while also isolating the earlier `8005` failure as stale process drift.
+- 2026-04-25T14:08:22Z user confirmed closeout. This validation ledger is accepted as completed with Phase 4 implementation checks, Phase 5 MySQL schema rollout, and Phase 6 live approve/resume smoke as the closure evidence.
