@@ -323,6 +323,40 @@ def test_video_composer_context_compose_contract_keeps_scene_inputs_even_when_fi
     assert "audio_file" not in payload["scenes"][0]
 
 
+def test_video_composer_context_rejects_url_only_scene_video_for_compose_mode():
+    service = _build_service()
+    workflow_id = "wf-composer-compose-url-only"
+
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            "1": {
+                "scene_number": 1,
+                "video_url": "https://example.com/scene-1.mp4",
+                "duration_sec": 1.0,
+            }
+        },
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "duration": 1.0}]},
+        service=service,
+    )
+
+    with pytest.raises(ValueError, match="missing local scene video files"):
+        build_video_composer_context(
+            workflow_id,
+            service=service,
+            execution_contract=build_video_composer_execution_contract(
+                workflow_state_id=workflow_id,
+                compose_mode="compose",
+            ),
+        )
+
+
 def test_video_composer_context_voiceover_contract_includes_scene_audio_in_ref():
     service = _build_service()
     workflow_id = "wf-composer-voice-authority"

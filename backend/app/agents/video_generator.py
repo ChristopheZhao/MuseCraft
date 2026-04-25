@@ -427,17 +427,51 @@ class VideoGeneratorAgent(ReActAgent):
             video_path = str(item.get("video_path") or "").strip()
             if not video_url and not video_path:
                 continue
-            receipts.append(
-                {
-                    "scene_number": scene_number,
-                    "status": "accepted",
-                    "artifact_kind": "video",
-                    "delivery_surface": "scene_outputs.video",
-                    "delivery_ref": f"scene_outputs.video.{scene_number}",
-                    "workflow_state_id": str(workflow_state_id or ""),
-                    "accepted_at": accepted_at,
-                }
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            storage_diag = item.get("storage") if isinstance(item.get("storage"), dict) else {}
+            if not storage_diag and isinstance(metadata, dict):
+                storage_diag = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+            fallback_reasons = item.get("fallback_reasons") if isinstance(item.get("fallback_reasons"), list) else []
+            if not fallback_reasons and isinstance(metadata, dict):
+                diagnostics = metadata.get("diagnostics")
+                if isinstance(diagnostics, list):
+                    fallback_reasons = [
+                        str(entry.get("fallback_reason"))
+                        for entry in diagnostics
+                        if isinstance(entry, dict) and entry.get("fallback_reason")
+                    ]
+            storage_status = str(storage_diag.get("status") or "").strip().lower() if storage_diag else ""
+            storage_fallback_reason = (
+                str(storage_diag.get("fallback_reason") or "").strip() if storage_diag else ""
             )
+            if (
+                not video_path
+                and not storage_fallback_reason
+                and "artifact_not_persisted" not in fallback_reasons
+            ):
+                fallback_reasons = list(fallback_reasons) + ["artifact_not_persisted"]
+            if storage_fallback_reason and storage_fallback_reason not in fallback_reasons:
+                fallback_reasons = list(fallback_reasons) + [storage_fallback_reason]
+            is_accepted = bool(video_path) and storage_status != "failed"
+            receipt = {
+                "scene_number": scene_number,
+                "status": "accepted" if is_accepted else "failed",
+                "artifact_kind": "video",
+                "delivery_surface": "scene_outputs.video",
+                "delivery_ref": f"scene_outputs.video.{scene_number}",
+                "workflow_state_id": str(workflow_state_id or ""),
+            }
+            if is_accepted:
+                receipt["accepted_at"] = accepted_at
+            else:
+                receipt["failure_reason"] = storage_fallback_reason or "artifact_not_persisted"
+            if storage_diag:
+                receipt["storage_status"] = str(storage_diag.get("status") or "")
+                if storage_fallback_reason:
+                    receipt["storage_fallback_reason"] = storage_fallback_reason
+            if fallback_reasons:
+                receipt["fallback_reasons"] = sorted(set(str(reason) for reason in fallback_reasons if reason))
+            receipts.append(receipt)
         return receipts
 
     def _collect_accepted_video_scene_numbers(

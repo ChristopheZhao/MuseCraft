@@ -1,9 +1,16 @@
 import logging
 
+import pytest
+
 from app.agents.utils.memory_helpers import ensure_mas_working_memory
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.video_generator import VideoGeneratorAgent
 from app.services.memory_provider import build_memory_services
+
+
+@pytest.fixture(autouse=True)
+def _use_in_memory_long_term_store(monkeypatch):
+    monkeypatch.setenv("MEMORY_BACKEND", "dict")
 
 
 def _make_bare_video_generator_agent():
@@ -115,11 +122,14 @@ def test_progress_read_model_uses_accepted_scene_outputs_with_provenance(monkeyp
     )
 
     progress = ctx["progress_read_model"]
-    assert progress["successful_scene_numbers"] == [1, 2]
-    assert progress["remaining_scene_numbers"] == []
+    assert progress["successful_scene_numbers"] == [1]
+    assert progress["remaining_scene_numbers"] == [2]
     assert progress["derived_from"] == ["scene_outputs.video"]
-    assert progress["last_receipt_watermark"] == "scene_outputs.video.2"
+    assert progress["last_receipt_watermark"] == "scene_outputs.video.1"
     assert progress["max_staleness_seconds"] > 0
+    diagnostics = ctx["plan_context_diagnostics"]["progress_read_model"]
+    assert diagnostics["reason"] == "video_scene_outputs_not_accepted"
+    assert "scene=2:missing_local_path" in diagnostics["detail"]
 
 
 def test_video_generator_completion_gate_requires_accepted_delivery(monkeypatch):

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..agents.adapters.memory_views import (
     build_script_stage_views,
+    build_script_writer_context,
     build_image_generation_context,
     build_media_agent_context,
     build_quality_checker_context,
@@ -255,7 +256,19 @@ class ContextContractAssembler:
                 script_stage_resolution
             )
 
-        if agent_type == AgentType.AUDIO_GENERATOR:
+        if agent_type == AgentType.SCRIPT_WRITER:
+            script_writer_ctx = build_script_writer_context(
+                workflow_state_id,
+                service=self._memory_services.short_term,
+            )
+            context_payload = script_writer_ctx.get("context") if isinstance(script_writer_ctx, dict) else {}
+            diagnostics = script_writer_ctx.get("diagnostics") if isinstance(script_writer_ctx, dict) else {}
+            if isinstance(context_payload, dict) and context_payload:
+                static_context.update(context_payload)
+            if isinstance(diagnostics, dict) and diagnostics:
+                assembler_diagnostics["script_writer_context"] = diagnostics
+
+        elif agent_type == AgentType.AUDIO_GENERATOR:
             audio_req = workflow_payload.get("audio_requirements")
             sfx_override = None
             if isinstance(audio_req, dict) and audio_req.get("sfx_required") is not None:

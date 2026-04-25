@@ -56,6 +56,35 @@ async def ensure_persisted_videos(
     """
     if not results:
         return results
+
+    def _attach_storage_diagnostic(
+        item: Dict[str, Any],
+        *,
+        status: str,
+        fallback_reason: str,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        updated = dict(item or {})
+        diagnostic: Dict[str, Any] = {
+            "status": str(status or "failed"),
+            "fallback_reason": str(fallback_reason or "artifact_storage_failed"),
+        }
+        for key, value in fields.items():
+            if value not in (None, ""):
+                diagnostic[key] = value
+        metadata = dict(updated.get("metadata") or {})
+        metadata["storage"] = diagnostic
+        diagnostics = list(metadata.get("diagnostics") or [])
+        diagnostics.append({"category": "storage", **diagnostic})
+        metadata["diagnostics"] = diagnostics
+        updated["metadata"] = metadata
+        updated["storage"] = diagnostic
+        fallback_reasons = list(updated.get("fallback_reasons") or [])
+        if diagnostic["fallback_reason"] not in fallback_reasons:
+            fallback_reasons.append(diagnostic["fallback_reason"])
+        updated["fallback_reasons"] = fallback_reasons
+        return updated
+
     updated: List[Dict[str, Any]] = []
     for r in results:
         try:
@@ -72,11 +101,37 @@ async def ensure_persisted_videos(
                 file_path = ""
                 if isinstance(storage_result, dict):
                     file_path = storage_result.get("file_path") or storage_result.get("local_path") or ""
+                    storage_diag = storage_result.get("storage")
+                    if isinstance(storage_diag, dict) and storage_diag.get("status") == "failed":
+                        r = _attach_storage_diagnostic(
+                            dict(r),
+                            status="failed",
+                            fallback_reason=str(storage_diag.get("fallback_reason") or "artifact_upload_failed"),
+                            error_type=storage_diag.get("error_type"),
+                            error=storage_diag.get("error"),
+                            scene_number=scene_num,
+                        )
                 r = dict(r)
                 r["video_path"] = file_path or r.get("video_path", "")
+                if not file_path:
+                    r = _attach_storage_diagnostic(
+                        r,
+                        status="failed",
+                        fallback_reason="artifact_upload_no_path",
+                        scene_number=scene_num,
+                    )
             updated.append(r)
-        except Exception:
-            updated.append(r)
+        except Exception as exc:
+            updated.append(
+                _attach_storage_diagnostic(
+                    dict(r or {}),
+                    status="failed",
+                    fallback_reason="artifact_upload_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                    scene_number=(r or {}).get("scene_number") if isinstance(r, dict) else None,
+                )
+            )
     return updated
 
 
@@ -226,8 +281,15 @@ def make_storage_uploader(
                     "metadata": metadata,
                 },
             )
-        except Exception:
-            return {}
+        except Exception as exc:
+            return {
+                "storage": {
+                    "status": "failed",
+                    "fallback_reason": "artifact_upload_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:200],
+                }
+            }
         payload = extract_tool_payload(tool_result)
         if isinstance(payload, dict):
             if "file_path" not in payload and payload.get("local_path"):

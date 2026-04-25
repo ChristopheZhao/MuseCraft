@@ -90,6 +90,16 @@ class OrchestratorAgent(BaseAgent):
     Orchestrator Agent manages the complete video generation workflow
     by coordinating all specialized agents in the correct order
     """
+
+    _PLANNING_RUNTIME_IDENTITY_KEYS = {
+        "workflow_state_id",
+        "workflow_id",
+        "task_id",
+        "runtime_session_id",
+        "session_id",
+        "attempt_id",
+        "lease_token",
+    }
     
     @classmethod
     def create_default(cls) -> "OrchestratorAgent":
@@ -271,6 +281,16 @@ class OrchestratorAgent(BaseAgent):
             "allow_silence": bool(audio_contract.get("allow_silence", True)),
             "need_voiceover": bool(audio_contract.get("need_voiceover", False)),
             "need_global_bgm": bool(audio_contract.get("need_global_bgm", False)),
+        }
+
+    @classmethod
+    def _sanitize_planning_audio_contract(cls, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            key: item
+            for key, item in dict(value).items()
+            if key not in cls._PLANNING_RUNTIME_IDENTITY_KEYS
         }
 
     @staticmethod
@@ -459,9 +479,10 @@ class OrchestratorAgent(BaseAgent):
                 "task_traits_json": json.dumps(task_traits, ensure_ascii=False),
                 "runtime_constraints_json": json.dumps(
                     {
-                        "audio_contract": workflow_data.get("audio_contract") or {},
+                        "audio_contract": self._sanitize_planning_audio_contract(
+                            workflow_data.get("audio_contract")
+                        ),
                         "audio_capability": workflow_data.get("audio_capability") or {},
-                        "workflow_state_id": workflow_id,
                     },
                     ensure_ascii=False,
                 ),
@@ -1962,10 +1983,11 @@ class OrchestratorAgent(BaseAgent):
                     ),
                     "runtime_constraints_json": json.dumps(
                         {
-                            "audio_contract": workflow_data.get("audio_contract") or {},
+                            "audio_contract": self._sanitize_planning_audio_contract(
+                                workflow_data.get("audio_contract")
+                            ),
                             "audio_capability": workflow_data.get("audio_capability") or {},
                             "task_traits": self._extract_planning_task_traits(workflow_data),
-                            "workflow_state_id": workflow_id,
                         },
                         ensure_ascii=False,
                     ),

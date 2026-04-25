@@ -294,6 +294,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
             session_factory=session_factory,
         )
     agent._workflow_completion_adapter = SimpleNamespace(
+        build_persistence_payload=lambda workflow_id: {"final_video_url": "https://example.com/final.mp4"},
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
     )
@@ -412,6 +413,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
             session_factory=session_factory,
         )
     agent._workflow_completion_adapter = SimpleNamespace(
+        build_persistence_payload=lambda workflow_id: {"final_video_url": "https://example.com/final.mp4"},
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
     )
@@ -1028,6 +1030,97 @@ def test_candidate_selection_prompt_includes_mainline_and_audio_optionality_prio
     assert "必须同时保留 script_writer" in user_content
 
 
+def test_orchestrator_planning_prompts_do_not_expose_workflow_state_id(monkeypatch):
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=object())
+    agent.agent_name = "orchestrator"
+    agent.logger = logging.getLogger("test.orchestrator.planning_prompt.runtime_identity")
+    agent.prompt_manager = get_prompt_manager()
+    agent.get_system_instructions = lambda: {"primary_role": "工作流编排器"}
+    agent.agents = {
+        AgentType.VIDEO_GENERATOR: object(),
+        AgentType.VIDEO_COMPOSER: object(),
+    }
+    captured_user_messages = []
+
+    async def _capture_chat_completion(*, messages, **kwargs):
+        captured_user_messages.append(messages[1]["content"])
+        if len(captured_user_messages) == 1:
+            return {
+                "content": json.dumps(
+                    {
+                        "candidate_agents": [
+                            AgentType.VIDEO_GENERATOR.value,
+                            AgentType.VIDEO_COMPOSER.value,
+                        ],
+                        "selection_rationale": "native audio is enough",
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "agents": [
+                        {
+                            "agent": AgentType.VIDEO_GENERATOR.value,
+                            "run": True,
+                            "mission": "generate scene video clips",
+                            "deliverable": "scene video clips",
+                            "constraints": [],
+                            "order": 0,
+                            "runtime_hints": {"generate_audio": True},
+                        },
+                        {
+                            "agent": AgentType.VIDEO_COMPOSER.value,
+                            "run": True,
+                            "mission": "compose the final video",
+                            "deliverable": "final composed video",
+                            "constraints": [],
+                            "order": 1,
+                            "runtime_hints": {},
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    agent.get_llm = lambda role: SimpleNamespace(chat_completion=_capture_chat_completion)
+
+    workflow_id = "wf-planning-boundary-secret"
+    workflow_data = {
+        "user_prompt": "make a short video",
+        "audio_contract": {
+            "allow_silence": True,
+            "need_voiceover": False,
+            "workflow_state_id": workflow_id,
+        },
+        "audio_capability": {"supports_native_audio": True},
+    }
+
+    selected, _ = asyncio.run(
+        agent._llm_select_candidate_agents(
+            workflow_data=workflow_data,
+            workflow_id=workflow_id,
+        )
+    )
+    task_specs, _ = asyncio.run(
+        agent._llm_decompose_tasks(
+            workflow_data,
+            workflow_id,
+            candidate_agents=selected,
+        )
+    )
+
+    assert selected == [AgentType.VIDEO_GENERATOR, AgentType.VIDEO_COMPOSER]
+    assert task_specs[AgentType.VIDEO_GENERATOR]["runtime_hints"] == {"generate_audio": True}
+    assert len(captured_user_messages) == 2
+    rendered_planning_text = "\n".join(captured_user_messages)
+    assert "workflow_state_id" not in rendered_planning_text
+    assert workflow_id not in rendered_planning_text
+
+
 def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
@@ -1562,6 +1655,7 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
                 {"content": json.dumps(selection_payload, ensure_ascii=False)},
                 {"content": json.dumps(decomposition_payload, ensure_ascii=False)},
             ],
+            session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
 
@@ -1588,6 +1682,14 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
         assert shared_store.get("workflow.activation_pool") is None
         assert shared_store.get("workflow.task_specs") is None
         assert shared_store.get("workflow.conditional_tasks") is None
+        rendered_planning_text = "\n".join(
+            message.get("content", "")
+            for call in agent._llms["plan"].calls
+            for message in call.get("messages", [])
+            if isinstance(message, dict)
+        )
+        assert "workflow_state_id" not in rendered_planning_text
+        assert str(task.task_id) not in rendered_planning_text
         assert checkpoint["task_specs"][AgentType.VIDEO_GENERATOR.value]["run"] is False
         assert checkpoint["task_specs"][AgentType.VIDEO_GENERATOR.value]["runtime_hints"] == {
             "generate_audio": True

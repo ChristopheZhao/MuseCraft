@@ -13,7 +13,7 @@ from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
 from ..services.script_review_contract import format_script_review_guidance
 from .utils.artifacts import extract_tool_payload
-from .adapters.memory_views import load_scene_overview, load_concept_plan
+from .adapters.memory_views import load_scene_overview
 from .utils.memory_helpers import read_shared_fact, write_shared_fact
 
 
@@ -80,62 +80,92 @@ class ScriptWriterAgent(BaseAgent):
         workflow_state_id: str,
         input_data: Dict[str, Any],
     ) -> Tuple[List[SceneSnapshot], Dict[str, Any], Optional[str]]:
-        fallback_reason: Optional[str] = None
-        concept_plan: Dict[str, Any] = {}
+        reasons: List[str] = []
+        static_context = input_data.get("static_context")
+        if not isinstance(static_context, dict):
+            static_context = {}
+            reasons.append("missing_assembler_static_context")
 
-        try:
-            concept_plan = load_concept_plan(workflow_state_id, service=self.short_term_service) or {}
-        except Exception as exc:
-            fallback_reason = f"wm_concept_plan_unavailable:{type(exc).__name__}"
+        concept_plan = static_context.get("concept_plan")
+        if not isinstance(concept_plan, dict):
             concept_plan = {}
-
-        try:
-            overview = load_scene_overview(workflow_state_id, service=self.short_term_service)
-        except Exception as exc:
-            if fallback_reason:
-                fallback_reason = f"{fallback_reason};wm_scene_overview_unavailable:{type(exc).__name__}"
-            else:
-                fallback_reason = f"wm_scene_overview_unavailable:{type(exc).__name__}"
-            overview = {}
-
+        overview = static_context.get("scene_overview")
         scenes = self._normalize_scene_snapshot_payloads(
             overview.get("scenes") if isinstance(overview, dict) else []
         )
         if scenes:
-            return scenes, concept_plan, fallback_reason
+            return scenes, concept_plan, None
 
-        static_context = input_data.get("static_context")
-        if not isinstance(static_context, dict):
-            static_context = {}
+        if isinstance(overview, dict) and overview:
+            reasons.append("assembler_scene_overview_empty")
+        else:
+            reasons.append("missing_assembler_scene_overview")
+        if isinstance(input_data.get("scene_overview"), dict) or isinstance(input_data.get("concept_plan"), dict):
+            reasons.append("raw_input_context_ignored")
+        return scenes, concept_plan, ";".join(reasons) if reasons else None
 
-        input_concept_plan = input_data.get("concept_plan")
-        if not isinstance(input_concept_plan, dict):
-            input_concept_plan = static_context.get("concept_plan")
-        if isinstance(input_concept_plan, dict) and input_concept_plan and not concept_plan:
-            concept_plan = dict(input_concept_plan)
+    def _read_scene_scripts_slot(self, workflow_state_id: str) -> Dict[str, Dict[str, Any]]:
+        payload = read_shared_fact(
+            workflow_state_id,
+            "project.scene_scripts",
+            {},
+            service=self.short_term_service,
+        ) or {}
+        if not isinstance(payload, dict):
+            raise AgentError(
+                "project.scene_scripts malformed: expected dict, "
+                f"got {type(payload).__name__}"
+            )
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for key, value in payload.items():
+            scene_key = str(key).strip()
+            if not scene_key:
+                raise AgentError("project.scene_scripts malformed: empty scene key")
+            if not isinstance(value, dict):
+                raise AgentError(
+                    "project.scene_scripts malformed: "
+                    f"scene {scene_key} value is {type(value).__name__}"
+                )
+            normalized[scene_key] = dict(value)
+        return normalized
 
-        direct_overview = input_data.get("scene_overview")
-        if not isinstance(direct_overview, dict):
-            direct_overview = static_context.get("scene_overview")
-        scenes = self._normalize_scene_snapshot_payloads(
-            direct_overview.get("scenes") if isinstance(direct_overview, dict) else []
+    def _write_scene_scripts_slot(
+        self,
+        workflow_state_id: str,
+        scene_scripts: Dict[str, Dict[str, Any]],
+    ) -> None:
+        if not isinstance(scene_scripts, dict):
+            raise AgentError("project.scene_scripts write rejected: payload_not_dict")
+        for key, value in scene_scripts.items():
+            if not isinstance(value, dict):
+                raise AgentError(
+                    "project.scene_scripts write rejected: "
+                    f"scene {key} value is {type(value).__name__}"
+                )
+        write_shared_fact(
+            workflow_state_id,
+            "project.scene_scripts",
+            scene_scripts,
+            service=self.short_term_service,
         )
-        if scenes:
-            if fallback_reason:
-                fallback_reason = f"{fallback_reason};input_scene_overview"
-            else:
-                fallback_reason = "input_scene_overview"
-            return scenes, concept_plan, fallback_reason
 
-        scenes = self._normalize_scene_snapshot_payloads(
-            input_concept_plan.get("scenes") if isinstance(input_concept_plan, dict) else []
-        )
-        if scenes:
-            if fallback_reason:
-                fallback_reason = f"{fallback_reason};input_concept_plan"
-            else:
-                fallback_reason = "input_concept_plan"
-        return scenes, concept_plan, fallback_reason
+    def _merge_scene_script_entry(
+        self,
+        workflow_state_id: str,
+        scene_number: Any,
+        patch: Dict[str, Any],
+    ) -> None:
+        scene_key = str(scene_number).strip()
+        if not scene_key:
+            raise AgentError("project.scene_scripts merge rejected: missing scene_number")
+        if not isinstance(patch, dict):
+            raise AgentError("project.scene_scripts merge rejected: patch_not_dict")
+        existing_scripts = self._read_scene_scripts_slot(workflow_state_id)
+        entry = dict(existing_scripts.get(scene_key, {}))
+        entry.update(patch)
+        merged = dict(existing_scripts)
+        merged[scene_key] = entry
+        self._write_scene_scripts_slot(workflow_state_id, merged)
         
     async def _execute_impl(
         self,
@@ -197,7 +227,12 @@ class ScriptWriterAgent(BaseAgent):
                 ]
 
             if not scenes:
-                raise AgentError("No scenes available for script generation")
+                detail = (
+                    f"No scenes available for script generation: {scene_input_fallback}"
+                    if scene_input_fallback
+                    else "No scenes available for script generation"
+                )
+                raise AgentError(detail)
 
             # 批量生成脚本
             return await self._batch_generate_scripts(
@@ -624,32 +659,30 @@ class ScriptWriterAgent(BaseAgent):
                             None,
                         )
                         # 将脚本结果写入项目级脚本槽
-                        entry = {}
                         try:
-                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
-                            entry = dict(existing_scripts.get(str(scene.scene_number), {}))
-                            entry.update({
-                                "scene_thesis": scene_script_data.get("scene_thesis", getattr(scene, "scene_thesis", "")),
-                                "script_text": scene_script_data.get("script_text", ""),
-                                "voice_over_text": scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
-                                "narrative_description": scene_script_data.get("narrative_description", scene.narrative_description),
-                                "background_music_style": scene_script_data.get("background_music_style", ""),
-                                "sound_effects": scene_script_data.get("sound_effects", []),
-                                "opening_state": scene_script_data.get("opening_state", ""),
-                                "event_trigger": scene_script_data.get("event_trigger", ""),
-                                "action_phases": scene_script_data.get("action_phases", []),
-                                "end_state": scene_script_data.get("end_state", ""),
-                                "camera_language": scene_script_data.get("camera_language", getattr(scene, "camera_angle", "")),
-                                "pacing_and_timing": {
-                                    "pace_tag": voice_guidance.get("pace_tag"),
-                                    "target_char_count": voice_guidance.get("target_char_count"),
-                                    "should_narrate": voice_guidance.get("should_narrate"),
+                            self._merge_scene_script_entry(
+                                workflow_state_id,
+                                scene.scene_number,
+                                {
+                                    "scene_thesis": scene_script_data.get("scene_thesis", getattr(scene, "scene_thesis", "")),
+                                    "script_text": scene_script_data.get("script_text", ""),
+                                    "voice_over_text": scene_script_data.get("voice_over_text", getattr(scene, "voice_over_text", "")),
+                                    "narrative_description": scene_script_data.get("narrative_description", scene.narrative_description),
+                                    "background_music_style": scene_script_data.get("background_music_style", ""),
+                                    "sound_effects": scene_script_data.get("sound_effects", []),
+                                    "opening_state": scene_script_data.get("opening_state", ""),
+                                    "event_trigger": scene_script_data.get("event_trigger", ""),
+                                    "action_phases": scene_script_data.get("action_phases", []),
+                                    "end_state": scene_script_data.get("end_state", ""),
+                                    "camera_language": scene_script_data.get("camera_language", getattr(scene, "camera_angle", "")),
+                                    "pacing_and_timing": {
+                                        "pace_tag": voice_guidance.get("pace_tag"),
+                                        "target_char_count": voice_guidance.get("target_char_count"),
+                                        "should_narrate": voice_guidance.get("should_narrate"),
+                                    },
+                                    "motion_beats": scene_script_data.get("motion_beats", []),
                                 },
-                                "motion_beats": scene_script_data.get("motion_beats", []),
-                            })
-                            merged = dict(existing_scripts)
-                            merged[str(scene.scene_number)] = entry
-                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
+                            )
                         except Exception as err:
                             raise AgentError(
                                 f"Failed to persist scene_scripts for scene {scene.scene_number}: {err}"
@@ -821,12 +854,11 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception as parse_err:
                             raise AgentError("Failed to parse scene_number during character consistency sync") from parse_err
                         if sn:
-                            existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
-                            entry = dict(existing_scripts.get(str(sn), {}))
-                            entry.update({"characters_present": present, "character_descriptions": descs})
-                            merged = dict(existing_scripts)
-                            merged[str(sn)] = entry
-                            write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
+                            self._merge_scene_script_entry(
+                                workflow_state_id,
+                                sn,
+                                {"characters_present": present, "character_descriptions": descs},
+                            )
                 self.logger.info("✅ 角色一致性标注已写回 scene_scripts")
             except Exception as ce:
                 self.logger.error(f"角色一致性标注失败: {ce}")
@@ -944,12 +976,11 @@ class ScriptWriterAgent(BaseAgent):
                         except Exception:
                             continue
                         # 将角色提示写到 facts.scene_scripts 下以场景为键
-                        existing_scripts = read_shared_fact(workflow_state_id, "project.scene_scripts", {}, service=self.short_term_service) or {}
-                        entry = dict(existing_scripts.get(str(sn), {}))
-                        entry.update({"characters_present": present, "character_descriptions": descs})
-                        merged = dict(existing_scripts)
-                        merged[str(sn)] = entry
-                        write_shared_fact(workflow_state_id, "project.scene_scripts", merged, service=self.short_term_service)
+                        self._merge_scene_script_entry(
+                            workflow_state_id,
+                            sn,
+                            {"characters_present": present, "character_descriptions": descs},
+                        )
                 self.logger.info("✅ 角色记忆已写回（concept→WF.scene）")
             except Exception as ce:
                 self.logger.error(f"角色记忆写回失败: {ce}")
@@ -1055,13 +1086,8 @@ class ScriptWriterAgent(BaseAgent):
                     per_scene = payload.get('per_scene_roles') or {}
                     global_roles = payload.get('roles') or []
                 # 合并写回各场景（不覆盖已有字段，仅对角色字段做并集）
-                existing_scripts = read_shared_fact(
-                    workflow_state_id,
-                    "project.scene_scripts",
-                    {},
-                    service=self.short_term_service,
-                ) or {}
-                merged_scripts = dict(existing_scripts) if isinstance(existing_scripts, dict) else {}
+                existing_scripts = self._read_scene_scripts_slot(workflow_state_id)
+                merged_scripts = dict(existing_scripts)
                 for sc in (scene_payload or []):
                     if not isinstance(sc, dict):
                         continue
@@ -1108,12 +1134,7 @@ class ScriptWriterAgent(BaseAgent):
                     entry.update({"characters_present": merged_names, "character_descriptions": merged_descs})
                     merged_scripts[key] = entry
                 if merged_scripts != existing_scripts:
-                    write_shared_fact(
-                        workflow_state_id,
-                        "project.scene_scripts",
-                        merged_scripts,
-                        service=self.short_term_service,
-                    )
+                    self._write_scene_scripts_slot(workflow_state_id, merged_scripts)
                 self.logger.info("✅ 角色分析结果已写回 scene_scripts slot")
 
                 # 将角色一致性快照作为 EPISODIC 记忆写入（无开关，作为系统保障；若记忆不可用则优雅降级）
@@ -1487,12 +1508,11 @@ class ScriptWriterAgent(BaseAgent):
     def _estimate_scene_count(self, input_data: Dict[str, Any]) -> int:
         """估算场景数量用于动态超时"""
         try:
-            workflow_state_id = input_data.get("workflow_state_id")
-            if workflow_state_id:
-                overview = load_scene_overview(str(workflow_state_id), service=self.short_term_service)
-                scenes = overview.get("scenes") if isinstance(overview, dict) else []
-                if scenes:
-                    return len(scenes)
+            static_context = input_data.get("static_context")
+            overview = static_context.get("scene_overview") if isinstance(static_context, dict) else {}
+            scenes = overview.get("scenes") if isinstance(overview, dict) else []
+            if scenes:
+                return len(scenes)
             return 6  # 默认估算
         except Exception:
             return 6

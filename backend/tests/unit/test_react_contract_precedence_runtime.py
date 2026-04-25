@@ -8,6 +8,11 @@ from app.models import AgentType
 from app.services.memory_provider import build_memory_services
 
 
+@pytest.fixture(autouse=True)
+def _use_in_memory_long_term_store(monkeypatch):
+    monkeypatch.setenv("MEMORY_BACKEND", "dict")
+
+
 class _ConflictReactAgent(ReActAgent):
     def __init__(self, *, memory_services):
         super().__init__(

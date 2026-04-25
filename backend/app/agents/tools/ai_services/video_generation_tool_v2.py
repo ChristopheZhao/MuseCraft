@@ -22,6 +22,7 @@ from ....services.scene_info_reference_service import (
     SceneInfoReferenceResolutionError,
     load_scene_info_payload,
 )
+from ....services.video_execution_context import merge_video_execution_context_into_params
 from ....services.enhanced_ai_client import enhanced_ai_client, TaskType
 from ....services.execution_host_lease import (
     ExecutionHostKeepaliveLostError,
@@ -125,6 +126,61 @@ class VideoGenerationTool(AsyncTool):
                 except Exception:
                     pass
             return None
+
+    def _video_service_diagnostics(
+        self,
+        *,
+        reason_code: str,
+        missing_generate: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        service = self.video_service
+        details: Dict[str, Any] = {
+            "reason_code": reason_code,
+            "functional": bool(getattr(self, "_functional", False)),
+            "service_name": type(service).__name__ if service is not None else None,
+            "service_none": service is None,
+        }
+        if missing_generate is not None:
+            details["missing_generate"] = bool(missing_generate)
+
+        try:
+            from .service_interfaces import get_service_manager
+
+            services = get_service_manager().get_available_services()
+            video_services = services.get("video", []) if isinstance(services, dict) else []
+            details["available_video_services"] = [
+                provider.value if hasattr(provider, "value") else str(provider)
+                for provider in video_services
+            ]
+        except Exception as exc:
+            details["available_video_services_error"] = type(exc).__name__
+
+        try:
+            provider_cfg = self.video_config.get_current_provider_config()
+            details["configured_provider"] = getattr(provider_cfg, "provider_name", None)
+            details["configured_model"] = getattr(provider_cfg, "model_name", None)
+        except Exception as exc:
+            details["provider_config_error"] = type(exc).__name__
+
+        return details
+
+    def _raise_video_service_unavailable(
+        self,
+        *,
+        reason_code: str,
+        missing_generate: Optional[bool] = None,
+    ) -> None:
+        details = self._video_service_diagnostics(
+            reason_code=reason_code,
+            missing_generate=missing_generate,
+        )
+        self.logger.error("VIDEO_SERVICE_UNAVAILABLE: %s", details)
+        raise ToolError(
+            "VideoGenerationTool not functional - video service unavailable",
+            self.metadata.name,
+            error_code="video_service_unavailable",
+            details=details,
+        )
 
     def _validate_prompt_length(self, prompt: Optional[str], prompt_caps=None):
         if not prompt or not isinstance(prompt, str):
@@ -394,47 +450,14 @@ class VideoGenerationTool(AsyncTool):
         params: Dict[str, Any],
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        merged = dict(params or {})
-        ctx = context if isinstance(context, dict) else {}
-
-        execution_contract = ctx.get("execution_contract")
-        if not isinstance(execution_contract, dict):
-            execution_contract = {}
-        storage = execution_contract.get("storage")
-        if not isinstance(storage, dict):
-            storage = {}
-        constraints = execution_contract.get("constraints")
-        if not isinstance(constraints, dict):
-            constraints = {}
-
-        explicit_workflow_state_id = str(merged.get("workflow_state_id") or "").strip()
-        bound_workflow_state_id = str(
-            storage.get("workflow_state_id") or ctx.get("workflow_state_id") or ""
-        ).strip()
-        if explicit_workflow_state_id and bound_workflow_state_id and explicit_workflow_state_id != bound_workflow_state_id:
-            raise ToolValidationError(
-                "workflow_state_id conflicts with execution context",
+        return merge_video_execution_context_into_params(
+            params,
+            context,
+            validation_error_factory=lambda message: ToolValidationError(
+                message,
                 self.metadata.name,
-            )
-        if bound_workflow_state_id:
-            merged["workflow_state_id"] = bound_workflow_state_id
-
-        explicit_generate_audio = merged.get("generate_audio")
-        bound_generate_audio = constraints.get("generate_audio")
-        if isinstance(bound_generate_audio, bool):
-            if explicit_generate_audio is not None and not isinstance(explicit_generate_audio, bool):
-                raise ToolValidationError(
-                    "generate_audio must be boolean when provided",
-                    self.metadata.name,
-                )
-            if isinstance(explicit_generate_audio, bool) and explicit_generate_audio != bound_generate_audio:
-                raise ToolValidationError(
-                    "generate_audio conflicts with execution context",
-                    self.metadata.name,
-                )
-            merged["generate_audio"] = bound_generate_audio
-
-        return merged
+            ),
+        )
     
     async def _execute_impl(self, tool_input: ToolInput) -> Any:
         """执行视频生成工具"""
@@ -455,7 +478,7 @@ class VideoGenerationTool(AsyncTool):
             except Exception:
                 pass
         if not self._functional:
-            raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
+            self._raise_video_service_unavailable(reason_code="service_unavailable_on_execute")
         
         action = tool_input.action
         params = self._merge_execution_context_into_params(
@@ -497,39 +520,12 @@ class VideoGenerationTool(AsyncTool):
             except Exception as _e:
                 self.logger.warning(f"RUNTIME_RECOVER_ERROR: {str(_e)}")
 
-        # 运行时再次校验服务可用性，避免 NoneType 调用；不可用则尝试回退
+        # 运行时再次校验服务可用性，避免 NoneType 调用。
         if not self._functional or not self.video_service or not hasattr(self.video_service, "generate_video"):
-            # 诊断：记录触发回退的具体原因
-            try:
-                cond_functional = not self._functional
-                cond_service_none = not bool(self.video_service)
-                cond_missing_method = not hasattr(self.video_service, "generate_video") if self.video_service else True
-                vs_name = type(self.video_service).__name__ if self.video_service else None
-                from .service_interfaces import get_service_manager
-                services = get_service_manager().get_available_services()
-                self.logger.warning(
-                    f"FALLBACK_TO_VENDOR: functional={not cond_functional} service={vs_name} "
-                    f"service_none={cond_service_none} missing_generate={cond_missing_method} "
-                    f"available_video_services={services.get('video', [])}"
-                )
-            except Exception:
-                pass
-            # 回退到 zhipu_client.generate_video（供应商无关的统一入口），不影响FC编排
-            try:
-                from ..tool_registry import get_tool_registry
-                from ..base_tool import ToolInput as TI
-                registry = get_tool_registry()
-                zhipu = registry.get_tool("zhipu_client")
-                # 显式传递超时，优先使用工具自身配置或settings
-                timeout = (
-                    self.config.get("timeout")
-                    or getattr(settings, "VIDEO_GENERATION_TOOL_TIMEOUT", None)
-                    or getattr(settings, "DEFAULT_TOOL_TIMEOUT", 120)
-                )
-                self.logger.info("FALLBACK_TO_VENDOR: using zhipu_client.generate_video")
-                return await zhipu.execute(TI(action="generate_video", parameters=params, timeout=timeout))
-            except Exception:
-                raise ToolError("VideoGenerationTool not functional - video service unavailable", self.metadata.name)
+            self._raise_video_service_unavailable(
+                reason_code="service_missing_generate_video",
+                missing_generate=not hasattr(self.video_service, "generate_video") if self.video_service else True,
+            )
 
         capabilities = self._fetch_capabilities()
         prompt_caps = getattr(capabilities, "prompt", None) if capabilities else None
@@ -1236,6 +1232,31 @@ class VideoGenerationTool(AsyncTool):
         policy = get_consistency_policy()
         workflow_state_id = params.get("workflow_state_id")
         scene_key = params.get("scene_number")
+        continuity_diagnostics: List[Dict[str, Any]] = []
+
+        def _record_continuity_diagnostic(reason: str, **fields: Any) -> None:
+            item: Dict[str, Any] = {"fallback_reason": reason}
+            for key, value in fields.items():
+                if value is not None:
+                    item[key] = value
+            continuity_diagnostics.append(item)
+
+        def _attach_continuity_diagnostics(result: Dict[str, Any]) -> None:
+            if not continuity_diagnostics:
+                return
+            cont = dict(result.get("continuity", {}) or {})
+            existing = cont.get("diagnostics")
+            diagnostics = list(existing) if isinstance(existing, list) else []
+            diagnostics.extend(continuity_diagnostics)
+            cont["diagnostics"] = diagnostics
+            reasons = list(cont.get("fallback_reasons") or [])
+            for item in continuity_diagnostics:
+                reason = item.get("fallback_reason")
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+            if reasons:
+                cont["fallback_reasons"] = reasons
+            result["continuity"] = cont
 
         consistency_meta = params.get('_consistency_meta') if isinstance(params, dict) else {}
         locked_info = self._collect_locked_segments(consistency_meta, scene_key)
@@ -1398,12 +1419,19 @@ class VideoGenerationTool(AsyncTool):
                     if continuity_frame:
                         params["image_from_continuity"] = bool(payload.get("continuity_used"))
             except Exception as e:
+                _record_continuity_diagnostic(
+                    "continuity_extract_failed",
+                    error_type=type(e).__name__,
+                    error=str(e)[:200],
+                    previous_video_url_present=bool(previous_video_url),
+                )
                 try:
                     self.logger.warning(f"CONTINUITY_EXTRACT_FAILED: {e}")
                 except Exception:
                     pass
 
         if not continuity_frame and not image_url and not previous_video_url:
+            _record_continuity_diagnostic("text_generation_no_reference")
             try:
                 self.logger.info("CONTINUITY_DISABLED: no continuity or reference image; fallback to text")
             except Exception:
@@ -1414,6 +1442,11 @@ class VideoGenerationTool(AsyncTool):
             try:
                 continuity_frame = await self._ensure_remote_image_url(continuity_frame)
             except Exception as e:
+                _record_continuity_diagnostic(
+                    "continuity_frame_upload_failed",
+                    error_type=type(e).__name__,
+                    error=str(e)[:200],
+                )
                 self.logger.warning(f"continuity frame not cloud-accessible, skipping continuity: {e}")
                 continuity_frame = None
 
@@ -1526,21 +1559,44 @@ class VideoGenerationTool(AsyncTool):
                         mem = get_scene_continuity_memory()
                         if scene_no is not None:
                             await mem.store_scene_final_frame(scene_no, last_url)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _record_continuity_diagnostic(
+                            "last_frame_memory_write_failed",
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                            scene_number=scene_no,
+                        )
                     try:
                         store_scene_reference(params.get("workflow_state_id"), scene_no, last_url)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _record_continuity_diagnostic(
+                            "last_frame_reference_store_failed",
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                            scene_number=scene_no,
+                        )
                     # 不再更新 WorkflowState；连续性帧已写入记忆工具/Shared WM 事实
                     cont = dict(gen_res.get("continuity", {}) or {})
                     cont.update({"last_frame_url": last_url})
                     gen_res["continuity"] = cont
+                else:
+                    _record_continuity_diagnostic(
+                        "last_frame_emit_empty",
+                        scene_number=scene_no,
+                    )
         except Exception as e:
+            _record_continuity_diagnostic(
+                "last_frame_emit_failed",
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+                scene_number=scene_no,
+            )
             try:
                 self.logger.warning(f"emit_last_frame failed (soft): {e}")
             except Exception:
                 pass
+        if isinstance(gen_res, dict):
+            _attach_continuity_diagnostics(gen_res)
         return gen_res
 
     def _run_consistency_guard(

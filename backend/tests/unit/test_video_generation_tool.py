@@ -1,15 +1,51 @@
 import asyncio
 import json
+import logging
 import types
 
 import pytest
 
 from app.agents.tools.ai_services import video_generation_tool_v2 as vgt_module
+from app.agents.tools.ai_services import service_interfaces
 from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
 from app.services.execution_host_lease import ExecutionHostKeepaliveLostError
 from app.core.consistency_policy import ConsistencyPolicy, PromptSafetyPolicy
 from app.agents.tools.base_tool import ToolError
 import app.agents.tools.tool_registry as tool_registry_module
+
+
+def _make_video_tool_without_init():
+    tool = object.__new__(VideoGenerationTool)
+    tool.metadata = VideoGenerationTool.get_metadata()
+    tool.config = {}
+    tool.logger = logging.getLogger("test.video_generation")
+    tool.video_service = None
+    tool._telemetry_logger = logging.getLogger("test.video_generation.telemetry")
+
+    class _StubVideoConfig:
+        def __init__(self):
+            self._config = types.SimpleNamespace(
+                provider_name="stub-provider",
+                model_name="stub-model",
+                duration_capabilities=[5, 10],
+                max_duration=10,
+                default_duration=5,
+                supports_first_last_frame=True,
+                resolution_options=[],
+                resolution_aliases={},
+                ratio_options=[],
+                ratio_aliases={},
+                supports_native_audio=False,
+                native_audio_default_enabled=False,
+                native_audio_param_name="generate_audio",
+                amplification_ratio=1.0,
+            )
+
+        def get_current_provider_config(self):
+            return self._config
+
+    tool.video_config = _StubVideoConfig()
+    return tool
 
 
 def test_prompt_safety_preserves_locked_segments(monkeypatch):
@@ -232,6 +268,49 @@ def test_generate_video_maps_keepalive_loss_to_tool_error(monkeypatch):
     assert excinfo.value.details["reason_code"] == "heartbeat_validation_failed"
 
 
+def test_generate_video_missing_service_fails_fast_without_vendor_fallback(monkeypatch):
+    tool = object.__new__(VideoGenerationTool)
+    tool.metadata = VideoGenerationTool.get_metadata()
+    tool.config = {}
+    tool.logger = logging.getLogger("test.video_generation.missing_service")
+    tool._functional = False
+    tool.video_service = None
+
+    class _StubVideoConfig:
+        def get_current_provider_config(self):
+            return types.SimpleNamespace(provider_name="stub-provider", model_name="stub-model")
+
+    tool.video_config = _StubVideoConfig()
+
+    class _StubServiceManager:
+        def get_available_services(self):
+            return {"video": []}
+
+    monkeypatch.setattr(service_interfaces, "get_video_service", lambda: None)
+    monkeypatch.setattr(service_interfaces, "get_service_manager", lambda: _StubServiceManager())
+
+    def _unexpected_registry_lookup():
+        raise AssertionError("vendor fallback must not be used")
+
+    monkeypatch.setattr(tool_registry_module, "get_tool_registry", _unexpected_registry_lookup)
+
+    params = {
+        "prompt": "安全提示词",
+        "duration": 5,
+        "scene_number": 1,
+        "workflow_state_id": "wf-missing-video-service",
+    }
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(tool._generate_video(dict(params)))
+
+    assert excinfo.value.error_code == "video_service_unavailable"
+    assert excinfo.value.details["reason_code"] == "service_missing_generate_video"
+    assert excinfo.value.details["service_none"] is True
+    assert excinfo.value.details["missing_generate"] is True
+    assert excinfo.value.details["available_video_services"] == []
+
+
 def test_get_capabilities_filters_blank_supported_models():
     tool = object.__new__(VideoGenerationTool)
     tool.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
@@ -387,4 +466,93 @@ def test_generate_with_continuity_hydrates_image_url_from_scene_info_ref(tmp_pat
             image_from_continuity=True,
         )
         == "image_to_video"
+    )
+
+
+def test_generate_with_continuity_reports_continuity_extract_failure(monkeypatch):
+    monkeypatch.setattr(
+        vgt_module,
+        "get_consistency_policy",
+        lambda: ConsistencyPolicy(prompt_safety=PromptSafetyPolicy(enabled=False)),
+    )
+
+    class _FailingContinuityTool:
+        async def execute(self, tool_input):
+            raise RuntimeError("extract failed")
+
+    class _FakeRegistry:
+        def get_tool(self, name):
+            if name == "scene_continuity_preparation":
+                return _FailingContinuityTool()
+            raise AssertionError(f"unexpected tool lookup: {name}")
+
+    monkeypatch.setattr(tool_registry_module, "get_tool_registry", lambda: _FakeRegistry())
+
+    tool = _make_video_tool_without_init()
+
+    async def fake_generate_video(self, params, *, execution_liveness_probe=None):
+        return {
+            "video_url": "https://stub.example/video.mp4",
+            "provider": "stub",
+            "model": "stub-model",
+        }
+
+    tool._generate_video = types.MethodType(fake_generate_video, tool)
+
+    result = asyncio.run(
+        tool._generate_with_continuity(
+            {
+                "prompt": "安全提示词",
+                "duration": 5,
+                "scene_number": 2,
+                "previous_video_url": "https://stub.example/scene1.mp4",
+                "emit_last_frame": "never",
+            }
+        )
+    )
+
+    continuity = result["continuity"]
+    assert "continuity_extract_failed" in continuity["fallback_reasons"]
+    assert continuity["diagnostics"][0]["error_type"] == "RuntimeError"
+
+
+def test_generate_with_continuity_reports_last_frame_emit_failure(monkeypatch):
+    monkeypatch.setattr(
+        vgt_module,
+        "get_consistency_policy",
+        lambda: ConsistencyPolicy(prompt_safety=PromptSafetyPolicy(enabled=False)),
+    )
+
+    tool = _make_video_tool_without_init()
+
+    async def fake_generate_video(self, params, *, execution_liveness_probe=None):
+        return {
+            "video_url": "https://stub.example/video.mp4",
+            "provider": "stub",
+            "model": "stub-model",
+        }
+
+    async def fake_emit_last_frame(self, video_url, scene_no=None):
+        raise RuntimeError("final frame tool failed")
+
+    tool._generate_video = types.MethodType(fake_generate_video, tool)
+    tool._emit_last_frame = types.MethodType(fake_emit_last_frame, tool)
+
+    result = asyncio.run(
+        tool._generate_with_continuity(
+            {
+                "prompt": "安全提示词",
+                "duration": 5,
+                "scene_number": 3,
+                "emit_last_frame": "always",
+            }
+        )
+    )
+
+    continuity = result["continuity"]
+    assert "last_frame_emit_failed" in continuity["fallback_reasons"]
+    assert any(
+        item.get("fallback_reason") == "last_frame_emit_failed"
+        and item.get("error_type") == "RuntimeError"
+        for item in continuity["diagnostics"]
     )

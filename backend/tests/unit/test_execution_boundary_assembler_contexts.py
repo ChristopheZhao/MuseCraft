@@ -198,6 +198,48 @@ def test_resolve_published_stage_payload_rejects_unapproved_runtime_ref(tmp_path
         )
 
 
+def test_assemble_agent_context_projects_script_writer_inputs_from_mas_boundary():
+    service = _build_service()
+    workflow_id = "wf-script-writer-context"
+    assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+
+    write_shared_fact(
+        workflow_id,
+        "project.concept_plan",
+        {"overview": "assembler-owned overview"},
+        service=service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "visual_description": "assembler-owned scene",
+                    "narrative_description": "script boundary scene",
+                    "duration": 6.0,
+                }
+            ]
+        },
+        service=service,
+    )
+
+    boundary = assembler.assemble_agent_context(
+        agent_type=AgentType.SCRIPT_WRITER,
+        workflow_state_id=workflow_id,
+        workflow_data={"concept_plan": {"overview": "raw input must not be selected"}},
+    )
+
+    static_context = boundary["static_context"]
+    diagnostics = boundary["_assembler_diagnostics"]["script_writer_context"]
+    assert static_context["concept_plan"]["overview"] == "assembler-owned overview"
+    assert static_context["scene_overview"]["scenes"][0]["scene_number"] == 1
+    assert diagnostics["status"] == "resolved"
+    assert diagnostics["source"] == "mas_working_memory"
+    assert diagnostics["scene_count"] == 1
+
+
 def test_assemble_agent_context_requires_no_projection_when_runtime_input_carries_script_ref(tmp_path):
     service = _build_service()
     workflow_id = "wf-assemble-runtime-input"

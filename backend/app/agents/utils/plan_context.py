@@ -325,6 +325,7 @@ def _extract_scene_output_delivery_receipts(
         )
 
     receipts: List[Dict[str, Any]] = []
+    skipped_video_reasons: List[str] = []
     for record in bucket.values():
         if not isinstance(record, dict):
             continue
@@ -333,6 +334,16 @@ def _extract_scene_output_delivery_receipts(
             continue
         artifact_url = str(record.get(f"{kind}_url") or "").strip()
         artifact_path = str(record.get(f"{kind}_path") or "").strip()
+        if kind == "video":
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+            storage_status = str(storage.get("status") or "").strip().lower() if storage else ""
+            if storage_status == "failed":
+                skipped_video_reasons.append(f"scene={scene_number}:storage_failed")
+                continue
+            if artifact_url and not artifact_path:
+                skipped_video_reasons.append(f"scene={scene_number}:missing_local_path")
+                continue
         if not artifact_url and not artifact_path:
             continue
         receipts.append(
@@ -342,7 +353,13 @@ def _extract_scene_output_delivery_receipts(
             )
         )
     receipts.sort(key=lambda item: item.get("scene_number") or 0)
-    return receipts, None
+    diagnostic = None
+    if kind == "video" and skipped_video_reasons:
+        diagnostic = _build_progress_diagnostic(
+            reason="video_scene_outputs_not_accepted",
+            detail=",".join(skipped_video_reasons[:5]),
+        )
+    return receipts, diagnostic
 
 
 def _build_last_receipt_watermark(receipts: List[Dict[str, Any]]) -> Optional[str]:

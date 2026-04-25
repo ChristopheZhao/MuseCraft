@@ -177,6 +177,35 @@ def build_script_stage_views(
     }
 
 
+def build_script_writer_context(
+    workflow_id: str,
+    *,
+    service: "WorkingMemoryService",
+) -> Dict[str, Any]:
+    """Build the ScriptWriter input boundary from canonical MAS facts."""
+    concept_plan = load_concept_plan(workflow_id, service=service)
+    scene_overview = load_scene_overview(workflow_id, service=service)
+    scenes = scene_overview.get("scenes") if isinstance(scene_overview, dict) else []
+    scene_count = len(scenes) if isinstance(scenes, list) else 0
+
+    context: Dict[str, Any] = {}
+    if isinstance(concept_plan, dict) and concept_plan:
+        context["concept_plan"] = concept_plan
+    if isinstance(scene_overview, dict) and scene_overview:
+        context["scene_overview"] = scene_overview
+
+    diagnostics = {
+        "source": "mas_working_memory",
+        "status": "resolved" if scene_count > 0 else "missing_scene_overview",
+        "concept_plan_present": bool(concept_plan),
+        "scene_count": scene_count,
+    }
+    return {
+        "context": context,
+        "diagnostics": diagnostics,
+    }
+
+
 def build_media_agent_context(
     workflow_id: str,
     *,
@@ -367,15 +396,31 @@ def build_video_composer_context(
             f"compose_mode={compose_mode}: workflow_id={workflow_id}"
         )
 
-    ctx["scene_videos"] = scene_videos
-    if scene_media_ref:
-        ctx["scene_media_ref"] = scene_media_ref
-        key_illustration = dict(ctx.get("key_illustration") or {})
-        key_illustration.setdefault(
-            "scene_media_ref",
-            "场景合成清单的引用地址（包含场景视频路径/时长，可能包含配音路径）",
+    missing_local_scene_numbers = [
+        int(item.get("scene_number") or 0)
+        for item in scene_videos
+        if isinstance(item, dict) and not str(item.get("local_path") or "").strip()
+    ]
+    if missing_local_scene_numbers:
+        raise ValueError(
+            "video_composer static context missing local scene video files for "
+            f"compose_mode={compose_mode}: workflow_id={workflow_id}; "
+            f"scene_numbers={sorted(set(missing_local_scene_numbers))}"
         )
-        ctx["key_illustration"] = key_illustration
+    if not scene_media_ref:
+        raise ValueError(
+            "video_composer static context missing scene_media_ref for "
+            f"compose_mode={compose_mode}: workflow_id={workflow_id}"
+        )
+
+    ctx["scene_videos"] = scene_videos
+    ctx["scene_media_ref"] = scene_media_ref
+    key_illustration = dict(ctx.get("key_illustration") or {})
+    key_illustration.setdefault(
+        "scene_media_ref",
+        "场景合成清单的引用地址（包含场景视频路径/时长，可能包含配音路径）",
+    )
+    ctx["key_illustration"] = key_illustration
 
     if compose_mode == "voiceover":
         if not scene_media_has_voice:
@@ -1252,6 +1297,7 @@ __all__ = [
     "load_scene_scripts",
     "load_roles_context",
     "load_concept_plan",
+    "build_script_writer_context",
     "build_media_agent_context",
     "build_quality_checker_context",
     "build_image_generation_context",

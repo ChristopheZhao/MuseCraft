@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.agents.utils.memory_helpers import ensure_mas_working_memory
 from app.agents.utils.plan_context import build_plan_context
 from app.services.memory_provider import build_memory_services
+
+
+@pytest.fixture(autouse=True)
+def _use_in_memory_long_term_store(monkeypatch):
+    monkeypatch.setenv("MEMORY_BACKEND", "dict")
 
 
 def _write_scene_info_ref(tmp_path: Path) -> str:

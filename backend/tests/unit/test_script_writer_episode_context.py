@@ -1,8 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.adapters.video.models import SceneSnapshot as VideoSceneSnapshot
+from app.agents.base import AgentError
 from app.agents.script_writer import ScriptWriterAgent
 from app.agents.memory.short_term import SceneSnapshot
 from app.agents.utils.memory_helpers import ensure_mas_working_memory, write_shared_fact
@@ -10,8 +13,11 @@ from app.agents.utils.memory_helpers import ensure_mas_working_memory, write_sha
 
 def test_script_writer_passes_episode_context(monkeypatch):
     agent = object.__new__(ScriptWriterAgent)
+    service = WorkingMemoryService()
+    agent._memory_services = SimpleNamespace(short_term=service, long_term=None)
 
     wf_id = "wf1"
+    ensure_mas_working_memory(wf_id, service=service)
     wf_scenes = [
         SceneSnapshot(scene_number=1, visual_description="Scene", narrative_description="Battle", duration=10.0)
     ]
@@ -19,18 +25,23 @@ def test_script_writer_passes_episode_context(monkeypatch):
 
     captured_params = []
 
-    async def fake_use_tool(name, action, params):
-        captured_params.append((name, action, params))
-        return {
-            "result": {
-                "success": True,
-                "script_text": "赵子龙回马",
-                "voice_over_text": "赵子龙回马",
-            }
-        }
+    async def fake_execute_tool_calls(tool_calls, **_kwargs):
+        function = tool_calls[0]["function"]
+        name = function["name"]
+        if name == "script_generation.generate_scene_scripts_batch":
+            scene_params = function["arguments"]["scenes"][0]
+            captured_params.append(scene_params)
+            raise RuntimeError("stop after context capture")
+        raise AssertionError(f"unexpected tool call: {name}")
 
-    agent.use_tool = fake_use_tool
-    agent.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
+    agent.execute_tool_calls = fake_execute_tool_calls
+    agent.logger = SimpleNamespace(
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+        exception=lambda *a, **k: None,
+    )
 
     async def run():
         return await agent._batch_generate_scripts(
@@ -55,21 +66,20 @@ def test_script_writer_passes_episode_context(monkeypatch):
             approved_script_text="00:00-00:10 战况紧急，赵子龙回马。",
         )
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except AgentError as exc:
+        assert "stop after context capture" in str(exc)
 
     assert captured_params, "script_writer should invoke tools"
-    ctx_entry = next(
-        (params for name, action, params in captured_params if action == "generate_scene_script"),
-        None,
-    )
-    assert ctx_entry is not None, f"generate_scene_script should include context payload, got {captured_params}"
+    ctx_entry = captured_params[0]
     ctx = ctx_entry["context"]
     assert ctx["episode_context"]["title"] == "Episode 1"
     assert ctx["episode_context"]["episode_index"] == 1
     assert ctx["approved_script"].startswith("00:00-00:10")
 
 
-def test_script_writer_uses_input_concept_plan_when_scene_overview_missing():
+def test_script_writer_uses_assembler_static_context_for_scene_inputs():
     service = WorkingMemoryService()
     workflow_id = "wf-script-fallback"
     ensure_mas_working_memory(workflow_id, service=service)
@@ -101,17 +111,21 @@ def test_script_writer_uses_input_concept_plan_when_scene_overview_missing():
 
     input_data = {
         "workflow_state_id": workflow_id,
-        "concept_plan": {
-            "overview": "凡人修仙传2预告",
-            "scenes": [
-                {
-                    "scene_number": 1,
-                    "duration": 10.0,
-                    "visual_description": "韩立立于山巅，衣袍翻飞",
-                    "narrative_description": "用第一幕建立史诗续作的开场气势",
-                    "motion_beats": [{"start": 0.0, "end": 2.0, "visual_focus": "韩立抬头"}],
-                }
-            ],
+        "static_context": {
+            "concept_plan": {
+                "overview": "凡人修仙传2预告",
+            },
+            "scene_overview": {
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "duration": 10.0,
+                        "visual_description": "韩立立于山巅，衣袍翻飞",
+                        "narrative_description": "用第一幕建立史诗续作的开场气势",
+                        "motion_beats": [{"start": 0.0, "end": 2.0, "visual_focus": "韩立抬头"}],
+                    }
+                ],
+            },
         },
     }
 
@@ -126,25 +140,10 @@ def test_script_writer_uses_input_concept_plan_when_scene_overview_missing():
     assert captured["scenes"][0].visual_description == "韩立立于山巅，衣袍翻飞"
 
 
-def test_script_writer_reads_scene_overview_from_working_memory():
+def test_script_writer_ignores_raw_scene_context_without_assembler_boundary():
     service = WorkingMemoryService()
-    workflow_id = "wf-script-wm"
+    workflow_id = "wf-script-raw-ignored"
     ensure_mas_working_memory(workflow_id, service=service)
-    write_shared_fact(
-        workflow_id,
-        "scene_overview",
-        {
-            "scenes": [
-                {
-                    "scene_number": 2,
-                    "duration": 8.0,
-                    "visual_description": "山门前灵光乍现",
-                    "narrative_description": "第二幕承接初入修仙世界的震撼感",
-                }
-            ]
-        },
-        service=service,
-    )
 
     agent = object.__new__(ScriptWriterAgent)
     agent._memory_services = SimpleNamespace(short_term=service)
@@ -156,11 +155,82 @@ def test_script_writer_reads_scene_overview_from_working_memory():
 
     scenes, concept_plan, fallback = agent._load_execution_scene_inputs(
         workflow_id,
-        {"workflow_state_id": workflow_id},
+        {
+            "workflow_state_id": workflow_id,
+            "concept_plan": {
+                "overview": "raw payload should not be used",
+                "scenes": [
+                    {
+                        "scene_number": 9,
+                        "duration": 8.0,
+                        "visual_description": "raw scene",
+                        "narrative_description": "raw narrative",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert scenes == []
+    assert concept_plan == {}
+    assert fallback is not None
+    assert "missing_assembler_static_context" in fallback
+    assert "raw_input_context_ignored" in fallback
+
+
+def test_script_writer_reads_scene_overview_from_static_context_boundary():
+    service = WorkingMemoryService()
+    workflow_id = "wf-script-static-context"
+    ensure_mas_working_memory(workflow_id, service=service)
+
+    agent = object.__new__(ScriptWriterAgent)
+    agent._memory_services = SimpleNamespace(short_term=service)
+    agent.logger = SimpleNamespace(
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+    )
+
+    scenes, concept_plan, fallback = agent._load_execution_scene_inputs(
+        workflow_id,
+        {
+            "workflow_state_id": workflow_id,
+            "static_context": {
+                "concept_plan": {"overview": "boundary overview"},
+                "scene_overview": {
+                    "scenes": [
+                        {
+                            "scene_number": 2,
+                            "duration": 8.0,
+                            "visual_description": "山门前灵光乍现",
+                            "narrative_description": "第二幕承接初入修仙世界的震撼感",
+                        }
+                    ]
+                },
+            },
+        },
     )
 
     assert fallback is None
-    assert concept_plan == {}
+    assert concept_plan == {"overview": "boundary overview"}
     assert len(scenes) == 1
     assert scenes[0].scene_number == 2
     assert scenes[0].narrative_description == "第二幕承接初入修仙世界的震撼感"
+
+
+def test_script_writer_rejects_malformed_scene_scripts_slot():
+    service = WorkingMemoryService()
+    workflow_id = "wf-script-slot-malformed"
+    ensure_mas_working_memory(workflow_id, service=service)
+    write_shared_fact(
+        workflow_id,
+        "project.scene_scripts",
+        ["not", "a", "dict"],
+        service=service,
+    )
+
+    agent = object.__new__(ScriptWriterAgent)
+    agent._memory_services = SimpleNamespace(short_term=service)
+
+    with pytest.raises(AgentError, match="project.scene_scripts malformed"):
+        agent._read_scene_scripts_slot(workflow_id)
