@@ -2338,15 +2338,36 @@
       "id": "PLAN-20260402-048",
       "title": "Video generator execution-boundary and progress-authority repair",
       "kind": "fix",
-      "status": "draft",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260402-048.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-04-02T13:02:50Z",
-      "updated_at": "2026-04-02T13:02:50Z",
+      "updated_at": "2026-04-25T08:03:37Z",
       "archived_at": null,
-      "notes": []
+      "notes": [
+        {
+          "at": "2026-04-23T14:28:27Z",
+          "text": "Stage A reconciliation from PLAN-20260423-063: implementation repair landed earlier, but focused video_generator -> video_composer runtime replay remains open; keep plan active instead of draft or completed."
+        },
+        {
+          "at": "2026-04-24T14:51:49Z",
+          "text": "Focused video_generator -> video_composer validation was rerun under PLAN-20260423-063: accepted-delivery/progress/composer context slice passed (40 passed), and direct execution-binding validation passed; await user confirmation before completion."
+        },
+        {
+          "at": "2026-04-25T02:14:17Z",
+          "text": "Amendment A under PLAN-20260423-063 refreshed 048 proof: delivery acceptance now requires local persisted video artifacts, composer fails closed on URL-only scene media, and execution-context merge contract tests passed in the focused slices (46 passed, 61 passed)."
+        },
+        {
+          "at": "2026-04-25T08:03:25Z",
+          "text": "Focused video generator execution/progress proof complete after 063 Amendment A refresh; awaiting user confirmation to close."
+        },
+        {
+          "at": "2026-04-25T08:03:37Z",
+          "text": "User confirmed continuation after 063 Amendment A refreshed the video generator execution/progress proof; focused slices passed and no remaining 048 blocker exists."
+        }
+      ]
     },
     {
       "id": "PLAN-20260403-049",
@@ -2775,6 +2796,45 @@
         {
           "at": "2026-04-07T14:03:12Z",
           "text": "Opened as a non-blocking follow-on for the intermittent SQLiteMemoryStore bootstrap failure after 061 fixed the separate memory bootstrap downgrade-path bug"
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260423-063",
+      "title": "MAS architecture boundary governance cleanup",
+      "kind": "fix",
+      "status": "completed",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260423-063.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-04-23T13:51:23Z",
+      "updated_at": "2026-04-25T08:04:08Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-04-23T14:27:40Z",
+          "text": "Started Stage A governance SoT triage before MAS code changes"
+        },
+        {
+          "at": "2026-04-24T14:51:49Z",
+          "text": "Stage E/F checkpoint completed: artifact storage diagnostics added, runtime identity sanitized from real planning prompts, focused runtime/read-model/progress/completion suite passed (56 passed), and 048 focused validation passed (40 passed). Await user confirmation before completion."
+        },
+        {
+          "at": "2026-04-25T01:45:48Z",
+          "text": "Review amendment opened: Stage E/F evidence is superseded for completion because storage-failed artifacts can still be accepted, composer context can silently lose URL-only scene media, and tool-side execution-context merge proof remains incomplete."
+        },
+        {
+          "at": "2026-04-25T02:14:17Z",
+          "text": "Amendment A completed: storage-failed or URL-only video artifacts no longer produce accepted delivery/progress, composer context fails closed without local scene media, execution-context merge helper tests pass, and focused validation passed (9 passed, 46 passed, 61 passed). Await user confirmation before completion."
+        },
+        {
+          "at": "2026-04-25T08:04:02Z",
+          "text": "Implementation and focused validation complete after Amendment A; awaiting user confirmation to close."
+        },
+        {
+          "at": "2026-04-25T08:04:08Z",
+          "text": "User confirmed continuation after Amendment A validation; MAS boundary checkpoint complete with focused suites passed (9, 46, 61)."
         }
       ]
     }
