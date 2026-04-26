@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-04-26T02:42:59Z",
+      "updated_at": "2026-04-26T03:47:21Z",
       "archived_at": null,
       "notes": [
         {
@@ -2866,6 +2866,10 @@
         {
           "at": "2026-04-26T02:42:59Z",
           "text": "Stage A/B partial baseline: fixed frontend lint/tooling blockers and backend path/ref blockers; backend focused suite passes (51 passed) and npm lint passes with warnings; frontend type-check remains blocked by historical test type debt."
+        },
+        {
+          "at": "2026-04-26T03:47:21Z",
+          "text": "Stage B build/typecheck baseline complete: npm run type-check passed, frontend runtime-check tsc passed, npm run lint passed with warnings, npm run build passed; root tsconfig now excludes historical __tests__ while focused runtime test tsconfig remains explicit."
         }
       ]
     }
