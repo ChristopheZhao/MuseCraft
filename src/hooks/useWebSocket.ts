@@ -252,7 +252,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     }
   }, [updateAgent]);
 
-  const handleWorkflowCompleted = useCallback((msg: any) => {
+  const handleWorkflowCompleted = useCallback(() => {
     addNotification({
       type: 'success',
       title: '生成完成通知',
@@ -279,7 +279,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
 
       switch (state) {
         case 'workflow_completed':
-          handleWorkflowCompleted({ ...msg, results: payload.results, ...payload });
+          handleWorkflowCompleted();
           break;
         case 'workflow_failed':
           handleWorkflowFailed({ ...msg, error: payload.error, ...payload });
@@ -299,11 +299,11 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     void refreshRuntimeView();
   }, [handleWorkflowCompleted, handleWorkflowFailed, updateAgent, refreshRuntimeView]);
 
-  const handleConnectionEstablished = useCallback((msg: any) => {
+  const handleConnectionEstablished = useCallback(() => {
     setWSConnected(true);
   }, [setWSConnected]);
 
-  const handleSubscriptionConfirmed = useCallback((msg: any) => {
+  const handleSubscriptionConfirmed = useCallback(() => {
     // no-op
   }, []);
 
@@ -334,7 +334,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
   }, [addResult, updateResult, addNotification]);
 
   const handleError = useCallback((data: any) => {
-    const { agentId, error, code } = data;
+    const { agentId, error } = data;
     
     if (agentId) {
       updateAgent(agentId, {

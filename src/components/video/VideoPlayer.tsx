@@ -12,7 +12,6 @@ import {
   Minimize,
   SkipBack,
   SkipForward,
-  RotateCcw,
   Settings,
   Download,
   Share2,

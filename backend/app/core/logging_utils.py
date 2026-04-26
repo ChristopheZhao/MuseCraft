@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 import re
 
 from .config import settings
 
 TASK_POLLING_ACCESS_RE = re.compile(r'GET /api/v1/tasks/[^/]+(?:/runtime)?/? ')
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class SuppressTaskPollingAccessFilter(logging.Filter):
@@ -28,8 +30,11 @@ def ensure_mas_log_dir() -> str:
     log_dir = getattr(settings, "MAS_LOG_DIR", "") or ""
     if not log_dir:
         raise ValueError("MAS_LOG_DIR is not configured")
-    os.makedirs(log_dir, exist_ok=True)
-    return os.path.abspath(log_dir)
+    log_path = Path(log_dir)
+    if not log_path.is_absolute():
+        log_path = PROJECT_ROOT / log_path
+    os.makedirs(log_path, exist_ok=True)
+    return str(log_path.resolve())
 
 
 def mas_log_file_path() -> str:

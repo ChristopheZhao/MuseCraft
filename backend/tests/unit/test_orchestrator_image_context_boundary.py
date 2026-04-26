@@ -321,9 +321,11 @@ def test_prepare_agent_context_pins_boundary_reads_to_runtime_input_payload(tmp_
     assert static_context["scenes_to_generate"][0]["script_text"] == "published script"
 
 
-def test_prepare_agent_context_projects_video_composer_from_execution_contract():
+def test_prepare_agent_context_projects_video_composer_from_execution_contract(tmp_path):
     service = _build_service()
     workflow_id = "wf-video-composer-prepare-boundary"
+    scene_video_path = tmp_path / "scene-1.mp4"
+    scene_video_path.write_bytes(b"fake video bytes")
 
     write_shared_fact(
         workflow_id,
@@ -337,7 +339,7 @@ def test_prepare_agent_context_projects_video_composer_from_execution_contract()
         {
             "1": {
                 "scene_number": 1,
-                "video_path": "/tmp/scene-1.mp4",
+                "video_path": str(scene_video_path),
                 "duration_sec": 1.0,
             }
         },
@@ -370,5 +372,5 @@ def test_prepare_agent_context_projects_video_composer_from_execution_contract()
     )
 
     static_context = agent_input["static_context"]
-    assert static_context["scene_videos"][0]["local_path"] == "/tmp/scene-1.mp4"
+    assert static_context["scene_videos"][0]["local_path"] == str(scene_video_path)
     assert "final_video" not in static_context

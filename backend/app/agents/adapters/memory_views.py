@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 
 
 _MAS_SCOPE_PREFIX = "mas"
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _resolve_config_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (_PROJECT_ROOT / path).resolve()
 
 
 def _get_mas_working_memory(
@@ -592,21 +600,13 @@ def _build_video_composer_scene_media_ref(
         scene_media.append(entry)
     if not scene_media:
         return None, include_audio
-    try:
-        base_dir = Path(settings.TEMP_PATH) / "context"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"video_composer_scene_media_{workflow_id}.json"
-        ref_path = (base_dir / filename).resolve()
-        with open(ref_path, "w", encoding="utf-8") as fh:
-            json.dump({"scenes": scene_media}, fh, ensure_ascii=False)
-        try:
-            backend_root = Path(__file__).resolve().parents[3]
-            scene_media_ref = str(ref_path.relative_to(backend_root))
-        except Exception:
-            scene_media_ref = str(ref_path)
-        return scene_media_ref, include_audio
-    except Exception:
-        return None, include_audio
+    base_dir = _resolve_config_path(str(settings.TEMP_PATH)) / "context"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"video_composer_scene_media_{workflow_id}.json"
+    ref_path = (base_dir / filename).resolve()
+    with open(ref_path, "w", encoding="utf-8") as fh:
+        json.dump({"scenes": scene_media}, fh, ensure_ascii=False)
+    return str(ref_path), include_audio
 
 
 def _normalize_quality_checker_final_video_refs(final_video: Dict[str, Any]) -> tuple[str, str, str]:

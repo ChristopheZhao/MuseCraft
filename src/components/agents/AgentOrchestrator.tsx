@@ -2,7 +2,6 @@
 
 import React, { useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { Agent } from '@/types';
 import { cn, getStatusColor as getTelemetryStatusColor } from '@/lib/utils';
 import {
   AlertCircle,

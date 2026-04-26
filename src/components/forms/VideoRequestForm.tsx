@@ -8,8 +8,6 @@ import { ApiClient, type QuickCurrentRunResponse } from '@/lib/api';
 import { getOrCreateQuickWorkspaceSessionId } from '@/lib/utils';
 import {
   AlertCircle,
-  Upload,
-  Image,
   FileText,
   Loader2,
   Music,
@@ -61,7 +59,7 @@ const VideoRequestForm: React.FC = () => {
     },
   });
 
-  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const [, setUploadedFiles] = useState<File[]>([]);
   const [currentTab, setCurrentTab] = useState<'basic' | 'style' | 'music' | 'advanced'>('basic');
   const hasPendingRunChoice = !loadingExistingRun && !!existingRun?.task && !existingRunDismissed;
   const existingRunResumeControl = existingRun?.runtime?.resume_control;

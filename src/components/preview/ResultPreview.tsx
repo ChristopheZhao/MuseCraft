@@ -31,7 +31,7 @@ interface ResultPreviewProps {
 const ResultPreview: React.FC<ResultPreviewProps> = ({ className }) => {
   const { results } = useAppStore();
   const [selectedType, setSelectedType] = useState<ResultType | 'all'>('all');
-  const [selectedResult, setSelectedResult] = useState<GenerationResult | null>(null);
+  const [, setSelectedResult] = useState<GenerationResult | null>(null);
   const { t } = useI18n();
 
   const resultTypes: { id: ResultType | 'all'; label: string; icon: React.ElementType; count: number }[] = [

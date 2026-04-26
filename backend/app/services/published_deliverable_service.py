@@ -25,8 +25,19 @@ def _backend_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _resolve_config_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (_project_root() / path).resolve()
+
+
 def _published_deliverable_dir() -> Path:
-    return Path(settings.TEMP_PATH) / "published_deliverables"
+    return _resolve_config_path(str(settings.TEMP_PATH)) / "published_deliverables"
 
 
 def _resolve_payload_path(payload_ref: str) -> Path:
@@ -50,10 +61,7 @@ def _persist_payload(
     target_path = (base_dir / filename).resolve()
     with open(target_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
-    try:
-        return str(target_path.relative_to(_backend_root()))
-    except Exception:
-        return str(target_path)
+    return str(target_path)
 
 
 def load_published_payload(payload_ref: Optional[str]) -> Optional[Dict[str, Any]]:
