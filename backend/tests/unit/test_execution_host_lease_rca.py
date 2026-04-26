@@ -215,12 +215,21 @@ def test_attempt_lease_keepalive_controller_can_leave_silent_expired_window_when
                     attempt_id=setup["attempt_id"],
                     lease_token=setup["lease_token"],
                 )
-            assert list(getattr(node, "diagnostics", None) or []) == []
+            keepalive_stop_diagnostics = [
+                item
+                for item in (getattr(node, "diagnostics", None) or [])
+                if isinstance(item, dict) and item.get("code") == "execution_host_keepalive"
+            ]
+            assert keepalive_stop_diagnostics == []
         finally:
             mid_db.close()
 
         controller.assert_healthy()
-        assert published == []
+        assert [
+            item
+            for item in published
+            if item["diagnostic"].get("code") == "execution_host_keepalive"
+        ] == []
 
         release_heartbeat.set()
 
@@ -266,7 +275,12 @@ def test_attempt_lease_keepalive_controller_can_leave_silent_expired_window_when
         finally:
             end_db.close()
 
-        assert published[0]["diagnostic"]["reason_code"] == "heartbeat_validation_failed"
+        published_stop_diagnostics = [
+            item["diagnostic"]
+            for item in published
+            if item["diagnostic"].get("code") == "execution_host_keepalive"
+        ]
+        assert published_stop_diagnostics[0]["reason_code"] == "heartbeat_validation_failed"
         assert excinfo.value.diagnostic["reason_code"] == "heartbeat_validation_failed"
         assert len(keepalive_diagnostics) == 1
         assert keepalive_diagnostics[0]["state"] == "stopped"

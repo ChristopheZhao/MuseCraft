@@ -108,6 +108,9 @@ def _build_continuation_checkpoint():
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER],
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        node_key="script",
+        attempt_id=1,
         decision_id=None,
     )
 
