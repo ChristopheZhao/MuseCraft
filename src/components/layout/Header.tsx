@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 
 const Header: React.FC = () => {
-  const { ui, setSidebarCollapsed, addNotification } = useAppStore();
+  const { ui, wsConnected, setSidebarCollapsed, addNotification } = useAppStore();
   const { t, lang, setLang } = useI18n();
   const { sidebarCollapsed, notifications } = ui;
 
@@ -66,12 +66,21 @@ const Header: React.FC = () => {
       </div>
 
       {/* Center Section - Status Indicator */}
-      <div className="hidden lg:flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-emerald-50 to-green-50 rounded-full border border-green-200">
-        <Zap className="w-4 h-4 text-green-600" />
+      <div
+        className={[
+          'hidden lg:flex items-center space-x-2 px-4 py-2 rounded-full border',
+          wsConnected
+            ? 'bg-gradient-to-r from-emerald-50 to-green-50 border-green-200'
+            : 'bg-gradient-to-r from-amber-50 to-orange-50 border-amber-200',
+        ].join(' ')}
+      >
+        <Zap className={wsConnected ? 'w-4 h-4 text-green-600' : 'w-4 h-4 text-amber-600'} />
         <span className="text-sm font-medium text-gray-700">
-          {t('status.ready')}
+          {wsConnected ? t('status.ready') : '服务未连接'}
         </span>
-        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+        <div
+          className={wsConnected ? 'w-2 h-2 bg-green-500 rounded-full animate-pulse' : 'w-2 h-2 bg-amber-500 rounded-full'}
+        ></div>
       </div>
 
       {/* Right Section */}

@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-04-26T09:34:04Z",
+      "updated_at": "2026-04-26T10:15:20Z",
       "archived_at": null,
       "notes": [
         {
@@ -2874,6 +2874,10 @@
         {
           "at": "2026-04-26T09:34:04Z",
           "text": "Stage C backend runtime/read-model focused validation passed: expanded MAS/runtime suite passed (62 passed); updated stale lease RCA and published-deliverable test contracts to current control-plane diagnostics/checkpoint schema."
+        },
+        {
+          "at": "2026-04-26T10:15:20Z",
+          "text": "Stage D frontend HTTP smoke completed: /home and /console SSR return 200; fixed marketing footer route-group links and console disconnected-service status; real browser Playwright remains blocked by missing Chrome and sudo-required install."
         }
       ]
     }
