@@ -67,7 +67,7 @@ async def test_image_generator_does_not_block_cross_iteration_repeat_before_act(
 
     executed = []
 
-    async def _fake_execute(function_name, function_args):
+    async def _fake_execute(function_name, function_args, **_kwargs):
         executed.append((function_name, dict(function_args or {})))
         return SimpleNamespace(
             success=True,
@@ -82,7 +82,7 @@ async def test_image_generator_does_not_block_cross_iteration_repeat_before_act(
 
     result = await agent._execute_action(
         {
-            "action": "execute_planned_calls",
+            "action": "execute_tool_calls",
             "tool_calls": [
                 {
                     "function": {

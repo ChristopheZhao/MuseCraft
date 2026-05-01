@@ -120,13 +120,18 @@ def test_sensitive_error_triggers_prompt_rewrite(monkeypatch):
 
     rewritten_prompt = "改写后的安全提示词"
 
-    def fake_generate_text(**kwargs):
-        return {
-            "content": rewritten_prompt,
+    async def fake_rewrite_prompt_preserving_locks(*args, **kwargs):
+        return rewritten_prompt, {
+            "result": "success",
+            "backend": "test",
             "usage": {"total_tokens": 12},
         }
 
-    monkeypatch.setattr(vgt_module.enhanced_ai_client, "generate_text", fake_generate_text)
+    monkeypatch.setattr(
+        vgt_module,
+        "ps_rewrite_preserving_locks",
+        fake_rewrite_prompt_preserving_locks,
+    )
 
     tool = VideoGenerationTool()
 

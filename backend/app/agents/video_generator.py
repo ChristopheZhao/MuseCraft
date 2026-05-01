@@ -65,10 +65,10 @@ class VideoGeneratorAgent(ReActAgent):
         task: Task,
         iteration: int,
     ) -> Dict[str, Any]:
-        """单段式纯 ReAct：在 PLAN 阶段一次 FC 产出完整 tool_calls，ACT 仅执行。
+        """单段式纯 ReAct：本轮 FC 产出 tool_calls，并在紧随其后的 ACT 中执行。
 
         设计要点：
-        - 不再在 ACT 内进行二次 FC；PLAN 即产出调用清单（如无调用则返回合同 JSON）。
+        - 不再在 ACT 内进行二次 FC；FC 输出的调用请求不作为跨轮计划状态保存。
         - 工具可见性与参数策略完全由 ToolManager/policy 决定；Agent 不做过滤。
         - 为了给模型充分上下文，优先提供“就绪场景”的批次视图；允许模型在该集合内自主选择并编排调用顺序。
         """
@@ -79,20 +79,20 @@ class VideoGeneratorAgent(ReActAgent):
         # 通过统一模板构造 PLAN 消息（分区上下文）
         messages = self.build_plan_messages(current_state or {})
 
-        # 仅规划：调用 FC 获取 tool_calls，不执行
+        # 单轮 FC：产出 tool_calls 后由同一 ReAct 迭代的 ACT 立即执行。
         fc = await self.llm_function_call(
             messages=messages,
             context_description="video_generation_plan_fc",
             temperature=0.2,
         )
 
-        planned_calls = list(fc.get("tool_calls") or []) if isinstance(fc, dict) else []
+        tool_calls = list(fc.get("tool_calls") or []) if isinstance(fc, dict) else []
         plan_llm = fc.get("llm_response") if isinstance(fc, dict) else None
 
         # 诊断日志（不干预流程）：计划数量 + 目标场景推断（最多预览若干）
         try:
             scene_numbers: List[int] = []
-            for call in planned_calls:
+            for call in tool_calls:
                 args = ((call or {}).get("function") or {}).get("arguments") or {}
                 if isinstance(args, str):
                     import json as _json
@@ -110,16 +110,16 @@ class VideoGeneratorAgent(ReActAgent):
             if scene_numbers:
                 self.logger.info(
                     "PLAN: tool_calls=%d scenes=%s",
-                    len(planned_calls),
+                    len(tool_calls),
                     scene_numbers[:6],
                 )
             else:
-                self.logger.info("PLAN: tool_calls=%d", len(planned_calls))
+                self.logger.info("PLAN: tool_calls=%d", len(tool_calls))
         except Exception:
             pass
 
         # 关键可观测性：当 tool_calls=0 时，打印本轮 PLAN 文本预览，便于定位“为何未触发工具调用”
-        if not planned_calls:
+        if not tool_calls:
             content = None
             finish_reason = None
             model = None
@@ -153,8 +153,8 @@ class VideoGeneratorAgent(ReActAgent):
                     provider,
                 )
 
-        # 若未产出任何调用，尝试解析合同 JSON 作为回退；否则进入执行阶段
-        if not planned_calls:
+        # 若未产出任何调用，回到观察，让下一轮根据 WM 事实自纠；否则进入同轮执行阶段。
+        if not tool_calls:
             # 无调用：回到观察，让下一轮根据 WM 事实自纠
             return {
                 "action": "observe",
@@ -164,8 +164,8 @@ class VideoGeneratorAgent(ReActAgent):
             }
 
         return {
-            "action": "execute_planned_calls",
-            "tool_calls": planned_calls,
+            "action": "execute_tool_calls",
+            "tool_calls": tool_calls,
             "plan_llm": plan_llm,
         }
 
@@ -230,16 +230,16 @@ class VideoGeneratorAgent(ReActAgent):
                 "generation_results": runtime.completed_outputs(),
             }
 
-        if action == "execute_planned_calls":
+        if action == "execute_tool_calls":
             params = action_plan.get("parameters", {}) or {}
-            planned_calls: List[Dict[str, Any]] = list(
+            tool_calls: List[Dict[str, Any]] = list(
                 action_plan.get("tool_calls")
                 or action_plan.get("call_tools")
                 or params.get("tool_calls")
                 or params.get("call_tools")
                 or []
             )
-            if not planned_calls:
+            if not tool_calls:
                 return {"action_performed": "observe", "generation_results": [], "executed_calls": []}
             plan_llm = action_plan.get("plan_llm") or params.get("plan_llm")
             wf_id = (
@@ -250,16 +250,16 @@ class VideoGeneratorAgent(ReActAgent):
             wf_id = str(wf_id) if wf_id else ""
             execution_contract = self._resolve_execution_contract(input_data, wf_id)
             self._validate_video_generation_calls_against_contract(
-                planned_calls,
+                tool_calls,
                 execution_contract=execution_contract,
             )
-            planned_calls = self._bind_execution_context_to_planned_calls(
-                planned_calls,
+            tool_calls = self._bind_execution_context_to_tool_calls(
+                tool_calls,
                 execution_contract=execution_contract,
             )
 
-            # 执行规划好的调用序列（顺序执行，不做阶段过滤）
-            executed_calls = await self.execute_tool_calls(planned_calls)
+            # 执行本轮 FC 产出的调用序列（顺序执行，不做阶段过滤）
+            executed_calls = await self.execute_tool_calls(tool_calls)
             # 规范化为 artifacts（视频），随后最小形态映射
             artifacts = normalize_executed_calls_to_artifacts(executed_calls, kind="video", include_prompt=True)
             normalized_results: List[Dict[str, Any]] = []
@@ -301,8 +301,8 @@ class VideoGeneratorAgent(ReActAgent):
             # 执行摘要
             success_cnt = sum(1 for r in (normalized_results or []) if r.get("success"))
             self.logger.info(
-                "ACT summary: planned=%d executed=%d success=%d",
-                len(planned_calls),
+                "ACT summary: requested=%d executed=%d success=%d",
+                len(tool_calls),
                 len(executed_calls or []),
                 success_cnt,
             )
@@ -356,15 +356,15 @@ class VideoGeneratorAgent(ReActAgent):
             context["workflow_state_id"] = workflow_state_id
         return context
 
-    def _bind_execution_context_to_planned_calls(
+    def _bind_execution_context_to_tool_calls(
         self,
-        planned_calls: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
         *,
         execution_contract: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         bound_calls: List[Dict[str, Any]] = []
         execution_context = self._build_execution_context(execution_contract)
-        for call in planned_calls:
+        for call in tool_calls:
             if not isinstance(call, dict):
                 bound_calls.append(call)
                 continue
@@ -506,11 +506,11 @@ class VideoGeneratorAgent(ReActAgent):
 
     def _validate_video_generation_calls_against_contract(
         self,
-        planned_calls: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
         *,
         execution_contract: Dict[str, Any],
     ) -> None:
-        if not isinstance(planned_calls, list) or not planned_calls:
+        if not isinstance(tool_calls, list) or not tool_calls:
             return
 
         storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
@@ -522,7 +522,7 @@ class VideoGeneratorAgent(ReActAgent):
 
         required_generate_audio = constraints.get("generate_audio")
 
-        for call in planned_calls:
+        for call in tool_calls:
             if not isinstance(call, dict):
                 continue
             fn_meta = call.get("function")

@@ -23,7 +23,6 @@ from ....services.scene_info_reference_service import (
     load_scene_info_payload,
 )
 from ....services.video_execution_context import merge_video_execution_context_into_params
-from ....services.enhanced_ai_client import enhanced_ai_client, TaskType
 from ....services.execution_host_lease import (
     ExecutionHostKeepaliveLostError,
     assert_current_execution_host_keepalive_healthy,

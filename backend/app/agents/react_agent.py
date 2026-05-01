@@ -120,19 +120,19 @@ class ReActAgent(BaseAgent, ABC):
                 # - 本轮无 tool_calls 时，对 PLAN 文本做一次“退出合同规整”（response_format=json_object，且不携带 tools），
                 #   以获得可解析的 task_complete / completed_reason / plan_summary，避免仅凭自然语言 content 猜测。
                 # - 连续多轮无 tool_calls 且合同仍判定未完成：以 blocked 早停并告警，避免浪费预算空转到 max_iterations。
-                def _planned_calls(plan: Any) -> List[Any]:
+                def _tool_calls_requested(plan: Any) -> List[Any]:
                     if isinstance(plan, dict):
                         calls = plan.get("tool_calls") or []
                         return list(calls) if isinstance(calls, list) else []
                     return []
 
-                planned_calls = _planned_calls(action_plan)
+                tool_calls_requested = _tool_calls_requested(action_plan)
                 raw_plan_text = self._extract_plan_contract_source_text(action_plan)
                 plan_contract: Dict[str, Any] = {}
                 if isinstance(action_plan, dict) and isinstance(action_plan.get("plan_contract"), dict):
                     plan_contract = dict(action_plan.get("plan_contract") or {})
 
-                if planned_calls:
+                if tool_calls_requested:
                     if not plan_contract and raw_plan_text:
                         self.logger.info(
                             "PLAN_CONTRACT_NORMALIZE agent=%s iter=%d (tool_calls present)",
@@ -145,7 +145,7 @@ class ReActAgent(BaseAgent, ABC):
                     try:
                         from .utils.tool_contracts import plan_contract_conflicts_with_actions
 
-                        conflict = plan_contract_conflicts_with_actions(plan_contract, planned_calls)
+                        conflict = plan_contract_conflicts_with_actions(plan_contract, tool_calls_requested)
                     except Exception:
                         conflict = False
                     if conflict:
@@ -158,10 +158,10 @@ class ReActAgent(BaseAgent, ABC):
                             plan_summary.strip() if isinstance(plan_summary, str) else ""
                         )
                         self.logger.error(
-                            "PLAN_CONTRACT_CONFLICT agent=%s iter=%d planned_calls=%d completed_reason=%s",
+                            "PLAN_CONTRACT_CONFLICT agent=%s iter=%d tool_calls_requested=%d completed_reason=%s",
                             self.agent_name,
                             iteration + 1,
-                            len(planned_calls),
+                            len(tool_calls_requested),
                             completed_reason_str or None,
                         )
                         try:
@@ -179,7 +179,7 @@ class ReActAgent(BaseAgent, ABC):
                                         "subtask_state": "error",
                                         "completed_reason": completed_reason_str or None,
                                         "plan_summary": plan_summary_str or None,
-                                        "planned_call_count": len(planned_calls),
+                                        "tool_calls_requested": len(tool_calls_requested),
                                     },
                                 },
                                 service=self.short_term_service,
@@ -282,10 +282,10 @@ class ReActAgent(BaseAgent, ABC):
                     completed_reason = plan_contract.get("completed_reason")
                     completed_reason_str = completed_reason.strip() if isinstance(completed_reason, str) else ""
                     self.logger.info(
-                        "PLAN_CONTRACT agent=%s iter=%d planned_calls=%d task_complete=%s completed_reason=%s plan_summary_preview=%s",
+                        "PLAN_CONTRACT agent=%s iter=%d tool_calls_requested=%d task_complete=%s completed_reason=%s plan_summary_preview=%s",
                         self.agent_name,
                         iteration + 1,
-                        len(planned_calls),
+                        len(tool_calls_requested),
                         task_complete,
                         completed_reason_str or None,
                         plan_summary_preview or None,
@@ -519,13 +519,13 @@ class ReActAgent(BaseAgent, ABC):
                     ok = 0
                     if isinstance(executed_calls, list):
                         ok = sum(1 for call in executed_calls if isinstance(call, dict) and bool(call.get('success')))
-                    planned_calls = 0
+                    tool_calls_requested_count = 0
                     if isinstance(action_plan, dict) and isinstance(action_plan.get('tool_calls'), list):
-                        planned_calls = len(action_plan.get('tool_calls'))
+                        tool_calls_requested_count = len(action_plan.get('tool_calls'))
                     self.logger.info(
-                        "ITER_SUMMARY iter=%d planned=%d executed=%d ok=%d",
+                        "ITER_SUMMARY iter=%d requested=%d executed=%d ok=%d",
                         iteration + 1,
-                        planned_calls,
+                        tool_calls_requested_count,
                         executed,
                         ok,
                     )
@@ -1214,9 +1214,9 @@ class ReActAgent(BaseAgent, ABC):
         executed_calls = []
         if isinstance(action_result, dict):
             executed_calls = list(action_result.get("executed_calls") or [])
-        planned_calls = []
+        tool_calls_requested = []
         if isinstance(action_plan, dict):
-            planned_calls = list(action_plan.get("tool_calls") or [])
+            tool_calls_requested = list(action_plan.get("tool_calls") or [])
         round_metrics = {}
         if isinstance(action_result, dict):
             round_metrics = action_result.get("react_metrics") or {}
@@ -1227,7 +1227,7 @@ class ReActAgent(BaseAgent, ABC):
         if isinstance(action_result, dict):
             duration_ms = action_result.get("duration_ms")
         _, react_metrics, act_log = derive_action_facts(
-            planned_calls=planned_calls,
+            tool_calls_requested=tool_calls_requested,
             executed_calls=executed_calls,
             round_metrics=round_metrics,
             actions=actions,

@@ -146,7 +146,7 @@ def compute_obs_digest(obs: Dict[str, Any]) -> Dict[str, Any]:
 
 def derive_action_facts(
     *,
-    planned_calls: Optional[Sequence[Any]] = None,
+    tool_calls_requested: Optional[Sequence[Any]] = None,
     executed_calls: Optional[Sequence[Any]] = None,
     round_metrics: Optional[Dict[str, Any]] = None,
     actions: Optional[Sequence[Dict[str, Any]]] = None,
@@ -158,14 +158,14 @@ def derive_action_facts(
     Returns:
         (act_summary, react_metrics, act_log)
     """
-    planned_count = len(planned_calls or [])
+    requested_count = len(tool_calls_requested or [])
     executed_count = len(executed_calls or [])
     metrics = {k: (int(v) if isinstance(v, (int, float)) else v) for k, v in (round_metrics or {}).items()}
     success = int(metrics.get("success", 0) or 0)
     fail = int(metrics.get("fail", 0) or 0)
     act_log = _sanitize_action_log(actions)
     act_summary = {
-        "planned_calls": planned_count,
+        "tool_calls_requested": requested_count,
         "executed_calls": executed_count or int(metrics.get("total", executed_count)),
         "success": success,
         "fail": fail,

@@ -1203,7 +1203,7 @@ class BaseAgent(ABC):
           - collect_facts=True：{"executed_calls": [...], "act_summary": {...}, "react_metrics": {...}, "act_log": [...]}（不落入Agent字段）
         """
         try:
-            self.logger.info("🤖 选择工具：开始执行规划的工具调用")
+            self.logger.info("🤖 选择工具：开始执行本轮 FC 工具调用")
         except Exception:
             pass
         results: List[Dict[str, Any]] = []
@@ -1585,7 +1585,7 @@ class BaseAgent(ABC):
         if collect_facts:
             try:
                 act_summary, metrics, act_log = derive_action_facts(
-                    planned_calls=tool_calls,
+                    tool_calls_requested=tool_calls,
                     executed_calls=results,
                     round_metrics=round_metrics,
                     actions=actions_this_round,

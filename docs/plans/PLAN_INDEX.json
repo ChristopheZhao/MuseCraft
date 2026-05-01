@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-04-26T10:15:20Z",
+      "updated_at": "2026-05-01T14:23:42Z",
       "archived_at": null,
       "notes": [
         {
@@ -2878,6 +2878,18 @@
         {
           "at": "2026-04-26T10:15:20Z",
           "text": "Stage D frontend HTTP smoke completed: /home and /console SSR return 200; fixed marketing footer route-group links and console disconnected-service status; real browser Playwright remains blocked by missing Chrome and sudo-required install."
+        },
+        {
+          "at": "2026-05-01T12:39:19Z",
+          "text": "Amendment A opened for Stage E architecture-boundary review: production ReAct agents now use same-iteration execute_tool_calls/tool_calls semantics instead of execute_planned_calls/planned_calls wording; focused ReAct/image/video-progress/published-deliverable tests passed, while video_generation_tool_v2 import still hangs and remains a residual blocker."
+        },
+        {
+          "at": "2026-05-01T14:07:31Z",
+          "text": "Amendment A blocker resolved: removed unused video_generation_tool_v2 top-level enhanced_ai_client/TaskType import that triggered import-time Redis/provider initialization; direct import now returns, route-injection test passed (8 passed), video-generation tool tests passed (10 passed), and combined Amendment A suite passed (28 passed)."
+        },
+        {
+          "at": "2026-05-01T14:23:42Z",
+          "text": "Stage F findings matrix added: 064 implementation is complete pending checkpoint commit and user closeout confirmation; residual risk is limited to real-browser Playwright availability due missing Chrome/sudo-required install."
         }
       ]
     }

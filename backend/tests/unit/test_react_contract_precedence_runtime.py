@@ -26,7 +26,7 @@ class _ConflictReactAgent(ReActAgent):
 
     async def _think_and_plan(self, current_state, task, iteration):
         return {
-            "action": "execute_planned_calls",
+            "action": "execute_tool_calls",
             "tool_calls": [
                 {
                     "function": {

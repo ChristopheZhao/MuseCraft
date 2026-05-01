@@ -1,6 +1,6 @@
 """
 Audio Generator Agent - Generates background music and audio for videos
-ReAct 版：先规划，再调用工具，失败可重试。
+ReAct 版：本轮 FC 产出工具调用请求，并在同一迭代执行，失败可重试。
 """
 import asyncio
 from typing import Dict, Any, List
@@ -46,31 +46,31 @@ class AudioGeneratorAgent(ReActAgent):
 
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
-        """PLAN：使用模板和分区化上下文生成 FC 规划。"""
+        """PLAN：使用模板和分区化上下文生成本轮 FC 调用请求。"""
         # current_state 已包含 orchestrator 组装的上下文（task/static/iteration 分区）；
         # Agent 内不再二次拼装/覆盖，避免双轨事实源。
         messages = self.build_plan_messages(current_state or {})
-        # 仅规划：调用 llm_function_call 获取 tool_calls，不执行
+        # 单轮 FC：产出 tool_calls 后由同一 ReAct 迭代的 ACT 立即执行。
         fc_plan = await self.llm_function_call(
             messages=messages,
             context_description="audio background generation planning",
             temperature=0.2,
             tools_override=None,
         )
-        planned_calls = []
+        tool_calls = []
         if isinstance(fc_plan, dict):
-            planned_calls = list(fc_plan.get("tool_calls") or [])
+            tool_calls = list(fc_plan.get("tool_calls") or [])
         plan_llm = fc_plan.get("llm_response") if isinstance(fc_plan, dict) else None
-        if not planned_calls:
+        if not tool_calls:
             return {"action": "noop", "plan_llm": plan_llm, "reason": "no_calls_planned"}
         return {
-            "action": "execute_planned_calls",
-            "tool_calls": planned_calls,
+            "action": "execute_tool_calls",
+            "tool_calls": tool_calls,
             "plan_llm": plan_llm,
         }
 
     async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], db: Session, iteration: int) -> Dict[str, Any]:
-        """ACT：只执行规划的 call_tools；不在 Agent 内自组参数直接 use_tool。"""
+        """ACT：只执行本轮 FC 返回的 tool_calls；不在 Agent 内自组参数直接 use_tool。"""
         # 不在 Agent 内对 action 做白名单判断；
         # 执行层只关心是否存在规划的 call_tools，权限/范围由工具系统与 schema 控制。
         act = (action_plan or {}).get("action")
@@ -209,7 +209,7 @@ class AudioGeneratorAgent(ReActAgent):
         execution: Any
     ) -> Dict[str, Any]:
         """Deprecated legacy path. Tools must be executed via PLAN→ACT."""
-        raise AgentError("Deprecated: _generate_background_music_from_concept is not used; use FC-planned calls.")
+        raise AgentError("Deprecated: _generate_background_music_from_concept is not used; use FC tool calls.")
     
     def _extract_music_requirements(
         self, 
@@ -388,8 +388,8 @@ class AudioGeneratorAgent(ReActAgent):
         task_id: int,
         execution: Any
     ) -> str:
-        """Deprecated legacy helper. Use FC-planned storage calls in ACT."""
-        raise AgentError("Deprecated: _save_music_file is not used; use FC-planned calls.")
+        """Deprecated legacy helper. Use FC storage tool calls in ACT."""
+        raise AgentError("Deprecated: _save_music_file is not used; use FC tool calls.")
     
     def _create_audio_summary(
         self, 
@@ -414,7 +414,7 @@ class AudioGeneratorAgent(ReActAgent):
             "generation_time_estimate": "30-120 seconds"
         }
     
-    # Removed legacy duration/processing helpers: use FC-planned calls in ACT instead.
+    # Removed legacy duration/processing helpers: use FC tool calls in ACT instead.
 
     async def _create_placeholder_audio(self, duration: int) -> Dict[str, Any]:
         """Create placeholder audio information when generation fails"""

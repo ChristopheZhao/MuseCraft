@@ -77,17 +77,17 @@ class ImageGeneratorAgent(ReActAgent):
                 "reason": summary.get("reason"),
             }
 
-        self.logger.info("🚀 ACT: execute %d planned calls", len(tool_calls))
+        self.logger.info("🚀 ACT: execute %d tool calls", len(tool_calls))
         exec_out = await self.execute_tool_calls(tool_calls, collect_facts=True)
         executed_calls: List[Dict[str, Any]] = list(exec_out.get("executed_calls") or [])
         act_log = exec_out.get("act_log") or []
         react_metrics = exec_out.get("react_metrics") or {}
-        planned_functions = [
+        requested_functions = [
             ((call or {}).get("function") or {}).get("name")
             for call in tool_calls
             if isinstance((call or {}).get("function"), dict)
         ]
-        planned_total = len(tool_calls)
+        requested_total = len(tool_calls)
 
         results = await self._persist_executed_results(executed_calls or [])
         if results:
@@ -106,8 +106,8 @@ class ImageGeneratorAgent(ReActAgent):
                 executed_tools.append(fn)
 
         self.logger.info(
-            "ACT_DIAG(image): planned_total=%d executed=%d success=%d exec_scenes=%s parsed_scenes=%s tools=%s",
-            planned_total,
+            "ACT_DIAG(image): requested_total=%d executed=%d success=%d exec_scenes=%s parsed_scenes=%s tools=%s",
+            requested_total,
             len(executed_calls),
             successes,
             exec_scenes,
@@ -117,8 +117,8 @@ class ImageGeneratorAgent(ReActAgent):
         summary_payload = {
             "action": action_label,
             "plan_llm": plan_llm,
-            "planned_calls": planned_total,
-            "planned_functions": [fn for fn in planned_functions if fn],
+            "tool_calls_requested": requested_total,
+            "requested_functions": [fn for fn in requested_functions if fn],
             "executed_calls": len(executed_calls),
             "success": successes,
             "scenes": parsed_scenes,
@@ -219,17 +219,17 @@ class ImageGeneratorAgent(ReActAgent):
         task: Task,
         iteration: int
     ) -> Dict[str, Any]:
-        """PLAN：直接通过 FC 产出 tool_calls，ACT 仅执行。"""
+        """PLAN：通过 FC 产出本轮 tool_calls，ACT 在同一迭代执行。"""
         messages = self.build_plan_messages(current_state or {})
         fc_plan = await self.llm_function_call(
             messages=messages,
             context_description="image_generation_plan_fc",
             temperature=0.2,
         )
-        planned_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
+        tool_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
         plan_llm = fc_plan.get("llm_response") if isinstance(fc_plan, dict) else None
 
-        if not planned_calls:
+        if not tool_calls:
             self.logger.info("PLAN decision: no_calls_planned")
             return {
                 "action": "noop",
@@ -237,9 +237,9 @@ class ImageGeneratorAgent(ReActAgent):
                 "reason": "no_calls_planned",
             }
 
-        self.logger.info("PLAN decision: execute_planned_calls count=%d", len(planned_calls))
+        self.logger.info("PLAN decision: execute_tool_calls count=%d", len(tool_calls))
         return {
-            "action": "execute_planned_calls",
-            "tool_calls": planned_calls,
+            "action": "execute_tool_calls",
+            "tool_calls": tool_calls,
             "plan_llm": plan_llm,
         }

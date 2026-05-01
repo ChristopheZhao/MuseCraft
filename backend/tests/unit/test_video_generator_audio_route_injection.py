@@ -17,7 +17,7 @@ def test_validate_video_generation_calls_allows_missing_llm_facing_execution_bin
         workflow_state_id="wf-1",
         generate_audio=True,
     )
-    planned_calls = [
+    tool_calls = [
         {
             "function": {
                 "name": "video_generation.generate_with_continuity",
@@ -33,7 +33,7 @@ def test_validate_video_generation_calls_allows_missing_llm_facing_execution_bin
     ]
 
     agent._validate_video_generation_calls_against_contract(
-        planned_calls,
+        tool_calls,
         execution_contract=contract,
     )
 
@@ -44,7 +44,7 @@ def test_validate_video_generation_calls_rejects_conflicting_execution_audio_con
         workflow_state_id="wf-1",
         generate_audio=False,
     )
-    planned_calls = [
+    tool_calls = [
         {
             "function": {
                 "name": "video_generation.generate_with_continuity",
@@ -62,7 +62,7 @@ def test_validate_video_generation_calls_rejects_conflicting_execution_audio_con
 
     with pytest.raises(Exception, match="generate_audio"):
         agent._validate_video_generation_calls_against_contract(
-            planned_calls,
+            tool_calls,
             execution_contract=contract,
         )
 
@@ -73,7 +73,7 @@ def test_validate_video_generation_calls_rejects_mismatched_workflow_state_id():
         workflow_state_id="wf-required",
         generate_audio=True,
     )
-    planned_calls = [
+    tool_calls = [
         {
             "function": {
                 "name": "video_generation.generate_with_continuity",
@@ -92,7 +92,7 @@ def test_validate_video_generation_calls_rejects_mismatched_workflow_state_id():
 
     with pytest.raises(Exception, match="workflow_state_id"):
         agent._validate_video_generation_calls_against_contract(
-            planned_calls,
+            tool_calls,
             execution_contract=contract,
         )
 
@@ -103,7 +103,7 @@ def test_bind_execution_context_strips_runtime_fields_from_fc_arguments():
         workflow_state_id="wf-1",
         generate_audio=True,
     )
-    planned_calls = [
+    tool_calls = [
         {
             "function": {
                 "name": "video_generation.generate_with_continuity",
@@ -118,8 +118,8 @@ def test_bind_execution_context_strips_runtime_fields_from_fc_arguments():
     ]
 
     agent.logger = logging.getLogger("test.video_generator")
-    bound_calls = agent._bind_execution_context_to_planned_calls(
-        planned_calls,
+    bound_calls = agent._bind_execution_context_to_tool_calls(
+        tool_calls,
         execution_contract=contract,
     )
 

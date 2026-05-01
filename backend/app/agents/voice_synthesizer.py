@@ -210,10 +210,10 @@ class VoiceSynthesizerAgent(ReActAgent):
             context_description="voice_synthesis_plan_fc",
             temperature=0.2,
         )
-        planned_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
+        tool_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
         plan_llm = fc_plan.get("llm_response") if isinstance(fc_plan, dict) else None
 
-        if not planned_calls:
+        if not tool_calls:
             return {
                 "action": "noop",
                 "reason": "no_calls_planned",
@@ -221,8 +221,8 @@ class VoiceSynthesizerAgent(ReActAgent):
             }
 
         return {
-            "action": "execute_planned_calls",
-            "tool_calls": planned_calls,
+            "action": "execute_tool_calls",
+            "tool_calls": tool_calls,
             "plan_llm": plan_llm,
         }
 
@@ -367,7 +367,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         voice_settings: Dict[str, Any],
     ) -> str:
         # Deprecated: 工具调用应在 PLAN→ACT 中通过 execute_tool_calls 执行，不再直连。
-        raise AgentError("Deprecated: _store_voice_asset is not used; use FC-planned and executed calls.")
+        raise AgentError("Deprecated: _store_voice_asset is not used; use FC tool calls.")
 
     @emit_progress_snapshot
     async def _reflect_on_results(

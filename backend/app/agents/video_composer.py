@@ -49,7 +49,7 @@ class VideoComposerAgent(ReActAgent):
         )
 
     async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
-        """PLAN：使用模板和分区化上下文生成 FC 规划。"""
+        """PLAN：使用模板和分区化上下文生成本轮 FC 调用请求。"""
         messages = self.build_plan_messages(current_state or {})
         fc_plan = await self.llm_function_call(
             messages=messages,
@@ -57,10 +57,10 @@ class VideoComposerAgent(ReActAgent):
             temperature=0.2,
             tools_override=None,
         )
-        planned_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
+        tool_calls = list(fc_plan.get("tool_calls") or []) if isinstance(fc_plan, dict) else []
         plan_llm = fc_plan.get("llm_response") if isinstance(fc_plan, dict) else None
 
-        if not planned_calls:
+        if not tool_calls:
             return {
                 "action": "noop",
                 "plan_llm": plan_llm,
@@ -68,8 +68,8 @@ class VideoComposerAgent(ReActAgent):
             }
 
         return {
-            "action": "execute_planned_calls",
-            "tool_calls": planned_calls,
+            "action": "execute_tool_calls",
+            "tool_calls": tool_calls,
             "plan_llm": plan_llm,
         }
 
@@ -210,7 +210,7 @@ class VideoComposerAgent(ReActAgent):
         db: Session,
         iteration: int,
     ) -> Dict[str, Any]:
-        """ACT：执行规划的工具调用并写回成片事实。"""
+        """ACT：执行本轮 FC 返回的工具调用并写回成片事实。"""
         act = (action_plan or {}).get("action")
         params = (action_plan or {}).get("parameters", {})
         call_tools = list(action_plan.get("tool_calls") or params.get("call_tools") or [])

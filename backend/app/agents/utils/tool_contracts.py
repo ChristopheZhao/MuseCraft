@@ -215,14 +215,14 @@ def extract_contract_slot_writes(
 
 def plan_contract_conflicts_with_actions(
     contract: Dict[str, Any],
-    planned_calls: Optional[List[Any]],
+    tool_calls_requested: Optional[List[Any]],
 ) -> bool:
-    """Return True when a plan simultaneously claims completion and schedules ACT."""
+    """Return True when a plan simultaneously claims completion and requests ACT."""
     if not isinstance(contract, dict):
         return False
     if contract.get("task_complete") is not True:
         return False
-    return bool(planned_calls)
+    return bool(tool_calls_requested)
 
 
 __all__ = [
