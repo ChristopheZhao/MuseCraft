@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-05-04T01:27:35Z",
+      "updated_at": "2026-05-04T01:46:13Z",
       "archived_at": null,
       "notes": [
         {
@@ -2894,6 +2894,10 @@
         {
           "at": "2026-05-04T01:27:35Z",
           "text": "Chrome is now installed and real-browser Playwright verification completed for /home and /console: /home navigation/CTA/footer surfaces render, /console shows explicit service-disconnected status, and submit while backend 8005 is offline records connection-refused diagnostics. Remaining live-flow blocker is backend API/runtime availability for task creation/progress/result verification, not browser installation."
+        },
+        {
+          "at": "2026-05-04T01:46:13Z",
+          "text": "Backend dev stack started on 127.0.0.1:8005 and live browser flow was verified through task creation, WebSocket subscription, runtime bootstrap, concept execution, script execution, and script_review HITL gate for task 03949554-13f3-4b4c-b0c1-ba2d49755860/session 70/gate 40. The run was intentionally not approved past the gate because the script preview drifted toward a city-scenery scenario, so the remaining residual is creative-quality alignment rather than browser installation or backend availability."
         }
       ]
     }
