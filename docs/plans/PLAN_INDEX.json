@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-05-01T14:23:42Z",
+      "updated_at": "2026-05-04T01:27:35Z",
       "archived_at": null,
       "notes": [
         {
@@ -2890,6 +2890,10 @@
         {
           "at": "2026-05-01T14:23:42Z",
           "text": "Stage F findings matrix added: 064 implementation is complete pending checkpoint commit and user closeout confirmation; residual risk is limited to real-browser Playwright availability due missing Chrome/sudo-required install."
+        },
+        {
+          "at": "2026-05-04T01:27:35Z",
+          "text": "Chrome is now installed and real-browser Playwright verification completed for /home and /console: /home navigation/CTA/footer surfaces render, /console shows explicit service-disconnected status, and submit while backend 8005 is offline records connection-refused diagnostics. Remaining live-flow blocker is backend API/runtime availability for task creation/progress/result verification, not browser installation."
         }
       ]
     }
