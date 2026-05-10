@@ -2856,7 +2856,7 @@
       "file_path": "docs/plans/active/PLAN-20260425-064.md",
       "confirmed_by_user": false,
       "created_at": "2026-04-25T15:17:07Z",
-      "updated_at": "2026-05-04T01:46:13Z",
+      "updated_at": "2026-05-10T08:12:23Z",
       "archived_at": null,
       "notes": [
         {
@@ -2898,6 +2898,18 @@
         {
           "at": "2026-05-04T01:46:13Z",
           "text": "Backend dev stack started on 127.0.0.1:8005 and live browser flow was verified through task creation, WebSocket subscription, runtime bootstrap, concept execution, script execution, and script_review HITL gate for task 03949554-13f3-4b4c-b0c1-ba2d49755860/session 70/gate 40. The run was intentionally not approved past the gate because the script preview drifted toward a city-scenery scenario, so the remaining residual is creative-quality alignment rather than browser installation or backend availability."
+        },
+        {
+          "at": "2026-05-10T05:24:47Z",
+          "text": "Amendment B opened after live script_review=revise failed: RCA assigned ownership to the runtime-to-agent resume projection boundary, not Celery, gate semantics, frontend, or script_writer fallback behavior."
+        },
+        {
+          "at": "2026-05-10T07:36:25Z",
+          "text": "Amendment B implementation and expanded pre-commit backend validation completed: revise now projects validated candidate script facts before the new script_writer attempt, malformed revision context fails fast, and the expanded regression suite passed 95 tests with formatting, compile, and diff checks."
+        },
+        {
+          "at": "2026-05-10T08:12:23Z",
+          "text": "Minimal frontend/backend E2E validation passed for script_review=revise: task f82124df-1677-4a3e-a38f-4d50bf73df1c reached gate 43, browser submitted revise decision 33, runtime resumed through attempt 162, and new gate 44 reopened awaiting human with script revision 1."
         }
       ]
     }
