@@ -49,6 +49,19 @@ def _create_task(session_factory, *, input_parameters):
     return task_id
 
 
+def _find_published_diagnostic(published, *, code: str, reason_code: str | None = None):
+    for event in published:
+        diagnostic = event.get("diagnostic") if isinstance(event, dict) else None
+        if not isinstance(diagnostic, dict):
+            continue
+        if diagnostic.get("code") != code:
+            continue
+        if reason_code is not None and diagnostic.get("reason_code") != reason_code:
+            continue
+        return event
+    return None
+
+
 def _build_threaded_sqlite_session_factory(tmp_path, name: str):
     engine = create_engine(
         f"sqlite:///{(tmp_path / name).as_posix()}",
@@ -58,7 +71,9 @@ def _build_threaded_sqlite_session_factory(tmp_path, name: str):
     return engine, sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
-def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orchestrator(monkeypatch, session_factory):
+def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orchestrator(
+    monkeypatch, session_factory
+):
     task_id = _create_task(
         session_factory,
         input_parameters={
@@ -79,7 +94,9 @@ def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orch
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True))
+    monkeypatch.setattr(
+        queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True)
+    )
     monkeypatch.setattr(
         "app.agents.orchestrator.OrchestratorAgent.create_default",
         classmethod(lambda cls: _FakeOrchestrator()),
@@ -146,7 +163,9 @@ def test_run_generation_in_host_exposes_execution_host_lease_context(monkeypatch
     assert execution_host_lease.get_current_execution_host_lease_context() is None
 
 
-def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receipts(monkeypatch, tmp_path):
+def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receipts(
+    monkeypatch, tmp_path
+):
     engine, session_factory = _build_threaded_sqlite_session_factory(
         tmp_path,
         "queued_host_keepalive.sqlite",
@@ -206,6 +225,28 @@ def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receip
                     probe_db.close()
                 time.sleep(0.02)
 
+            ack_seen = False
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                probe_db = session_factory()
+                try:
+                    node = RuntimeSessionService.get_node_by_key_sync(
+                        probe_db,
+                        runtime_session.id,
+                        "video",
+                    )
+                    receipt_codes = [
+                        item.get("code")
+                        for item in (getattr(node, "diagnostics", None) or [])
+                        if isinstance(item, dict)
+                    ]
+                    if "execution_host_keepalive_first_heartbeat_ack" in receipt_codes:
+                        ack_seen = True
+                        break
+                finally:
+                    probe_db.close()
+                time.sleep(0.02)
+
             execution_host_lease.deactivate_current_attempt_keepalive(reason="test_done")
             probe.update(
                 {
@@ -215,13 +256,16 @@ def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receip
                     "initial_last_heartbeat_at": leased_attempt.last_heartbeat_at,
                     "initial_lease_expires_at": leased_attempt.lease_expires_at,
                     "advanced": advanced,
+                    "ack_seen": ack_seen,
                 }
             )
             return {"status": "completed"}
 
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05)
+    monkeypatch.setattr(
+        queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05
+    )
     monkeypatch.setattr(core_database, "SessionLocal", session_factory)
     monkeypatch.setattr(
         "app.agents.orchestrator.OrchestratorAgent.create_default",
@@ -262,6 +306,7 @@ def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receip
     assert result["status"] == "completed"
     assert probe["activated"] is True
     assert probe["advanced"] is True
+    assert probe["ack_seen"] is True
     assert refreshed_attempt is not None
     assert refreshed_attempt.last_heartbeat_at > probe["initial_last_heartbeat_at"]
     assert refreshed_attempt.lease_expires_at > probe["initial_lease_expires_at"]
@@ -291,7 +336,9 @@ def test_run_generation_in_host_can_silently_expire_when_heartbeat_blocks(monkey
     original_heartbeat = RuntimeSessionService.heartbeat_attempt_lease_sync
     probe = {}
 
-    def _blocked_heartbeat(db, runtime_session, *, attempt_id, lease_token, lease_timeout_seconds=None):
+    def _blocked_heartbeat(
+        db, runtime_session, *, attempt_id, lease_token, lease_timeout_seconds=None
+    ):
         entered_heartbeat.set()
         if not release_heartbeat.wait(timeout=5.0):
             raise RuntimeError("test heartbeat release timeout")
@@ -389,7 +436,9 @@ def test_run_generation_in_host_can_silently_expire_when_heartbeat_blocks(monkey
 
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05)
+    monkeypatch.setattr(
+        queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05
+    )
     monkeypatch.setattr(core_database, "SessionLocal", session_factory)
     monkeypatch.setattr(
         RuntimeSessionService,
@@ -520,20 +569,27 @@ def test_attempt_lease_keepalive_controller_marks_unhealthy_on_heartbeat_error()
     try:
         controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
         deadline = time.time() + 1.0
+        caught = None
         while time.time() < deadline:
-            if published:
+            try:
+                controller.assert_healthy()
+            except execution_host_lease.ExecutionHostKeepaliveLostError as exc:
+                caught = exc
                 break
             time.sleep(0.02)
-
-        with pytest.raises(execution_host_lease.ExecutionHostKeepaliveLostError) as excinfo:
-            controller.assert_healthy()
     finally:
         controller.close()
 
-    assert published
-    diagnostic = published[0]["diagnostic"]
+    assert caught is not None
+    event = _find_published_diagnostic(
+        published,
+        code="execution_host_keepalive",
+        reason_code="heartbeat_error",
+    )
+    assert event is not None
+    diagnostic = event["diagnostic"]
     assert diagnostic["reason_code"] == "heartbeat_error"
-    assert excinfo.value.diagnostic["reason_code"] == "heartbeat_error"
+    assert caught.diagnostic["reason_code"] == "heartbeat_error"
 
 
 def test_attempt_lease_keepalive_controller_publishes_diagnostic_when_validation_stops():
@@ -569,16 +625,24 @@ def test_attempt_lease_keepalive_controller_publishes_diagnostic_when_validation
         controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
         deadline = time.time() + 1.0
         while time.time() < deadline:
-            if published:
+            if _find_published_diagnostic(
+                published,
+                code="execution_host_keepalive",
+                reason_code="heartbeat_validation_failed",
+            ):
                 break
             time.sleep(0.02)
     finally:
         controller.close()
 
-    assert published
+    event = _find_published_diagnostic(
+        published,
+        code="execution_host_keepalive",
+        reason_code="heartbeat_validation_failed",
+    )
+    assert event is not None
     assert ("open",) in events
     assert ("load", 77) in events
-    event = published[0]
     diagnostic = event["diagnostic"]
     assert event["runtime_session_id"] == 77
     assert event["attempt_id"] == 11
@@ -641,18 +705,26 @@ def test_attempt_lease_keepalive_controller_publishes_lifecycle_receipts():
     finally:
         controller.close()
 
-    diagnostics_by_code = {
-        item["diagnostic"]["code"]: item["diagnostic"]
-        for item in published
-    }
+    diagnostics_by_code = {item["diagnostic"]["code"]: item["diagnostic"] for item in published}
 
     assert diagnostics_by_code["execution_host_keepalive_activation_requested"]["attempt_id"] == 11
-    assert diagnostics_by_code["execution_host_keepalive_first_heartbeat_ack"]["last_heartbeat_at"] is not None
-    assert diagnostics_by_code["execution_host_keepalive_heartbeat_end"]["lease_expires_at"] is not None
-    assert diagnostics_by_code["execution_host_keepalive_deactivated"]["reason_code"] == "test_scope_exit"
+    assert (
+        diagnostics_by_code["execution_host_keepalive_first_heartbeat_ack"]["last_heartbeat_at"]
+        is not None
+    )
+    assert (
+        diagnostics_by_code["execution_host_keepalive_heartbeat_end"]["lease_expires_at"]
+        is not None
+    )
+    assert (
+        diagnostics_by_code["execution_host_keepalive_deactivated"]["reason_code"]
+        == "test_scope_exit"
+    )
 
 
-def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monkeypatch, session_factory):
+def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(
+    monkeypatch, session_factory
+):
     task_id = _create_task(
         session_factory,
         input_parameters={"project_id": "project-1", "user_prompt": "test prompt"},
@@ -668,7 +740,9 @@ def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monk
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True))
+    monkeypatch.setattr(
+        queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True)
+    )
     monkeypatch.setattr(
         "app.agents.episode_orchestrator.EpisodeOrchestratorAgent.create_default",
         classmethod(lambda cls: _FakeEpisodeOrchestrator()),
@@ -697,7 +771,9 @@ def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(monk
     assert orchestrator_calls["execution_order"] == 2
 
 
-def test_sync_process_video_task_routes_silent_quick_payload_to_orchestrator_mainline(monkeypatch, session_factory):
+def test_sync_process_video_task_routes_silent_quick_payload_to_orchestrator_mainline(
+    monkeypatch, session_factory
+):
     task_id = _create_task(
         session_factory,
         input_parameters={"user_prompt": "test prompt"},
@@ -734,7 +810,9 @@ def test_sync_process_video_task_routes_silent_quick_payload_to_orchestrator_mai
     assert dispatch_calls["input_data"]["user_prompt"] == "test prompt"
 
 
-def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispatch(monkeypatch, session_factory):
+def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispatch(
+    monkeypatch, session_factory
+):
     task_id = _create_task(
         session_factory,
         input_parameters={"user_prompt": "task payload"},
@@ -758,8 +836,13 @@ def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispa
     db = session_factory()
     try:
         task = db.query(Task).filter(Task.id == task_id).first()
-        session = task_queue.RuntimeSessionService.get_or_create_session_for_task_sync(db, task, mode="quick")
-        session.input_payload = {"user_prompt": "runtime payload", "runtime_contracts": {"script_review": {"action": "approve"}}}
+        session = task_queue.RuntimeSessionService.get_or_create_session_for_task_sync(
+            db, task, mode="quick"
+        )
+        session.input_payload = {
+            "user_prompt": "runtime payload",
+            "runtime_contracts": {"script_review": {"action": "approve"}},
+        }
         db.commit()
     finally:
         db.close()
@@ -768,7 +851,9 @@ def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispa
 
     assert result["route"] == "orchestrator_mainline"
     assert dispatch_calls["input_data"]["user_prompt"] == "runtime payload"
-    assert dispatch_calls["input_data"]["runtime_contracts"] == {"script_review": {"action": "approve"}}
+    assert dispatch_calls["input_data"]["runtime_contracts"] == {
+        "script_review": {"action": "approve"}
+    }
 
 
 def test_queue_task_persists_celery_handle_and_sets_queued(monkeypatch, session_factory):
@@ -779,7 +864,9 @@ def test_queue_task_persists_celery_handle_and_sets_queued(monkeypatch, session_
 
     monkeypatch.setattr(
         "app.services.celery_app.process_video_task",
-        SimpleNamespace(delay=lambda queued_task_id: SimpleNamespace(id=f"celery-{queued_task_id}")),
+        SimpleNamespace(
+            delay=lambda queued_task_id: SimpleNamespace(id=f"celery-{queued_task_id}")
+        ),
     )
     monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
 
@@ -837,7 +924,12 @@ def test_sync_process_video_task_skips_terminal_quick_runtime(monkeypatch, sessi
 
     def _fake_host(mode, *, task, input_data, db, route, execution_order=1):
         dispatch_calls["called"] = True
-        return {"status": "completed", "result": {"status": "completed"}, "route": route, "mode": mode.value}
+        return {
+            "status": "completed",
+            "result": {"status": "completed"},
+            "route": route,
+            "mode": mode.value,
+        }
 
     monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
     monkeypatch.setattr(task_queue, "run_generation_in_host", _fake_host)
@@ -864,7 +956,9 @@ def test_sync_process_video_task_skips_terminal_quick_runtime(monkeypatch, sessi
     assert dispatch_calls == {}
 
 
-def test_sync_process_video_task_marks_runtime_failure_via_runtime_service(monkeypatch, session_factory):
+def test_sync_process_video_task_marks_runtime_failure_via_runtime_service(
+    monkeypatch, session_factory
+):
     task_id = _create_task(
         session_factory,
         input_parameters={"user_prompt": "test prompt"},

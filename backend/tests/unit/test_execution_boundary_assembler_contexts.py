@@ -13,6 +13,16 @@ from app.agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from app.core.database import Base
 from app.models import AgentType, Task, TaskStatus, TaskType
 from app.services.context_assembler import ContextContractAssembler
+from app.services.orchestration_runtime_resume_bootstrap_facade import (
+    OrchestrationRuntimeResumeBootstrapError,
+    OrchestrationRuntimeResumeBootstrapFacade,
+)
+from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.services.published_deliverable_adapter import build_script_deliverable_payload
+from app.services.published_deliverable_service import (
+    PublishedDeliverableService,
+    build_deliverable_ref,
+)
 from app.services.runtime_session_service import RuntimeSessionService
 from app.services.scene_info_reference_service import SceneInfoReferencePersistenceError
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
@@ -54,7 +64,9 @@ def test_publish_script_review_boundary_publishes_deliverable_without_shared_wm_
     service = _build_service()
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(sync_db, session, node_key="script", task=task)
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db, session, node_key="script", task=task
+    )
     workflow_id = str(task.task_id)
 
     write_shared_fact(
@@ -240,7 +252,174 @@ def test_assemble_agent_context_projects_script_writer_inputs_from_mas_boundary(
     assert diagnostics["scene_count"] == 1
 
 
-def test_assemble_agent_context_requires_no_projection_when_runtime_input_carries_script_ref(tmp_path):
+def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(sync_db):
+    source_service = _build_service()
+    workflow_id = "wf-script-revise-projection"
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+    )
+
+    write_shared_fact(
+        workflow_id,
+        "project.concept_plan",
+        {"overview": "candidate concept", "scenes": [{"scene_number": 1}]},
+        service=source_service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "scene_overview",
+        {"scenes": [{"scene_number": 1, "visual_description": "candidate scene"}]},
+        service=source_service,
+    )
+    write_shared_fact(
+        workflow_id,
+        "project.scene_scripts",
+        {"1": {"script_text": "candidate script"}},
+        service=source_service,
+    )
+    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
+        sync_db,
+        session=session,
+        workflow_id=workflow_id,
+        attempt_id=attempt.id,
+        payload=build_script_deliverable_payload(workflow_id, service=source_service),
+        summary={"total_scenes": 1},
+    )
+    artifact_ref = build_deliverable_ref(deliverable)
+    checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={
+            AgentType.SCRIPT_WRITER: {
+                "run": True,
+                "order": 1,
+                "mission": "revise script",
+                "deliverable": "scene scripts",
+            }
+        },
+        conditional_task_specs={},
+        candidate_agents=[AgentType.SCRIPT_WRITER],
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
+        node_key="script",
+        attempt_id=attempt.id,
+    )
+    RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
+        sync_db,
+        session,
+        task=task,
+        workflow_state_id=workflow_id,
+        attempt_id=attempt.id,
+        trigger_reason="initial",
+        script_output={"scenes_generated": 1, "total_scenes": 1},
+        artifact_ref=artifact_ref,
+        script_preview_text="candidate preview",
+        continuation_checkpoint=checkpoint,
+    )
+    RuntimeSessionService.submit_gate_decision_sync(
+        sync_db,
+        session.id,
+        node_key="script",
+        action="revise",
+        feedback_text="change the boy's camera angle",
+    )
+
+    fresh_service = _build_service()
+    memory_services = SimpleNamespace(short_term=fresh_service)
+    facade = OrchestrationRuntimeResumeBootstrapFacade(
+        orchestration_state=OrchestrationStateAdapter(memory_services=memory_services),
+    )
+    fresh_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
+
+    receipt = facade.project_script_revision_context(
+        db=sync_db,
+        runtime_session=fresh_session,
+        workflow_state_id=workflow_id,
+        resume_action="revise",
+    )
+    boundary = ContextContractAssembler(memory_services=memory_services).assemble_agent_context(
+        agent_type=AgentType.SCRIPT_WRITER,
+        workflow_state_id=workflow_id,
+        workflow_data={},
+    )
+
+    static_context = boundary["static_context"]
+    diagnostics = boundary["_assembler_diagnostics"]["script_writer_context"]
+    assert receipt["status"] == "resolved"
+    assert static_context["concept_plan"]["overview"] == "candidate concept"
+    assert static_context["scene_overview"]["scenes"][0]["visual_description"] == "candidate scene"
+    assert (
+        read_shared_fact(workflow_id, "project.scene_scripts", {}, service=fresh_service)["1"][
+            "script_text"
+        ]
+        == "candidate script"
+    )
+    assert diagnostics["status"] == "resolved"
+    assert diagnostics["scene_count"] == 1
+
+
+def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db, tmp_path):
+    workflow_id = "wf-script-revise-malformed"
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+        task=task,
+    )
+    payload_path = Path(tmp_path) / "malformed_script_payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "deliverable_type": "script",
+                "workflow_state_id": workflow_id,
+                "concept_plan": {"overview": "candidate concept"},
+                "scene_scripts": {"1": {"script_text": "candidate script"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    RuntimeSessionService.open_human_gate_sync(
+        sync_db,
+        session,
+        node_key="script",
+        gate_name="script_review",
+        gate_type="human_review",
+        attempt_id=attempt.id,
+        artifact_refs=[
+            {
+                "type": "published_deliverable",
+                "deliverable_type": "script",
+                "payload_ref": str(payload_path),
+            }
+        ],
+        allowed_actions=["approve", "revise"],
+        recommended_action="approve",
+        task=task,
+    )
+    memory_services = SimpleNamespace(short_term=_build_service())
+    facade = OrchestrationRuntimeResumeBootstrapFacade(
+        orchestration_state=OrchestrationStateAdapter(memory_services=memory_services),
+    )
+
+    with pytest.raises(
+        OrchestrationRuntimeResumeBootstrapError, match="script_revision_scene_overview_missing"
+    ):
+        facade.project_script_revision_context(
+            db=sync_db,
+            runtime_session=session,
+            workflow_state_id=workflow_id,
+            resume_action="revise",
+        )
+
+
+def test_assemble_agent_context_requires_no_projection_when_runtime_input_carries_script_ref(
+    tmp_path,
+):
     service = _build_service()
     workflow_id = "wf-assemble-runtime-input"
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
@@ -327,7 +506,9 @@ def test_assemble_agent_context_requires_no_projection_when_runtime_input_carrie
     assert diagnostics["source"] == "runtime_input"
 
 
-def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(tmp_path, monkeypatch):
+def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(
+    tmp_path, monkeypatch
+):
     service = _build_service()
     workflow_id = "wf-image-scene-info-ref"
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
@@ -397,7 +578,9 @@ def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(tm
     assert "scene_info_payload" not in static_context
 
 
-def test_assemble_agent_context_fails_closed_when_scene_info_ref_persistence_fails(tmp_path, monkeypatch):
+def test_assemble_agent_context_fails_closed_when_scene_info_ref_persistence_fails(
+    tmp_path, monkeypatch
+):
     service = _build_service()
     workflow_id = "wf-image-scene-info-persist-fail"
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
