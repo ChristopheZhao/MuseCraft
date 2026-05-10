@@ -33,6 +33,7 @@ class OrchestrationStateAdapter:
         "workflow.attempt.",
         "workflow.gate_decision.",
     )
+
     def __init__(self, memory_services: Optional[MemoryServices] = None):
         if memory_services is None:
             raise ValueError("memory_services is required for OrchestrationStateAdapter")
@@ -49,15 +50,67 @@ class OrchestrationStateAdapter:
             normalized_key.startswith(prefix)
             for prefix in self._FORBIDDEN_WORKFLOW_CONTROL_PREFIXES
         ):
-            raise ValueError(
-                f"Forbidden runtime control state projection key: {normalized_key}"
-            )
+            raise ValueError(f"Forbidden runtime control state projection key: {normalized_key}")
         write_shared_fact(
             str(workflow_state_id),
             normalized_key,
             value,
             service=self._memory_services.short_term,
         )
+
+    def project_script_revision_facts(
+        self,
+        *,
+        workflow_state_id: str,
+        payload: Dict[str, Any],
+        source: str,
+    ) -> Dict[str, Any]:
+        """Project validated script-revision facts into MAS working memory."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("script_revision_context_missing: payload_not_dict")
+
+        concept_plan = payload.get("concept_plan")
+        if not isinstance(concept_plan, dict) or not concept_plan:
+            raise ValueError("script_revision_concept_plan_missing")
+
+        scene_overview = payload.get("scene_overview")
+        scenes = scene_overview.get("scenes") if isinstance(scene_overview, dict) else None
+        if not isinstance(scene_overview, dict) or not isinstance(scenes, list) or not scenes:
+            raise ValueError("script_revision_scene_overview_missing")
+
+        scene_scripts = payload.get("scene_scripts")
+        if not isinstance(scene_scripts, dict) or not scene_scripts:
+            raise ValueError("script_revision_scene_scripts_missing")
+
+        self._write_workflow_projection(
+            str(workflow_state_id),
+            "project.concept_plan",
+            dict(concept_plan),
+        )
+        self._write_workflow_projection(
+            str(workflow_state_id),
+            "scene_overview",
+            dict(scene_overview),
+        )
+        self._write_workflow_projection(
+            str(workflow_state_id),
+            "project.scene_scripts",
+            dict(scene_scripts),
+        )
+
+        receipt = {
+            "status": "resolved",
+            "source": str(source or "script_revision_candidate"),
+            "scene_count": len(scenes),
+            "scene_script_count": len(scene_scripts),
+        }
+        self._write_workflow_projection(
+            str(workflow_state_id),
+            "workflow.script_revision_context",
+            dict(receipt),
+        )
+        return receipt
 
     @staticmethod
     def normalize_audio_policy(value: Any) -> str:
@@ -99,9 +152,7 @@ class OrchestrationStateAdapter:
                 normalized["constraints"] = []
             elif isinstance(raw_constraints, list):
                 normalized["constraints"] = [
-                    str(item)
-                    for item in raw_constraints
-                    if str(item or "").strip()
+                    str(item) for item in raw_constraints if str(item or "").strip()
                 ]
             else:
                 raise ValueError("Continuation spec constraints must be a list")
@@ -212,9 +263,7 @@ class OrchestrationStateAdapter:
 
         raw_version = checkpoint.get("version")
         if raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:
-            raise ValueError(
-                f"Unsupported continuation checkpoint version: {raw_version!r}"
-            )
+            raise ValueError(f"Unsupported continuation checkpoint version: {raw_version!r}")
 
         normalized_anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
         if normalized_anchor_type not in {
@@ -314,8 +363,7 @@ class OrchestrationStateAdapter:
             for task_id, spec in (normalized.get("conditional_task_specs") or {}).items()
         }
         candidate_agents = [
-            AgentType(str(raw_agent))
-            for raw_agent in (normalized.get("candidate_agents") or [])
+            AgentType(str(raw_agent)) for raw_agent in (normalized.get("candidate_agents") or [])
         ]
         return task_specs, conditional_task_specs, candidate_agents
 
@@ -355,12 +403,15 @@ class OrchestrationStateAdapter:
         return contract
 
     def append_replan_trace(self, *, workflow_state_id: str, record: Dict[str, Any]) -> None:
-        trace = read_shared_fact(
-            workflow_state_id,
-            "workflow.replan_trace",
-            [],
-            service=self._memory_services.short_term,
-        ) or []
+        trace = (
+            read_shared_fact(
+                workflow_state_id,
+                "workflow.replan_trace",
+                [],
+                service=self._memory_services.short_term,
+            )
+            or []
+        )
         if not isinstance(trace, list):
             trace = []
         trace.append(dict(record or {}))

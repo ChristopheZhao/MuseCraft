@@ -17,6 +17,10 @@ from sqlalchemy.orm import Session
 
 from ..models import AgentType, Task, WorkflowSessionStatus
 from .orchestration_state_adapter import OrchestrationStateAdapter
+from .published_deliverable_service import (
+    PublishedDeliverableService,
+    load_published_payload,
+)
 from .runtime_session_service import RuntimeSessionService
 
 
@@ -86,6 +90,88 @@ class OrchestrationRuntimeResumeBootstrapFacade:
                 return agent_type
         return None
 
+    @staticmethod
+    def _select_script_candidate_ref(gate: Any) -> Optional[Dict[str, Any]]:
+        artifact_refs = getattr(gate, "artifact_refs", None)
+        if not isinstance(artifact_refs, list):
+            return None
+        for ref in artifact_refs:
+            if not isinstance(ref, dict):
+                continue
+            if str(ref.get("deliverable_type") or "").strip().lower() != "script":
+                continue
+            if not str(ref.get("payload_ref") or "").strip():
+                continue
+            return dict(ref)
+        return None
+
+    def project_script_revision_context(
+        self,
+        *,
+        db: Session,
+        runtime_session: Any,
+        workflow_state_id: str,
+        resume_action: str,
+    ) -> Dict[str, Any]:
+        """Restore agent-facing script facts for a control-plane revise resume."""
+
+        normalized_action = str(resume_action or "").strip().lower()
+        if normalized_action != "revise":
+            return {
+                "status": "skipped",
+                "reason_code": "resume_action_not_revise",
+                "resume_action": normalized_action,
+            }
+        if runtime_session is None:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                "script_revision_context_missing: runtime_session_missing"
+            )
+
+        gate = RuntimeSessionService.get_latest_gate_for_node_sync(
+            db,
+            runtime_session.id,
+            "script",
+        )
+        if gate is None:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                "script_revision_context_missing: script_gate_missing"
+            )
+
+        ref = self._select_script_candidate_ref(gate)
+        if ref is None:
+            ref = PublishedDeliverableService.get_node_deliverable_ref_sync(
+                db,
+                session=runtime_session,
+                node_key="script",
+                attempt_id=getattr(gate, "attempt_id", None),
+            )
+        if not isinstance(ref, dict):
+            raise OrchestrationRuntimeResumeBootstrapError(
+                "script_revision_context_missing: candidate_deliverable_ref_missing"
+            )
+
+        payload = load_published_payload(ref.get("payload_ref"))
+        if not isinstance(payload, dict):
+            raise OrchestrationRuntimeResumeBootstrapError(
+                "script_revision_context_missing: candidate_payload_unavailable"
+            )
+
+        try:
+            receipt = self._orchestration_state.project_script_revision_facts(
+                workflow_state_id=str(workflow_state_id),
+                payload=payload,
+                source="script_gate_candidate_deliverable",
+            )
+        except ValueError as exc:
+            raise OrchestrationRuntimeResumeBootstrapError(str(exc)) from exc
+
+        return {
+            **dict(receipt),
+            "gate_id": getattr(gate, "id", None),
+            "attempt_id": getattr(gate, "attempt_id", None),
+            "deliverable_id": ref.get("deliverable_id"),
+        }
+
     def resolve_runtime_resume_context(
         self,
         *,
@@ -121,12 +207,18 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             )
 
         script_resume_action = ""
-        if latest_decision is not None and runtime_session.status == WorkflowSessionStatus.RESUMING.value:
+        if (
+            latest_decision is not None
+            and runtime_session.status == WorkflowSessionStatus.RESUMING.value
+        ):
             script_resume_action = str(latest_decision.action or "").strip().lower()
 
         runtime_resume_checkpoint: Optional[Dict[str, Any]] = None
         resume_anchor_agent: Optional[AgentType] = None
-        if runtime_session.status == WorkflowSessionStatus.RESUMING.value and not script_resume_action:
+        if (
+            runtime_session.status == WorkflowSessionStatus.RESUMING.value
+            and not script_resume_action
+        ):
             try:
                 runtime_resume_checkpoint = RuntimeSessionService.load_active_continuation_sync(
                     db,
@@ -169,7 +261,11 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             runtime_session,
             node_key="script",
         )
-        task_specs, conditional_task_specs, candidate_agents = self._orchestration_state.checkpoint_to_task_specs(
+        (
+            task_specs,
+            conditional_task_specs,
+            candidate_agents,
+        ) = self._orchestration_state.checkpoint_to_task_specs(
             checkpoint=checkpoint,
             require_decision_id=True,
         )
@@ -227,15 +323,22 @@ class OrchestrationRuntimeResumeBootstrapFacade:
 
         if trigger_reason_override is not None:
             effective_trigger_reason = str(trigger_reason_override or "").strip().lower() or "retry"
-        elif current_agent_type == AgentType.SCRIPT_WRITER and script_trigger_reason in {"revise", "replan"}:
+        elif current_agent_type == AgentType.SCRIPT_WRITER and script_trigger_reason in {
+            "revise",
+            "replan",
+        }:
             effective_trigger_reason = script_trigger_reason
         elif resume_anchor_agent == current_agent_type:
             effective_trigger_reason = "resume"
         else:
             effective_trigger_reason = "initial"
 
-        requested_by = script_requested_by if current_agent_type == AgentType.SCRIPT_WRITER else "system"
-        progress_step = "Generating script" if current_agent_type == AgentType.SCRIPT_WRITER else None
+        requested_by = (
+            script_requested_by if current_agent_type == AgentType.SCRIPT_WRITER else "system"
+        )
+        progress_step = (
+            "Generating script" if current_agent_type == AgentType.SCRIPT_WRITER else None
+        )
         progress_percentage = 15 if current_agent_type == AgentType.SCRIPT_WRITER else None
         attempt = RuntimeSessionService.start_node_attempt_sync(
             db,

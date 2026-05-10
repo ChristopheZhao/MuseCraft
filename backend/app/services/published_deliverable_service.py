@@ -92,6 +92,8 @@ def build_deliverable_ref(deliverable: WorkflowPublishedDeliverable) -> Dict[str
         "is_candidate": bool(deliverable.is_candidate),
         "is_approved": bool(deliverable.is_approved),
     }
+
+
 def get_published_deliverables(payload: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     if not isinstance(payload, dict):
         return {}
@@ -202,6 +204,38 @@ class PublishedDeliverableService:
         db.flush()
         db.refresh(deliverable)
         return deliverable
+
+    @staticmethod
+    def get_node_deliverable_ref_sync(
+        db: Session,
+        *,
+        session: WorkflowSession,
+        node_key: str,
+        attempt_id: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        if attempt_id is None:
+            return None
+        node = (
+            db.query(WorkflowNodeState)
+            .filter(
+                WorkflowNodeState.session_id == session.id,
+                WorkflowNodeState.node_key == node_key,
+            )
+            .first()
+        )
+        if node is None:
+            return None
+        deliverable = (
+            db.query(WorkflowPublishedDeliverable)
+            .filter(
+                WorkflowPublishedDeliverable.session_id == session.id,
+                WorkflowPublishedDeliverable.node_id == node.id,
+                WorkflowPublishedDeliverable.attempt_id == attempt_id,
+            )
+            .order_by(WorkflowPublishedDeliverable.id.desc())
+            .first()
+        )
+        return build_deliverable_ref(deliverable) if deliverable is not None else None
 
     @staticmethod
     def mark_node_deliverable_approved_sync(
