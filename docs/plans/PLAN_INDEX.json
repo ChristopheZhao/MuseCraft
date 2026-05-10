@@ -2912,6 +2912,25 @@
           "text": "Minimal frontend/backend E2E validation passed for script_review=revise: task f82124df-1677-4a3e-a38f-4d50bf73df1c reached gate 43, browser submitted revise decision 33, runtime resumed through attempt 162, and new gate 44 reopened awaiting human with script revision 1."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260510-065",
+      "title": "角色一致性与创作质量优化",
+      "kind": "feature",
+      "status": "draft",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260510-065.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-05-10T10:23:02Z",
+      "updated_at": "2026-05-10T10:24:52Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-05-10T10:24:52Z",
+          "text": "Created as a draft optimization plan after task 1080 video review exposed character identity drift and an over-optimistic quality score; owner assigned to MAS content contract/context/quality boundaries."
+        }
+      ]
     }
   ]
 }
