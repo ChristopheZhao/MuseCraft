@@ -2995,6 +2995,25 @@
           "text": "P1-D clean provider validation completed after account recovery: fresh task 1083 / workflow d5c72a2d-b334-4995-ac6e-fe49eedb8970 generated 6/6 videos, composed storage/outputs/videos/mothers_day_final.mp4 (60.327s, 960x960, H.264/AAC), quality score 85 conditional, same-carrier character contract verified across image/video scene_info_ref, and role continuity correctly remains not_evaluated/unverified until explicit observation evidence is written."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260705-066",
+      "title": "MAS control-plane and native-agent boundary correction",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260705-066.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-07-05T02:47:48Z",
+      "updated_at": "2026-07-05T02:47:48Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-07-05T02:47:48Z",
+          "text": "Drafted after dirty-worktree checkpoint commits 849b7ce, 566379a, and 92d9a6c; scope is MAS control-plane/native-agent boundary correction, not 063 reopening or 065 continuation."
+        }
+      ]
     }
   ]
 }
