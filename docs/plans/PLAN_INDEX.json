@@ -3000,13 +3000,13 @@
       "id": "PLAN-20260705-066",
       "title": "MAS control-plane and native-agent boundary correction",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260705-066.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-07-05T02:47:48Z",
-      "updated_at": "2026-07-05T03:28:45Z",
+      "updated_at": "2026-07-05T05:12:02Z",
       "archived_at": null,
       "notes": [
         {
@@ -3016,6 +3016,34 @@
         {
           "at": "2026-07-05T03:28:45Z",
           "text": "User confirmed PLAN-20260705-066 execution contract; begin MAS control-plane/native-agent boundary correction."
+        },
+        {
+          "at": "2026-07-05T03:57:58Z",
+          "text": "Initial implementation pass covered P0/P1 boundary corrections and passed focused validation: 23 pytest cases, py_compile, and git diff --check; awaiting follow-up review before plan completion."
+        },
+        {
+          "at": "2026-07-05T04:00:39Z",
+          "text": "Additional checkpoint endpoint validation passed: 3 pytest cases for checkpoint/resume_task_runtime."
+        },
+        {
+          "at": "2026-07-05T05:03:33Z",
+          "text": "Follow-up MAS review reopened the initial fix as partial: continuation checkpoint specs rejected known scope/fallback_used fields, and non-script runtime agents still lacked explicit orchestration_report after BaseAgent stopped synthesizing reports."
+        },
+        {
+          "at": "2026-07-05T05:03:33Z",
+          "text": "Repaired reopened gaps: continuation spec normalization preserves and validates scope/fallback_used; ConceptPlanner, ImageGenerator, VoiceSynthesizer, and QualityChecker emit explicit MAS boundary reports; runtime tests now use explicit reports."
+        },
+        {
+          "at": "2026-07-05T05:03:33Z",
+          "text": "Expanded validation passed: runtime mainline suite passed 19 tests, targeted audio gate runtime decision suite passed 7 tests, combined focused MAS boundary suite passed 114 tests with 16 deselected and 2 existing warnings, plus py_compile and git diff --check."
+        },
+        {
+          "at": "2026-07-05T05:11:49Z",
+          "text": "Implementation and expanded focused validation passed; waiting on user acceptance after MAS boundary review"
+        },
+        {
+          "at": "2026-07-05T05:12:02Z",
+          "text": "User accepted MAS boundary review; PLAN-066 closed with focused validation evidence (114 passed, 16 deselected, 2 existing warnings)"
         }
       ]
     }
