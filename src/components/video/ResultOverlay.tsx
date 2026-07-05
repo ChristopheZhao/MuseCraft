@@ -4,9 +4,10 @@ import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import VideoPlayer from './VideoPlayer';
 import { X, CheckCircle } from 'lucide-react';
+import RoleContinuityDiagnosticsPanel from '@/components/quality/RoleContinuityDiagnosticsPanel';
 
 export default function ResultOverlay() {
-  const { ui, finalVideoUrl, setModal } = useAppStore();
+  const { ui, finalVideoUrl, quickRuntime, setModal } = useAppStore();
   const modal = ui.modal;
   const open = modal?.type === 'result-ready';
 
@@ -39,6 +40,7 @@ export default function ResultOverlay() {
           <div className="rounded-lg border border-gray-200 overflow-hidden">
             <VideoPlayer src={finalVideoUrl} className="aspect-video" />
           </div>
+          <RoleContinuityDiagnosticsPanel compact summaryOutput={quickRuntime?.summary_output} />
           <p className="text-sm text-gray-600">
             视频已就绪。点击右上角关闭进入“结果评审”进行导出与分享。
           </p>
@@ -53,4 +55,3 @@ export default function ResultOverlay() {
     </div>
   );
 }
-

@@ -66,7 +66,7 @@ async def test_video_prompt_builder_uses_action_phases_as_prompt_body(tmp_path):
     assert payload["metadata"]["prompt_mode"] == "image_to_video"
     assert payload["metadata"]["action_source"] == "action_phases"
     assert payload["metadata"]["has_scene_thesis"] is True
-    assert payload["metadata"]["scene_strategy"] == "climax_peak"
+    assert payload["metadata"]["scene_strategy"] == "action_keyframe"
     assert "diagnostics" not in payload["metadata"]
 
 

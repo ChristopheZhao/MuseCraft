@@ -11,6 +11,10 @@ from ..events.models import EventKind
 from ..events.publisher import publish_event
 from ..models import Task
 from .memory_provider import MemoryServices
+from .role_continuity_read_model import (
+    build_role_continuity_read_model_from_quality,
+    build_role_continuity_read_model_from_results,
+)
 
 
 class WorkflowCompletionAdapter:
@@ -178,6 +182,28 @@ class WorkflowCompletionAdapter:
             return ""
         return str(final_video.get("url") or final_video.get("path") or "").strip()
 
+    def build_runtime_summary_output(
+        self,
+        *,
+        final_video_url: str = "",
+        final_video_path: str = "",
+        results: Optional[Dict[str, Any]] = None,
+        quality_score: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Build the runtime-facing terminal summary projection."""
+        quality_result = results.get("quality_checker") if isinstance(results, dict) else None
+        summary: Dict[str, Any] = {
+            "status": "completed",
+            "final_video_url": str(final_video_url or "").strip(),
+            "final_video_path": str(final_video_path or "").strip(),
+            "role_continuity_diagnostics": build_role_continuity_read_model_from_quality(
+                quality_result if isinstance(quality_result, dict) else None
+            ),
+        }
+        if quality_score is not None:
+            summary["quality_score"] = quality_score
+        return summary
+
     async def publish_completed(
         self,
         *,
@@ -206,6 +232,9 @@ class WorkflowCompletionAdapter:
             "facts_summary": facts_summary,
             "scenes": persistence_payload.get("scenes") or [],
             "resources": persistence_payload.get("resources") or [],
+            "role_continuity_diagnostics": build_role_continuity_read_model_from_results(
+                results
+            ),
         }
         if isinstance(results, dict) and results:
             payload["results"] = results
@@ -225,6 +254,7 @@ class WorkflowCompletionAdapter:
             "final_video_path": final_video_path,
             "scenes": payload["scenes"],
             "resources": payload["resources"],
+            "role_continuity_diagnostics": payload["role_continuity_diagnostics"],
         }
 
     async def publish_failed(

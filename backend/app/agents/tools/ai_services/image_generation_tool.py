@@ -103,6 +103,9 @@ class ImageGenerationTool(AsyncTool):
                     "description": "可选：持久化时使用的目标路径/键名（例如 projects/<id>/characters/<cid>/avatar.jpg）"
                 }
             }
+            reference_schema = self._build_reference_image_schema_properties()
+            if reference_schema:
+                base_schema["properties"].update(reference_schema)
             base_schema["required"] = ["prompt"]
             base_schema["description"] = "根据用户提供的提示词直接生成图像，可选指定尺寸以及风格。"
 
@@ -154,6 +157,72 @@ class ImageGenerationTool(AsyncTool):
         except Exception:
             pass
         return prop
+
+    def _get_reference_image_capability(self):
+        try:
+            service = self._vlm_service
+            if service is not None and hasattr(service, "get_capabilities"):
+                caps = service.get_capabilities()
+            else:
+                caps = get_vlm_capabilities()
+        except Exception:
+            caps = None
+        capability = getattr(caps, "reference_image", None) if caps else None
+        if capability is not None and bool(getattr(capability, "supported", False)):
+            return capability
+        return None
+
+    def _build_reference_image_schema_properties(self) -> Dict[str, Any]:
+        capability = self._get_reference_image_capability()
+        if capability is None:
+            return {}
+        notes: List[str] = []
+        if getattr(capability, "description_suffix", None):
+            notes.append(str(capability.description_suffix))
+        if getattr(capability, "note", None):
+            notes.append(str(capability.note))
+        description = "可选：参考图像 URL，仅当当前 provider schema 声明支持时可用"
+        if notes:
+            description = f"{description} {' '.join(notes)}"
+        return {
+            "reference_image_url": {
+                "type": "string",
+                "description": description,
+            }
+        }
+
+    def _validate_reference_image_request(self, reference_image_url: str) -> Optional[Dict[str, Any]]:
+        reference_image_url = str(reference_image_url or "").strip()
+        if not reference_image_url:
+            return None
+        capability = self._get_reference_image_capability()
+        if capability is None:
+            provider_name = "unknown"
+            try:
+                service = self._get_active_vlm_service()
+                if hasattr(service, "get_provider_name"):
+                    provider_name = service.get_provider_name() or provider_name
+            except Exception:
+                pass
+            raise ToolError(
+                (
+                    "Image reference input is not supported by the active provider "
+                    f"capability schema: provider={provider_name}"
+                ),
+                tool_name=self.metadata.name,
+                error_code="image_reference_capability_missing",
+                details={
+                    "provider": provider_name,
+                    "reference_image_requested": True,
+                    "capability": "unsupported_or_missing",
+                },
+            )
+        return {
+            "reference_image_url": reference_image_url,
+            "capability": capability.to_metadata()
+            if hasattr(capability, "to_metadata")
+            else {"supported": True},
+        }
 
     def _get_active_vlm_service(self):
         if not self._vlm_service:
@@ -345,6 +414,8 @@ class ImageGenerationTool(AsyncTool):
         persist = bool(params.get("persist", False))
         destination_key = (params.get("destination_key") or "").strip()
         scene_number = params.get("scene_number")
+        reference_image_url = str(params.get("reference_image_url") or "").strip()
+        reference_request = self._validate_reference_image_request(reference_image_url)
 
         async def _maybe_persist(image_url: str) -> str:
             if not persist:
@@ -462,6 +533,8 @@ class ImageGenerationTool(AsyncTool):
                 gen_args["style"] = style
             if params.get("quality"):
                 gen_args["quality"] = params["quality"]
+            if reference_request:
+                gen_args["reference_image_url"] = reference_request["reference_image_url"]
             # 调试期保留组合提示词日志
             try:
                 prompt_bytes_len = len(prompt.encode("utf-8")) if isinstance(prompt, str) else 0
@@ -487,6 +560,10 @@ class ImageGenerationTool(AsyncTool):
                     "size": size,
                     "generation_metadata": res,
                     "prompt_safety": advisor_meta,
+                    "reference_image": {
+                        "applied": bool(reference_request),
+                        "capability": reference_request.get("capability") if reference_request else None,
+                    },
                 }
             except Exception as exc:
                 terr = self._normalize_generation_exception(
@@ -585,6 +662,10 @@ class ImageGenerationTool(AsyncTool):
                             "size": size,
                             "generation_metadata": res2,
                             "prompt_safety": advisor_meta,
+                            "reference_image": {
+                                "applied": bool(reference_request),
+                                "capability": reference_request.get("capability") if reference_request else None,
+                            },
                             "prompt_safety_rewrite": {
                                 **rewrite_meta,
                                 "retry_outcome": "success",

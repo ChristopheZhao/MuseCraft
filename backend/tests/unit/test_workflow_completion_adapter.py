@@ -89,9 +89,69 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
     assert payload["facts_summary"]["completed_scenes"] == 1
     assert payload["results"] == {"ok": True}
     assert payload["quality_score"] == 0.92
+    assert payload["role_continuity_diagnostics"]["status"] == "not_available"
     assert payload["final_video_path"] == "/tmp/final.mp4"
     assert result["final_video_url"] == "/files/final.mp4"
     assert result["final_video_path"] == "/tmp/final.mp4"
+    assert result["role_continuity_diagnostics"]["fallback_reason"] == "quality_checker_result_missing"
+
+
+def test_build_runtime_summary_output_projects_role_continuity_read_model():
+    adapter = WorkflowCompletionAdapter(memory_services=SimpleNamespace(short_term=object()))
+
+    summary = adapter.build_runtime_summary_output(
+        final_video_url="/files/final.mp4",
+        final_video_path="/tmp/final.mp4",
+        quality_score=89,
+        results={
+            "quality_checker": {
+                "quality_score": 89,
+                "requires_human_review": True,
+                "content_quality": {
+                    "role_continuity_score": None,
+                    "contract_readiness": {
+                        "status": "ready",
+                        "score": 100,
+                        "same_carrier_verified": True,
+                    },
+                    "visual_evidence_verified": False,
+                    "role_continuity_diagnostics": {
+                        "status": "not_evaluated",
+                        "score_cap_when_unverified": 89,
+                        "fallback_reason": "role_continuity_visual_evidence_missing",
+                        "display_summary": {
+                            "characters": [
+                                {
+                                    "canonical_id": "child",
+                                    "display_name": "Child",
+                                    "stable_anchor_count": 3,
+                                    "allowed_variant_count": 3,
+                                    "reference_asset_count": 0,
+                                }
+                            ],
+                            "character_count": 1,
+                            "scene_lock_count": 6,
+                            "locked_scene_numbers": [1, 2, 3, 4, 5, 6],
+                            "missing_lock_scenes": [],
+                            "empty_cast_scenes": [],
+                        },
+                    },
+                },
+                "quality_assessment": {
+                    "quality_score_cap_applied": 89,
+                    "fallback_reason": "role_continuity_visual_evidence_missing",
+                    "approval_status": "conditional",
+                    "requires_human_review": True,
+                },
+            }
+        },
+    )
+
+    diagnostics = summary["role_continuity_diagnostics"]
+    assert summary["quality_score"] == 89
+    assert diagnostics["review_status"] == "unverified"
+    assert diagnostics["score_cap"] == 89
+    assert diagnostics["display_summary"]["characters"][0]["display_name"] == "Child"
 
 
 def test_publish_failed_emits_bounded_terminal_summary(monkeypatch):

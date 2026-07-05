@@ -3,7 +3,6 @@
  * 
  * Setup for Puppeteer-based E2E tests
  */
-import 'expect-puppeteer'
 
 // Global test configuration
 jest.setTimeout(60000) // 60 seconds for E2E tests

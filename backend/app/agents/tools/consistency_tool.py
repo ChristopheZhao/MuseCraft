@@ -124,6 +124,16 @@ class ConsistencyTool(BaseTool):
                                                 "descriptions": {"max_items": 8},
                                             },
                                         },
+                                        "identity_bible": {
+                                            "fields": {
+                                                "contract_version": {"max_text": 40},
+                                                "source": {"max_text": 120},
+                                                "characters": {"max_items": 8},
+                                            },
+                                        },
+                                        "scene_locks": {"max_items": 8},
+                                        "allowed_variants": {"max_items": 8},
+                                        "diagnostics": {"max_items": 12},
                                         "characters": {
                                             "max_items": 8,
                                             "items": {
@@ -200,9 +210,9 @@ class ConsistencyTool(BaseTool):
             return {
                 "type": "object",
                 "properties": {
-                    "scene_number": {"type": "integer"},
-                    "scene_info_ref": {"type": "string"},
-                    "use_cache": {"type": "boolean"},
+                    "scene_number": {"type": "integer", "description": "目标场景编号"},
+                    "scene_info_ref": {"type": "string", "description": "场景信息引用"},
+                    "use_cache": {"type": "boolean", "description": "是否使用缓存"},
                 },
                 "required": ["scene_number", "scene_info_ref"],
             }
@@ -210,9 +220,9 @@ class ConsistencyTool(BaseTool):
             return {
                 "type": "object",
                 "properties": {
-                    "scene_number": {"type": "integer"},
-                    "reference_type": {"type": "string"},
-                    "reference_value": {"type": "string"},
+                    "scene_number": {"type": "integer", "description": "目标场景编号"},
+                    "reference_type": {"type": "string", "description": "引用类型"},
+                    "reference_value": {"type": "string", "description": "引用内容"},
                 },
                 "required": ["scene_number", "reference_type", "reference_value"],
             }
@@ -312,6 +322,13 @@ class ConsistencyTool(BaseTool):
 
         self._asset_cache[cache_key] = assets
         diagnostics["cached_categories"] = list(assets.keys())
+        character_assets = assets.get("characters") if isinstance(assets.get("characters"), dict) else {}
+        if character_assets.get("source"):
+            diagnostics["character_identity_contract_source"] = character_assets.get("source")
+        if character_assets.get("structured_identity_missing") is not None:
+            diagnostics["structured_identity_missing"] = bool(
+                character_assets.get("structured_identity_missing")
+            )
         return assets, diagnostics
 
     def _load_scene_info(self, ref: str) -> Dict[str, Any]:
@@ -398,6 +415,10 @@ class ConsistencyTool(BaseTool):
         return style_assets
 
     def _extract_character_assets(self, scene_info: Dict[str, Any], scene_entry: Dict[str, Any]) -> Dict[str, Any]:
+        structured_assets = self._extract_structured_character_assets(scene_info, scene_entry)
+        if structured_assets is not None:
+            return structured_assets
+
         concept_plan = scene_info.get("concept_plan") or {}
         characters: List[Dict[str, Any]] = []
         if isinstance(concept_plan, dict):
@@ -422,6 +443,15 @@ class ConsistencyTool(BaseTool):
             "present": present,
             "descriptions": descriptions,
             "guidelines": guidelines,
+            "source": "legacy_roles" if characters else "legacy_text",
+            "structured_identity_missing": True,
+            "diagnostics": [
+                {
+                    "code": "structured_identity_missing",
+                    "source": "character_identity_bible",
+                    "fallback_reason": "using_legacy_roles_or_scene_text",
+                }
+            ],
             "global_lock": {
                 "guidelines": str(guidelines or "").strip(),
                 "stable_traits": list(dict.fromkeys(stable_traits))[:12],
@@ -429,6 +459,134 @@ class ConsistencyTool(BaseTool):
             "scene_cast": {
                 "present": list(present) if isinstance(present, list) else [],
                 "descriptions": list(descriptions) if isinstance(descriptions, list) else [],
+            },
+        }
+
+    def _extract_structured_character_assets(
+        self,
+        scene_info: Dict[str, Any],
+        scene_entry: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        bible = scene_info.get("character_identity_bible")
+        if not isinstance(bible, dict):
+            return None
+        characters = bible.get("characters")
+        if not isinstance(characters, list) or not characters:
+            return None
+
+        scene_number = self._coerce_int(scene_entry.get("scene_number") if isinstance(scene_entry, dict) else None)
+        scene_lock = None
+        locks = scene_info.get("scene_character_locks")
+        if isinstance(locks, list):
+            for lock in locks:
+                if not isinstance(lock, dict):
+                    continue
+                if scene_number is not None and self._coerce_int(lock.get("scene_number")) == scene_number:
+                    scene_lock = lock
+                    break
+
+        by_id = {
+            str(item.get("canonical_id") or "").strip(): item
+            for item in characters
+            if isinstance(item, dict) and str(item.get("canonical_id") or "").strip()
+        }
+        lock_cast = scene_lock.get("cast") if isinstance(scene_lock, dict) else []
+        if not isinstance(lock_cast, list):
+            lock_cast = []
+
+        present: List[str] = []
+        descriptions: List[str] = []
+        stable_traits: List[str] = []
+        allowed_variants: List[Dict[str, Any]] = []
+        scene_locks: List[Dict[str, Any]] = []
+
+        if lock_cast:
+            for cast_item in lock_cast:
+                if not isinstance(cast_item, dict):
+                    continue
+                canonical_id = str(cast_item.get("canonical_id") or "").strip()
+                character = by_id.get(canonical_id, {})
+                display_name = str(
+                    cast_item.get("display_name")
+                    or character.get("display_name")
+                    or canonical_id
+                ).strip()
+                if display_name:
+                    present.append(display_name)
+                stable_traits.extend(
+                    str(item).strip()
+                    for item in (cast_item.get("required_anchors") or [])
+                    if str(item).strip()
+                )
+                descriptions.extend(
+                    str(item).strip()
+                    for item in (cast_item.get("scene_specific_state") or [])
+                    if str(item).strip()
+                )
+                scene_locks.append(cast_item)
+        else:
+            for character in characters:
+                if not isinstance(character, dict):
+                    continue
+                display_name = str(character.get("display_name") or character.get("canonical_id") or "").strip()
+                if display_name:
+                    present.append(display_name)
+                stable = character.get("stable_anchors") if isinstance(character.get("stable_anchors"), dict) else {}
+                for key in ("visual_identity", "signature_outfit_or_props", "identity_tags"):
+                    stable_traits.extend(
+                        str(item).strip()
+                        for item in (stable.get(key) or [])
+                        if str(item).strip()
+                    )
+
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            canonical_id = str(character.get("canonical_id") or "").strip()
+            variants = character.get("allowed_variants")
+            if canonical_id and isinstance(variants, list):
+                allowed_variants.append({"canonical_id": canonical_id, "variants": variants})
+
+        diagnostics = []
+        diagnostics.extend(bible.get("diagnostics") if isinstance(bible.get("diagnostics"), list) else [])
+        if isinstance(scene_lock, dict):
+            diagnostics.extend(scene_lock.get("diagnostics") if isinstance(scene_lock.get("diagnostics"), list) else [])
+        if not scene_lock:
+            diagnostics.append(
+                {
+                    "code": "scene_character_lock_missing",
+                    "scene_number": scene_number,
+                    "fallback_reason": "using_identity_bible_without_scene_lock",
+                }
+            )
+
+        concept_plan = scene_info.get("concept_plan") or {}
+        guidelines = ""
+        if isinstance(concept_plan, dict):
+            guidelines = (concept_plan.get("consistency_guidelines") or {}).get("character_consistency", "")
+
+        return {
+            "characters": [item for item in characters if isinstance(item, dict)],
+            "identity_bible": {
+                "contract_version": bible.get("contract_version"),
+                "source": bible.get("source"),
+                "characters": [item for item in characters if isinstance(item, dict)],
+            },
+            "scene_locks": scene_locks,
+            "allowed_variants": allowed_variants,
+            "present": list(dict.fromkeys(present)),
+            "descriptions": list(dict.fromkeys(descriptions)),
+            "guidelines": guidelines,
+            "source": "character_identity_contract",
+            "structured_identity_missing": False,
+            "diagnostics": diagnostics,
+            "global_lock": {
+                "guidelines": str(guidelines or "").strip(),
+                "stable_traits": list(dict.fromkeys(stable_traits))[:12],
+            },
+            "scene_cast": {
+                "present": list(dict.fromkeys(present)),
+                "descriptions": list(dict.fromkeys(descriptions))[:8],
             },
         }
 

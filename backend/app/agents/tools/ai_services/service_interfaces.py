@@ -96,6 +96,30 @@ class VideoCapabilities:
 class ImageGenerationCapabilities:
     prompt: Optional[PromptCapability] = None
     size: Optional[EnumCapability] = None
+    reference_image: Optional["ReferenceImageCapability"] = None
+
+
+@dataclass
+class ReferenceImageCapability:
+    """Reference-image input capability for image generation providers."""
+
+    supported: bool = False
+    max_images: int = 0
+    input_modes: List[str] = field(default_factory=list)
+    description_suffix: Optional[str] = None
+    note: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_metadata(self) -> Dict[str, Any]:
+        metadata = dict(self.extra or {})
+        metadata.setdefault("supported", bool(self.supported))
+        metadata.setdefault("max_images", int(self.max_images or 0))
+        metadata.setdefault("input_modes", list(self.input_modes or []))
+        if self.description_suffix:
+            metadata.setdefault("description_suffix", self.description_suffix)
+        if self.note:
+            metadata.setdefault("note", self.note)
+        return metadata
 
 
 class ServiceProvider(Enum):

@@ -11,10 +11,11 @@ import { useTaskPolling } from '@/hooks/useTaskPolling';
 import ResultOverlay from '@/components/video/ResultOverlay';
 import ProjectModeView from '@/components/project/ProjectModeView';
 import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
+import RoleContinuityDiagnosticsPanel from '@/components/quality/RoleContinuityDiagnosticsPanel';
 import { cn } from '@/lib/utils';
 
 const HomePage: React.FC = () => {
-  const { ui, currentRequest, finalVideoUrl, mode, setMode, setCurrentStep } = useAppStore();
+  const { ui, currentRequest, finalVideoUrl, mode, quickRuntime, setMode, setCurrentStep } = useAppStore();
   const { currentStep } = ui;
   const { t } = useI18n();
   const isProcessingWorkspace = mode === 'quick' && currentStep === 'processing';
@@ -51,7 +52,8 @@ const HomePage: React.FC = () => {
             </div>
 
             {/* Right Column - Export Interface */}
-            <div className="lg:w-1/3">
+            <div className="lg:w-1/3 space-y-4">
+              <RoleContinuityDiagnosticsPanel summaryOutput={quickRuntime?.summary_output} />
               <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6 h-full">
                 <ExportInterface 
                   videoUrl={finalVideoUrl}
@@ -74,6 +76,7 @@ const HomePage: React.FC = () => {
             </div>
 
             {/* Export Interface */}
+            <RoleContinuityDiagnosticsPanel summaryOutput={quickRuntime?.summary_output} />
             <div className="bg-white/90 backdrop-blur rounded-xl shadow-card border border-gray-200 p-6">
               <ExportInterface videoUrl={finalVideoUrl} />
             </div>

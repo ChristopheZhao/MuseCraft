@@ -1,12 +1,12 @@
 name: agents/common_tools
-description: Common tool guidance blocks
+description: Common capability context blocks
 version: 1.0.0
 templates:
   tools_overview:
-    description: Overview of available tools and when to use them
+    description: Overview of available capability context
     required_variables: [agent, capabilities]
     template: |
-      工具能力概览（{{ agent }}）：
+      可用能力摘要（{{ agent }}）：
       {{ capabilities }}
 
   tools_edge_cases:
@@ -16,4 +16,3 @@ templates:
       常见注意事项：
       {% for it in items %}- {{ it }}
       {% endfor %}
-

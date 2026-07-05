@@ -12,14 +12,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
+from ...models import AgentType
+from ...services.character_identity_contract import normalize_character_identity_contract
+from ...services.role_continuity_observation_contract import (
+    normalize_role_continuity_observation,
+)
 from ...services.scene_contract import annotate_scene_info_payload
+from ...services.scene_info_reference_service import (
+    SceneInfoReferenceResolutionError,
+    build_scene_info_ref,
+    load_agent_scene_info_payload,
+)
 from ...services.video_metadata_service import (
     merge_video_metadata,
     normalize_video_metadata,
     probe_local_video_metadata_sync,
 )
 from ...services.video_composer_execution_contract import get_video_composer_compose_mode
-from ..utils.media_runtime import build_local_public_url, resolve_local_public_path
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
 
@@ -297,6 +306,7 @@ def build_video_composer_context(
 
     scene_videos: List[Dict[str, Any]] = []
     scene_voiceovers: List[Dict[str, Any]] = []
+    expected_scene_numbers: List[int] = []
     try:
         overview = wm.get("scene_overview", {}) if wm else {}
         duration_by_scene: Dict[int, float] = {}
@@ -311,6 +321,7 @@ def build_video_composer_context(
                 duration_by_scene[sn] = float(s.get("duration") or 0.0)
             except Exception:
                 duration_by_scene[sn] = 0.0
+        expected_scene_numbers = sorted(duration_by_scene)
 
         video_bucket = wm.get("scene_outputs.video", {}) if wm else {}
         if isinstance(video_bucket, dict) and video_bucket:
@@ -415,6 +426,21 @@ def build_video_composer_context(
             f"compose_mode={compose_mode}: workflow_id={workflow_id}; "
             f"scene_numbers={sorted(set(missing_local_scene_numbers))}"
         )
+    if expected_scene_numbers:
+        available_scene_numbers = {
+            int(item.get("scene_number") or 0)
+            for item in scene_videos
+            if isinstance(item, dict)
+        }
+        missing_scene_numbers = sorted(set(expected_scene_numbers) - available_scene_numbers)
+        if missing_scene_numbers:
+            raise ValueError(
+                "video_composer static context has incomplete scene_videos for "
+                f"compose_mode={compose_mode}: workflow_id={workflow_id}; "
+                f"expected_scene_numbers={expected_scene_numbers}; "
+                f"available_scene_numbers={sorted(available_scene_numbers)}; "
+                f"missing_scene_numbers={missing_scene_numbers}"
+            )
     if not scene_media_ref:
         raise ValueError(
             "video_composer static context missing scene_media_ref for "
@@ -456,6 +482,100 @@ def _has_video_artifact(payload: Dict[str, Any]) -> bool:
     return bool(str(payload.get("path") or "").strip() or str(payload.get("url") or "").strip())
 
 
+def _payload_has_character_identity_contract(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return isinstance(payload.get("character_identity_bible"), dict) and isinstance(
+        payload.get("scene_character_locks"),
+        list,
+    )
+
+
+def _resolve_quality_checker_identity_contract(
+    *,
+    workflow_id: str,
+    concept_plan: Dict[str, Any],
+    scene_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Resolve the identity contract from the same persisted carrier used by media agents."""
+
+    attempted_refs: List[Dict[str, Any]] = []
+    for agent_type in (AgentType.VIDEO_GENERATOR, AgentType.IMAGE_GENERATOR):
+        ref = ""
+        try:
+            ref = build_scene_info_ref(workflow_id=workflow_id, agent_type=agent_type)
+            payload = load_agent_scene_info_payload(
+                workflow_id=workflow_id,
+                agent_type=agent_type,
+            )
+        except SceneInfoReferenceResolutionError as exc:
+            attempted_refs.append(
+                {
+                    "agent_type": agent_type.value,
+                    "scene_info_ref": ref,
+                    "status": "missing_or_unreadable",
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        if _payload_has_character_identity_contract(payload):
+            diagnostics = list(payload.get("character_identity_diagnostics") or [])
+            diagnostics.append(
+                {
+                    "code": "same_identity_carrier_verified",
+                    "source": "scene_info_ref",
+                    "agent_type": agent_type.value,
+                    "scene_info_ref": ref,
+                }
+            )
+            return {
+                "character_identity_bible": payload.get("character_identity_bible") or {},
+                "scene_character_locks": payload.get("scene_character_locks") or [],
+                "quality_expectations": payload.get("quality_expectations") or {},
+                "character_identity_diagnostics": diagnostics,
+                "character_identity_contract_carrier": {
+                    "source": "scene_info_ref",
+                    "agent_type": agent_type.value,
+                    "scene_info_ref": ref,
+                    "same_carrier_verified": True,
+                    "fallback_reason": "",
+                },
+            }
+
+        attempted_refs.append(
+            {
+                "agent_type": agent_type.value,
+                "scene_info_ref": ref,
+                "status": "identity_contract_missing",
+            }
+        )
+
+    rebuilt = normalize_character_identity_contract(
+        {
+            "concept_plan": concept_plan,
+            "scenes_to_generate": scene_rows,
+        }
+    )
+    diagnostics = list(rebuilt.get("character_identity_diagnostics") or [])
+    diagnostics.append(
+        {
+            "code": "same_identity_carrier_missing",
+            "fallback_reason": "identity_contract_rebuilt_from_working_memory",
+            "status": "needs_human_review",
+            "attempted_refs": attempted_refs,
+        }
+    )
+    rebuilt["character_identity_diagnostics"] = diagnostics
+    rebuilt["character_identity_contract_carrier"] = {
+        "source": "rebuilt_from_working_memory",
+        "same_carrier_verified": False,
+        "fallback_reason": "identity_contract_rebuilt_from_working_memory",
+        "attempted_refs": attempted_refs,
+    }
+    return rebuilt
+
+
 def build_quality_checker_context(
     workflow_id: str,
     *,
@@ -470,6 +590,13 @@ def build_quality_checker_context(
     video_outputs = wm.get("scene_outputs.video", {}) if wm else {}
     final_video = wm.get("project.final_video", {}) if wm else {}
     concept_plan = wm.get("project.concept_plan", {}) if wm else {}
+    role_observation = {}
+    if wm:
+        role_observation = (
+            wm.get("quality.role_continuity_observation", {})
+            or wm.get("quality.role_continuity_evidence", {})
+            or wm.get("role_continuity_observation", {})
+        )
 
     if not isinstance(scene_overview, dict):
         scene_overview = {"scenes": []}
@@ -487,6 +614,20 @@ def build_quality_checker_context(
         scene_overview=scene_overview,
         video_outputs=video_outputs,
     )
+    scene_rows = scene_overview.get("scenes") if isinstance(scene_overview.get("scenes"), list) else []
+    if not scene_rows and isinstance(concept_plan.get("scenes"), list):
+        scene_rows = concept_plan.get("scenes") or []
+    identity_contract = _resolve_quality_checker_identity_contract(
+        workflow_id=str(workflow_id or ""),
+        concept_plan=concept_plan,
+        scene_rows=scene_rows,
+    )
+    character_identity_bible = identity_contract.get("character_identity_bible") or {}
+    scene_character_locks = identity_contract.get("scene_character_locks") or []
+    quality_expectations = identity_contract.get("quality_expectations") or {}
+    character_identity_diagnostics = identity_contract.get("character_identity_diagnostics") or []
+    character_identity_contract_carrier = identity_contract.get("character_identity_contract_carrier") or {}
+    role_continuity_observation = normalize_role_continuity_observation(role_observation)
 
     stored_metadata = normalize_video_metadata(final_video.get("metadata", {}))
     probed_metadata = probe_local_video_metadata_sync(final_video_path) if final_video_path else {}
@@ -507,6 +648,20 @@ def build_quality_checker_context(
         metadata_sources.append("composition_timeline")
     metadata_source = "+".join(metadata_sources) if metadata_sources else "missing"
 
+    expected_scene_numbers = _scene_numbers_from_records(scene_rows)
+    video_output_scene_numbers = _scene_numbers_from_video_outputs(video_outputs)
+    missing_video_scene_numbers = sorted(expected_scene_numbers - video_output_scene_numbers)
+    media_completeness = {
+        "status": "complete"
+        if not expected_scene_numbers or not missing_video_scene_numbers
+        else "incomplete",
+        "expected_scene_numbers": sorted(expected_scene_numbers),
+        "video_output_scene_numbers": sorted(video_output_scene_numbers),
+        "missing_scene_numbers": missing_video_scene_numbers,
+        "expected_scene_count": len(expected_scene_numbers),
+        "video_output_scene_count": len(video_output_scene_numbers),
+    }
+
     concept_source = "project.concept_plan" if concept_plan else "missing"
     fallback_reasons: List[str] = []
     if final_video_source == "missing":
@@ -519,6 +674,8 @@ def build_quality_checker_context(
         fallback_reasons.append(f"video_metadata_source={metadata_source}")
     if metadata_source == "missing":
         fallback_reasons.append("video_metadata_missing")
+    if media_completeness["status"] == "incomplete":
+        fallback_reasons.append("scene_video_outputs_incomplete")
 
     if final_video_source == "missing":
         status = "missing_final_video"
@@ -534,20 +691,36 @@ def build_quality_checker_context(
         "concept_plan_source": concept_source,
         "timeline_source": timeline_source,
         "video_metadata_source": metadata_source,
+        "media_completeness": media_completeness,
+        "role_continuity_observation_source": role_continuity_observation.get("source", ""),
+        "role_continuity_observation_status": role_continuity_observation.get("status", "not_available"),
+        "character_identity_contract_source": character_identity_bible.get("source", "missing")
+        if isinstance(character_identity_bible, dict)
+        else "missing",
+        "character_identity_contract_carrier": character_identity_contract_carrier,
     }
     if fallback_reasons:
         diagnostics["fallback_reason"] = ", ".join(fallback_reasons)
+    if character_identity_diagnostics:
+        diagnostics["character_identity_diagnostics"] = character_identity_diagnostics
 
     return {
         "context": {
             "scene_overview": scene_overview,
             "concept_plan": concept_plan,
             "original_requirements": concept_plan,
+            "character_identity_bible": character_identity_bible,
+            "scene_character_locks": scene_character_locks,
+            "quality_expectations": quality_expectations,
+            "role_continuity_observation": role_continuity_observation,
+            "character_identity_diagnostics": character_identity_diagnostics,
+            "character_identity_contract_carrier": character_identity_contract_carrier,
             "final_video": {
                 "path": final_video_path,
                 "url": final_video_url,
             },
             "composition_timeline": composition_timeline,
+            "media_completeness": media_completeness,
             "video_metadata": video_metadata,
             "context_diagnostics": diagnostics,
         },
@@ -609,7 +782,34 @@ def _build_video_composer_scene_media_ref(
     return str(ref_path), include_audio
 
 
+def _scene_numbers_from_records(records: List[Dict[str, Any]]) -> set[int]:
+    scene_numbers: set[int] = set()
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        scene_number = _coerce_int(record.get("scene_number"))
+        if scene_number is not None:
+            scene_numbers.add(scene_number)
+    return scene_numbers
+
+
+def _scene_numbers_from_video_outputs(video_outputs: Dict[str, Any]) -> set[int]:
+    scene_numbers: set[int] = set()
+    for key, payload in (video_outputs.items() if isinstance(video_outputs, dict) else []):
+        if isinstance(payload, dict):
+            scene_number = _coerce_int(payload.get("scene_number"))
+        else:
+            scene_number = None
+        if scene_number is None:
+            scene_number = _coerce_int(key)
+        if scene_number is not None:
+            scene_numbers.add(scene_number)
+    return scene_numbers
+
+
 def _normalize_quality_checker_final_video_refs(final_video: Dict[str, Any]) -> tuple[str, str, str]:
+    from ..utils.media_runtime import build_local_public_url, resolve_local_public_path
+
     video_path = str(final_video.get("path") or "").strip() if isinstance(final_video, dict) else ""
     video_url = str(final_video.get("url") or "").strip() if isinstance(final_video, dict) else ""
     source_parts: List[str] = []
@@ -778,6 +978,10 @@ def build_image_generation_context(
             "voice_over_text": (script_entry or {}).get("voice_over_text", ""),
             "background_music_style": (script_entry or {}).get("background_music_style", ""),
         }
+        if isinstance((script_entry or {}).get("character_constraints_struct"), list):
+            payload["character_constraints_struct"] = list(
+                (script_entry or {}).get("character_constraints_struct") or []
+            )
         if mode in {"skip", "reuse"}:
             scenes_to_skip.append({"scene_number": sn, "reason": mode, "reuse_from": None})
         else:
@@ -793,16 +997,18 @@ def build_image_generation_context(
         "intelligent_style": concept_plan.get("intelligent_style_design") or {},
     }
 
-    scene_info_payload = annotate_scene_info_payload({
-        "task_type": "batch_image_generation",
-        "workflow_state_id": workflow_id,
-        "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
-        "scenes_to_generate": scenes_to_generate,
-        "scenes_to_skip": scenes_to_skip,
-        "concept_plan": concept_plan,
-        "intelligent_style": concept_plan.get("intelligent_style_design") or {},
-        "scene_overview": overview,
-    }, mode="image_generation")
+    scene_info_payload = normalize_character_identity_contract(
+        annotate_scene_info_payload({
+            "task_type": "batch_image_generation",
+            "workflow_state_id": workflow_id,
+            "total_scenes": len(overview.get("scenes", [])) if isinstance(overview, dict) else 0,
+            "scenes_to_generate": scenes_to_generate,
+            "scenes_to_skip": scenes_to_skip,
+            "concept_plan": concept_plan,
+            "intelligent_style": concept_plan.get("intelligent_style_design") or {},
+            "scene_overview": overview,
+        }, mode="image_generation")
+    )
 
     return {
         "context": context,
@@ -935,6 +1141,10 @@ def build_video_generation_context(
             "script_text": (script_entry or {}).get("script_text", ""),
             "voice_over_text": (script_entry or {}).get("voice_over_text", ""),
         }
+        if isinstance((script_entry or {}).get("character_constraints_struct"), list):
+            payload["character_constraints_struct"] = list(
+                (script_entry or {}).get("character_constraints_struct") or []
+            )
         if depends_on_scene is not None:
             payload["depends_on_scene"] = depends_on_scene
 
@@ -990,15 +1200,17 @@ def build_video_generation_context(
         "scene_image_refs": scene_image_refs,
     }
 
-    scene_info_payload = annotate_scene_info_payload({
-        "task_type": "batch_video_generation",
-        "workflow_state_id": workflow_id,
-        "total_scenes": len(scenes_source or []),
-        "scenes_to_generate": scenes_to_generate,
-        "concept_plan": concept_plan,
-        "intelligent_style": concept_plan.get("intelligent_style_design") or {},
-        "scene_overview": overview,
-    }, mode="video_generation")
+    scene_info_payload = normalize_character_identity_contract(
+        annotate_scene_info_payload({
+            "task_type": "batch_video_generation",
+            "workflow_state_id": workflow_id,
+            "total_scenes": len(scenes_source or []),
+            "scenes_to_generate": scenes_to_generate,
+            "concept_plan": concept_plan,
+            "intelligent_style": concept_plan.get("intelligent_style_design") or {},
+            "scene_overview": overview,
+        }, mode="video_generation")
+    )
 
     context = {
         "task_overview": task_overview,

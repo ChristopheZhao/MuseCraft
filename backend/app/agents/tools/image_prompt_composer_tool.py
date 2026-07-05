@@ -239,6 +239,10 @@ class ImagePromptComposerTool(AsyncTool):
             image_purpose=resolved_purpose,
             task_direction=resolved_task_direction,
         )
+        reference_asset_projection = self._resolve_reference_asset_projection(
+            assets,
+            image_tool=image_tool,
+        )
 
         if consistency_block:
             prompt_text = self._merge_prompt_text_with_consistency(
@@ -261,6 +265,8 @@ class ImagePromptComposerTool(AsyncTool):
             image_params["style"] = style_name
         if locked_segments:
             image_params["consistency_locks"] = locked_segments
+        if reference_asset_projection.get("reference_image_url"):
+            image_params["reference_image_url"] = reference_asset_projection["reference_image_url"]
 
         gen_input = ToolInput(
             action="generate_image",
@@ -286,6 +292,8 @@ class ImagePromptComposerTool(AsyncTool):
         metadata["consistency_lock_count"] = len(locked_segments)
         metadata["consistency_source"] = "scene_info_ref"
         metadata["image_purpose"] = resolved_purpose
+        if reference_asset_projection.get("status") != "not_requested":
+            metadata["reference_asset_diagnostics"] = reference_asset_projection
         if resolved_task_direction:
             metadata["task_direction"] = resolved_task_direction
 
@@ -308,6 +316,82 @@ class ImagePromptComposerTool(AsyncTool):
             "scene_number": scene_number,
             "prompt_safety": gen_payload.get("prompt_safety") or {},
             "metadata": metadata,
+        }
+
+    @staticmethod
+    def _extract_reference_assets_from_consistency_assets(assets: Any) -> List[Dict[str, Any]]:
+        if not isinstance(assets, dict):
+            return []
+        character_assets = assets.get("characters")
+        character_assets = character_assets if isinstance(character_assets, dict) else {}
+        characters = character_assets.get("characters")
+        if not isinstance(characters, list):
+            return []
+        refs: List[Dict[str, Any]] = []
+        seen = set()
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            canonical_id = str(character.get("canonical_id") or "").strip()
+            display_name = str(character.get("display_name") or canonical_id).strip()
+            reference_assets = character.get("reference_assets")
+            if not isinstance(reference_assets, list):
+                continue
+            for asset in reference_assets:
+                if not isinstance(asset, dict):
+                    continue
+                uri = str(asset.get("uri") or "").strip()
+                if not uri or uri in seen:
+                    continue
+                seen.add(uri)
+                refs.append(
+                    {
+                        "canonical_id": canonical_id,
+                        "display_name": display_name,
+                        "asset_type": str(asset.get("asset_type") or "reference").strip(),
+                        "uri": uri,
+                        "capability_required": str(
+                            asset.get("capability_required") or "reference_image"
+                        ).strip(),
+                    }
+                )
+        return refs
+
+    def _resolve_reference_asset_projection(
+        self,
+        assets: Any,
+        *,
+        image_tool: Any,
+    ) -> Dict[str, Any]:
+        references = self._extract_reference_assets_from_consistency_assets(assets)
+        if not references:
+            return {"status": "not_requested", "reference_asset_count": 0}
+
+        schema = {}
+        try:
+            schema = image_tool.get_action_schema("generate_image")
+        except Exception:
+            schema = {}
+        properties = schema.get("properties") if isinstance(schema, dict) else {}
+        supports_reference_image = isinstance(properties, dict) and "reference_image_url" in properties
+        if not supports_reference_image:
+            return {
+                "status": "unavailable",
+                "reference_asset_count": len(references),
+                "selected_reference_asset": None,
+                "fallback_reason": "image_reference_capability_missing",
+            }
+
+        selected = references[0]
+        return {
+            "status": "enabled",
+            "reference_asset_count": len(references),
+            "selected_reference_asset": {
+                key: selected.get(key)
+                for key in ("canonical_id", "display_name", "asset_type", "uri")
+            },
+            "reference_image_url": selected["uri"],
+            "fallback_reason": "",
         }
 
     def _load_scene_info(self, ref: str) -> Dict[str, Any]:
@@ -805,6 +889,7 @@ class ImagePromptComposerTool(AsyncTool):
         lock = character_assets.get("global_lock") or {}
         scene_cast = character_assets.get("scene_cast") or {}
         present = self._join_items(scene_cast.get("present") or character_assets.get("present") or [], max_items=4)
+        scene_lock_descriptions = self._format_scene_locks(character_assets)
         structured_blocks: List[str] = []
         for item in character_assets.get("characters") or []:
             if not isinstance(item, dict):
@@ -826,14 +911,16 @@ class ImagePromptComposerTool(AsyncTool):
             if traits:
                 segments.append(f"特征：{traits}")
             aliases = self._join_items(item.get("aliases") or [], max_items=4)
-            if aliases:
+            if aliases and not character_assets.get("identity_bible"):
                 segments.append(f"别名：{aliases}")
             if segments:
                 structured_blocks.append(f"{name}：" + "；".join(segments) if name else "；".join(segments))
 
         scene_descriptions = []
         descriptions_raw = scene_cast.get("descriptions") or character_assets.get("descriptions") or []
-        if isinstance(descriptions_raw, list) and not structured_blocks:
+        if scene_lock_descriptions:
+            scene_descriptions.append(scene_lock_descriptions)
+        elif isinstance(descriptions_raw, list) and not structured_blocks:
             for item in descriptions_raw[:2]:
                 normalized = prompt_norm.normalize_still_text(item, max_len=100)
                 if normalized:
@@ -863,6 +950,36 @@ class ImagePromptComposerTool(AsyncTool):
         elif guideline:
             parts.append(guideline)
         return "；".join([p for p in parts if p])
+
+    def _format_scene_locks(self, character_assets: Dict[str, Any]) -> str:
+        locks = character_assets.get("scene_locks")
+        if not isinstance(locks, list):
+            return ""
+
+        blocks: List[str] = []
+        for item in locks[:4]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("display_name") or item.get("canonical_id") or "").strip()
+            segments: List[str] = []
+            stage = str(item.get("age_stage") or "").strip()
+            if stage and stage != "default":
+                segments.append(f"阶段：{stage}")
+            anchors = self._join_items(item.get("required_anchors") or [], max_items=3)
+            if anchors:
+                segments.append(f"锚点：{anchors}")
+            state_items = []
+            for state in item.get("scene_specific_state") or []:
+                normalized = prompt_norm.normalize_still_text(state, max_len=70)
+                if normalized:
+                    state_items.append(normalized)
+            state = self._join_items(self._dedupe_prompt_entries(state_items), max_items=1, sep="；")
+            if state:
+                segments.append(f"场景状态：{state}")
+            if segments:
+                blocks.append(f"{name}：" + "，".join(segments) if name else "，".join(segments))
+
+        return "；".join(self._dedupe_prompt_entries(blocks))
 
     def _format_environment(self, environment_assets: Dict[str, Any], *, image_purpose: str) -> str:
         if not isinstance(environment_assets, dict):

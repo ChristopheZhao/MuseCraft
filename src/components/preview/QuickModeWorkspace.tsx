@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 
 import { ApiClient } from '@/lib/api';
+import RoleContinuityDiagnosticsPanel from '@/components/quality/RoleContinuityDiagnosticsPanel';
 import {
   getRuntimeFailureMessage,
   getRuntimeWorkspaceProjection,
@@ -265,7 +266,13 @@ function getArtifactHighlights(node?: RuntimeDisplayNode | null) {
 
 function getSummaryHighlights(summaryOutput?: Record<string, unknown>) {
   return Object.entries(summaryOutput || {})
-    .filter(([, value]) => value !== null && value !== undefined && String(flattenValue(value)).trim().length > 0)
+    .filter(
+      ([key, value]) =>
+        key !== 'role_continuity_diagnostics' &&
+        value !== null &&
+        value !== undefined &&
+        String(flattenValue(value)).trim().length > 0
+    )
     .slice(0, 3)
     .map(([key, value]) => ({
       key,
@@ -738,6 +745,7 @@ const QuickModeWorkspace: React.FC = () => {
       return (
         <div className="space-y-5">
           {renderNodeSnapshot('delivery summary', '当前 run 已完成。工作台会把用户送往结果评审与下载，而不是继续停留在固定节点骨架上。')}
+          <RoleContinuityDiagnosticsPanel summaryOutput={quickRuntime?.summary_output} />
           <div className="grid gap-4 2xl:grid-cols-2">
             <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/80 p-5 text-sm leading-6 text-emerald-900">
               <div className="font-semibold">结果已可交付</div>

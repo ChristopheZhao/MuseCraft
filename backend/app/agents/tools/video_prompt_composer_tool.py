@@ -327,7 +327,7 @@ class VideoPromptComposerTool(AsyncTool):
         lock = character_assets.get("global_lock") or {}
         scene_cast = character_assets.get("scene_cast") or {}
         present = self._join_items(scene_cast.get("present") or character_assets.get("present") or [], max_items=3)
-        descriptions = self._compact_scene_descriptions(
+        descriptions = self._format_scene_locks(character_assets) or self._compact_scene_descriptions(
             scene_cast.get("descriptions") or character_assets.get("descriptions") or []
         )
         stable_traits = self._join_items(lock.get("stable_traits") or [], max_items=3)
@@ -348,6 +348,35 @@ class VideoPromptComposerTool(AsyncTool):
         if guideline and not parts:
             parts.append(guideline)
         return "；".join([p for p in parts if p])
+
+    def _format_scene_locks(self, character_assets: Dict[str, Any]) -> str:
+        locks = character_assets.get("scene_locks")
+        if not isinstance(locks, list):
+            return ""
+
+        blocks: List[str] = []
+        for item in locks[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("display_name") or item.get("canonical_id") or "").strip()
+            segments: List[str] = []
+            stage = str(item.get("age_stage") or "").strip()
+            if stage and stage != "default":
+                segments.append(f"阶段：{stage}")
+            anchors = self._join_items(item.get("required_anchors") or [], max_items=2)
+            if anchors:
+                segments.append(f"锚点：{anchors}")
+            state_items = []
+            for state in item.get("scene_specific_state") or []:
+                compact = prompt_norm.compact_lock_text(state, max_len=36, max_clauses=1, drop_meta=True)
+                if compact:
+                    state_items.append(compact)
+            state = self._join_items(prompt_norm.dedupe_clauses(state_items), max_items=1, sep="；")
+            if state:
+                segments.append(f"状态：{state}")
+            if segments:
+                blocks.append(f"{name}：" + "，".join(segments) if name else "，".join(segments))
+        return "；".join(prompt_norm.dedupe_clauses(blocks))
 
     def _format_environment(self, environment_assets: Dict[str, Any]) -> str:
         if not isinstance(environment_assets, dict):

@@ -1,4 +1,5 @@
 import {
+  getRoleContinuityDiagnostics,
   getRuntimeDisplayNodes,
   getRuntimeFailureMessage,
   getRuntimeTerminalStatus,
@@ -173,9 +174,70 @@ function validateCompletedTerminalState(): void {
   console.log('PASS completed runtime stays separate from failure presentation');
 }
 
+function validateRoleContinuityReadModelProjection(): void {
+  const runtime = buildRuntime({
+    status: 'completed',
+    active_gate: null,
+    summary_output: {
+      final_video_url: '/files/final.mp4',
+      role_continuity_diagnostics: {
+        version: 'v1',
+        status: 'not_evaluated',
+        review_status: 'unverified',
+        role_continuity_score: null,
+        visual_evidence_verified: false,
+        score_cap: 89,
+        fallback_reason: 'role_continuity_visual_evidence_missing',
+        unverified_reason: 'role_continuity_visual_evidence_missing',
+        requires_human_review: true,
+        approval_status: 'conditional',
+        contract_readiness: {
+          status: 'ready',
+          score: 100,
+          same_carrier_verified: true,
+        },
+        identity_drift_findings: [],
+        display_summary: {
+          characters: [
+            {
+              canonical_id: 'child',
+              display_name: 'Child',
+              stable_anchor_count: 3,
+              allowed_variant_count: 3,
+              reference_asset_count: 0,
+            },
+          ],
+          character_count: 1,
+          scene_lock_count: 6,
+          locked_scene_numbers: [1, 2, 3, 4, 5, 6],
+          missing_lock_scenes: [],
+          empty_cast_scenes: [],
+        },
+      },
+    },
+  });
+
+  const diagnostics = getRoleContinuityDiagnostics(runtime.summary_output);
+  assertCondition(diagnostics, 'role continuity diagnostics should be extracted from summary_output');
+  assertCondition(diagnostics.reviewStatus === 'unverified', 'review status should stay unverified');
+  assertCondition(diagnostics.visualEvidenceVerified === false, 'visual evidence should stay false');
+  assertCondition(diagnostics.scoreCap === 89, 'score cap should be preserved');
+  assertCondition(diagnostics.contractReadiness.sameCarrierVerified, 'carrier alignment should be visible');
+  assertCondition(
+    diagnostics.displaySummary.characters[0]?.displayName === 'Child',
+    'display summary should expose display names'
+  );
+  assertCondition(
+    getRoleContinuityDiagnostics({}) === null,
+    'missing role continuity diagnostics should not be fabricated'
+  );
+  console.log('PASS role continuity diagnostics stay bounded to runtime summary_output');
+}
+
 validateStepZeroFailure();
 validateAwaitingHumanGate();
 validateResumeState();
 validateCompletedTerminalState();
+validateRoleContinuityReadModelProjection();
 
 console.log('Runtime read-model validation passed');

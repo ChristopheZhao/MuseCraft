@@ -151,11 +151,20 @@ def test_mark_session_running_and_completed_updates_projection(sync_db):
         sync_db,
         session,
         task=task,
-        summary_output={"final_video_url": "https://example.com/final.mp4"},
+        summary_output={
+            "final_video_url": "https://example.com/final.mp4",
+            "role_continuity_diagnostics": {
+                "status": "not_evaluated",
+                "review_status": "unverified",
+                "score_cap": 89,
+                "fallback_reason": "role_continuity_visual_evidence_missing",
+            },
+        },
     )
     completed_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
     assert completed_view["status"] == WorkflowSessionStatus.COMPLETED.value
     assert completed_view["summary_output"]["final_video_url"] == "https://example.com/final.mp4"
+    assert completed_view["summary_output"]["role_continuity_diagnostics"]["review_status"] == "unverified"
     assert completed_view["nodes"][0]["status"] == WorkflowNodeStatus.COMPLETED.value
     assert all(
         node["status"] in {WorkflowNodeStatus.COMPLETED.value, WorkflowNodeStatus.SKIPPED.value}

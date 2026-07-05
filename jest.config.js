@@ -88,6 +88,13 @@ const customJestConfig = {
   // Custom test environments for different test types
   projects: [
     {
+      displayName: 'unit',
+      ...sharedProjectConfig,
+      testMatch: ['<rootDir>/__tests__/lib/**/*.test.{js,jsx,ts,tsx}'],
+      testEnvironment: 'jest-environment-jsdom',
+      setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
+    },
+    {
       displayName: 'integration',
       ...sharedProjectConfig,
       testMatch: ['<rootDir>/__tests__/integration/**/*.test.{js,jsx,ts,tsx}'],

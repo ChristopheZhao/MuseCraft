@@ -1,0 +1,162 @@
+{
+  "fixture_id": "task_1080_character_identity_gap",
+  "task_id": 1080,
+  "workflow_state_id": "e47efe5f-6e5f-4735-8f32-ff175f349e08",
+  "source_contexts": {
+    "image": "backend/storage/temp/context/image_generator_e47efe5f-6e5f-4735-8f32-ff175f349e08.json",
+    "video": "backend/storage/temp/context/video_generator_e47efe5f-6e5f-4735-8f32-ff175f349e08.json"
+  },
+  "media_probe": {
+    "final_video_path": "backend/storage/outputs/videos/mothers_day_final.mp4",
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration_seconds": 60.32746,
+    "size_bytes": 21328527,
+    "video_stream": {
+      "codec_name": "h264",
+      "width": 960,
+      "height": 960,
+      "duration_seconds": 60.3
+    },
+    "audio_stream": {
+      "codec_name": "aac",
+      "duration_seconds": 60.32746
+    }
+  },
+  "review_summary": {
+    "contact_sheet_path": "/tmp/svm_video_review_1080/contact_sheet.jpg",
+    "system_quality_score": 92,
+    "manual_quality_band": "75-80",
+    "manual_findings": [
+      "Technical playback was acceptable: no obvious black screen or long frozen segment.",
+      "Mother and child identities drift across scenes, making the output feel like separate themed illustrations rather than one continuous family story.",
+      "Quality scoring did not include a hard role-continuity check and still rated the video Excellent."
+    ]
+  },
+  "image_context": {
+    "task_type": "batch_image_generation",
+    "workflow_state_id": "e47efe5f-6e5f-4735-8f32-ff175f349e08",
+    "total_scenes": 6,
+    "concept_plan": {
+      "overview": "母亲节温情短片，通过日常照护、成长离别与归家拥抱表达感恩。",
+      "content_elements": {
+        "characters": [
+          {
+            "canonical_id": "mother",
+            "canonical_name": "mother",
+            "display_name": "妈妈",
+            "aliases": ["母亲", "妈妈"],
+            "type": "人类",
+            "species_or_breed": "人类",
+            "archetype_or_identity": "守护者",
+            "abstract_traits": ["温柔", "坚韧", "无私", "勤劳", "慈爱"],
+            "personality_traits": ["温柔", "坚韧", "无私", "勤劳", "慈爱", "细心", "耐心", "包容"],
+            "visual_identity": ["暖棕色长发", "围裙", "柔和微笑"],
+            "signature_outfit_or_props": ["围裙", "针线", "雨伞"],
+            "role": "主角，母爱的化身",
+            "description": "一位从年轻到年迈的母亲，用日常细节诠释母爱。",
+            "visual_traits": {
+              "signature_props": ["围裙", "针线", "雨伞"],
+              "identity_tags": ["围裙", "暖棕色长发"],
+              "entity_type": "human",
+              "species_or_breed": "人类"
+            },
+            "reference_assets": {"items": []},
+            "metadata": {"source": "concept_plan", "source_index": 0}
+          },
+          {
+            "canonical_id": "child",
+            "canonical_name": "child",
+            "display_name": "孩子",
+            "aliases": ["子女", "孩子"],
+            "type": "人类",
+            "species_or_breed": "人类",
+            "archetype_or_identity": "成长者",
+            "abstract_traits": ["成长", "感恩", "依赖", "独立"],
+            "personality_traits": ["成长", "感恩", "依赖", "独立", "懂事", "孝顺"],
+            "visual_identity": ["随年龄变化：幼年→少年→青年"],
+            "signature_outfit_or_props": ["书包", "行李箱", "手机"],
+            "role": "视角人物，母爱的接受者",
+            "description": "从孩童到成人的孩子，通过回忆展现母爱。",
+            "visual_traits": {
+              "signature_props": ["书包", "行李箱", "手机"],
+              "identity_tags": ["书包", "行李箱"],
+              "entity_type": "human",
+              "species_or_breed": "人类"
+            },
+            "reference_assets": {"items": []},
+            "metadata": {"source": "concept_plan", "source_index": 1}
+          }
+        ]
+      },
+      "consistency_guidelines": {
+        "character_consistency": "确保角色外形与特征在所有场景保持一致。",
+        "environment_consistency": "场景氛围和叙事节奏需延续骨架设定。",
+        "object_consistency": "重复出现的关键道具需保持造型与用途一致。",
+        "style_consistency": "坚持既定的风格组合和色彩基调。"
+      },
+      "intelligent_style_design": {
+        "style_name": "温馨动漫叙事风",
+        "style_description": "以柔和线条、温暖色调和细腻光影呈现日常亲情。",
+        "visual_approach": "2D动画"
+      },
+      "scenes": [
+        {"scene_number": 1, "title": "晨光中的背影"},
+        {"scene_number": 2, "title": "雨中伞下"},
+        {"scene_number": 6, "title": "归家拥抱"}
+      ]
+    },
+    "scenes_to_generate": [
+      {
+        "scene_number": 1,
+        "title": "晨光中的背影",
+        "visual_description": "厨房环境，暖色调，晨光从窗户斜射进来。母亲背影为主体，围裙、锅具、热气为关键元素。孩子幼年形象，穿着睡衣。",
+        "opening_state": "厨房充满晨光，母亲独自在灶台前忙碌，热气在光束中缭绕",
+        "characters_present": ["妈妈", "孩子"],
+        "character_descriptions": [
+          "背影为主，系着围裙，在厨房晨光中忙碌，暖色调光线勾勒轮廓。",
+          "妈妈：原型：守护者；物种：人类；温柔，坚韧，无私，勤劳，慈爱；暖棕色长发，围裙，柔和微笑；围裙，针线；主角，母爱的化身",
+          "孩子：原型：成长者；物种：人类；成长，感恩，依赖，独立；随年龄变化：幼年→少年→青年；书包，行李箱；视角人物，母爱的接受者",
+          "幼年形象，矮小可爱，穿着舒适的睡衣，头发蓬松，站在厨房门口。"
+        ]
+      },
+      {
+        "scene_number": 2,
+        "title": "雨中伞下",
+        "visual_description": "雨天街道，灰蓝色调，雨滴可见。母亲和孩子在伞下，伞下区域呈暖色对比。母亲肩膀湿了，孩子干爽。",
+        "opening_state": "母子二人共撑一把伞行走在雨中，伞下呈暖色，伞外是冷色调的雨天",
+        "characters_present": ["妈妈", "孩子"],
+        "character_descriptions": [
+          "妈妈：原型：守护者；物种：人类；温柔，坚韧，无私，勤劳，慈爱；暖棕色长发，围裙，柔和微笑；围裙，针线；主角，母爱的化身",
+          "孩子：原型：成长者；物种：人类；成长，感恩，依赖，独立；随年龄变化：幼年→少年→青年；书包，行李箱；视角人物，母爱的接受者",
+          "少年形象，在伞下保持干爽，紧靠母亲，表情安心。",
+          "手持雨伞，肩膀部分被雨水打湿，身体倾向孩子一侧，形成保护姿态。"
+        ]
+      },
+      {
+        "scene_number": 6,
+        "title": "归家拥抱",
+        "visual_description": "家门口，秋日夕阳温暖金黄。母亲穿着围裙，白发在光中柔和。孩子从远处走来，行李箱在身后。",
+        "opening_state": "母亲站在家门口，夕阳逆光勾勒出她柔和的白发与围裙轮廓",
+        "characters_present": ["妈妈", "孩子"],
+        "character_descriptions": [
+          "妈妈：原型：守护者；物种：人类；温柔，坚韧，无私，勤劳，慈爱；暖棕色长发，围裙，柔和微笑；围裙，针线；主角，母爱的化身",
+          "孩子：原型：成长者；物种：人类；成长，感恩，依赖，独立；随年龄变化：幼年→少年→青年；书包，行李箱；视角人物，母爱的接受者",
+          "穿着围裙，白发在秋日夕阳中柔和发光，面容慈祥，眼角有岁月痕迹，但笑容温暖。",
+          "青年形象，从远处走来，行李箱在身后，表情充满期待和感动，与母亲拥抱时闭眼微笑。"
+        ]
+      }
+    ]
+  },
+  "video_context": {
+    "task_type": "batch_video_generation",
+    "workflow_state_id": "e47efe5f-6e5f-4735-8f32-ff175f349e08",
+    "total_scenes": 6,
+    "concept_plan_ref": "image_context.concept_plan",
+    "scenes_to_generate_ref": "image_context.scenes_to_generate",
+    "video_scene_image_urls": {
+      "1": "https://multi-media-zs.oss-cn-shanghai.aliyuncs.com/images/scene_1_image.jpg",
+      "2": "https://multi-media-zs.oss-cn-shanghai.aliyuncs.com/images/scene_2_image.jpg",
+      "6": "https://multi-media-zs.oss-cn-shanghai.aliyuncs.com/images/scene_6_image.jpg"
+    }
+  }
+}

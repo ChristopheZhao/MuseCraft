@@ -1342,18 +1342,19 @@ class OrchestratorAgent(BaseAgent):
             )
             final_url = str(completion_payload.get("final_video_url") or "").strip()
             final_path = str(completion_payload.get("final_video_path") or "").strip()
+            quality_result = workflow_results.get("quality_checker")
+            quality_result = quality_result if isinstance(quality_result, dict) else {}
+            quality_score = quality_result.get("quality_score")
             if runtime_session is not None:
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
                     runtime_session_id=runtime_session.id,
                     task_db_id=task.id,
-                    summary_output={
-                        "status": "completed",
-                        "final_video_url": final_url,
-                        "final_video_path": final_path,
-                        "quality_score": workflow_results.get("quality_checker", {}).get(
-                            "quality_score"
-                        ),
-                    },
+                    summary_output=self._workflow_completion_adapter.build_runtime_summary_output(
+                        final_video_url=final_url,
+                        final_video_path=final_path,
+                        results=workflow_results,
+                        quality_score=quality_score,
+                    ),
                 )
 
             self.logger.info(f"🎉 工作流完成，任务ID: {task.task_id}")
@@ -1364,7 +1365,10 @@ class OrchestratorAgent(BaseAgent):
                 "results": workflow_results,
                 "final_video_url": final_url,
                 "final_video_path": final_path,
-                "quality_score": workflow_results.get("quality_checker", {}).get("quality_score"),
+                "quality_score": quality_score,
+                "role_continuity_diagnostics": completion_payload.get(
+                    "role_continuity_diagnostics"
+                ),
                 "persistence_status": "event_published",
                 "workflow_state_id": wf_id,
             }

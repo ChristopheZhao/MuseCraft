@@ -18,6 +18,23 @@ VIDEO_GENERATION:
     scene: optional
   max_items: 15
 
+CHARACTER_IDENTITY_LOCKS:
+  requires:
+    - { type: CONCEPTUAL, tags: ["character_identity_bible"] }
+    - { type: EPISODIC, tags: ["scene_character_locks"], scene: current }
+  scope:
+    workflow: required
+    scene: required
+  budget:
+    max_characters: 8
+    max_anchors_per_character: 6
+    max_scene_lock_chars: 700
+    reference_assets: capability_gated
+  diagnostics:
+    missing_contract_status: needs_human_review
+    legacy_text_source: legacy_text
+    fallback_reason_required: true
+
 SCRIPT_WRITING:
   requires:
     - { type: CONCEPTUAL }
@@ -26,4 +43,3 @@ SCRIPT_WRITING:
     workflow: required
     scene: optional
   max_items: 5
-

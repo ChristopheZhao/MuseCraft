@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import QuickModeWorkspace from '@/components/preview/QuickModeWorkspace';
@@ -157,7 +157,7 @@ describe('runtime gate sync', () => {
     expect(screen.getByText('场景 1：主角登场\\n场景 2：冲突展开')).toBeInTheDocument();
     expect(screen.getAllByText('脚本创作').length).toBeGreaterThan(0);
     expect(screen.getByText('执行轨迹')).toBeInTheDocument();
-    expect(screen.getByText(/该节点等待人工审核后继续/)).toBeInTheDocument();
+    expect(screen.getByText(/等待人工审核后继续/)).toBeInTheDocument();
     expect(screen.queryByText('图像生成')).not.toBeInTheDocument();
   });
 
@@ -182,7 +182,9 @@ describe('runtime gate sync', () => {
 
     const user = userEvent.setup();
     const { store } = renderWorkspace();
-    await user.click(screen.getByRole('button', { name: '批准并继续' }));
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: '批准并继续' }));
+    });
 
     await waitFor(() => {
       expect(mockSubmitScriptGateDecision).toHaveBeenCalledWith('task-123', {
@@ -209,14 +211,16 @@ describe('runtime gate sync', () => {
     const user = userEvent.setup();
     const { rerender } = renderWorkspace();
 
-    await user.click(screen.getByRole('button', { name: '要求重写' }));
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: '要求重写' }));
+    });
     await waitFor(() => {
       expect(mockSubmitScriptGateDecision).toHaveBeenCalledWith('task-123', {
         action: 'revise',
         feedback_text: undefined,
       });
     });
-    expect(screen.getByText('已提交要求重写，等待主线恢复…')).toBeInTheDocument();
+    expect(await screen.findByText('已提交要求重写，等待主线恢复…')).toBeInTheDocument();
 
     rerender(
       <I18nProvider defaultLang="zh">
@@ -224,14 +228,16 @@ describe('runtime gate sync', () => {
       </I18nProvider>
     );
 
-    await user.click(screen.getByRole('button', { name: '要求重规划' }));
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: '要求重规划' }));
+    });
     await waitFor(() => {
       expect(mockSubmitScriptGateDecision).toHaveBeenCalledWith('task-123', {
         action: 'replan',
         feedback_text: undefined,
       });
     });
-    expect(screen.getByText('已提交要求重规划，等待主线恢复…')).toBeInTheDocument();
+    expect(await screen.findByText('已提交要求重规划，等待主线恢复…')).toBeInTheDocument();
   });
 
   it('renders runtime failure as the primary state even when nodes remain queued', () => {
@@ -245,9 +251,64 @@ describe('runtime gate sync', () => {
       }),
     });
 
-    expect(screen.getByText('运行失败')).toBeInTheDocument();
+    expect(screen.getAllByText('运行失败').length).toBeGreaterThan(0);
     expect(screen.getByText('step-0 failed before entering first node')).toBeInTheDocument();
     expect(screen.getByText('失败发生在进入首个 workflow 节点之前，因此节点列表仍保持 queued。')).toBeInTheDocument();
+  });
+
+  it('renders role continuity diagnostics from runtime summary output only', () => {
+    renderWorkspace({
+      quickRuntime: buildRuntime({
+        status: 'completed',
+        current_node_key: 'quality',
+        active_gate: null,
+        summary_output: {
+          final_video_url: '/files/final.mp4',
+          role_continuity_diagnostics: {
+            version: 'v1',
+            status: 'not_evaluated',
+            review_status: 'unverified',
+            role_continuity_score: null,
+            visual_evidence_verified: false,
+            score_cap: 89,
+            fallback_reason: 'role_continuity_visual_evidence_missing',
+            unverified_reason: 'role_continuity_visual_evidence_missing',
+            requires_human_review: true,
+            approval_status: 'conditional',
+            contract_readiness: {
+              status: 'ready',
+              score: 100,
+              same_carrier_verified: true,
+            },
+            identity_drift_findings: [],
+            display_summary: {
+              characters: [
+                {
+                  canonical_id: 'child',
+                  display_name: 'Child',
+                  stable_anchor_count: 3,
+                  allowed_variant_count: 3,
+                  reference_asset_count: 0,
+                },
+              ],
+              character_count: 1,
+              scene_lock_count: 6,
+              locked_scene_numbers: [1, 2, 3, 4, 5, 6],
+              missing_lock_scenes: [],
+              empty_cast_scenes: [],
+            },
+          },
+        },
+      }),
+    });
+
+    expect(screen.getByText('角色一致性未验证')).toBeInTheDocument();
+    expect(screen.getAllByText('未验证').length).toBeGreaterThan(0);
+    expect(screen.getByText('ready / 同源')).toBeInTheDocument();
+    expect(screen.getByText('Child')).toBeInTheDocument();
+    expect(screen.getByText('1, 2, 3, 4, 5, 6')).toBeInTheDocument();
+    expect(screen.getByText('reason: role_continuity_visual_evidence_missing')).toBeInTheDocument();
+    expect(screen.queryByText(/canonical_id/)).not.toBeInTheDocument();
   });
 
   it('keeps fresh-submit bootstrap separate from resume-blocked workspace state', () => {

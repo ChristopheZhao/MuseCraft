@@ -37,10 +37,11 @@ def persist_scene_info_ref(
         )
 
     try:
-        base_dir = Path(settings.TEMP_PATH) / "context"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{agent_type.value}_{normalized_workflow_id}.json"
-        ref_path = (base_dir / filename).resolve()
+        ref_path = build_scene_info_ref_path(
+            workflow_id=normalized_workflow_id,
+            agent_type=agent_type,
+        )
+        ref_path.parent.mkdir(parents=True, exist_ok=True)
         with open(ref_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
     except Exception as exc:
@@ -54,6 +55,54 @@ def persist_scene_info_ref(
         return str(ref_path.relative_to(backend_root))
     except ValueError:
         return str(ref_path)
+
+
+def build_scene_info_ref_path(
+    *,
+    workflow_id: str,
+    agent_type: AgentType,
+) -> Path:
+    """Return the canonical persisted scene-info path for an agent/workflow."""
+    normalized_workflow_id = str(workflow_id or "").strip()
+    if not normalized_workflow_id:
+        raise SceneInfoReferenceResolutionError(
+            "Scene info reference path requires workflow_id"
+        )
+    if not isinstance(agent_type, AgentType):
+        raise SceneInfoReferenceResolutionError(
+            "Scene info reference path requires AgentType"
+        )
+    base_dir = Path(settings.TEMP_PATH) / "context"
+    filename = f"{agent_type.value}_{normalized_workflow_id}.json"
+    return (base_dir / filename).resolve()
+
+
+def build_scene_info_ref(
+    *,
+    workflow_id: str,
+    agent_type: AgentType,
+) -> str:
+    """Return the canonical ref string for an agent/workflow, even if missing."""
+    ref_path = build_scene_info_ref_path(
+        workflow_id=workflow_id,
+        agent_type=agent_type,
+    )
+    backend_root = Path(__file__).resolve().parents[2]
+    try:
+        return str(ref_path.relative_to(backend_root))
+    except ValueError:
+        return str(ref_path)
+
+
+def load_agent_scene_info_payload(
+    *,
+    workflow_id: str,
+    agent_type: AgentType,
+) -> Dict[str, Any]:
+    """Load the canonical persisted scene-info payload for an agent/workflow."""
+    return load_scene_info_payload(
+        build_scene_info_ref(workflow_id=workflow_id, agent_type=agent_type)
+    )
 
 
 def resolve_scene_info_ref_path(ref: str) -> Path:

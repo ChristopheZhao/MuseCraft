@@ -3,12 +3,13 @@ Quality Checker Agent - Analyzes and validates the final video quality
 """
 import os
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from .base import BaseAgent, AgentError
 from ..models import Task, AgentType
 from .utils.media_runtime import resolve_local_public_path
+from ..services.character_identity_contract import build_default_role_continuity_expectations
 
 
 class QualityCheckerAgent(BaseAgent):
@@ -46,8 +47,15 @@ class QualityCheckerAgent(BaseAgent):
         final_video_url = quality_inputs["final_video_url"]
         final_video_path = quality_inputs["final_video_path"]
         composition_timeline = quality_inputs["composition_timeline"]
+        media_completeness = quality_inputs["media_completeness"]
         video_metadata = quality_inputs["video_metadata"]
         context_diagnostics = quality_inputs["context_diagnostics"]
+        character_identity_bible = quality_inputs["character_identity_bible"]
+        scene_character_locks = quality_inputs["scene_character_locks"]
+        quality_expectations = quality_inputs["quality_expectations"]
+        role_continuity_observation = quality_inputs["role_continuity_observation"]
+        character_identity_diagnostics = quality_inputs["character_identity_diagnostics"]
+        character_identity_contract_carrier = quality_inputs["character_identity_contract_carrier"]
 
         await self._update_progress(10, "Loading final video from workflow", db)
 
@@ -72,7 +80,14 @@ class QualityCheckerAgent(BaseAgent):
             composition_timeline,
             final_video_url or final_video_path,
             original_requirements,
-            video_metadata
+            video_metadata,
+            media_completeness=media_completeness,
+            character_identity_bible=character_identity_bible,
+            scene_character_locks=scene_character_locks,
+            quality_expectations=quality_expectations,
+            role_continuity_observation=role_continuity_observation,
+            character_identity_diagnostics=character_identity_diagnostics,
+            character_identity_contract_carrier=character_identity_contract_carrier,
         )
         
         await self._update_progress(60, "Checking requirement compliance", db)
@@ -139,11 +154,38 @@ class QualityCheckerAgent(BaseAgent):
         concept_plan = static_context.get("concept_plan")
         original_requirements = static_context.get("original_requirements")
         composition_timeline = static_context.get("composition_timeline")
+        media_completeness = static_context.get("media_completeness")
         video_metadata = static_context.get("video_metadata")
+        character_identity_bible = static_context.get("character_identity_bible")
+        scene_character_locks = static_context.get("scene_character_locks")
+        quality_expectations = static_context.get("quality_expectations")
+        role_continuity_observation = static_context.get("role_continuity_observation")
+        character_identity_diagnostics = static_context.get("character_identity_diagnostics")
+        character_identity_contract_carrier = static_context.get("character_identity_contract_carrier")
+
+        concept_plan_dict = dict(concept_plan) if isinstance(concept_plan, dict) else {}
+        scene_overview_dict = dict(scene_overview) if isinstance(scene_overview, dict) else {"scenes": []}
+        if not isinstance(quality_expectations, dict):
+            quality_expectations = {}
+        else:
+            quality_expectations = dict(quality_expectations)
+        if (
+            not quality_expectations.get("role_continuity")
+            and self._concept_plan_has_structured_characters(concept_plan_dict)
+        ):
+            quality_expectations["role_continuity"] = build_default_role_continuity_expectations(
+                required=True,
+            )
+            diagnostics["character_identity_contract_status"] = "missing"
+            existing_reason = str(diagnostics.get("fallback_reason") or "").strip()
+            missing_reason = "character_identity_contract_missing"
+            diagnostics["fallback_reason"] = (
+                f"{existing_reason}, {missing_reason}" if existing_reason else missing_reason
+            )
 
         return {
-            "scene_overview": dict(scene_overview) if isinstance(scene_overview, dict) else {"scenes": []},
-            "concept_plan": dict(concept_plan) if isinstance(concept_plan, dict) else {},
+            "scene_overview": scene_overview_dict,
+            "concept_plan": concept_plan_dict,
             "original_requirements": (
                 dict(original_requirements)
                 if isinstance(original_requirements, dict)
@@ -156,9 +198,46 @@ class QualityCheckerAgent(BaseAgent):
                 if isinstance(composition_timeline, list)
                 else []
             ),
+            "media_completeness": (
+                dict(media_completeness)
+                if isinstance(media_completeness, dict)
+                else {}
+            ),
             "video_metadata": dict(video_metadata) if isinstance(video_metadata, dict) else {},
+            "character_identity_bible": (
+                dict(character_identity_bible)
+                if isinstance(character_identity_bible, dict)
+                else {}
+            ),
+            "scene_character_locks": (
+                list(scene_character_locks)
+                if isinstance(scene_character_locks, list)
+                else []
+            ),
+            "quality_expectations": quality_expectations,
+            "role_continuity_observation": (
+                dict(role_continuity_observation)
+                if isinstance(role_continuity_observation, dict)
+                else {}
+            ),
+            "character_identity_diagnostics": (
+                list(character_identity_diagnostics)
+                if isinstance(character_identity_diagnostics, list)
+                else []
+            ),
+            "character_identity_contract_carrier": (
+                dict(character_identity_contract_carrier)
+                if isinstance(character_identity_contract_carrier, dict)
+                else {}
+            ),
             "context_diagnostics": diagnostics,
         }
+
+    @staticmethod
+    def _concept_plan_has_structured_characters(concept_plan: Dict[str, Any]) -> bool:
+        content_elements = concept_plan.get("content_elements") if isinstance(concept_plan, dict) else {}
+        characters = content_elements.get("characters") if isinstance(content_elements, dict) else None
+        return isinstance(characters, list) and any(isinstance(item, dict) for item in characters)
     
     async def _perform_image_based_quality_check(
         self, 
@@ -322,7 +401,15 @@ class QualityCheckerAgent(BaseAgent):
         composition_timeline: List[Dict],
         video_url: str,
         original_requirements: Dict[str, Any],
-        video_metadata: Dict[str, Any]
+        video_metadata: Dict[str, Any],
+        *,
+        media_completeness: Optional[Dict[str, Any]] = None,
+        character_identity_bible: Optional[Dict[str, Any]] = None,
+        scene_character_locks: Optional[List[Dict[str, Any]]] = None,
+        quality_expectations: Optional[Dict[str, Any]] = None,
+        role_continuity_observation: Optional[Dict[str, Any]] = None,
+        character_identity_diagnostics: Optional[List[Dict[str, Any]]] = None,
+        character_identity_contract_carrier: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Analyze content quality and coherence"""
         
@@ -335,6 +422,22 @@ class QualityCheckerAgent(BaseAgent):
         }
         
         issues = []
+        media_completeness = media_completeness if isinstance(media_completeness, dict) else {}
+        media_status = str(media_completeness.get("status") or "").strip().lower()
+        missing_media_scenes = (
+            media_completeness.get("missing_scene_numbers")
+            if isinstance(media_completeness.get("missing_scene_numbers"), list)
+            else []
+        )
+        if media_status == "incomplete" or missing_media_scenes:
+            content_analysis["scene_continuity"] = False
+            content_analysis["narrative_flow"] = False
+            issues.append(
+                "Missing scene videos: "
+                f"expected {media_completeness.get('expected_scene_count')}, "
+                f"got {media_completeness.get('video_output_scene_count')}, "
+                f"missing scenes {missing_media_scenes}"
+            )
         
         # Check scene continuity
         if len(composition_timeline) < 2:
@@ -345,7 +448,7 @@ class QualityCheckerAgent(BaseAgent):
         expected_scenes = len(concept_plan.get("scenes", []))
         actual_scenes = len(composition_timeline)
         
-        if actual_scenes < expected_scenes * 0.7:  # Less than 70% of planned scenes
+        if expected_scenes and actual_scenes < expected_scenes:
             content_analysis["narrative_flow"] = False
             issues.append(f"Missing scenes: expected {expected_scenes}, got {actual_scenes}")
         
@@ -360,6 +463,20 @@ class QualityCheckerAgent(BaseAgent):
             
             if "outro" not in explicit_scene_types and len(composition_timeline) > 2:
                 issues.append("Missing conclusion scene")
+
+        role_continuity = self._analyze_role_continuity_quality(
+            composition_timeline=composition_timeline,
+            original_requirements=original_requirements,
+            character_identity_bible=character_identity_bible or {},
+            scene_character_locks=scene_character_locks or [],
+            quality_expectations=quality_expectations or {},
+            role_continuity_observation=role_continuity_observation or {},
+            character_identity_diagnostics=character_identity_diagnostics or [],
+            character_identity_contract_carrier=character_identity_contract_carrier or {},
+        )
+        if role_continuity.get("applies"):
+            content_analysis["role_continuity"] = bool(role_continuity.get("passed"))
+            issues.extend(role_continuity.get("issues") or [])
         
         # Calculate content score
         passed_checks = sum(1 for check in content_analysis.values() if check)
@@ -373,17 +490,444 @@ class QualityCheckerAgent(BaseAgent):
             video_metadata
         )
         
-        return {
+        result = {
             "score": content_score,
             "analysis": content_analysis,
             "issues": issues,
             "scene_breakdown": self._analyze_scene_breakdown(composition_timeline),
+            "media_completeness": media_completeness,
             "scene_type_diagnostics": {
                 **scene_type_evidence,
                 "intro_outro_check_applied": intro_outro_check_applied,
             },
+            "contract_readiness": role_continuity.get("contract_readiness"),
+            "role_continuity_score": role_continuity.get("role_continuity_score"),
+            "identity_drift_findings": role_continuity.get("identity_drift_findings", []),
+            "visual_evidence_verified": bool(role_continuity.get("visual_evidence_verified")),
+            "role_continuity_diagnostics": role_continuity.get("diagnostics", {}),
             "ai_analysis": ai_content_analysis,
             "recommendations": self._get_content_recommendations(issues, scene_type_evidence)
+        }
+        if role_continuity.get("fallback_reason"):
+            result["fallback_reason"] = role_continuity["fallback_reason"]
+        return result
+
+    def _analyze_role_continuity_quality(
+        self,
+        *,
+        composition_timeline: List[Dict[str, Any]],
+        original_requirements: Dict[str, Any],
+        character_identity_bible: Dict[str, Any],
+        scene_character_locks: List[Dict[str, Any]],
+        quality_expectations: Dict[str, Any],
+        role_continuity_observation: Dict[str, Any],
+        character_identity_diagnostics: List[Dict[str, Any]],
+        character_identity_contract_carrier: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expectations = quality_expectations.get("role_continuity") if isinstance(quality_expectations, dict) else {}
+        if not isinstance(expectations, dict) or not expectations:
+            return {
+                "applies": False,
+                "contract_readiness": {"status": "not_required", "score": None},
+                "role_continuity_score": None,
+                "passed": True,
+                "issues": [],
+                "identity_drift_findings": [],
+                "visual_evidence_verified": False,
+                "diagnostics": {"status": "not_required"},
+            }
+
+        required = bool(expectations.get("required"))
+        cap_failed = int(expectations.get("score_cap_when_failed") or 79)
+        cap_missing = int(expectations.get("score_cap_when_contract_missing") or 69)
+        cap_unverified = int(expectations.get("score_cap_when_unverified") or 89)
+        carrier = character_identity_contract_carrier if isinstance(character_identity_contract_carrier, dict) else {}
+        same_carrier_verified = bool(carrier.get("same_carrier_verified"))
+        carrier_fallback_reason = str(carrier.get("fallback_reason") or "").strip()
+        characters = (
+            character_identity_bible.get("characters")
+            if isinstance(character_identity_bible, dict)
+            else []
+        )
+        characters = characters if isinstance(characters, list) else []
+        locks = scene_character_locks if isinstance(scene_character_locks, list) else []
+        drift_findings = self._extract_identity_drift_findings(original_requirements)
+        observation = role_continuity_observation if isinstance(role_continuity_observation, dict) else {}
+
+        base_diagnostics = {
+            "required": required,
+            "score_cap_when_failed": cap_failed,
+            "score_cap_when_contract_missing": cap_missing,
+            "score_cap_when_unverified": cap_unverified,
+            "contract_source": character_identity_bible.get("source", "missing")
+            if isinstance(character_identity_bible, dict)
+            else "missing",
+            "character_count": len(characters),
+            "scene_lock_count": len(locks),
+            "locked_scene_numbers": sorted(self._scene_numbers_from_locks(locks)),
+            "display_summary": self._build_role_continuity_display_summary(
+                characters=characters,
+                scene_character_locks=locks,
+            ),
+            "contract_diagnostics": character_identity_diagnostics,
+            "contract_carrier": carrier,
+        }
+
+        if drift_findings:
+            return {
+                "applies": True,
+                "contract_readiness": {
+                    "status": "ready" if characters and locks and same_carrier_verified else "degraded",
+                    "score": 100 if characters and locks and same_carrier_verified else 50,
+                    "same_carrier_verified": same_carrier_verified,
+                },
+                "role_continuity_score": 40,
+                "passed": False,
+                "issues": ["Role continuity drift findings require review"],
+                "identity_drift_findings": drift_findings,
+                "visual_evidence_verified": True,
+                "diagnostics": {
+                    **base_diagnostics,
+                    "status": "failed",
+                    "fallback_reason": "",
+                },
+            }
+
+        if not required:
+            return {
+                "applies": False,
+                "contract_readiness": {
+                    "status": "not_required",
+                    "score": None,
+                    "same_carrier_verified": same_carrier_verified,
+                },
+                "role_continuity_score": None,
+                "passed": True,
+                "issues": [],
+                "identity_drift_findings": [],
+                "visual_evidence_verified": False,
+                "diagnostics": {
+                    **base_diagnostics,
+                    "status": "not_required",
+                },
+            }
+
+        if not same_carrier_verified:
+            return self._missing_role_continuity_result(
+                base_diagnostics,
+                fallback_reason=carrier_fallback_reason or "same_identity_carrier_missing",
+                issue="Role continuity contract carrier missing or not shared with media generation",
+                readiness_status="carrier_missing",
+            )
+
+        if not characters:
+            return self._missing_role_continuity_result(
+                base_diagnostics,
+                fallback_reason="character_identity_contract_missing",
+                issue="Role continuity contract missing character_identity_bible",
+                readiness_status="missing_contract",
+            )
+
+        if not locks:
+            return self._missing_role_continuity_result(
+                base_diagnostics,
+                fallback_reason="scene_character_locks_missing",
+                issue="Role continuity contract missing scene_character_locks",
+                readiness_status="missing_scene_locks",
+            )
+
+        expected_scene_numbers = self._scene_numbers_from_timeline(composition_timeline)
+        locked_scene_numbers = self._scene_numbers_from_locks(locks)
+        missing_lock_scenes = sorted(expected_scene_numbers - locked_scene_numbers)
+        empty_cast_scenes = sorted(
+            scene_number
+            for scene_number in locked_scene_numbers
+            if not self._scene_lock_has_cast(locks, scene_number)
+        )
+        if missing_lock_scenes or empty_cast_scenes:
+            issue_parts: List[str] = []
+            if missing_lock_scenes:
+                issue_parts.append(f"missing locks for scenes {missing_lock_scenes}")
+            if empty_cast_scenes:
+                issue_parts.append(f"empty cast for scenes {empty_cast_scenes}")
+            return {
+                "applies": True,
+                "contract_readiness": {
+                    "status": "incomplete",
+                    "score": 60,
+                    "same_carrier_verified": same_carrier_verified,
+                },
+                "role_continuity_score": None,
+                "passed": False,
+                "issues": ["Role continuity contract incomplete: " + "; ".join(issue_parts)],
+                "identity_drift_findings": [],
+                "fallback_reason": "scene_character_locks_incomplete",
+                "visual_evidence_verified": False,
+                "diagnostics": {
+                    **base_diagnostics,
+                    "status": "needs_human_review",
+                    "fallback_reason": "scene_character_locks_incomplete",
+                    "missing_lock_scenes": missing_lock_scenes,
+                    "empty_cast_scenes": empty_cast_scenes,
+                    "display_summary": self._build_role_continuity_display_summary(
+                        characters=characters,
+                        scene_character_locks=locks,
+                        missing_lock_scenes=missing_lock_scenes,
+                        empty_cast_scenes=empty_cast_scenes,
+                    ),
+                },
+            }
+
+        observed = self._role_continuity_result_from_observation(
+            observation=observation,
+            base_diagnostics=base_diagnostics,
+            same_carrier_verified=same_carrier_verified,
+        )
+        if observed:
+            return observed
+
+        return {
+            "applies": True,
+            "contract_readiness": {
+                "status": "ready",
+                "score": 100,
+                "same_carrier_verified": True,
+            },
+            "role_continuity_score": None,
+            "passed": False,
+            "issues": ["Role continuity visual evidence has not been evaluated"],
+            "identity_drift_findings": [],
+            "fallback_reason": "role_continuity_visual_evidence_missing",
+            "visual_evidence_verified": False,
+            "diagnostics": {
+                **base_diagnostics,
+                "status": "not_evaluated",
+                "evaluation_scope": "contract_boundary",
+                "visual_evidence_verified": False,
+                "fallback_reason": "role_continuity_visual_evidence_missing",
+                "note": "Role identity facts and scene locks are available; visual drift still requires explicit observation evidence.",
+            },
+        }
+
+    def _role_continuity_result_from_observation(
+        self,
+        *,
+        observation: Dict[str, Any],
+        base_diagnostics: Dict[str, Any],
+        same_carrier_verified: bool,
+    ) -> Dict[str, Any]:
+        status = str(observation.get("status") or "").strip().lower()
+        if status not in {"passed", "failed", "needs_human_review"}:
+            return {}
+
+        observation_score = observation.get("score")
+        try:
+            observation_score = int(observation_score)
+        except Exception:
+            observation_score = None
+        findings = (
+            observation.get("identity_drift_findings")
+            if isinstance(observation.get("identity_drift_findings"), list)
+            else []
+        )
+        diagnostics = {
+            **base_diagnostics,
+            "status": status if status != "needs_human_review" else "needs_human_review",
+            "evaluation_scope": "visual_observation",
+            "visual_evidence_verified": bool(observation.get("visual_evidence_verified")),
+            "observation_source": observation.get("source", ""),
+            "observation_reviewer": observation.get("reviewer", ""),
+            "checked_scene_numbers": observation.get("checked_scene_numbers", []),
+            "evidence_refs": observation.get("evidence_refs", []),
+        }
+        if observation.get("fallback_reason"):
+            diagnostics["fallback_reason"] = observation.get("fallback_reason")
+
+        if status == "passed":
+            return {
+                "applies": True,
+                "contract_readiness": {
+                    "status": "ready",
+                    "score": 100,
+                    "same_carrier_verified": same_carrier_verified,
+                },
+                "role_continuity_score": observation_score if observation_score is not None else 100,
+                "passed": True,
+                "issues": [],
+                "identity_drift_findings": [],
+                "visual_evidence_verified": True,
+                "diagnostics": diagnostics,
+            }
+
+        if status == "failed":
+            return {
+                "applies": True,
+                "contract_readiness": {
+                    "status": "ready",
+                    "score": 100,
+                    "same_carrier_verified": same_carrier_verified,
+                },
+                "role_continuity_score": observation_score if observation_score is not None else 40,
+                "passed": False,
+                "issues": ["Role continuity failed visual observation gate"],
+                "identity_drift_findings": findings,
+                "fallback_reason": str(observation.get("fallback_reason") or ""),
+                "visual_evidence_verified": True,
+                "diagnostics": diagnostics,
+            }
+
+        return {
+            "applies": True,
+            "contract_readiness": {
+                "status": "ready",
+                "score": 100,
+                "same_carrier_verified": same_carrier_verified,
+            },
+            "role_continuity_score": None,
+            "passed": False,
+            "issues": ["Role continuity visual observation requires human review"],
+            "identity_drift_findings": findings,
+            "fallback_reason": str(
+                observation.get("fallback_reason") or "role_continuity_observation_unverified"
+            ),
+            "visual_evidence_verified": False,
+            "diagnostics": diagnostics,
+        }
+
+    def _missing_role_continuity_result(
+        self,
+        diagnostics: Dict[str, Any],
+        *,
+        fallback_reason: str,
+        issue: str,
+        readiness_status: str,
+    ) -> Dict[str, Any]:
+        return {
+            "applies": True,
+            "contract_readiness": {
+                "status": readiness_status,
+                "score": 0,
+                "same_carrier_verified": False,
+            },
+            "role_continuity_score": None,
+            "passed": False,
+            "issues": [issue],
+            "identity_drift_findings": [],
+            "fallback_reason": fallback_reason,
+            "visual_evidence_verified": False,
+            "diagnostics": {
+                **diagnostics,
+                "status": "needs_human_review",
+                "fallback_reason": fallback_reason,
+            },
+        }
+
+    @staticmethod
+    def _extract_identity_drift_findings(original_requirements: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(original_requirements, dict):
+            return []
+        candidate_values = [
+            original_requirements.get("identity_drift_findings"),
+            original_requirements.get("role_continuity_findings"),
+        ]
+        role_continuity = original_requirements.get("role_continuity")
+        if isinstance(role_continuity, dict):
+            candidate_values.append(role_continuity.get("identity_drift_findings"))
+
+        findings: List[Dict[str, Any]] = []
+        for candidate in candidate_values:
+            if isinstance(candidate, dict):
+                candidate = [candidate]
+            if not isinstance(candidate, list):
+                continue
+            for item in candidate:
+                if isinstance(item, dict):
+                    findings.append(dict(item))
+                elif str(item or "").strip():
+                    findings.append({"message": str(item).strip()})
+        return findings
+
+    @staticmethod
+    def _scene_numbers_from_timeline(composition_timeline: List[Dict[str, Any]]) -> set[int]:
+        scene_numbers: set[int] = set()
+        for entry in composition_timeline if isinstance(composition_timeline, list) else []:
+            try:
+                scene_numbers.add(int(entry.get("scene_number")))
+            except Exception:
+                continue
+        return scene_numbers
+
+    @staticmethod
+    def _scene_numbers_from_locks(scene_character_locks: List[Dict[str, Any]]) -> set[int]:
+        scene_numbers: set[int] = set()
+        for entry in scene_character_locks if isinstance(scene_character_locks, list) else []:
+            try:
+                scene_numbers.add(int(entry.get("scene_number")))
+            except Exception:
+                continue
+        return scene_numbers
+
+    @staticmethod
+    def _scene_lock_has_cast(scene_character_locks: List[Dict[str, Any]], scene_number: int) -> bool:
+        for entry in scene_character_locks if isinstance(scene_character_locks, list) else []:
+            try:
+                current = int(entry.get("scene_number"))
+            except Exception:
+                continue
+            if current != scene_number:
+                continue
+            cast = entry.get("cast")
+            return isinstance(cast, list) and bool(cast)
+        return False
+
+    @staticmethod
+    def _build_role_continuity_display_summary(
+        *,
+        characters: List[Dict[str, Any]],
+        scene_character_locks: List[Dict[str, Any]],
+        missing_lock_scenes: Optional[List[int]] = None,
+        empty_cast_scenes: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        character_summaries: List[Dict[str, Any]] = []
+        for character in characters if isinstance(characters, list) else []:
+            if not isinstance(character, dict):
+                continue
+            stable_anchors = character.get("stable_anchors")
+            stable_anchors = stable_anchors if isinstance(stable_anchors, dict) else {}
+            anchor_count = 0
+            for value in stable_anchors.values():
+                if isinstance(value, list):
+                    anchor_count += len(value)
+                elif str(value or "").strip():
+                    anchor_count += 1
+            allowed_variants = character.get("allowed_variants")
+            reference_assets = character.get("reference_assets")
+            character_summaries.append(
+                {
+                    "canonical_id": str(character.get("canonical_id") or "").strip(),
+                    "display_name": str(character.get("display_name") or "").strip(),
+                    "stable_anchor_count": anchor_count,
+                    "allowed_variant_count": len(allowed_variants)
+                    if isinstance(allowed_variants, list)
+                    else 0,
+                    "reference_asset_count": len(reference_assets)
+                    if isinstance(reference_assets, list)
+                    else 0,
+                }
+            )
+
+        locked_scene_numbers = sorted(
+            QualityCheckerAgent._scene_numbers_from_locks(scene_character_locks)
+        )
+        return {
+            "characters": character_summaries[:8],
+            "character_count": len(character_summaries),
+            "scene_lock_count": len(scene_character_locks)
+            if isinstance(scene_character_locks, list)
+            else 0,
+            "locked_scene_numbers": locked_scene_numbers[:20],
+            "missing_lock_scenes": list(missing_lock_scenes or [])[:20],
+            "empty_cast_scenes": list(empty_cast_scenes or [])[:20],
         }
     
     async def _ai_content_analysis(
@@ -531,11 +1075,20 @@ class QualityCheckerAgent(BaseAgent):
         content_weight = 0.4
         compliance_weight = 0.3
         
-        overall_score = int(
+        raw_overall_score = int(
             technical_quality["score"] * technical_weight +
             content_quality["score"] * content_weight +
             compliance_check["score"] * compliance_weight
         )
+        role_gate = self._derive_role_continuity_quality_gate(content_quality)
+        media_gate = self._derive_media_completeness_quality_gate(content_quality)
+        score_caps = [
+            int(gate["score_cap"])
+            for gate in (role_gate, media_gate)
+            if gate.get("score_cap") is not None
+        ]
+        score_cap = min(score_caps) if score_caps else None
+        overall_score = min(raw_overall_score, int(score_cap)) if score_cap is not None else raw_overall_score
         
         # Determine quality grade
         if overall_score >= 90:
@@ -558,6 +1111,15 @@ class QualityCheckerAgent(BaseAgent):
             quality_grade = "Unacceptable"
             approval_status = "rejected"
             requires_human_review = True
+
+        if role_gate.get("requires_human_review"):
+            requires_human_review = True
+            if approval_status == "approved":
+                approval_status = role_gate.get("approval_status") or "conditional"
+        if media_gate.get("requires_human_review"):
+            requires_human_review = True
+            if approval_status in {"approved", "conditional"}:
+                approval_status = media_gate.get("approval_status") or "needs_revision"
         
         # Collect all issues and recommendations
         all_issues = (
@@ -565,6 +1127,10 @@ class QualityCheckerAgent(BaseAgent):
             content_quality.get("issues", []) +
             compliance_check.get("issues", [])
         )
+        if role_gate.get("issue"):
+            all_issues.append(role_gate["issue"])
+        if media_gate.get("issue"):
+            all_issues.append(media_gate["issue"])
         
         all_recommendations = (
             technical_quality.get("recommendations", []) +
@@ -575,23 +1141,111 @@ class QualityCheckerAgent(BaseAgent):
         summary = self._generate_quality_summary(
             overall_score, quality_grade, all_issues
         )
-        
-        return {
+
+        detailed_scores = {
+            "technical": technical_quality["score"],
+            "content": content_quality["score"],
+            "compliance": compliance_check["score"]
+        }
+        if isinstance(content_quality.get("contract_readiness"), dict):
+            detailed_scores["contract_readiness"] = content_quality["contract_readiness"].get("score")
+        if content_quality.get("role_continuity_score") is not None:
+            detailed_scores["role_continuity"] = content_quality.get("role_continuity_score")
+
+        assessment = {
             "overall_score": overall_score,
             "quality_grade": quality_grade,
             "approval_status": approval_status,
             "requires_human_review": requires_human_review,
             "summary": summary,
-            "detailed_scores": {
-                "technical": technical_quality["score"],
-                "content": content_quality["score"],
-                "compliance": compliance_check["score"]
-            },
+            "detailed_scores": detailed_scores,
             "issues_found": len(all_issues),
             "critical_issues": [issue for issue in all_issues if "missing" in issue.lower() or "failed" in issue.lower()],
             "recommendations": all_recommendations[:10],  # Top 10 recommendations
             "review_notes": self._generate_review_notes(all_issues, overall_score)
         }
+        if score_cap is not None:
+            assessment["raw_overall_score"] = raw_overall_score
+            assessment["quality_score_cap_applied"] = score_cap
+        if content_quality.get("identity_drift_findings") is not None:
+            assessment["identity_drift_findings"] = content_quality.get("identity_drift_findings") or []
+        if content_quality.get("contract_readiness") is not None:
+            assessment["contract_readiness"] = content_quality.get("contract_readiness") or {}
+        assessment["visual_evidence_verified"] = bool(content_quality.get("visual_evidence_verified"))
+        if role_gate.get("fallback_reason"):
+            assessment["fallback_reason"] = role_gate["fallback_reason"]
+        if content_quality.get("role_continuity_diagnostics") is not None:
+            assessment["role_continuity_diagnostics"] = content_quality.get("role_continuity_diagnostics")
+        if content_quality.get("media_completeness") is not None:
+            assessment["media_completeness"] = content_quality.get("media_completeness") or {}
+        if media_gate.get("fallback_reason"):
+            assessment["media_completeness_fallback_reason"] = media_gate["fallback_reason"]
+
+        return assessment
+
+    def _derive_media_completeness_quality_gate(
+        self,
+        content_quality: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        media_completeness = content_quality.get("media_completeness")
+        media_completeness = media_completeness if isinstance(media_completeness, dict) else {}
+        status = str(media_completeness.get("status") or "").strip().lower()
+        missing_scene_numbers = media_completeness.get("missing_scene_numbers")
+        missing_scene_numbers = missing_scene_numbers if isinstance(missing_scene_numbers, list) else []
+        if status == "incomplete" or missing_scene_numbers:
+            return {
+                "score_cap": 79,
+                "requires_human_review": True,
+                "approval_status": "needs_revision",
+                "issue": f"Media completeness failed: missing scene videos {missing_scene_numbers}",
+                "fallback_reason": "scene_video_outputs_incomplete",
+            }
+        return {}
+
+    def _derive_role_continuity_quality_gate(
+        self,
+        content_quality: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        diagnostics = content_quality.get("role_continuity_diagnostics")
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        status = str(diagnostics.get("status") or "").strip().lower()
+        fallback_reason = str(
+            diagnostics.get("fallback_reason") or content_quality.get("fallback_reason") or ""
+        ).strip()
+        drift_findings = content_quality.get("identity_drift_findings")
+        drift_findings = drift_findings if isinstance(drift_findings, list) else []
+        cap_failed = int(diagnostics.get("score_cap_when_failed") or 79)
+        cap_missing = int(diagnostics.get("score_cap_when_contract_missing") or 69)
+        cap_unverified = int(diagnostics.get("score_cap_when_unverified") or 89)
+
+        if status == "failed" or drift_findings:
+            return {
+                "score_cap": cap_failed,
+                "requires_human_review": True,
+                "approval_status": "conditional",
+                "issue": "Role continuity failed identity drift gate",
+                "fallback_reason": fallback_reason,
+            }
+
+        if status in {"not_evaluated", "visual_not_evaluated"}:
+            return {
+                "score_cap": cap_unverified,
+                "requires_human_review": True,
+                "approval_status": "conditional",
+                "issue": "Role continuity visual evidence not evaluated",
+                "fallback_reason": fallback_reason or "role_continuity_visual_evidence_missing",
+            }
+
+        if status in {"needs_human_review", "missing_contract", "unverifiable"} or fallback_reason:
+            return {
+                "score_cap": cap_missing,
+                "requires_human_review": True,
+                "approval_status": "needs_revision",
+                "issue": "Role continuity contract missing or unverifiable",
+                "fallback_reason": fallback_reason or "role_continuity_unverifiable",
+            }
+
+        return {}
     
     def _analyze_scene_breakdown(self, composition_timeline: List[Dict]) -> Dict[str, Any]:
         """Analyze the breakdown of scenes in the composition"""

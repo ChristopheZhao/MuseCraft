@@ -6,6 +6,7 @@ import pytest
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
 from app.agents.tools import register_default_tools
 from app.agents.base import AgentError
+from app.services.memory_provider import build_memory_services
 
 
 class StubLLM:
@@ -21,7 +22,7 @@ class StubLLM:
 @pytest.mark.asyncio
 async def test_draft_narration_generates_natural_text(monkeypatch):
     register_default_tools()
-    agent = VoiceSynthesizerAgent(llms={})
+    agent = VoiceSynthesizerAgent(llms={}, memory_services=build_memory_services())
     stub_llm = StubLLM("我在水草间轻盈穿梭，心里伏着对古卷的好奇。")
     monkeypatch.setattr(agent, "get_llm", lambda key: stub_llm)
 
