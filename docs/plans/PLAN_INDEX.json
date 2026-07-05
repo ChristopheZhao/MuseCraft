@@ -2917,18 +2917,82 @@
       "id": "PLAN-20260510-065",
       "title": "角色一致性与创作质量优化",
       "kind": "feature",
-      "status": "draft",
+      "status": "in_progress",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260510-065.md",
       "confirmed_by_user": false,
       "created_at": "2026-05-10T10:23:02Z",
-      "updated_at": "2026-05-10T10:24:52Z",
+      "updated_at": "2026-05-17T15:04:01Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-05-10T10:24:52Z",
           "text": "Created as a draft optimization plan after task 1080 video review exposed character identity drift and an over-optimistic quality score; owner assigned to MAS content contract/context/quality boundaries."
+        },
+        {
+          "at": "2026-05-10T10:58:08Z",
+          "text": "Started P0-A/P0-B: task 1080 minimal fixture and character identity contract design; prompt patch intentionally deferred."
+        },
+        {
+          "at": "2026-05-10T11:08:42Z",
+          "text": "Completed P0-A/P0-B baseline slice: added task 1080 minimal fixture, diagnostic boundary tests, character identity contract design, and config-owned context budget strategy; prompt patch still deferred."
+        },
+        {
+          "at": "2026-05-10T13:39:39Z",
+          "text": "Completed P0-C/P0-D contract-normalization slice: scene_info payload now carries normalized character_identity_bible/scene_character_locks, image/video projection share it, and consistency_tool consumes structured identity assets with explicit legacy fallback diagnostics."
+        },
+        {
+          "at": "2026-05-10T13:43:02Z",
+          "text": "Completed P0-E structured prompt-consumption slice: image/video prompt composers now format character scene_locks into role locks and preserve them in locked segments without provider-specific or task-specific prompt patching."
+        },
+        {
+          "at": "2026-05-10T13:51:05Z",
+          "text": "P1-A quality gate completed: role-continuity contract fields now reach quality checker; missing/unverifiable contract or drift findings cap score below Excellent."
+        },
+        {
+          "at": "2026-05-10T14:09:56Z",
+          "text": "Plan amended after architecture review: added carrier-alignment follow-up, scoring semantics split, and runtime/read-model projection before frontend UX work."
+        },
+        {
+          "at": "2026-05-10T14:25:15Z",
+          "text": "Completed P1-A2/P1-A3: quality checker now uses persisted scene_info_ref identity carrier when available, marks rebuilt WM contracts as missing same-carrier evidence, and separates contract_readiness from visual role_continuity_score."
+        },
+        {
+          "at": "2026-05-10T14:34:12Z",
+          "text": "P1-C completed: completion/runtime read-model now exposes compact role_continuity_diagnostics with status, review_status, score_cap, fallback_reason, human_review, and displayable role/scene summary; next focus P1-D E2E validation."
+        },
+        {
+          "at": "2026-05-10T14:56:53Z",
+          "text": "P1-D offline validation slice passed: task 1080 source video context normalizes into 6 scene_character_locks, same persisted video scene_info_ref carrier reaches consistency/prompt locks, quality caps at 89 with visual_evidence_verified=false, and runtime role_continuity_diagnostics stays compact without carrier internals. Provider-backed regeneration remains pending."
+        },
+        {
+          "at": "2026-05-10T15:03:54Z",
+          "text": "P1-B completed: reference image support is capability-gated at image generation schema; unsupported hard-passed references fail fast; prompt composer records reference_asset_diagnostics or passes selected reference only when schema supports it. Focus remains P1-D provider/manual validation or P2 UX diagnostics."
+        },
+        {
+          "at": "2026-05-16T16:40:32Z",
+          "text": "P2 UX diagnostics completed: frontend normalizes only summary_output.role_continuity_diagnostics into a bounded role-continuity read model and renders compact diagnostics in completed runtime, result overlay, review, and export surfaces. Focused TypeScript checks and runtime read-model validation passed; focused Jest integration command timed out in the current sandbox before reporting."
+        },
+        {
+          "at": "2026-05-16T17:20:10Z",
+          "text": "P1-D0 provider-backed validation produced evidence but failed full acceptance: fresh task 1082 / workflow 054219bc-837d-436a-a17b-35264be88dd9 generated 6 images and 5 videos; scene 6 hit provider timeout/account-overdue, runtime still completed, final output was 50.277s, quality score 85 conditional, and role continuity remained not_evaluated/unverified."
+        },
+        {
+          "at": "2026-05-16T17:33:59Z",
+          "text": "P1-E completed: fixed contract-boundary scene state binding so object mentions are not treated as owner evidence, and age variants are selected from focused scene facts rather than generic role biographies. Added/ran focused contract and quality regression tests."
+        },
+        {
+          "at": "2026-05-16T17:42:40Z",
+          "text": "P1-F completed: composer rejects incomplete scene video sets before composition; quality context projects media_completeness; quality assessment caps incomplete media at 79 with needs_revision. Related composer, quality, task1080, and character contract tests passed (42 passed)."
+        },
+        {
+          "at": "2026-05-17T13:18:21Z",
+          "text": "P1-G completed: added role_continuity_observation as a quality-boundary contract, projected it from WM into quality checker context, and made quality analysis consume explicit visual observations for passed/failed/needs-review role continuity. Related backend boundary tests passed (54 passed)."
+        },
+        {
+          "at": "2026-05-17T15:04:01Z",
+          "text": "P1-D clean provider validation completed after account recovery: fresh task 1083 / workflow d5c72a2d-b334-4995-ac6e-fe49eedb8970 generated 6/6 videos, composed storage/outputs/videos/mothers_day_final.mp4 (60.327s, 960x960, H.264/AAC), quality score 85 conditional, same-carrier character contract verified across image/video scene_info_ref, and role continuity correctly remains not_evaluated/unverified until explicit observation evidence is written."
         }
       ]
     }
