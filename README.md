@@ -56,16 +56,16 @@
 
 ### 前置要求
 
-- **Node.js** 16+ 
-- **Python** 3.8+
-- **uv** (推荐) 或 **pip** (传统方式)
+- **Node.js** 18+
+- **Python** 3.11（通过 **uv** 管理）
+- **uv**（后端依赖和测试的推荐入口）
 - **MySQL** 8.0+ (或 **PostgreSQL** 13+)
 - **Redis** 6+
 - **Docker** (可选，推荐)
 
-> **Windows用户建议**：推荐使用WSL2 (Windows Subsystem for Linux)，可获得最佳开发体验。WSL中的服务端口会自动转发到Windows宿主机。
+> **Windows 用户建议**：推荐使用 WSL2 (Ubuntu) 进行本地开发和测试；本仓库的后端命令默认按 WSL + uv 环境验证。
 
-### 🐳 Docker快速部署（推荐）
+### 🐳 Docker 后端服务栈
 
 ```bash
 # 克隆项目
@@ -74,16 +74,18 @@ cd short-video-maker
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env 文件，填入API密钥
+# 编辑 .env 文件，填入 API 密钥
 
-# 启动所有服务
-docker-compose up -d
+# 启动后端 API、PostgreSQL、Redis、Celery 等服务
+cd backend
+docker compose up -d
 
 # 访问应用
-# 前端: http://localhost:3000
 # 后端API: http://localhost:8000
 # API文档: http://localhost:8000/docs
 ```
+
+前端开发服务器仍在仓库根目录启动：`npm install && npm run dev`，默认地址为 `http://localhost:3000`。
 
 ### 📦 手动安装
 
@@ -145,40 +147,29 @@ docker run --name redis-short-video \
   -p 6379:6379 -d redis:7-alpine
 ```
 
-#### 2. 后端设置 (推荐使用uv)
+#### 2. 后端设置 (WSL + uv)
 
 ```bash
 cd backend
 
-# 方法1: 使用uv (推荐，更快更现代)
-# 自动安装uv并设置环境
-python scripts/setup_uv_environment.py
-
-# 或手动安装 uv
-curl -LsSf https://astral.sh/uv/install.sh | sh  # Linux/macOS
-# 或 Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+# 安装 uv（如尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 国内网络如果访问 astral / PyPI 较慢，可临时切到阿里源：
-python -m pip install -U uv -i https://mirrors.aliyun.com/pypi/simple
 export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
 
 # 根据 pyproject.toml 创建 3.11 环境并同步开发依赖
 uv sync --extra dev
 
-# 方法2: 传统pip方式
-pip install -r requirements.txt
-
 # 配置环境变量
 cp ../.env.example .env
-# 编辑.env文件，至少配置一个AI服务的API密钥
+# 编辑 .env 文件，至少配置一个 AI 服务的 API 密钥
 
 # 初始化数据库（确保MySQL已启动）
-python scripts/setup_database.py
+uv run python scripts/setup_database.py
 
-# 启动后端服务 (uv版本)
-python scripts/start_dev_uv.py
-# 或传统版本
-python scripts/start_dev.py
+# 启动后端服务
+uv run python scripts/start_dev_uv.py
 ```
 
 #### 3. 前端设置
@@ -202,9 +193,12 @@ npm run dev
 # 运行健康检查
 curl http://localhost:8000/health
 
-# 运行测试套件
-cd tests
-python run_all_tests.py --quick --mock
+# 前端基础检查（仓库根目录）
+npm run lint
+npm run type-check
+
+# 后端聚焦测试（仓库根目录）
+uv run --project backend pytest backend/tests/unit/test_runtime_session_service.py -q
 ```
 
 ## 🎮 使用指南
@@ -229,17 +223,19 @@ python run_all_tests.py --quick --mock
 ### 完整测试套件
 
 ```bash
-# 运行所有测试
-python tests/run_all_tests.py
+# 前端：lint、类型检查、Jest
+npm run lint
+npm run type-check
+npm test -- --runInBand
 
-# 运行特定测试
-python tests/run_all_tests.py --tests e2e integration
+# 后端：通过 uv 运行 pytest
+uv run --project backend pytest backend/tests/unit -q
 
-# 快速测试（跳过长时间测试）
-python tests/run_all_tests.py --quick
+# 后端：运行指定测试
+uv run --project backend pytest backend/tests/unit/test_runtime_session_service.py -q
 
-# 模拟模式（不调用真实API）
-python tests/run_all_tests.py --mock
+# 系统集成验证（仓库根目录 tests/）
+PYTHONPATH=backend:. uv run --project backend pytest tests/test_system_integration_validation.py -q
 ```
 
 ### 测试覆盖
@@ -380,7 +376,7 @@ AI_BATCH_SIZE=5
 
 ```bash
 # 查看应用日志
-docker-compose logs -f backend
+cd backend && docker compose logs -f api
 
 # 查看特定智能体日志
 grep "ConceptPlannerAgent" logs/app.log
@@ -448,19 +444,20 @@ short-video-maker/
 │   ├── app/api/            # API路由
 │   ├── app/models/         # 数据模型
 │   └── app/services/       # 业务服务
-├── tests/                   # 前端测试套件
+├── __tests__/               # 前端测试套件
 │   ├── e2e/               # 端到端测试
 │   ├── integration/       # 集成测试
 │   ├── performance/       # 性能测试
-│   └── ux/                # 用户体验测试
+│   └── accessibility/     # 无障碍测试
+├── tests/                   # 系统级 Python 验证测试
 ├── backend/tests/           # 后端测试套件
-└── docker-compose.yml       # Docker编排配置
+└── backend/docker-compose.yml # 后端 Docker 编排配置
 ```
 
 ### 开发工作流
 
 1. **Fork项目** 并创建功能分支
-2. **本地开发** 使用Docker环境
+2. **本地开发** 使用 WSL + uv；需要容器时使用 `backend/docker-compose.yml`
 3. **运行测试** 确保所有测试通过
 4. **代码审查** 提交Pull Request
 5. **自动部署** 合并后自动部署
