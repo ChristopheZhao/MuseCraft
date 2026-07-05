@@ -70,6 +70,7 @@ from .utils.memory_helpers import (
     write_shared_fact,
     read_shared_fact,
 )
+from .utils.artifacts import evaluate_scene_output_acceptance
 from .utils.media_runtime import build_local_public_url
 
 from ..events.execution import execution_context_var
@@ -83,6 +84,7 @@ from .video_composer import VideoComposerAgent
 from .quality_checker import QualityCheckerAgent
 from .tools.tool_registry import get_tool_registry
 from ..core.config import settings
+from ..core.prompt_manager import get_prompt_manager
 from ..core.video_config_manager import get_video_config
 
 
@@ -458,7 +460,7 @@ class OrchestratorAgent(BaseAgent):
             "resolution": workflow_data.get("resolution"),
             "target_resolution": workflow_data.get("target_resolution"),
         }
-        pm = self.prompt_manager
+        pm = getattr(self, "prompt_manager", None) or get_prompt_manager()
         try:
             agent_sys = self.get_system_instructions() or {}
             pr = agent_sys.get("primary_role") or "工作流编排器"
@@ -1410,6 +1412,12 @@ class OrchestratorAgent(BaseAgent):
         """Use a lightweight LLM + orchestrator_control tool to decide next step.
         Returns: 'proceed_next' | 'repeat_agent' | 'halt_workflow'
         """
+        def _decision_error(reason_code: str, message: str) -> AgentError:
+            return AgentError(
+                "orchestrator_decision_failed "
+                f"reason_code={reason_code}: {message}"
+            )
+
         # Build observation (concise, facts-only) from MAS WM (SoT)
         try:
             from .adapters.state.agent_outputs import assess_agent_delivery
@@ -1434,7 +1442,7 @@ class OrchestratorAgent(BaseAgent):
         # 使用模板生成系统指令（保持中立，不暴露工具/参数名）
         # 使用统一提示体系：优先读取 YAML 中 orchestrator 的系统指令；如不可用则回退到简短中立文案
         # Render decision prompts from templates
-        pm = self.prompt_manager
+        pm = getattr(self, "prompt_manager", None) or get_prompt_manager()
         try:
             agent_sys = self.get_system_instructions() or {}
             pr = agent_sys.get("primary_role") or "工作流编排器"
@@ -1476,9 +1484,31 @@ class OrchestratorAgent(BaseAgent):
             response_format={"type": "json_object"},
         )
 
-        if result.get("approach") == "function_call_plan" and result.get("tool_calls"):
-            exec_res = await self.execute_tool_calls(result["tool_calls"])  # 执行控制动作
+        if not isinstance(result, dict):
+            raise _decision_error(
+                "orchestrator_decision_invalid_envelope",
+                "llm_function_call returned a non-dict result",
+            )
+
+        approach = str(result.get("approach") or "").strip()
+        if approach == "function_call_plan":
+            tool_calls = result.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                raise _decision_error(
+                    "orchestrator_decision_missing",
+                    "function_call_plan returned no control tool calls",
+                )
+            exec_res = await self.execute_tool_calls(tool_calls)  # 执行控制动作
+            if not isinstance(exec_res, list) or not exec_res:
+                raise _decision_error(
+                    "orchestrator_decision_tool_failed",
+                    "control tool execution returned no result",
+                )
+            failed_calls: List[str] = []
             for call in exec_res:
+                if not isinstance(call, dict):
+                    failed_calls.append("non_dict_result")
+                    continue
                 tool_name = call.get("tool") or ""
                 if tool_name == "orchestrator_control_repeat_agent" and call.get("success"):
                     return "repeat_agent"
@@ -1486,12 +1516,30 @@ class OrchestratorAgent(BaseAgent):
                     return "halt_workflow"
                 if tool_name == "orchestrator_control_proceed_next" and call.get("success"):
                     return "proceed_next"
+                if not call.get("success"):
+                    failed_calls.append(
+                        f"{tool_name or '<unknown>'}:{call.get('error') or 'failed'}"
+                    )
+            if failed_calls:
+                raise _decision_error(
+                    "orchestrator_decision_tool_failed",
+                    "; ".join(failed_calls),
+                )
+            raise _decision_error(
+                "orchestrator_decision_unsupported_tool_result",
+                "control tool execution returned no recognized successful decision",
+            )
         # 无工具可用：尝试解析严格 JSON 文本决策
-        if result.get("approach") == "text_response":
+        if approach == "text_response":
             try:
                 content = (result.get("content") or "").strip()
                 import json as _json
 
+                if not content:
+                    raise _decision_error(
+                        "orchestrator_decision_missing",
+                        "text_response returned empty content",
+                    )
                 data = _json.loads(content) if content else {}
                 decision = str(data.get("decision") or "").strip()
                 rationale = str(data.get("rationale") or "").strip()
@@ -1506,11 +1554,26 @@ class OrchestratorAgent(BaseAgent):
                     pass
                 if decision in ("repeat_agent", "proceed_next", "halt_workflow"):
                     return decision
-            except Exception:
-                # 解析失败走默认
-                pass
-        # Default fallback: proceed
-        return "proceed_next"
+                if decision:
+                    raise _decision_error(
+                        "orchestrator_decision_invalid_action",
+                        f"unsupported decision: {decision}",
+                    )
+                raise _decision_error(
+                    "orchestrator_decision_missing",
+                    "text_response JSON did not include a supported decision",
+                )
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise _decision_error(
+                    "orchestrator_decision_parse_failed",
+                    str(exc),
+                ) from exc
+        raise _decision_error(
+            "orchestrator_decision_missing",
+            f"unsupported or missing decision approach: {approach or '<empty>'}",
+        )
 
     # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
 
@@ -1532,26 +1595,48 @@ class OrchestratorAgent(BaseAgent):
 
     def _is_image_step_completed(self, workflow_id: str) -> bool:
         """Gate condition for image generation step completion."""
-        try:
-            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
-            outputs = shared.get("scene_outputs.image", {}) if shared is not None else {}
-            if isinstance(outputs, dict) and outputs:
-                return True
-        except Exception:
-            pass
-        self.logger.warning("Image step not completed: no scene_outputs.image found in MAS WM")
+        contract = evaluate_scene_output_acceptance(
+            kind="image",
+            workflow_id=str(workflow_id),
+            agent_memory=None,
+            service=self.short_term_service,
+        )
+        if contract.get("accepted") is True:
+            return True
+        self.logger.warning(
+            "Image step not completed by scene-output acceptance contract: %s",
+            {
+                "reason_code": contract.get("reason_code"),
+                "expected_scene_numbers": contract.get("expected_scene_numbers"),
+                "accepted_scene_numbers": contract.get("accepted_scene_numbers"),
+                "missing_scene_numbers": contract.get("missing_scene_numbers"),
+                "failed_scene_numbers": contract.get("failed_scene_numbers"),
+                "rejected_scene_outputs": contract.get("rejected_scene_outputs"),
+            },
+        )
         return False
 
     def _is_video_step_completed(self, workflow_id: str) -> bool:
         """Gate condition for video generation step completion."""
-        try:
-            shared = get_mas_working_memory(str(workflow_id), service=self.short_term_service)
-            outputs = shared.get("scene_outputs.video", {}) if shared is not None else {}
-            if isinstance(outputs, dict) and outputs:
-                return True
-        except Exception:
-            pass
-        self.logger.warning("Video step not completed: no scene_outputs.video found in MAS WM")
+        contract = evaluate_scene_output_acceptance(
+            kind="video",
+            workflow_id=str(workflow_id),
+            agent_memory=None,
+            service=self.short_term_service,
+        )
+        if contract.get("accepted") is True:
+            return True
+        self.logger.warning(
+            "Video step not completed by scene-output acceptance contract: %s",
+            {
+                "reason_code": contract.get("reason_code"),
+                "expected_scene_numbers": contract.get("expected_scene_numbers"),
+                "accepted_scene_numbers": contract.get("accepted_scene_numbers"),
+                "missing_scene_numbers": contract.get("missing_scene_numbers"),
+                "failed_scene_numbers": contract.get("failed_scene_numbers"),
+                "rejected_scene_outputs": contract.get("rejected_scene_outputs"),
+            },
+        )
         return False
 
     async def _store_creative_guidance_from_output(self, agent_output: Dict[str, Any]):
@@ -1798,7 +1883,7 @@ class OrchestratorAgent(BaseAgent):
             }
 
         llm = self.get_llm("plan")
-        pm = self.prompt_manager
+        pm = getattr(self, "prompt_manager", None) or get_prompt_manager()
         try:
             agent_sys = self.get_system_instructions() or {}
             pr = agent_sys.get("primary_role") or "工作流编排器"
@@ -2105,7 +2190,7 @@ class OrchestratorAgent(BaseAgent):
             available_agents = [
                 atype.value for atype in candidate_agents if isinstance(atype, AgentType)
             ]
-            pm = self.prompt_manager
+            pm = getattr(self, "prompt_manager", None) or get_prompt_manager()
             try:
                 agent_sys = self.get_system_instructions() or {}
                 pr = agent_sys.get("primary_role") or "工作流编排器"

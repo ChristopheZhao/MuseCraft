@@ -75,12 +75,12 @@ def test_progress_read_model_uses_accepted_scene_outputs_with_provenance(monkeyp
     services = build_memory_services()
     shared = ensure_mas_working_memory("wf-video-accepted", service=services.short_term)
     shared.put(
-        "scene_outputs.video",
-        {
-            1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-            2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
-        },
-    )
+            "scene_outputs.video",
+            {
+                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
+                2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
+            },
+        )
 
     monkeypatch.setattr(
         "app.services.scene_info_reference_service.load_scene_info_payload",
@@ -170,7 +170,7 @@ def test_video_generator_completion_gate_accepts_when_all_deliveries_exist():
         "scene_outputs.video",
         {
             1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-            2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
+            2: {"scene_number": 2, "video_path": "/tmp/scene-2.mp4"},
         },
     )
 

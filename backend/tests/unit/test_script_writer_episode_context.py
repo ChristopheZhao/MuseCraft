@@ -132,12 +132,46 @@ def test_script_writer_uses_assembler_static_context_for_scene_inputs():
     result = asyncio.run(agent._execute_impl(task=None, input_data=input_data, db=None))
 
     assert result["success"] is True
+    assert result["execution_boundary"] == {
+        "mode": "deterministic_mas_stage",
+        "native_agent": False,
+        "reason_code": "script_writer_deterministic_tool_sequence",
+    }
+    assert result["orchestration_report"]["boundary_event"] == "scene_script_completed"
+    assert result["orchestration_report"]["gate_triggers"] == []
+    assert result["orchestration_report"]["artifacts"] == [
+        {"kind": "shared_fact", "ref": "project.scene_scripts"}
+    ]
+    assert (
+        result["orchestration_report"]["reflection"]["reported_hints"]
+        == ["script_writer_deterministic_tool_sequence"]
+    )
     assert captured["workflow_state_id"] == workflow_id
     assert captured["concept_plan"]["overview"] == "凡人修仙传2预告"
     assert len(captured["scenes"]) == 1
     assert isinstance(captured["scenes"][0], VideoSceneSnapshot)
     assert captured["scenes"][0].scene_number == 1
     assert captured["scenes"][0].visual_description == "韩立立于山巅，衣袍翻飞"
+
+
+def test_script_writer_partial_result_reports_deterministic_boundary():
+    agent = object.__new__(ScriptWriterAgent)
+
+    result = agent._attach_deterministic_boundary_report(
+        {
+            "success": False,
+            "scenes_generated": 1,
+            "total_scenes": 2,
+            "failed_voice_scenes": [{"scene_number": 2, "reason": "voice_plan_missing"}],
+        }
+    )
+
+    assert result["execution_boundary"]["mode"] == "deterministic_mas_stage"
+    report = result["orchestration_report"]
+    assert report["status"] == "partial"
+    assert report["boundary_event"] == "scene_script_completed"
+    assert report["reflection"]["completion_state"] == "partial"
+    assert report["reflection"]["reported_gaps"] == ["scene_script_generation_incomplete"]
 
 
 def test_script_writer_ignores_raw_scene_context_without_assembler_boundary():

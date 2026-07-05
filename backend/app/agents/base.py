@@ -436,55 +436,10 @@ class BaseAgent(ABC):
             self.logger.error("Artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
             return None
 
-    @staticmethod
-    def _normalize_orchestration_completion_state(value: Any, *, success: bool) -> str:
-        raw = str(value or "").strip().lower()
-        if raw in {"complete", "completed"}:
-            return "completed"
-        if raw in {"partial", "blocked", "error", "failed", "max_iter_reached"}:
-            return raw
-        return "completed" if success else "partial"
-
-    def _build_default_orchestration_report(
-        self,
-        output_data: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        success = bool(output_data.get("success", True))
-        completed_reason = str(
-            output_data.get("completed_reason")
-            or output_data.get("loop_end_reason")
-            or ""
-        ).strip()
-        reflection_summary = str(output_data.get("reflection_summary") or "").strip()
-        completion_state = self._normalize_orchestration_completion_state(
-            output_data.get("subtask_state"),
-            success=success,
-        )
-        reflection: Dict[str, Any] = {
-            "completion_state": completion_state,
-            "reported_gaps": [completed_reason] if completed_reason and not success else [],
-            "reported_hints": [],
-        }
-        if reflection_summary:
-            reflection["summary"] = reflection_summary
-        return {
-            "status": "completed" if success else "partial",
-            "boundary_event": "",
-            "gate_triggers": [],
-            "artifacts": [],
-            "reflection": reflection,
-        }
-
     def _ensure_orchestration_report(self, output_data: Any) -> Any:
-        if self.agent_type == AgentType.ORCHESTRATOR or not isinstance(output_data, dict):
-            return output_data
-        if isinstance(output_data.get("orchestration_report"), dict):
-            return output_data
-        enriched_output = dict(output_data)
-        enriched_output["orchestration_report"] = self._build_default_orchestration_report(
-            enriched_output
-        )
-        return enriched_output
+        # Boundary reports are agent-owned protocol facts. Do not synthesize one here;
+        # OrchestrationProtocol must see and reject missing reports explicitly.
+        return output_data
     
     async def execute(
         self,

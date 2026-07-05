@@ -109,6 +109,78 @@ def _build_video_wm(total_scenes, scene_records):
     )
 
 
+def _build_orchestrator_gate_agent(shared_facts):
+    agent = object.__new__(OrchestratorAgent)
+    agent.agent_name = "orchestrator"
+    agent.logger = logging.getLogger("test.orchestrator.gate")
+    shared_store = _FakeSharedMemoryStore(shared_facts)
+    agent._memory_services = SimpleNamespace(short_term=_FakeShortTermService(shared_store))
+    return agent
+
+
+def test_image_step_completion_requires_all_expected_scene_outputs():
+    agent = _build_orchestrator_gate_agent(
+        {
+            "scene_overview": {
+                "scenes": [{"scene_number": 1}, {"scene_number": 2}],
+            },
+            "scene_outputs.image": {
+                1: {"scene_number": 1, "image_url": "https://example.com/scene-1.png"},
+            },
+        }
+    )
+
+    assert agent._is_image_step_completed("wf-image-incomplete") is False
+
+
+def test_image_step_completion_accepts_scene_output_contract():
+    agent = _build_orchestrator_gate_agent(
+        {
+            "scene_overview": {
+                "scenes": [{"scene_number": 1}, {"scene_number": 2}],
+            },
+            "scene_outputs.image": {
+                1: {"scene_number": 1, "image_url": "https://example.com/scene-1.png"},
+                2: {"scene_number": 2, "image_path": "/tmp/scene-2.png"},
+            },
+        }
+    )
+
+    assert agent._is_image_step_completed("wf-image-complete") is True
+
+
+def test_video_step_completion_rejects_url_only_scene_outputs():
+    agent = _build_orchestrator_gate_agent(
+        {
+            "scene_overview": {
+                "scenes": [{"scene_number": 1}, {"scene_number": 2}],
+            },
+            "scene_outputs.video": {
+                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
+                2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
+            },
+        }
+    )
+
+    assert agent._is_video_step_completed("wf-video-url-only") is False
+
+
+def test_video_step_completion_accepts_scene_output_contract():
+    agent = _build_orchestrator_gate_agent(
+        {
+            "scene_overview": {
+                "scenes": [{"scene_number": 1}, {"scene_number": 2}],
+            },
+            "scene_outputs.video": {
+                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
+                2: {"scene_number": 2, "video_path": "/tmp/scene-2.mp4"},
+            },
+        }
+    )
+
+    assert agent._is_video_step_completed("wf-video-complete") is True
+
+
 def _make_gate_result(**facts):
     merged_facts = {
         "records": 0,
@@ -253,8 +325,10 @@ def _build_main_loop_runtime_harness(
         publish_script_review_boundary_sync=lambda **kwargs: {},
     )
     agent._workflow_completion_adapter = SimpleNamespace(
+        build_persistence_payload=lambda workflow_id: {},
         publish_completed=_async_return_json({"final_video_url": ""}),
         publish_failed=_async_return_json({}),
+        build_runtime_summary_output=lambda **kwargs: dict(kwargs),
     )
     agent._last_audio_route_payload = {}
     video_agent_output = video_output or {
@@ -354,8 +428,10 @@ def _build_main_loop_runtime_harness(
     agent._is_image_step_completed = lambda workflow_id: False
     agent._is_video_step_completed = lambda workflow_id: False
     agent._workflow_completion_adapter = SimpleNamespace(
+        build_persistence_payload=lambda workflow_id: {},
         publish_completed=_publish_completed,
         publish_failed=_publish_failed,
+        build_runtime_summary_output=lambda **kwargs: dict(kwargs),
     )
 
     return agent, _FakeWorkflowTask("wf-mainloop-1"), runtime_calls, state_calls
@@ -748,6 +824,74 @@ def test_orchestrator_runtime_boundary_cycle_fails_fast_on_protocol_violation():
                 conditional_task_specs={},
             )
         )
+
+
+def _build_legacy_decision_agent(monkeypatch):
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.legacy_decision")
+    agent._memory_services = SimpleNamespace(short_term=object())
+    agent.prompt_manager = SimpleNamespace(
+        render_template=lambda *args, **kwargs: "template"
+    )
+    agent.get_system_instructions = lambda: {}
+    monkeypatch.setattr(
+        "app.agents.adapters.state.agent_outputs.assess_agent_delivery",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.agents.adapters.state.mas_state.build_mas_state_view",
+        lambda *args, **kwargs: {},
+    )
+    return agent
+
+
+def test_legacy_orchestrator_decision_rejects_malformed_json(monkeypatch):
+    agent = _build_legacy_decision_agent(monkeypatch)
+
+    async def _llm_function_call(**_kwargs):
+        return {"approach": "text_response", "content": "not-json"}
+
+    agent.llm_function_call = _llm_function_call
+
+    with pytest.raises(AgentError, match="orchestrator_decision_parse_failed"):
+        asyncio.run(agent._decide_next_step_llm(AgentType.VIDEO_GENERATOR, "wf-decision-1"))
+
+
+def test_legacy_orchestrator_decision_rejects_failed_control_tool(monkeypatch):
+    agent = _build_legacy_decision_agent(monkeypatch)
+
+    async def _llm_function_call(**_kwargs):
+        return {
+            "approach": "function_call_plan",
+            "tool_calls": [{"function": "orchestrator_control.proceed_next", "arguments": {}}],
+        }
+
+    async def _execute_tool_calls(_calls):
+        return [
+            {
+                "tool": "orchestrator_control_proceed_next",
+                "success": False,
+                "error": "synthetic control failure",
+            }
+        ]
+
+    agent.llm_function_call = _llm_function_call
+    agent.execute_tool_calls = _execute_tool_calls
+
+    with pytest.raises(AgentError, match="orchestrator_decision_tool_failed"):
+        asyncio.run(agent._decide_next_step_llm(AgentType.VIDEO_GENERATOR, "wf-decision-2"))
+
+
+def test_legacy_orchestrator_decision_rejects_empty_result(monkeypatch):
+    agent = _build_legacy_decision_agent(monkeypatch)
+
+    async def _llm_function_call(**_kwargs):
+        return {"approach": "function_call_plan", "tool_calls": []}
+
+    agent.llm_function_call = _llm_function_call
+
+    with pytest.raises(AgentError, match="orchestrator_decision_missing"):
+        asyncio.run(agent._decide_next_step_llm(AgentType.VIDEO_GENERATOR, "wf-decision-3"))
 
 
 def test_orchestrator_runtime_boundary_cycle_skips_runtime_llm_without_gate_event():

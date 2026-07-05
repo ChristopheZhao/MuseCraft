@@ -17,8 +17,10 @@ from app.models import (
 )
 from app.services.published_deliverable_service import (
     PublishedDeliverableService,
+    PublishedDeliverablePayloadError,
     build_deliverable_ref,
     get_published_deliverable_ref,
+    load_published_payload,
 )
 from app.services.published_deliverable_adapter import (
     build_script_deliverable_payload,
@@ -113,6 +115,59 @@ def _build_continuation_checkpoint():
         attempt_id=1,
         decision_id=None,
     )
+
+
+def test_load_published_payload_reports_missing_file_reason_code(tmp_path):
+    missing_ref = tmp_path / "missing.json"
+
+    with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
+        load_published_payload(str(missing_ref))
+
+    assert excinfo.value.reason_code == "published_payload_missing"
+
+
+def test_load_published_payload_reports_invalid_json_reason_code(tmp_path):
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
+        load_published_payload(str(payload_path))
+
+    assert excinfo.value.reason_code == "published_payload_json_invalid"
+
+
+def test_load_published_payload_rejects_non_dict_contract(tmp_path):
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(json.dumps(["not", "dict"]), encoding="utf-8")
+
+    with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
+        load_published_payload(str(payload_path))
+
+    assert excinfo.value.reason_code == "published_payload_contract_invalid"
+
+
+def test_continuation_checkpoint_rejects_unknown_task_spec_keys():
+    with pytest.raises(ValueError, match="continuation_spec_unknown_keys: extra"):
+        OrchestrationStateAdapter.build_continuation_checkpoint(
+            task_specs={AgentType.SCRIPT_WRITER: {"run": True, "extra": "discarded"}},
+            conditional_task_specs={},
+            candidate_agents=[AgentType.SCRIPT_WRITER],
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="script",
+            attempt_id=1,
+            decision_id=None,
+        )
+
+
+def test_continuation_checkpoint_rejects_unknown_checkpoint_keys():
+    checkpoint = _build_continuation_checkpoint()
+    checkpoint["extra"] = "discarded"
+
+    with pytest.raises(ValueError, match="continuation_checkpoint_unknown_keys: extra"):
+        OrchestrationStateAdapter.validate_continuation_checkpoint(
+            checkpoint,
+            require_decision_id=False,
+        )
 
 
 def test_publish_script_deliverable_persists_payload_without_direct_wm_projection(sync_db, tmp_path, monkeypatch):

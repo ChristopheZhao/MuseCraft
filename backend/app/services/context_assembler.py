@@ -27,6 +27,7 @@ from .published_deliverable_adapter import (
 )
 from .published_deliverable_service import (
     PublishedDeliverableService,
+    PublishedDeliverablePayloadError,
     build_deliverable_ref,
     get_published_deliverable_ref,
     get_published_deliverables,
@@ -147,14 +148,28 @@ class ContextContractAssembler:
                 )
             return receipt
 
-        payload = load_published_payload(payload_ref)
-        if not isinstance(payload, dict):
+        try:
+            payload = load_published_payload(payload_ref)
+        except PublishedDeliverablePayloadError as exc:
             receipt["status"] = "payload_unavailable"
+            receipt["reason_code"] = exc.reason_code
             if required:
                 raise AgentError(
                     "Published deliverable payload unavailable: "
                     f"workflow_id={workflow_state_id} node_key={node_key} "
-                    f"payload_ref={payload_ref} source={source} status=payload_unavailable"
+                    f"payload_ref={payload_ref} source={source} "
+                    f"status=payload_unavailable reason_code={exc.reason_code}"
+                ) from exc
+            return receipt
+        if not isinstance(payload, dict):
+            receipt["status"] = "payload_unavailable"
+            receipt["reason_code"] = "published_payload_empty"
+            if required:
+                raise AgentError(
+                    "Published deliverable payload unavailable: "
+                    f"workflow_id={workflow_state_id} node_key={node_key} "
+                    f"payload_ref={payload_ref} source={source} "
+                    "status=payload_unavailable reason_code=published_payload_empty"
                 )
             return receipt
 

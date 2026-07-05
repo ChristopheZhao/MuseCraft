@@ -10,6 +10,7 @@ except Exception:  # pragma: no cover - import fallback for tests
     settings = None  # type: ignore
 
 from .memory_helpers import get_mas_working_memory
+from .artifacts import evaluate_scene_output_acceptance
 
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
@@ -324,37 +325,49 @@ def _extract_scene_output_delivery_receipts(
             detail=key,
         )
 
+    contract = evaluate_scene_output_acceptance(
+        kind=kind,
+        workflow_id=str(workflow_state_id),
+        agent_memory=None,
+        shared_memory=shared_memory,
+        service=service,
+        require_expected_scenes=False,
+    )
     receipts: List[Dict[str, Any]] = []
-    skipped_video_reasons: List[str] = []
-    for record in bucket.values():
-        if not isinstance(record, dict):
+    for item in contract.get("accepted_receipts") or []:
+        if not isinstance(item, dict):
             continue
-        scene_number = _coerce_int(record.get("scene_number"))
+        scene_number = _coerce_int(item.get("scene_number"))
         if scene_number is None:
             continue
-        artifact_url = str(record.get(f"{kind}_url") or "").strip()
-        artifact_path = str(record.get(f"{kind}_path") or "").strip()
-        if kind == "video":
-            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-            storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
-            storage_status = str(storage.get("status") or "").strip().lower() if storage else ""
-            if storage_status == "failed":
-                skipped_video_reasons.append(f"scene={scene_number}:storage_failed")
-                continue
-            if artifact_url and not artifact_path:
-                skipped_video_reasons.append(f"scene={scene_number}:missing_local_path")
-                continue
-        if not artifact_url and not artifact_path:
-            continue
-        receipts.append(
-            _build_delivery_receipt(
-                scene_number=scene_number,
-                surface=key,
-            )
+        receipt = _build_delivery_receipt(
+            scene_number=scene_number,
+            surface=key,
         )
+        accepted_at = str(item.get("accepted_at") or "").strip()
+        if accepted_at:
+            receipt["accepted_at"] = accepted_at
+        receipts.append(receipt)
     receipts.sort(key=lambda item: item.get("scene_number") or 0)
     diagnostic = None
-    if kind == "video" and skipped_video_reasons:
+    if kind == "video" and contract.get("rejected_scene_outputs"):
+        reason_aliases = {
+            "scene_output_missing_local_path": "missing_local_path",
+            "scene_output_storage_failed": "storage_failed",
+            "scene_output_artifact_ref_missing": "missing_artifact_ref",
+            "scene_output_status_failed": "status_failed",
+            "scene_output_scene_number_missing": "scene_number_missing",
+        }
+        skipped_video_reasons: List[str] = []
+        for item in contract.get("rejected_scene_outputs") or []:
+            if not isinstance(item, dict):
+                continue
+            scene_number = item.get("scene_number", "unknown")
+            alias = reason_aliases.get(
+                str(item.get("reason_code") or ""),
+                str(item.get("reason_code") or "not_accepted"),
+            )
+            skipped_video_reasons.append(f"scene={scene_number}:{alias}")
         diagnostic = _build_progress_diagnostic(
             reason="video_scene_outputs_not_accepted",
             detail=",".join(skipped_video_reasons[:5]),

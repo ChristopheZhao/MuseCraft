@@ -36,6 +36,29 @@ class ImageGeneratorAgent(ReActAgent):
             llms=llms,
             memory_services=memory_services,
         )
+
+    def _build_image_orchestration_report(
+        self,
+        *,
+        status: str,
+        completion_state: str,
+        completed_count: int,
+        failed_count: int,
+        reported_gaps: List[str] | None = None,
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "boundary_event": "scene_image_completed",
+            "gate_triggers": [],
+            "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.image"}],
+            "reflection": {
+                "completion_state": completion_state,
+                "reported_gaps": list(reported_gaps or []),
+                "reported_hints": [],
+                "completed_scene_count": int(completed_count),
+                "failed_scene_count": int(failed_count),
+            },
+        }
     # 覆盖基类的上下文注入：本 Agent 交给通用 FC 逻辑处理上下文提示
     def build_react_context_messages(self) -> List[Dict[str, Any]]:
         return []
@@ -181,9 +204,42 @@ class ImageGeneratorAgent(ReActAgent):
         result = dict(final_action_result or {})
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = finals_failed
+        result["orchestration_report"] = self._build_image_orchestration_report(
+            status="completed",
+            completion_state="completed",
+            completed_count=len(finals),
+            failed_count=len(finals_failed),
+        )
         # Orchestrator 的策略优先读取 subtask_state；成功收尾时显式标记
         result.setdefault("subtask_state", "complete")
         result.setdefault("loop_end_reason", "task_complete")
+        return result
+
+    async def _finalize_incomplete_results(self, context: Dict[str, Any], task: Task) -> Dict[str, Any]:
+        result = await super()._finalize_incomplete_results(context, task)
+        wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        shared = None
+        try:
+            if wf_id:
+                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
+        except Exception:
+            shared = None
+        finals, finals_failed = finalize_scene_outputs(
+            kind="image",
+            workflow_id=str(wf_id) if wf_id else None,
+            agent_memory=self.wm,
+            shared_memory=shared,
+            service=self.short_term_service,
+        )
+        result["final_completed_scenes"] = finals
+        result["final_failed_scenes"] = finals_failed
+        result["orchestration_report"] = self._build_image_orchestration_report(
+            status="partial",
+            completion_state=str(result.get("subtask_state") or "partial"),
+            completed_count=len(finals),
+            failed_count=len(finals_failed),
+            reported_gaps=["scene_image_generation_incomplete"],
+        )
         return result
     
     @emit_progress_snapshot

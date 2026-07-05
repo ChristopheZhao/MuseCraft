@@ -26,6 +26,18 @@ class OrchestrationStateAdapter:
         "run",
         "conditional_task_id",
         "trigger",
+        "scope",
+        "fallback_used",
+    )
+    _CONTINUATION_ALLOWED_CHECKPOINT_FIELDS = (
+        "version",
+        "anchor_type",
+        "node_key",
+        "attempt_id",
+        "decision_id",
+        "candidate_agents",
+        "task_specs",
+        "conditional_task_specs",
     )
     _FORBIDDEN_WORKFLOW_CONTROL_PREFIXES = (
         "workflow.session.",
@@ -172,11 +184,23 @@ class OrchestrationStateAdapter:
             normalized["conditional_task_id"] = str(spec.get("conditional_task_id"))
         if spec.get("trigger") is not None:
             normalized["trigger"] = str(spec.get("trigger"))
+        if "scope" in spec:
+            raw_scope = spec.get("scope")
+            if raw_scope is None:
+                normalized["scope"] = {}
+            elif isinstance(raw_scope, dict):
+                normalized["scope"] = dict(raw_scope)
+            else:
+                raise ValueError("Continuation spec scope must be a dict")
+        if "fallback_used" in spec:
+            normalized["fallback_used"] = bool(spec.get("fallback_used"))
 
         unknown_keys = set(spec.keys()) - set(cls._CONTINUATION_ALLOWED_SPEC_FIELDS)
         if unknown_keys:
-            # Ignore extra keys at the checkpoint boundary to keep the stored contract minimal.
-            pass
+            raise ValueError(
+                "continuation_spec_unknown_keys: "
+                + ",".join(sorted(str(key) for key in unknown_keys))
+            )
         return normalized
 
     @classmethod
@@ -260,6 +284,15 @@ class OrchestrationStateAdapter:
     ) -> Dict[str, Any]:
         if not isinstance(checkpoint, dict):
             raise ValueError("Continuation checkpoint must be a dict")
+
+        unknown_checkpoint_keys = set(checkpoint.keys()) - set(
+            cls._CONTINUATION_ALLOWED_CHECKPOINT_FIELDS
+        )
+        if unknown_checkpoint_keys:
+            raise ValueError(
+                "continuation_checkpoint_unknown_keys: "
+                + ",".join(sorted(str(key) for key in unknown_checkpoint_keys))
+            )
 
         raw_version = checkpoint.get("version")
         if raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:

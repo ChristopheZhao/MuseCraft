@@ -113,6 +113,7 @@ class QualityCheckerAgent(BaseAgent):
         db.commit()
         
         output_data = {
+            "success": True,
             "quality_score": quality_assessment["overall_score"],
             "quality_grade": quality_assessment["quality_grade"],
             "requires_human_review": quality_assessment["requires_human_review"],
@@ -123,6 +124,18 @@ class QualityCheckerAgent(BaseAgent):
             "recommendations": quality_assessment["recommendations"],
             "approval_status": quality_assessment["approval_status"],
             "input_diagnostics": context_diagnostics,
+            "orchestration_report": {
+                "status": "completed",
+                "boundary_event": "quality_check_completed",
+                "gate_triggers": [],
+                "artifacts": [{"kind": "quality_report", "ref": "quality_assessment"}],
+                "reflection": {
+                    "completion_state": "completed",
+                    "reported_gaps": [],
+                    "reported_hints": [],
+                    "summary": f"quality_score={quality_assessment['overall_score']}",
+                },
+            },
         }
         
         await self._update_progress(100, "Quality check completed", db)

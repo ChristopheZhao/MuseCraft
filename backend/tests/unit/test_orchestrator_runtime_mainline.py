@@ -99,6 +99,24 @@ class _FlakyAgent:
         return dict(self._success_output)
 
 
+def _fake_report(boundary_event: str, artifact_ref: str) -> dict:
+    return {
+        "status": "completed",
+        "boundary_event": boundary_event,
+        "gate_triggers": [],
+        "artifacts": [{"kind": "shared_fact", "ref": artifact_ref}],
+        "reflection": {
+            "completion_state": "completed",
+            "reported_gaps": [],
+            "reported_hints": [],
+        },
+    }
+
+
+def _runtime_summary_stub(**kwargs):
+    return dict(kwargs)
+
+
 class _QueuedPlanLLM:
     def __init__(self, responses):
         self._responses = list(responses)
@@ -305,6 +323,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
         },
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
+        build_runtime_summary_output=_runtime_summary_stub,
     )
     agent._get_video_audio_capability = lambda: {
         "provider": "",
@@ -350,7 +369,13 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent.agents = {
         AgentType.CONCEPT_PLANNER: _FakeAgent(
             "concept_planner",
-            {"concept_plan": {"scenes": [{"scene_number": 1}]}},
+            {
+                "concept_plan": {"scenes": [{"scene_number": 1}]},
+                "orchestration_report": _fake_report(
+                    "concept_plan_completed",
+                    "project.concept_plan",
+                ),
+            },
             call_log["concept_planner"],
         ),
         AgentType.SCRIPT_WRITER: _FakeAgent(
@@ -359,12 +384,22 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
                 "scenes_generated": 1,
                 "total_scenes": 1,
                 "script_results": {"scripts": {"1": {"script_text": "Scene 1 approved script"}}},
+                "orchestration_report": _fake_report(
+                    "scene_script_completed",
+                    "project.scene_scripts",
+                ),
             },
             call_log["script_writer"],
         ),
         AgentType.IMAGE_GENERATOR: _FakeAgent(
             "image_generator",
-            {"success": True},
+            {
+                "success": True,
+                "orchestration_report": _fake_report(
+                    "scene_image_completed",
+                    "scene_outputs.image",
+                ),
+            },
             call_log["image_generator"],
         ),
     }
@@ -430,6 +465,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
         },
         publish_completed=_async_return({"final_video_url": "https://example.com/final.mp4"}),
         publish_failed=_async_return({}),
+        build_runtime_summary_output=_runtime_summary_stub,
     )
     agent._get_video_audio_capability = lambda: {
         "provider": "",
@@ -453,7 +489,13 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     agent.agents = {
         AgentType.CONCEPT_PLANNER: _FakeAgent(
             "concept_planner",
-            {"concept_plan": {"scenes": [{"scene_number": 1}]}},
+            {
+                "concept_plan": {"scenes": [{"scene_number": 1}]},
+                "orchestration_report": _fake_report(
+                    "concept_plan_completed",
+                    "project.concept_plan",
+                ),
+            },
             call_log["concept_planner"],
         ),
         AgentType.SCRIPT_WRITER: _FakeAgent(
@@ -462,17 +504,33 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
                 "scenes_generated": 1,
                 "total_scenes": 1,
                 "script_results": {"scripts": {"1": {"script_text": "Scene 1 approved script"}}},
+                "orchestration_report": _fake_report(
+                    "scene_script_completed",
+                    "project.scene_scripts",
+                ),
             },
             call_log["script_writer"],
         ),
         AgentType.IMAGE_GENERATOR: _FakeAgent(
             "image_generator",
-            {"success": True},
+            {
+                "success": True,
+                "orchestration_report": _fake_report(
+                    "scene_image_completed",
+                    "scene_outputs.image",
+                ),
+            },
             call_log["image_generator"],
         ),
         AgentType.VIDEO_GENERATOR: _FakeAgent(
             "video_generator",
-            {"success": True},
+            {
+                "success": True,
+                "orchestration_report": _fake_report(
+                    "scene_video_completed",
+                    "scene_outputs.video",
+                ),
+            },
             [],
         ),
     }
@@ -1671,6 +1729,10 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
                 "scenes_generated": 1,
                 "total_scenes": 1,
                 "script_results": {"scripts": {"1": {"script_text": "Scene 1 approved script"}}},
+                "orchestration_report": _fake_report(
+                    "scene_script_completed",
+                    "project.scene_scripts",
+                ),
             },
             calls=call_log["script_writer"],
         )

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 from ..memory.short_term.working_memory import WorkingMemory
 from ..memory.config.scene_output_schema import load_scene_output_schema
@@ -209,6 +209,217 @@ def collect_scene_outputs(
         results.append(entry)
     results.sort(key=lambda item: item.get("scene_number") or 0)
     return results
+
+
+def _sorted_scene_numbers(values: Optional[Iterable[Any]]) -> List[int]:
+    scene_numbers: set[int] = set()
+    for value in values or []:
+        scene_number = coerce_scene_number(value)
+        if scene_number is not None:
+            scene_numbers.add(scene_number)
+    return sorted(scene_numbers)
+
+
+def _scene_numbers_from_overview(overview: Optional[Dict[str, Any]]) -> List[int]:
+    if not isinstance(overview, dict):
+        return []
+    scenes = overview.get("scenes")
+    if not isinstance(scenes, list):
+        return []
+    return _sorted_scene_numbers(
+        scene.get("scene_number") for scene in scenes if isinstance(scene, dict)
+    )
+
+
+def _extract_storage_diagnostic(record: Dict[str, Any]) -> Dict[str, Any]:
+    storage = record.get("storage")
+    if isinstance(storage, dict):
+        return storage
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict):
+        storage = metadata.get("storage")
+        if isinstance(storage, dict):
+            return storage
+    return {}
+
+
+def _reject_scene_output(
+    *,
+    scene_number: Optional[int],
+    reason_code: str,
+    detail: str = "",
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"reason_code": reason_code}
+    if scene_number is not None:
+        payload["scene_number"] = scene_number
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+def _accept_scene_output_record(
+    *,
+    kind: str,
+    record: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    scene_number = coerce_scene_number(record.get("scene_number"))
+    if scene_number is None:
+        return None, _reject_scene_output(
+            scene_number=None,
+            reason_code="scene_output_scene_number_missing",
+        )
+
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    status = str(record.get("status") or metadata.get("status") or "").strip().lower()
+    if status in {"failed", "error", "rejected", "blocked"}:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_status_failed",
+            detail=status,
+        )
+
+    artifact_url = str(record.get(f"{kind}_url") or "").strip()
+    artifact_path = str(record.get(f"{kind}_path") or "").strip()
+    storage = _extract_storage_diagnostic(record)
+    storage_status = str(storage.get("status") or "").strip().lower() if storage else ""
+    if storage_status == "failed":
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_storage_failed",
+            detail=str(storage.get("fallback_reason") or "storage_failed"),
+        )
+    if kind == "video" and artifact_url and not artifact_path:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_missing_local_path",
+        )
+    if not artifact_path and not artifact_url:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_artifact_ref_missing",
+        )
+
+    receipt: Dict[str, Any] = {
+        "scene_number": scene_number,
+        "status": "accepted",
+        "artifact_kind": kind,
+        "delivery_surface": f"scene_outputs.{kind}",
+        "delivery_ref": f"scene_outputs.{kind}.{scene_number}",
+    }
+    accepted_at = ""
+    if metadata:
+        accepted_at = str(
+            metadata.get("accepted_at")
+            or metadata.get("created_at")
+            or metadata.get("updated_at")
+            or ""
+        ).strip()
+    if accepted_at:
+        receipt["accepted_at"] = accepted_at
+    return receipt, None
+
+
+def evaluate_scene_output_acceptance(
+    *,
+    kind: str,
+    workflow_id: Optional[str],
+    agent_memory: Optional[WorkingMemory],
+    shared_memory: Optional[WorkingMemory] = None,
+    service: Optional["WorkingMemoryService"] = None,
+    expected_scene_numbers: Optional[Iterable[Any]] = None,
+    require_expected_scenes: bool = True,
+) -> Dict[str, Any]:
+    """Evaluate scene output completion through the shared acceptance contract."""
+    wf_id = str(workflow_id) if workflow_id else None
+    shared = shared_memory
+    if shared is None and wf_id and service is not None:
+        try:
+            shared = get_mas_working_memory(wf_id, service=service)
+        except Exception as exc:
+            return {
+                "accepted": False,
+                "status": "failed",
+                "kind": kind,
+                "reason_code": "scene_outputs_load_failed",
+                "detail": type(exc).__name__,
+                "expected_scene_numbers": [],
+                "accepted_scene_numbers": [],
+                "missing_scene_numbers": [],
+                "failed_scene_numbers": [],
+                "rejected_scene_outputs": [],
+                "accepted_receipts": [],
+            }
+
+    overview = load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
+    expected_numbers = _sorted_scene_numbers(expected_scene_numbers)
+    if not expected_numbers:
+        expected_numbers = _scene_numbers_from_overview(overview)
+
+    completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)
+    accepted_receipts: List[Dict[str, Any]] = []
+    rejected_outputs: List[Dict[str, Any]] = []
+    for record in completed:
+        receipt, rejection = _accept_scene_output_record(kind=kind, record=record)
+        if receipt is not None:
+            accepted_receipts.append(receipt)
+        if rejection is not None:
+            rejected_outputs.append(rejection)
+
+    accepted_receipts.sort(key=lambda item: item.get("scene_number") or 0)
+    accepted_scene_numbers = _sorted_scene_numbers(
+        receipt.get("scene_number") for receipt in accepted_receipts
+    )
+    accepted_set = set(accepted_scene_numbers)
+    expected_set = set(expected_numbers)
+    missing_scene_numbers = [
+        scene_number for scene_number in expected_numbers if scene_number not in accepted_set
+    ]
+    failed_scene_numbers = _sorted_scene_numbers(
+        scene.get("scene_number") for scene in extract_failed_scenes(overview)
+    )
+    if expected_set:
+        failed_scene_numbers = [
+            scene_number for scene_number in failed_scene_numbers if scene_number in expected_set
+        ]
+    unexpected_scene_numbers = [
+        scene_number for scene_number in accepted_scene_numbers
+        if expected_set and scene_number not in expected_set
+    ]
+
+    if require_expected_scenes and not expected_numbers:
+        reason_code = "scene_output_expected_scenes_missing"
+        accepted = False
+        status = "incomplete"
+    elif failed_scene_numbers:
+        reason_code = "scene_output_failed_scenes"
+        accepted = False
+        status = "failed"
+    elif missing_scene_numbers:
+        reason_code = "scene_output_incomplete"
+        accepted = False
+        status = "incomplete"
+    elif require_expected_scenes:
+        reason_code = "scene_output_accepted"
+        accepted = True
+        status = "accepted"
+    else:
+        accepted = bool(accepted_scene_numbers)
+        reason_code = "scene_output_accepted" if accepted else "scene_output_empty"
+        status = "accepted" if accepted else "incomplete"
+
+    return {
+        "accepted": accepted,
+        "status": status,
+        "kind": kind,
+        "reason_code": reason_code,
+        "expected_scene_numbers": expected_numbers,
+        "accepted_scene_numbers": accepted_scene_numbers,
+        "missing_scene_numbers": missing_scene_numbers,
+        "failed_scene_numbers": failed_scene_numbers,
+        "unexpected_scene_numbers": unexpected_scene_numbers,
+        "rejected_scene_outputs": rejected_outputs,
+        "accepted_receipts": accepted_receipts,
+    }
 
 
 def finalize_scene_outputs(

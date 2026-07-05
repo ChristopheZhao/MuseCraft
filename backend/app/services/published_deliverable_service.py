@@ -4,6 +4,7 @@ Published stage-deliverable helpers for gate/resume/downstream stable references
 from __future__ import annotations
 
 import json
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,21 @@ from ..models import (
 
 PUBLISHED_DELIVERABLES_PAYLOAD_KEY = "published_deliverables"
 PUBLISHED_DELIVERABLE_REF_TYPE = "published_deliverable"
+
+
+class PublishedDeliverablePayloadError(ValueError):
+    """Raised when a published deliverable payload violates its contract."""
+
+    def __init__(
+        self,
+        reason_code: str,
+        message: str,
+        *,
+        payload_ref: Optional[str] = None,
+    ) -> None:
+        self.reason_code = str(reason_code or "published_payload_error")
+        self.payload_ref = str(payload_ref or "")
+        super().__init__(f"{self.reason_code}: {message}")
 
 
 def _backend_root() -> Path:
@@ -67,15 +83,43 @@ def _persist_payload(
 def load_published_payload(payload_ref: Optional[str]) -> Optional[Dict[str, Any]]:
     if not payload_ref:
         return None
+    payload_ref_value = str(payload_ref)
     try:
-        payload_path = _resolve_payload_path(payload_ref)
-        if not payload_path.exists():
-            return None
+        payload_path = _resolve_payload_path(payload_ref_value)
+    except Exception as exc:
+        raise PublishedDeliverablePayloadError(
+            "published_payload_ref_invalid",
+            f"Cannot resolve payload_ref: {type(exc).__name__}",
+            payload_ref=payload_ref_value,
+        ) from exc
+    if not payload_path.exists():
+        raise PublishedDeliverablePayloadError(
+            "published_payload_missing",
+            f"Payload file does not exist: {payload_path}",
+            payload_ref=payload_ref_value,
+        )
+    try:
         with open(payload_path, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
+    except JSONDecodeError as exc:
+        raise PublishedDeliverablePayloadError(
+            "published_payload_json_invalid",
+            f"Payload JSON is invalid: {exc.msg}",
+            payload_ref=payload_ref_value,
+        ) from exc
+    except OSError as exc:
+        raise PublishedDeliverablePayloadError(
+            "published_payload_read_failed",
+            f"Payload file cannot be read: {type(exc).__name__}",
+            payload_ref=payload_ref_value,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise PublishedDeliverablePayloadError(
+            "published_payload_contract_invalid",
+            f"Payload root must be dict, got {type(payload).__name__}",
+            payload_ref=payload_ref_value,
+        )
+    return payload
 
 
 def build_deliverable_ref(deliverable: WorkflowPublishedDeliverable) -> Dict[str, Any]:

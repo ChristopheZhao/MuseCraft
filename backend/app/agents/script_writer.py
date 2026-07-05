@@ -19,9 +19,15 @@ from .utils.memory_helpers import read_shared_fact, write_shared_fact
 
 class ScriptWriterAgent(BaseAgent):
     """
-    Script Writer Agent - 简化版批量脚本生成
-    专注于场景脚本、叙事结构和连续性分析，但使用BaseAgent接口
+    Script Writer Agent - deterministic MAS stage.
+
+    This class intentionally remains a coded tool sequence instead of a native
+    ReAct agent. It reports that boundary explicitly so the MAS control plane
+    does not mistake it for an autonomous observe-plan-act-reflect worker.
     """
+    AGENT_EXECUTION_MODE = "deterministic_mas_stage"
+    EXECUTION_BOUNDARY_REASON_CODE = "script_writer_deterministic_tool_sequence"
+    BOUNDARY_EVENT = "scene_script_completed"
     
     def __init__(self, llms=None, memory_services=None):
         super().__init__(
@@ -235,7 +241,7 @@ class ScriptWriterAgent(BaseAgent):
                 raise AgentError(detail)
 
             # 批量生成脚本
-            return await self._batch_generate_scripts(
+            result = await self._batch_generate_scripts(
                 scenes,
                 concept_plan,
                 str(workflow_state_id),
@@ -245,12 +251,58 @@ class ScriptWriterAgent(BaseAgent):
                 approved_script_text=approved_script_text,
                 script_review_contract=script_review_contract,
             )
+            return self._attach_deterministic_boundary_report(result)
 
         except AgentError:
             raise
         except Exception as e:
             self.logger.error("ScriptWriter execution failed: %s", e, exc_info=True)
             raise AgentError(f"ScriptWriter execution failed: {e}") from e
+
+    def _build_deterministic_boundary_report(
+        self,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        success = bool(result.get("success", True)) if isinstance(result, dict) else False
+        failed_scenes = result.get("failed_voice_scenes") if isinstance(result, dict) else []
+        if not isinstance(failed_scenes, list):
+            failed_scenes = []
+        generated_count = int(result.get("scenes_generated") or 0) if isinstance(result, dict) else 0
+        total_scenes = int(result.get("total_scenes") or generated_count or 0) if isinstance(result, dict) else 0
+        completion_state = "completed" if success else "partial"
+        reported_gaps: List[str] = []
+        if not success:
+            reported_gaps.append("scene_script_generation_incomplete")
+        reflection: Dict[str, Any] = {
+            "completion_state": completion_state,
+            "reported_gaps": reported_gaps,
+            "reported_hints": [self.EXECUTION_BOUNDARY_REASON_CODE],
+            "summary": f"generated_scene_scripts={generated_count}/{total_scenes}",
+        }
+        return {
+            "status": "completed" if success else "partial",
+            "boundary_event": self.BOUNDARY_EVENT,
+            "gate_triggers": [],
+            "artifacts": [{"kind": "shared_fact", "ref": "project.scene_scripts"}],
+            "reflection": reflection,
+            "execution_mode": self.AGENT_EXECUTION_MODE,
+            "reason_code": self.EXECUTION_BOUNDARY_REASON_CODE,
+        }
+
+    def _attach_deterministic_boundary_report(
+        self,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            raise AgentError("ScriptWriter deterministic stage returned non-dict result")
+        payload = dict(result)
+        payload["execution_boundary"] = {
+            "mode": self.AGENT_EXECUTION_MODE,
+            "native_agent": False,
+            "reason_code": self.EXECUTION_BOUNDARY_REASON_CODE,
+        }
+        payload["orchestration_report"] = self._build_deterministic_boundary_report(payload)
+        return payload
 
     async def _batch_generate_scripts(
         self,

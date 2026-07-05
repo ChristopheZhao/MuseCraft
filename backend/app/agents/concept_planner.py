@@ -378,6 +378,7 @@ class ConceptPlannerAgent(BaseAgent):
         await self._update_progress(100, "Concept planning completed", db)
 
         return {
+            "success": True,
             "concept_plan": concept_plan,
             "voice_plan": voice_plan,
             "total_scenes": len(scenes_data),
@@ -387,6 +388,22 @@ class ConceptPlannerAgent(BaseAgent):
             "target_audience": concept_plan.get("target_audience", "general"),
             "key_messages": concept_plan.get("key_messages", []),
             "workflow_state_id": workflow_state_id,
+            "orchestration_report": {
+                "status": "completed",
+                "boundary_event": "concept_plan_completed",
+                "gate_triggers": [],
+                "artifacts": [
+                    {"kind": "shared_fact", "ref": "project.concept_plan"},
+                    {"kind": "shared_fact", "ref": "project.voice_plan"},
+                    {"kind": "shared_fact", "ref": "scene_overview"},
+                ],
+                "reflection": {
+                    "completion_state": "completed",
+                    "reported_gaps": [],
+                    "reported_hints": [],
+                    "summary": f"planned_scenes={len(scenes_data)}",
+                },
+            },
         }
 
     def _build_system_prompt(self) -> str:

@@ -44,6 +44,29 @@ class VoiceSynthesizerAgent(ReActAgent):
         )
         self._max_chars = int(getattr(settings, "VOICE_MAX_CHARS_PER_REQUEST", 300))
 
+    def _build_voice_orchestration_report(
+        self,
+        *,
+        status: str,
+        completion_state: str,
+        completed_count: int,
+        failed_count: int,
+        reported_gaps: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "boundary_event": "scene_voice_completed",
+            "gate_triggers": [],
+            "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.voice"}],
+            "reflection": {
+                "completion_state": completion_state,
+                "reported_gaps": list(reported_gaps or []),
+                "reported_hints": [],
+                "completed_scene_count": int(completed_count),
+                "failed_scene_count": int(failed_count),
+            },
+        }
+
     async def _execute_impl(
         self,
         task: Task,
@@ -397,6 +420,35 @@ class VoiceSynthesizerAgent(ReActAgent):
         result = dict(base or {})
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
+        result["orchestration_report"] = self._build_voice_orchestration_report(
+            status="completed",
+            completion_state="completed",
+            completed_count=len(finals),
+            failed_count=len(failed),
+        )
+        return result
+
+    async def _finalize_incomplete_results(
+        self,
+        context: Dict[str, Any],
+        task: Task,
+    ) -> Dict[str, Any]:
+        result = await super()._finalize_incomplete_results(context, task)
+        wf_id = context.get("workflow_state_id") or self.workflow_state_id
+        finals, failed = finalize_scene_outputs(
+            kind="voice",
+            workflow_id=str(wf_id) if wf_id else None,
+            agent_memory=self.wm,
+        )
+        result["final_completed_scenes"] = finals
+        result["final_failed_scenes"] = failed
+        result["orchestration_report"] = self._build_voice_orchestration_report(
+            status="partial",
+            completion_state=str(result.get("subtask_state") or "partial"),
+            completed_count=len(finals),
+            failed_count=len(failed),
+            reported_gaps=["scene_voice_generation_incomplete"],
+        )
         return result
 
     def _truncate_text(self, text: str) -> str:

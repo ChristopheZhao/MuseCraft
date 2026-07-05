@@ -19,6 +19,7 @@ from ..models import AgentType, Task, WorkflowSessionStatus
 from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import (
     PublishedDeliverableService,
+    PublishedDeliverablePayloadError,
     load_published_payload,
 )
 from .runtime_session_service import RuntimeSessionService
@@ -150,10 +151,17 @@ class OrchestrationRuntimeResumeBootstrapFacade:
                 "script_revision_context_missing: candidate_deliverable_ref_missing"
             )
 
-        payload = load_published_payload(ref.get("payload_ref"))
+        try:
+            payload = load_published_payload(ref.get("payload_ref"))
+        except PublishedDeliverablePayloadError as exc:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                "script_revision_context_missing: "
+                f"candidate_payload_unavailable reason_code={exc.reason_code}"
+            ) from exc
         if not isinstance(payload, dict):
             raise OrchestrationRuntimeResumeBootstrapError(
-                "script_revision_context_missing: candidate_payload_unavailable"
+                "script_revision_context_missing: "
+                "candidate_payload_unavailable reason_code=published_payload_empty"
             )
 
         try:

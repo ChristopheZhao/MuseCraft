@@ -24,6 +24,7 @@ from .utils.artifacts import (
     normalize_executed_calls_to_artifacts,
     persist_scene_outputs,
     finalize_scene_outputs,
+    evaluate_scene_output_acceptance,
 )
 from .memory.short_term.working_memory import WorkingMemory
 from .utils.progress_snapshot import emit_progress_snapshot
@@ -484,25 +485,14 @@ class VideoGeneratorAgent(ReActAgent):
                 agent_memory = self.wm
             except Exception:
                 agent_memory = None
-        completed, _failed = finalize_scene_outputs(
+        contract = evaluate_scene_output_acceptance(
             kind="video",
             workflow_id=workflow_state_id or None,
             agent_memory=agent_memory,
             service=self.short_term_service,
+            require_expected_scenes=False,
         )
-        accepted: List[int] = []
-        for item in completed:
-            if not isinstance(item, dict):
-                continue
-            scene_number = item.get("scene_number")
-            try:
-                scene_number = int(scene_number)
-            except Exception:
-                continue
-            if not (item.get("video_path") or item.get("video_url")):
-                continue
-            accepted.append(scene_number)
-        return sorted(set(accepted))
+        return _coerce_int_list(contract.get("accepted_scene_numbers"))
 
     def _validate_video_generation_calls_against_contract(
         self,
