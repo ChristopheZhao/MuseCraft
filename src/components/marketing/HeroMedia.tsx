@@ -11,9 +11,9 @@ type Props = {
 };
 
 export default function HeroMedia({
-  videoSrc = '/marketing/hero.mp4',
-  posterSrc = '/marketing/hero-1.jpg',
-  imageSrc = '/marketing/hero-1.jpg',
+  videoSrc,
+  posterSrc = '/marketing/musecraft-console.png',
+  imageSrc = '/marketing/musecraft-console.png',
   className,
   height = 'h-[540px]',
 }: Props) {
@@ -45,7 +45,7 @@ export default function HeroMedia({
   return (
     <div className={`absolute inset-0 ${className ?? ''}`} aria-hidden>
       <div className={`relative ${height}`}>
-        {!fallback ? (
+        {finalVideoSrc && !fallback ? (
           <video
             ref={videoRef}
             className="absolute inset-0 w-full h-full object-cover"
@@ -60,16 +60,14 @@ export default function HeroMedia({
         ) : (
           <Image
             src={imageSrc}
-            alt="Background"
+            alt="MuseCraft creation console"
             fill
             priority
             sizes="100vw"
             className="object-cover"
           />
         )}
-        {/* gradient overlay for readability */}
-        <div className="absolute inset-0 bg-gradient-to-tr from-white to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-br from-primary-100/40 via-transparent to-accent-100/40" />
+        <div className="absolute inset-0 bg-white/75" />
       </div>
     </div>
   );

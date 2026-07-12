@@ -106,11 +106,6 @@ export class TaskRuntimeEndpointError extends Error {
 
 export class ApiClient {
   static async createTask(request: CreateTaskRequest): Promise<TaskResponse> {
-    console.log('🚀 ApiClient.createTask called');
-    console.log('📝 Request payload:', request);
-    console.log('🌐 API_BASE_URL:', API_BASE_URL);
-    console.log('🎯 Full URL:', `${API_BASE_URL}/tasks/`);
-    
     const response = await fetch(`${API_BASE_URL}/tasks/`, {
       method: 'POST',
       headers: {
@@ -120,9 +115,6 @@ export class ApiClient {
       // 绕过代理设置
       mode: 'cors',
     });
-
-    console.log('Response status:', response.status);
-
     if (!response.ok) {
       const errorText = await response.text();
       let error;
@@ -141,7 +133,6 @@ export class ApiClient {
     }
 
     const data = await response.json();
-    console.log('Task created:', data);
     return data;
   }
 

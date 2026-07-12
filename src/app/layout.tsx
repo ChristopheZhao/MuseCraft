@@ -5,9 +5,13 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'MuseCraft AI — 多智能体动漫生成平台',
   description:
-    'MuseCraft AI：企业级多智能体编排，一站式概念、剧本、角色与场景、配音、合成与质检协作，快速生成商业级动漫。',
-  keywords: ['AI动漫', '多智能体', '动漫生成', '企业级', '内容生产'],
+    'MuseCraft AI：以可观测 MAS runtime 组织概念、剧本、媒体生成、合成与质量检查。',
+  keywords: ['AI动漫', '多智能体', '动漫生成', 'MAS runtime', '内容生产'],
   authors: [{ name: 'MuseCraft AI' }],
+  icons: {
+    icon: '/marketing/musecraft-console.png',
+    apple: '/marketing/musecraft-console.png',
+  },
 };
 
 export const viewport: Viewport = {
@@ -23,11 +27,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh">
-      <head>
-        <link rel="icon" href="/favicon.ico" />
-        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-        <meta name="theme-color" content="#0ea5e9" />
-      </head>
       <body>
         <I18nProvider defaultLang="zh">{children}</I18nProvider>
       </body>

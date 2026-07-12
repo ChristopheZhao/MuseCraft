@@ -2,17 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useI18n } from '@/i18n/I18nProvider';
-import { Video, User } from 'lucide-react';
+import { Video } from 'lucide-react';
 
 export default function NavBar() {
-  const { lang, setLang } = useI18n();
   const pathname = usePathname();
 
   const nav = [
     { href: '/home', label: '首页' },
-    { href: '/home/#product', label: '产品' },
-    { href: '/pricing', label: '定价' },
+    { href: '/home/#product', label: '架构' },
   ];
 
   return (
@@ -36,17 +33,9 @@ export default function NavBar() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-            className="hidden sm:block px-3 py-1 text-xs rounded-full border border-gray-200 hover:bg-gray-100 text-gray-600"
-          >
-            {lang === 'zh' ? '中文' : 'EN'}
-          </button>
-          <button aria-label="User profile" className="w-9 h-9 rounded-full bg-primary-100 hover:bg-primary-200 flex items-center justify-center text-primary-700">
-            <User className="w-5 h-5" />
-          </button>
-        </div>
+        <Link href="/console" className="px-4 py-2 rounded-md bg-primary-600 text-sm font-medium text-white hover:bg-primary-700">
+          打开控制台
+        </Link>
       </div>
     </header>
   );

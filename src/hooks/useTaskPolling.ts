@@ -207,8 +207,10 @@ export function useTaskPolling() {
           );
           return;
         }
-      } catch (e) {
-        // Soft fail; keep polling
+      } catch (error) {
+        notifyRuntimeReadError(
+          error instanceof Error ? error.message : 'Unexpected task polling failure'
+        );
       }
     };
 

@@ -114,19 +114,15 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     try {
       // Prevent duplicate connections (React StrictMode / double mount)
       if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-        console.log('WebSocket already open/connecting, skip new connect');
         return;
       }
       if (isConnecting.current) {
-        console.log('WebSocket connect already in progress');
         return;
       }
       isConnecting.current = true;
-      console.log('Connecting WebSocket to:', url);
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
-        console.log('WebSocket connected');
         setWSConnected(true);
         reconnectAttempts.current = 0;
         isConnecting.current = false;
@@ -149,8 +145,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
         }
       };
 
-      ws.current.onclose = (event) => {
-        console.log('WebSocket disconnected', event.code, event.reason);
+      ws.current.onclose = () => {
         setWSConnected(false);
         isConnecting.current = false;
         onClose?.();
@@ -363,8 +358,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
   }, [addNotification]);
 
   const handleMessage = useCallback((message: WebSocketMessage) => {
-    console.log('Received WebSocket message:', message);
-
     // 事件总线消息（统一走事件语义）
     const eventBusHandlers: Record<string, (msg: any) => void> = {
       'event.progress': handleEventProgress,

@@ -242,11 +242,7 @@ const VideoRequestForm: React.FC = () => {
       return;
     }
     
-    console.log('🎬 Form submission started');
-    console.log('Current API URL:', process.env.NEXT_PUBLIC_API_URL);
-    
     if (!formData.title.trim()) {
-      console.log('❌ Validation failed: Missing title');
       addNotification({
         type: 'error',
         title: t('validation.error'),
@@ -257,7 +253,6 @@ const VideoRequestForm: React.FC = () => {
     }
 
     if (!formData.description.trim()) {
-      console.log('❌ Validation failed: Missing description');
       addNotification({
         type: 'error',
         title: t('validation.error'),
@@ -276,9 +271,6 @@ const VideoRequestForm: React.FC = () => {
         sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
         title: formData.title,
       });
-      console.log('✅ Validation passed, submitting form with data:', formData);
-      console.log('📡 About to call ApiClient.createTask...');
-      
       // Create task via API
       const taskResponse = await ApiClient.createTask({
         user_prompt: `${formData.title}\n\n${formData.description}`,
@@ -289,8 +281,6 @@ const VideoRequestForm: React.FC = () => {
         session_id: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),
       });
       
-      console.log('🎉 API call successful, response:', taskResponse);
-
       const request: VideoRequest = {
         id: taskResponse.task_id,
         sessionId: workspaceSessionId || getOrCreateQuickWorkspaceSessionId(),

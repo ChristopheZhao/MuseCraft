@@ -4,7 +4,7 @@ type Dict = Record<string, string>;
 
 export const zh: Dict = {
   'brand.name': 'MuseCraft AI',
-  'brand.tagline': '企业级多智能体动漫生成平台',
+  'brand.tagline': '可观测多智能体动漫生成平台',
 
   'status.ready': '系统就绪',
   'actions.upgrade': '升级套餐',

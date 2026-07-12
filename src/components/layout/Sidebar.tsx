@@ -40,7 +40,6 @@ const Sidebar: React.FC = () => {
       id: 'projects',
       label: t('nav.projects'),
       icon: FileText,
-      badge: '3',
     },
     {
       id: 'templates',
@@ -56,7 +55,6 @@ const Sidebar: React.FC = () => {
       id: 'videos',
       label: t('nav.videos'),
       icon: Video,
-      badge: '12',
     },
     {
       id: 'analytics',
@@ -133,42 +131,6 @@ const Sidebar: React.FC = () => {
         <nav className="flex-1 px-3 py-6 space-y-1">
           {navigationItems.map(renderNavigationItem)}
           
-          {/* Divider */}
-          <div className="my-6 border-t border-gray-200" />
-          
-          {/* AI Agents Status - Collapsed View */}
-          {sidebarCollapsed && (
-            <div className="px-2">
-              <div className="w-full flex flex-col items-center space-y-2 p-2 bg-gray-50 rounded-lg">
-                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" />
-                <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
-                <div className="w-3 h-3 bg-yellow-500 rounded-full animate-pulse" />
-              </div>
-            </div>
-          )}
-          
-          {/* AI Agents Status - Expanded View */}
-          {!sidebarCollapsed && (
-            <div className="space-y-2">
-              <h3 className="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                {t('sidebar.aiAgents')}
-              </h3>
-              <div className="space-y-1">
-                <div className="flex items-center space-x-2 px-3 py-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full" />
-                  <span className="text-sm text-gray-600">{t('sidebar.agent.concept')}</span>
-                </div>
-                <div className="flex items-center space-x-2 px-3 py-2">
-                  <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-                  <span className="text-sm text-gray-600">{t('sidebar.agent.script')}</span>
-                </div>
-                <div className="flex items-center space-x-2 px-3 py-2">
-                  <div className="w-2 h-2 bg-gray-300 rounded-full" />
-                  <span className="text-sm text-gray-400">{t('sidebar.agent.visual')}</span>
-                </div>
-              </div>
-            </div>
-          )}
         </nav>
 
         {/* Bottom Navigation */}
@@ -176,28 +138,6 @@ const Sidebar: React.FC = () => {
           {bottomItems.map(renderNavigationItem)}
         </div>
 
-        {/* Usage Stats - Only show when expanded */}
-        {!sidebarCollapsed && (
-          <div className="p-4 bg-gradient-to-r from-primary-50 to-accent-50 m-3 rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-gray-600">
-                {t('usage.credits')}
-              </span>
-              <span className="text-xs text-gray-500">
-                1,240 / 2,000
-              </span>
-            </div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
-              <div 
-                className="bg-gradient-to-r from-primary-500 to-accent-500 h-2 rounded-full" 
-                style={{ width: '62%' }}
-              />
-            </div>
-            <button className="w-full mt-3 text-xs text-primary-600 hover:text-primary-700 font-medium">
-              {t('actions.upgrade')}
-            </button>
-          </div>
-        )}
       </div>
     </aside>
   );
