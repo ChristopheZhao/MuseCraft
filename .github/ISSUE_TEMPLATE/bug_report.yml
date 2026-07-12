@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible defect without including secrets or private payloads.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Describe what happened and any typed reason code shown.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include minimal steps and sanitized logs. Never include API keys or user media.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Docker Compose
+        - WSL2 / Linux local
+        - Other
+    validations:
+      required: true

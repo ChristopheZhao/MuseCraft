@@ -1,526 +1,119 @@
-# 🎬 MuseCraft - AI驱动的多智能体创作工坊
+# MuseCraft
 
-一个基于多智能体协作的智能创作平台，通过6个专业AI智能体的协同工作，自动化完成从概念规划到视频输出的完整流程。将灵感转化为精美视频的现代工艺。
+MuseCraft 是一个面向短视频创作的多智能体应用。系统把概念规划、剧本、画面、视频、配音、合成和质量检查组织为可观测的 MAS runtime，并通过显式 gate 与 read model 向前端投影进度。
 
-## ✨ 核心特性
+> 当前处于活跃开发阶段。公开发布路径以 PostgreSQL、Python 3.11、uv 和 Node.js 18.18+ 为准。
 
-### 🤖 多智能体协作架构
-- **Orchestrator Agent** - 总协调器，管理整个工作流
-- **Concept Planner Agent** - 概念规划，创意构思和主题设计
-- **Script Writer Agent** - 脚本编写，场景描述和旁白生成
-- **Image Generator Agent** - 图像生成，视觉素材创作
-- **Video Generator Agent** - 视频生成，动态内容制作
-- **Video Composer Agent** - 视频合成，最终作品输出
-- **Quality Checker Agent** - 质量检查，内容安全和一致性验证
+![MuseCraft console](public/marketing/musecraft-console.png)
 
-### 🎯 智能化视频生成
-- 🧠 **AI驱动创作** - 从文本描述到完整视频的全自动生成
-- 🎨 **多样化风格** - 支持科技、创意、商务、教育等多种视频风格
-- ⚡ **实时协作** - 智能体间实时通信和任务协调
-- 🔄 **自适应优化** - 根据结果质量自动调整生成策略
+## 核心边界
 
-### 🌐 现代化Web界面
-- 📱 **响应式设计** - 完美适配桌面端和移动端
-- 🔄 **实时更新** - WebSocket实时显示生成进度
-- 🎛️ **直观控制** - 用户友好的参数设置和预览功能
-- ♿ **无障碍支持** - 符合WCAG标准的可访问性设计
+- MAS control plane 是 session、node、attempt、gate 和 decision 的运行时事实源。
+- Celery/Redis 只承担传输与执行容器职责，不决定业务状态。
+- Agent 通过注册工具访问外部服务，通过 ContextAssembler/MemoryWriter 读写上下文。
+- 前端只消费 runtime/read-model 投影，不从队列状态推断业务完成度。
+- 媒体完成以 scene-output acceptance contract 为准，不以非空 URL 代替验收。
 
-### 🏗️ 企业级架构
-- 🚀 **高性能** - 异步处理和并发优化
-- 🔒 **安全可靠** - 多层安全防护和错误恢复
-- 📊 **可观测性** - 完整的监控、日志和性能分析
-- 🔧 **易扩展** - 模块化设计，支持水平扩展
+## 架构
 
-## 🏛️ 系统架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    用户界面 (Next.js)                       │
-├─────────────────────────────────────────────────────────────┤
-│                  API网关 (FastAPI)                         │
-├─────────────────────────────────────────────────────────────┤
-│                 Orchestrator Agent                          │
-├─────────────┬─────────────┬─────────────┬─────────────────┤
-│ Concept     │ Script      │ Image       │ Video           │
-│ Planner     │ Writer      │ Generator   │ Generator       │
-├─────────────┼─────────────┼─────────────┼─────────────────┤
-│ Video       │ Quality     │ Monitoring  │ Error Recovery  │
-│ Composer    │ Checker     │ Service     │ Service         │
-├─────────────────────┬─────────────────┬─────────────────────┤
-│  消息队列 (Redis)    │  数据库         │  文件存储           │
-│                     │  (MySQL)        │  (MinIO/S3)         │
-└─────────────────────┴─────────────────┴─────────────────────┘
+```text
+Next.js UI
+    |
+FastAPI read/write API
+    |
+MAS control plane ---- PostgreSQL (runtime source of truth)
+    |
+Native agents ---- registered tools ---- configured AI/media providers
+    |
+Redis/Celery (transport and execution only)
 ```
 
-## 🚀 快速开始
+## 前置条件
 
-### 前置要求
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 18.18+ 与 npm
+- PostgreSQL 15+ 和 Redis 7+
+- FFmpeg/ffprobe
+- 可选：Docker Engine 与 Docker Compose v2
 
-- **Node.js** 18+
-- **Python** 3.11（通过 **uv** 管理）
-- **uv**（后端依赖和测试的推荐入口）
-- **MySQL** 8.0+ (或 **PostgreSQL** 13+)
-- **Redis** 6+
-- **Docker** (可选，推荐)
+Windows 开发建议使用 WSL2 Ubuntu；仓库脚本和 CI 以 Linux 兼容行为为准。
 
-> **Windows 用户建议**：推荐使用 WSL2 (Ubuntu) 进行本地开发和测试；本仓库的后端命令默认按 WSL + uv 环境验证。
+## 快速启动
 
-### 🐳 Docker 后端服务栈
+### 1. 配置
 
 ```bash
-# 克隆项目
-git clone <repository-url>
-cd short-video-maker
-
-# 配置环境变量
 cp .env.example .env
-# 编辑 .env 文件，填入 API 密钥
-
-# 启动后端 API、PostgreSQL、Redis、Celery 等服务
-cd backend
-docker compose up -d
-
-# 访问应用
-# 后端API: http://localhost:8000
-# API文档: http://localhost:8000/docs
+cp .env.local.example .env.local
 ```
 
-前端开发服务器仍在仓库根目录启动：`npm install && npm run dev`，默认地址为 `http://localhost:3000`。
+至少修改 `.env` 中的 `SECRET_KEY`，并配置一个实际使用的 AI provider。`.env` 和 `.env.local` 都不会进入 Git。
 
-### 📦 手动安装
+### 2. Docker 启动后端
 
-#### 1. 安装数据库服务
-
-**Linux/WSL (推荐)**：
 ```bash
-# Ubuntu/Debian/WSL
-sudo apt update
-sudo apt install mysql-server redis-server
-
-# 启动服务
-sudo service mysql start
-sudo service redis-server start
-
-# 创建数据库用户
-sudo mysql
-CREATE DATABASE short_video_maker;
-CREATE USER 'videouser'@'localhost' IDENTIFIED BY 'videopass123';
-GRANT ALL PRIVILEGES ON short_video_maker.* TO 'videouser'@'localhost';
-FLUSH PRIVILEGES;
-EXIT;
+docker compose -f backend/docker-compose.yml up --build
 ```
 
-**macOS**：
-```bash
-# 使用Homebrew  
-brew install mysql redis
-brew services start mysql
-brew services start redis
+Compose 会先运行一次 Alembic migration，成功后再启动 API、worker 和 beat。API 默认监听 `http://localhost:8000`。
 
-# 配置MySQL
-mysql -u root -p
-CREATE DATABASE short_video_maker;
-CREATE USER 'videouser'@'localhost' IDENTIFIED BY 'videopass123';
-GRANT ALL PRIVILEGES ON short_video_maker.* TO 'videouser'@'localhost';
-FLUSH PRIVILEGES;
-EXIT;
-```
-
-**Windows原生**（不推荐，建议使用WSL）：
-```bash
-# 使用Chocolatey
-choco install mysql redis-64
-```
-
-**或使用Docker（更简单）**：
-```bash
-# 启动MySQL
-docker run --name mysql-short-video \
-  -e MYSQL_ROOT_PASSWORD=rootpass \
-  -e MYSQL_DATABASE=short_video_maker \
-  -e MYSQL_USER=videouser \
-  -e MYSQL_PASSWORD=videopass123 \
-  -p 3306:3306 -d mysql:8.0
-
-# 启动Redis
-docker run --name redis-short-video \
-  -p 6379:6379 -d redis:7-alpine
-```
-
-#### 2. 后端设置 (WSL + uv)
+### 3. 启动前端
 
 ```bash
-cd backend
-
-# 安装 uv（如尚未安装）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 国内网络如果访问 astral / PyPI 较慢，可临时切到阿里源：
-export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
-
-# 根据 pyproject.toml 创建 3.11 环境并同步开发依赖
-uv sync --extra dev
-
-# 配置环境变量
-cp ../.env.example .env
-# 编辑 .env 文件，至少配置一个 AI 服务的 API 密钥
-
-# 初始化数据库（确保MySQL已启动）
-uv run python scripts/setup_database.py
-
-# 启动后端服务
-uv run python scripts/start_dev_uv.py
-```
-
-#### 3. 前端设置
-
-```bash
-# 注意：前端代码在根目录，不是单独的frontend文件夹
-# 返回根目录或直接在根目录执行
-
-cd .. # 如果在backend目录中，先返回根目录
-
-# 安装依赖
-npm install
-
-# 启动开发服务器
+npm ci
 npm run dev
 ```
 
-#### 4. 验证部署
+浏览器访问 `http://localhost:3000`。
+
+## 本地后端开发
 
 ```bash
-# 运行健康检查
-curl http://localhost:8000/health
+uv sync --project backend --frozen --extra dev --extra test
+uv run --project backend alembic -c backend/alembic.ini upgrade head
+uv run --project backend uvicorn app.main:app --app-dir backend --reload
+```
 
-# 前端基础检查（仓库根目录）
+`backend/pyproject.toml` 与受跟踪的 `backend/uv.lock` 是依赖事实源。`backend/requirements.txt` 仅是由 uv 自动导出的兼容清单，不能手工维护。
+
+## 数据库迁移
+
+公开 release migration 位于 `backend/alembic/release_versions/`。新环境执行：
+
+```bash
+uv run --project backend alembic -c backend/alembic.ini upgrade head
+uv run --project backend alembic -c backend/alembic.ini check
+```
+
+早期本地 MySQL migration 从未进入版本控制，不能作为公开升级链。已有数据库请先阅读 [数据库迁移说明](docs/database-migrations.md)，不要在未比对 schema 时直接 `alembic stamp`。
+
+## 验证
+
+```bash
 npm run lint
 npm run type-check
+npm test
+npm run build
 
-# 后端聚焦测试（仓库根目录）
-uv run --project backend pytest backend/tests/unit/test_runtime_session_service.py -q
+uv run --project backend pytest -q \
+  backend/tests/unit/test_env_loading.py \
+  backend/tests/unit/test_release_migration_contract.py
 ```
 
-## 🎮 使用指南
+GitHub Actions 还运行 PLAN-066 对应的 MAS control-plane/runtime 边界回归。测试分层与当前非门禁 legacy suite 见 [测试策略](docs/testing.md)。
 
-### 创建视频项目
+## 配置原则
 
-1. **输入需求** - 描述你想要的视频内容
-2. **选择风格** - 科技、创意、商务、教育等
-3. **设置参数** - 时长、分辨率、音乐等
-4. **开始生成** - 观看AI智能体协作过程
-5. **下载结果** - 预览并下载最终视频
+- 后端配置：仓库根目录 `.env`，模板为 `.env.example`。
+- 前端公开配置：仓库根目录 `.env.local`，模板为 `.env.local.example`。
+- `NEXT_PUBLIC_*` 会发送到浏览器，禁止放置密钥。
+- provider endpoint、model 和能力约束通过配置注入，不在 Agent 代码中硬编码。
 
-### 监控生成过程
+## 贡献与安全
 
-- 📊 **实时进度** - 查看每个智能体的执行状态
-- 🎯 **中间结果** - 预览概念、脚本、图像等中间产出
-- ⚡ **性能指标** - 监控系统资源和执行效率
-- 🔧 **错误处理** - 自动重试和人工干预选项
+提交变更前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私密报告，不要在公开 issue 中粘贴密钥、provider payload 或未脱敏日志。
 
-## 🧪 测试和质量保证
+## 许可证
 
-### 完整测试套件
-
-```bash
-# 前端：lint、类型检查、Jest
-npm run lint
-npm run type-check
-npm test -- --runInBand
-
-# 后端：通过 uv 运行 pytest
-uv run --project backend pytest backend/tests/unit -q
-
-# 后端：运行指定测试
-uv run --project backend pytest backend/tests/unit/test_runtime_session_service.py -q
-
-# 系统集成验证（仓库根目录 tests/）
-PYTHONPATH=backend:. uv run --project backend pytest tests/test_system_integration_validation.py -q
-```
-
-### 测试覆盖
-
-- ✅ **端到端测试** - 完整工作流验证
-- ✅ **系统集成测试** - 组件间协作验证  
-- ✅ **AI服务测试** - 外部API集成验证
-- ✅ **性能测试** - 负载和压力测试
-- ✅ **用户体验测试** - 界面和交互验证
-
-### 质量指标
-
-- 🎯 **功能覆盖率** > 95%
-- ⚡ **响应时间** < 2秒
-- 🔄 **系统可用性** > 99.5%
-- 🛡️ **错误恢复率** > 90%
-- 📱 **移动端兼容性** 完全支持
-
-## 🔧 配置说明
-
-### 🔑 API密钥要求
-
-根据代码分析，运行短视频生成功能需要以下API密钥配置：
-
-#### 🔴 核心服务（必须配置）
-**以下服务必须全部配置才能正常生成短视频**：
-
-**1. 文本生成服务（选择一个即可）**：
-- `KIMI_API_KEY` - 月之暗面 Kimi K2模型（🇨🇳 国内推荐）
-- `GLM_API_KEY` - 智谱AI GLM-4.5模型（🇨🇳 国内推荐）  
-- `OPENAI_API_KEY` - OpenAI GPT模型（🌍 国际用户）
-
-**2. 图像生成服务（选择一个即可）**：
-- `GLM_API_KEY` - 智谱AI CogView图像生成（🇨🇳 一键多能）
-- `JIMENG_API_KEY` - 即梦图像生成（🇨🇳 国内服务）
-- `OPENAI_API_KEY` - DALL-E图像生成（🌍 国际用户）
-- `STABILITY_API_KEY` - Stability AI图像生成（🌍 国际用户）
-
-**3. 视频生成服务（选择一个即可）**：
-- `GLM_API_KEY` - 智谱AI CogVideoX视频生成（🇨🇳 一键多能）
-- `MINIMAX_API_KEY` - MiniMax视频生成（🇨🇳 国内服务）
-- `RUNWAY_API_KEY` - Runway ML视频生成（🌍 国际用户）
-
-> ⚠️ **重要提醒**：系统缺少任一类服务都无法完成短视频生成流程
-
-#### 💡 推荐配置方案
-
-**方案1：国内用户最佳（仅需1个API密钥）**
-```bash
-# 智谱AI一键全能 - 文本+图像+视频全覆盖
-GLM_API_KEY=your-glm-api-key-here
-```
-
-**方案2：国内用户备选**
-```bash
-# 分别配置不同服务商
-KIMI_API_KEY=your-kimi-key-here      # 文本生成
-JIMENG_API_KEY=your-jimeng-key-here   # 图像生成  
-MINIMAX_API_KEY=your-minimax-key-here # 视频生成
-```
-
-**方案3：国际用户推荐**
-```bash
-# 使用国际服务
-OPENAI_API_KEY=sk-your-openai-key-here    # 文本+图像生成
-RUNWAY_API_KEY=your-runway-key-here       # 视频生成
-```
-
-### 完整环境变量示例
-
-```bash
-# =============================================================================
-# AI服务配置（根据选择的方案配置）
-# =============================================================================
-
-# 方案1：使用智谱AI一键全能
-GLM_API_KEY=your-glm-api-key-here
-
-# 或方案2：使用OpenAI + Runway
-# OPENAI_API_KEY=sk-your-openai-key-here
-# RUNWAY_API_KEY=your-runway-key-here
-
-# 或方案3：使用国内多个服务商
-# KIMI_API_KEY=your-kimi-key-here
-# JIMENG_API_KEY=your-jimeng-key-here  
-# MINIMAX_API_KEY=your-minimax-key-here
-
-# =============================================================================
-# 基础系统配置
-# =============================================================================
-
-# 数据库配置 (MySQL为主，也支持PostgreSQL)
-DATABASE_URL=mysql://videouser:videopass123@localhost:3306/short_video_maker
-# 或使用PostgreSQL: DATABASE_URL=postgresql://user:pass@localhost:5432/db
-REDIS_URL=redis://localhost:6379/0
-
-# 文件存储配置
-STORAGE_TYPE=local  # local, s3, oss
-# AWS_ACCESS_KEY_ID=your_access_key
-# AWS_SECRET_ACCESS_KEY=your_secret_key
-
-# 应用配置
-DEBUG=false
-LOG_LEVEL=INFO
-JWT_SECRET_KEY=your_jwt_secret
-```
-
-> 📋 查看 [API密钥详细获取指南](docs/api/api-keys-guide.md) 了解如何申请各服务的API密钥
-
-### 性能调优
-
-```bash
-# 并发设置
-MAX_CONCURRENT_TASKS=10
-WORKER_PROCESSES=4
-CELERY_WORKERS=8
-
-# 缓存配置
-REDIS_CACHE_TTL=3600
-IMAGE_CACHE_SIZE=1000
-
-# AI服务优化
-AI_REQUEST_TIMEOUT=60
-AI_RETRY_ATTEMPTS=3
-AI_BATCH_SIZE=5
-```
-
-## 📊 监控和运维
-
-### 系统监控
-
-- 📈 **应用性能监控** - API响应时间、吞吐量、错误率
-- 💾 **资源监控** - CPU、内存、磁盘、网络使用情况
-- 🤖 **AI服务监控** - API调用成功率、成本追踪
-- 🔍 **业务监控** - 视频生成成功率、用户活跃度
-
-### 日志管理
-
-```bash
-# 查看应用日志
-cd backend && docker compose logs -f api
-
-# 查看特定智能体日志
-grep "ConceptPlannerAgent" logs/app.log
-
-# 错误日志分析
-grep "ERROR" logs/app.log | tail -20
-```
-
-### 性能分析
-
-```bash
-# 运行性能测试
-python tests/performance/test_performance_reliability.py
-
-# 生成性能报告
-python scripts/generate_performance_report.py
-
-# 查看系统指标
-curl http://localhost:8000/metrics
-```
-
-## 🔒 安全说明
-
-### 数据安全
-- 🔐 **传输加密** - 所有API通信使用HTTPS
-- 🗃️ **数据加密** - 敏感数据库字段加密存储
-- 🔑 **访问控制** - JWT认证和角色权限管理
-- 🛡️ **内容安全** - AI生成内容安全检查
-
-### API安全
-- 🚦 **频率限制** - 防止API滥用
-- 🔍 **输入验证** - 严格的输入参数验证
-- 🛡️ **SQL注入防护** - ORM和参数化查询
-- 🔒 **XSS防护** - 输出内容转义和CSP
-
-## 📚 文档中心
-
-详细的技术文档已整理在 [docs](docs/) 目录下，包括：
-
-- **[架构设计](docs/architecture/)** - 系统架构、设计模式、技术决策
-- **[部署指南](docs/deployment/)** - 生产部署、环境配置、运维指南
-- **[开发文档](docs/development/)** - 开发流程、最佳实践、优化记录
-- **[API文档](docs/api/)** - API接口、服务集成、配置说明
-- **[测试文档](docs/testing/)** - 测试策略、执行指南、覆盖报告
-- **[运维文档](docs/operations/)** - 监控配置、故障排查、性能调优
-
-查看 [文档索引](docs/README.md) 了解完整的文档结构。
-
-## 🤝 开发指南
-
-### 项目结构
-
-```
-short-video-maker/
-├── docs/                    # 技术文档中心
-├── src/                     # Next.js前端应用源码
-│   ├── components/          # React组件
-│   ├── pages/              # 页面组件
-│   └── store/              # 状态管理
-├── package.json             # 前端依赖配置
-├── next.config.js           # Next.js配置
-├── tailwind.config.js       # Tailwind CSS配置
-├── backend/                 # FastAPI后端应用
-│   ├── app/agents/         # AI智能体
-│   ├── app/api/            # API路由
-│   ├── app/models/         # 数据模型
-│   └── app/services/       # 业务服务
-├── __tests__/               # 前端测试套件
-│   ├── e2e/               # 端到端测试
-│   ├── integration/       # 集成测试
-│   ├── performance/       # 性能测试
-│   └── accessibility/     # 无障碍测试
-├── tests/                   # 系统级 Python 验证测试
-├── backend/tests/           # 后端测试套件
-└── backend/docker-compose.yml # 后端 Docker 编排配置
-```
-
-### 开发工作流
-
-1. **Fork项目** 并创建功能分支
-2. **本地开发** 使用 WSL + uv；需要容器时使用 `backend/docker-compose.yml`
-3. **运行测试** 确保所有测试通过
-4. **代码审查** 提交Pull Request
-5. **自动部署** 合并后自动部署
-
-### 添加新智能体
-
-```python
-# 1. 创建智能体类
-class NewAgent(BaseAgent):
-    async def execute(self, context: TaskContext) -> AgentResult:
-        # 实现智能体逻辑
-        pass
-
-# 2. 注册到编排器
-orchestrator.register_agent("new_agent", NewAgent())
-
-# 3. 添加测试
-class TestNewAgent(unittest.TestCase):
-    def test_execute_success(self):
-        # 测试代码
-        pass
-```
-
-## 📈 路线图
-
-### v1.0 (当前版本)
-- ✅ 多智能体协作框架
-- ✅ 基础视频生成功能
-- ✅ Web用户界面
-- ✅ 完整测试套件
-
-### v1.1 (计划中)
-- 🔄 模板系统和预设风格
-- 🔄 批量处理功能
-- 🔄 用户管理和权限
-- 🔄 高级编辑功能
-
-### v1.2 (未来)
-- 🔮 更多AI服务集成
-- 🔮 实时协作编辑
-- 🔮 移动端应用
-- 🔮 企业级功能
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
-## 🙏 致谢
-
-感谢以下开源项目和服务提供商：
-
-- [FastAPI](https://fastapi.tiangolo.com/) - 现代高性能Web框架
-- [Next.js](https://nextjs.org/) - React全栈框架
-- [OpenAI](https://openai.com/) - AI模型服务
-- [Stability AI](https://stability.ai/) - 图像生成服务
-
-## 📞 支持和反馈
-
-- 📧 **邮箱**: support@short-video-maker.com
-- 🐛 **问题报告**: [GitHub Issues](issues)
-- 💬 **讨论**: [GitHub Discussions](discussions)
-- 📚 **文档**: [在线文档](docs)
-
----
-
-**⭐ 如果这个项目对你有帮助，请给我们一个星标！**
+本项目使用 [MIT License](LICENSE)。第三方模型、API 和生成内容仍受各自服务条款约束。
