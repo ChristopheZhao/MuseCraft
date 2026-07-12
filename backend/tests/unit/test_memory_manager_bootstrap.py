@@ -1,6 +1,4 @@
 import asyncio
-import logging
-
 from app.agents.memory.long_term.manager import LongTermMemoryManager
 
 
@@ -29,14 +27,20 @@ def test_long_term_memory_manager_degrades_when_logger_fails_in_no_loop_path(mon
         def info(self, _message, *args, **kwargs):
             raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(asyncio, "get_running_loop", lambda: (_ for _ in ()).throw(RuntimeError("no running event loop")))
-    monkeypatch.setattr(logging, "getLogger", lambda _name: _BrokenLogger())
-
     manager = LongTermMemoryManager(
         stores={},
         retrievers={},
-        config={"enable_consolidation": True, "enable_cleanup": True},
+        config={"enable_consolidation": False, "enable_cleanup": False},
     )
+    manager.config.update(enable_consolidation=True, enable_cleanup=True)
+    manager.logger = _BrokenLogger()
+    monkeypatch.setattr(
+        asyncio,
+        "get_running_loop",
+        lambda: (_ for _ in ()).throw(RuntimeError("no running event loop")),
+    )
+
+    manager._start_background_tasks()
 
     assert manager._consolidation_task is None
     assert manager._cleanup_task is None

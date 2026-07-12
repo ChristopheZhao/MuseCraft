@@ -1,11 +1,11 @@
 import pytest
 
-from backend.app.agents.base import BaseAgent
-from backend.app.agents.tools.tool_registry import get_tool_registry
-from backend.app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
-from backend.app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
-from backend.app.models import AgentType
-from backend.app.services.memory_provider import build_memory_services
+from app.agents.base import BaseAgent
+from app.agents.tools.tool_registry import get_tool_registry
+from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
+from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
+from app.models import AgentType
+from app.services.memory_provider import build_memory_services
 
 
 class _DummyAgent(BaseAgent):

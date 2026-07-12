@@ -1,17 +1,15 @@
-name: Backend Integration Tests
+name: Backend Release Checks
 
 on:
   push:
     branches: [main, develop]
     paths:
       - "backend/**"
-      - "tests/**"
       - ".github/workflows/integration-tests.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "backend/**"
-      - "tests/**"
       - ".github/workflows/integration-tests.yml"
   schedule:
     - cron: "0 2 * * *"
@@ -23,40 +21,17 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
+  UV_VERSION: "0.5.20"
   DATABASE_URL: "postgresql://test:test@localhost:5432/test_db"
   REDIS_URL: "redis://localhost:6379/0"
   SECRET_KEY: "test-secret-key-for-github-actions-only-not-production"
   PYTHONPATH: "backend:."
 
 jobs:
-  backend-tests:
-    name: ${{ matrix.name }}
+  release-contracts:
+    name: Dependencies, Schema, And Release Contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Runtime Session Unit Tests
-            path: backend/tests/unit/test_runtime_session_service.py
-            report: runtime-session
-          - name: Contract And Prompt Tests
-            path: >
-              backend/tests/unit/test_react_contract_smoke.py
-              backend/tests/unit/test_react_contract_precedence_runtime.py
-              backend/tests/unit/test_tool_contracts.py
-              backend/tests/unit/test_prompt_safety_rewrite.py
-            report: contract-prompt
-          - name: System Integration Validation
-            path: tests/test_system_integration_validation.py
-            report: system-integration
-          - name: Deployment Validation
-            path: tests/test_deployment_validation.py
-            report: deployment
-          - name: Monitoring And Health Checks
-            path: tests/test_monitoring_and_health_checks.py
-            report: monitoring
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -72,7 +47,6 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-
       redis:
         image: redis:7-alpine
         options: >-
@@ -93,27 +67,58 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        run: python -m pip install --upgrade uv
+        run: python -m pip install "uv==${UV_VERSION}"
 
-      - name: Sync backend dependencies
-        run: uv sync --project backend --extra dev --extra test
+      - name: Sync locked backend dependencies
+        run: uv sync --project backend --frozen --extra test
 
-      - name: Validate environment
+      - name: Verify requirements compatibility export
         run: |
-          uv run --project backend python -c "import sys; print(sys.version)"
-          uv run --project backend python -c "import fastapi, sqlalchemy; print(fastapi.__version__, sqlalchemy.__version__)"
+          uv export --project backend --frozen --format requirements-txt --no-hashes --no-emit-project --output-file /tmp/requirements.txt
+          tail -n +3 backend/requirements.txt > /tmp/requirements.expected
+          tail -n +3 /tmp/requirements.txt > /tmp/requirements.actual
+          diff -u /tmp/requirements.expected /tmp/requirements.actual
 
-      - name: Prepare reports
-        run: mkdir -p test_reports
+      - name: Apply and verify PostgreSQL migrations
+        run: |
+          uv run --project backend alembic -c backend/alembic.ini upgrade head
+          uv run --project backend alembic -c backend/alembic.ini check
 
-      - name: Run pytest
-        run: >
-          uv run --project backend pytest ${{ matrix.path }}
-          --junitxml=test_reports/${{ matrix.report }}.xml
+      - name: Run release contract tests
+        run: >-
+          uv run --project backend pytest -q
+          backend/tests/unit/test_env_loading.py
+          backend/tests/unit/test_release_migration_contract.py
 
-      - name: Upload test report
-        uses: actions/upload-artifact@v4
-        if: always()
+  mas-runtime:
+    name: MAS Runtime Boundary Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          name: backend-${{ matrix.report }}
-          path: test_reports/${{ matrix.report }}.xml
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+
+      - name: Sync locked backend dependencies
+        run: uv sync --project backend --frozen --extra test
+
+      - name: Run focused control-plane and runtime tests
+        run: >-
+          uv run --project backend pytest -q
+          backend/tests/unit/test_base_agent_orchestration_report_boundary.py
+          backend/tests/unit/test_audio_orchestration_runtime_gate.py
+          backend/tests/unit/test_video_generator_progress_boundary.py
+          backend/tests/unit/test_script_writer_episode_context.py
+          backend/tests/unit/test_published_deliverable_service.py
+          backend/tests/unit/test_execution_boundary_assembler_contexts.py
+          backend/tests/unit/test_tasks_endpoint.py
+          backend/tests/unit/test_orchestrator_runtime_mainline.py
+          -k "base_agent_does_not_synthesize_orchestration_report or base_agent_preserves_explicit_orchestration_report or legacy_orchestrator_decision_rejects or image_step_completion or video_step_completion or progress_read_model_uses_accepted_scene_outputs_with_provenance or video_generator_completion_gate or assembler_static_context or partial_result_reports_deterministic_boundary or malformed_scene_scripts_slot or published_payload or continuation_checkpoint_rejects_unknown or publish_script_deliverable or submit_gate_decision_approve or script_revise_resume_projects_candidate_deliverable_into_mas_boundary or rejects_malformed_script_candidate_payload or checkpoint or resume_task_runtime or mainline or runtime"

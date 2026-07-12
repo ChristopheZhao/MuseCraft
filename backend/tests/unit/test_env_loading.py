@@ -1,69 +1,33 @@
-#!/usr/bin/env python3
-"""
-测试环境变量加载是否正常
-"""
+"""Environment-loading contract tests."""
 
-import sys
+from __future__ import annotations
+
 import os
 from pathlib import Path
+import subprocess
+import sys
 
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
 
-def test_env_loading():
-    """测试环境变量加载"""
-    
-    print("🧪 测试环境变量加载")
-    print("=" * 60)
-    
-    # 测试直接从环境变量读取
-    print("\n📋 直接环境变量检查")
-    print("-" * 40)
-    
-    env_vars = [
-        "GLM_API_KEY",
-        "OPENAI_API_KEY", 
-        "STABILITY_API_KEY",
-        "KIMI_API_KEY"
-    ]
-    
-    for var in env_vars:
-        value = os.getenv(var)
-        if value:
-            # 只显示前几个字符以保护隐私
-            masked_value = f"{value[:8]}..." if len(value) > 8 else "短密钥"
-            print(f"✅ {var}: {masked_value}")
-        else:
-            print(f"❌ {var}: 未设置")
-    
-    # 测试通过settings加载
-    print("\n📋 通过Settings配置加载")
-    print("-" * 40)
-    
-    try:
-        from app.core.config import settings
-        
-        api_keys = {
-            "GLM_API_KEY": settings.GLM_API_KEY,
-            "OPENAI_API_KEY": settings.OPENAI_API_KEY,
-            "STABILITY_API_KEY": settings.STABILITY_API_KEY,
-            "KIMI_API_KEY": settings.KIMI_API_KEY
-        }
-        
-        for key_name, key_value in api_keys.items():
-            if key_value:
-                masked_value = f"{key_value[:8]}..." if len(key_value) > 8 else "短密钥"
-                print(f"✅ {key_name}: {masked_value}")
-            else:
-                print(f"❌ {key_name}: 未设置")
-        
-        print("\n📋 设置加载成功")
-        
-    except Exception as e:
-        print(f"❌ Settings加载失败: {e}")
-    
-    print("\n🎊 环境变量测试完成!")
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
-if __name__ == "__main__":
-    test_env_loading()
+
+def test_process_environment_overrides_local_dotenv() -> None:
+    expected_url = "postgresql://explicit:explicit@localhost:5432/explicit"
+    env = os.environ.copy()
+    env["DATABASE_URL"] = expected_url
+    env["PYTHONPATH"] = str(BACKEND_ROOT)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from app.core.config import settings; print(settings.DATABASE_URL)",
+        ],
+        cwd=BACKEND_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == expected_url

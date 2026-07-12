@@ -1,19 +1,17 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: short_video_maker
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${DATABASE_NAME:-short_video_maker}
+      POSTGRES_USER: ${DATABASE_USER:-user}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d short_video_maker"]
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-user} -d ${DATABASE_NAME:-short_video_maker}"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -31,27 +29,40 @@ services:
       timeout: 10s
       retries: 3
 
+  migrate:
+    build: .
+    command: alembic -c alembic.ini upgrade head
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${DATABASE_USER:-user}:${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}@postgres:5432/${DATABASE_NAME:-short_video_maker}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # FastAPI Application
   api:
     build: .
+    env_file:
+      - ../.env
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://user:password@postgres:5432/short_video_maker
+      DATABASE_URL: postgresql://${DATABASE_USER:-user}:${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}@postgres:5432/${DATABASE_NAME:-short_video_maker}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-      DEBUG: "true"
+      DEBUG: "false"
     volumes:
       - ./storage:/app/storage
       - ./logs:/app/logs
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -60,8 +71,10 @@ services:
   celery_worker:
     build: .
     command: celery -A app.services.celery_app worker --loglevel=info --concurrency=2 --queues=video_processing
+    env_file:
+      - ../.env
     environment:
-      DATABASE_URL: postgresql://user:password@postgres:5432/short_video_maker
+      DATABASE_URL: postgresql://${DATABASE_USER:-user}:${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}@postgres:5432/${DATABASE_NAME:-short_video_maker}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -69,8 +82,8 @@ services:
       - ./storage:/app/storage
       - ./logs:/app/logs
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -78,8 +91,10 @@ services:
   celery_beat:
     build: .
     command: celery -A app.services.celery_app beat --loglevel=info
+    env_file:
+      - ../.env
     environment:
-      DATABASE_URL: postgresql://user:password@postgres:5432/short_video_maker
+      DATABASE_URL: postgresql://${DATABASE_USER:-user}:${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}@postgres:5432/${DATABASE_NAME:-short_video_maker}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -87,8 +102,8 @@ services:
       - ./storage:/app/storage
       - ./logs:/app/logs
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 

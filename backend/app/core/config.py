@@ -13,11 +13,12 @@ import pathlib
 # Load from project root directory (the only .env file)
 root_env_path = pathlib.Path(__file__).parent.parent.parent.parent / '.env'
 if root_env_path.exists():
-    load_dotenv(root_env_path, override=True)
+    # Process/container environment is authoritative; .env only fills local gaps.
+    load_dotenv(root_env_path, override=False)
     # print(f"Loaded .env from: {root_env_path}")  # Remove print in production
 else:
     # Fallback: try current working directory
-    load_dotenv(override=True)
+    load_dotenv(override=False)
 
 # Now import decouple after env vars are loaded
 from decouple import config

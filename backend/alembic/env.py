@@ -19,10 +19,12 @@ from app.models import (
     WorkflowGateDecision,
 )
 from app.models.base import BaseModel
+from app.core.config import settings
 
 # this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.  
+# access to the values within the .ini file in use.
 config = context.config
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -75,11 +77,13 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
-    
-    # Get the database URL and convert for MySQL
+
+    # Alembic owns schema changes; driver adaptation stays at this boundary.
     database_url = config.get_main_option("sqlalchemy.url")
-    if database_url.startswith("mysql://"):
-        database_url = database_url.replace("mysql://", "mysql+aiomysql://")
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif database_url.startswith("mysql://"):
+        database_url = database_url.replace("mysql://", "mysql+aiomysql://", 1)
 
     connectable = async_engine_from_config(
         {

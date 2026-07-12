@@ -84,6 +84,7 @@ storage/outputs/*
 
 # 营销文件
 public/marketing/*
+!public/marketing/musecraft-console.png
 
 
 
@@ -135,6 +136,7 @@ frontend/.env.production.local
 # uv Python环境管理
 .python-version
 uv.lock
+!backend/uv.lock
 
 # 前端 Node.js
 node_modules/
@@ -190,7 +192,6 @@ ipython_config.py
 .python-version
 
 # Docker
-.dockerignore
 
 # 系统文件
 *.tmp
@@ -202,7 +203,8 @@ debug_*.py
 temp_*.py
 test_temp_*.py
 
-# Alembic
+# Local pre-release Alembic snapshots. Public release migrations live in
+# backend/alembic/release_versions and are always tracked.
 backend/alembic/versions/*.py
 !backend/alembic/versions/__init__.py
 
