@@ -3046,6 +3046,25 @@
           "text": "User accepted MAS boundary review; PLAN-066 closed with focused validation evidence (114 passed, 16 deselected, 2 existing warnings)"
         }
       ]
+    },
+    {
+      "id": "PLAN-20260711-067",
+      "title": "Open-source release readiness and reproducible delivery",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260711-067.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-07-11T01:03:22Z",
+      "updated_at": "2026-07-11T01:05:21Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-07-11T01:05:21Z",
+          "text": "User requested a high-quality open-source readiness pass and local submission after blocker repair; start Sprint 1 from the audited clean baseline."
+        }
+      ]
     }
   ]
 }
