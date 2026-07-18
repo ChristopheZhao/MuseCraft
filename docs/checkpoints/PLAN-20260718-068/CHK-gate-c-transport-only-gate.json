@@ -1,0 +1,77 @@
+{
+  "plan_id": "PLAN-20260718-068",
+  "checkpoint": "CHK-gate-c-transport-only",
+  "title": "Gate C - Transport-only execution",
+  "profile": "default",
+  "verdict": "pass",
+  "summary": "All Gate C commands and post-format checks passed without remediation. The exact commands were run directly because the bundled gate runner requires /bin/bash, which was unavailable in the Windows-only execution environment.",
+  "updated_at": "2026-07-18T16:36:37Z",
+  "checklist_path": "docs/checkpoints/PLAN-20260718-068/CHK-gate-c-transport-only-checklist.md",
+  "attempts": [
+    {
+      "attempt": 1,
+      "started_at": "2026-07-18T16:22:08Z",
+      "finished_at": "2026-07-18T16:23:42Z",
+      "validation_results": [
+        {
+          "commands": [
+            {
+              "command": "git -c safe.directory=D:/code/agent/Opensource/vertical_application/short-video-maker diff --check",
+              "started_at": "2026-07-18T16:22:08Z",
+              "finished_at": "2026-07-18T16:22:09Z",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "Only line-ending conversion warnings were emitted."
+            },
+            {
+              "command": "uv run --project backend --extra test --frozen pytest -q backend/tests/architecture/test_agent_persistence_boundary.py backend/tests/architecture/test_transport_execution_boundary.py backend/tests/unit/test_agent_execution_application_boundary.py backend/tests/unit/test_execution_host_lease_rca.py backend/tests/unit/test_task_queue.py backend/tests/unit/test_project_job_queue.py backend/tests/unit/test_celery_app.py backend/tests/unit/test_tasks_endpoint.py backend/tests/unit/test_project_contracts.py backend/tests/unit/test_orchestrator_runtime_mainline.py backend/tests/unit/test_runtime_session_service.py --tb=short",
+              "started_at": "2026-07-18T16:22:09Z",
+              "finished_at": "2026-07-18T16:22:35Z",
+              "returncode": 0,
+              "stdout": "107 passed, 2 warnings in 19.59s",
+              "stderr": ""
+            },
+            {
+              "command": "uv run --project backend --extra test --frozen mypy backend/app/domain/queued_execution.py backend/app/services/queued_execution_use_case.py backend/app/services/queued_task_execution_host.py backend/app/services/runtime_attempt_keepalive_adapter.py backend/app/services/task_queue.py backend/app/services/project_job_queue.py",
+              "started_at": "2026-07-18T16:22:35Z",
+              "finished_at": "2026-07-18T16:23:42Z",
+              "returncode": 0,
+              "stdout": "Success: no issues found in 6 source files",
+              "stderr": ""
+            }
+          ],
+          "passed": true,
+          "matched_user_confirmation_triggers": [],
+          "round": 0
+        }
+      ],
+      "auto_fix_rounds": [],
+      "matched_user_confirmation_triggers": []
+    },
+    {
+      "attempt": 2,
+      "started_at": "2026-07-18T16:35:25Z",
+      "finished_at": "2026-07-18T16:36:32Z",
+      "validation_results": [
+        {
+          "commands": [
+            {
+              "command": "git diff --check; Gate C pytest; focused mypy; Black/isort checks for new and fully rewritten Slice C files",
+              "started_at": "2026-07-18T16:35:25Z",
+              "finished_at": "2026-07-18T16:36:32Z",
+              "returncode": 0,
+              "stdout": "109 passed, 2 warnings in 26.63s; Success: no issues found in 6 source files; Black/isort checks passed",
+              "stderr": "Only line-ending conversion warnings were emitted."
+            }
+          ],
+          "passed": true,
+          "matched_user_confirmation_triggers": [],
+          "round": 0
+        }
+      ],
+      "auto_fix_rounds": [],
+      "matched_user_confirmation_triggers": []
+    }
+  ],
+  "waiver": null
+}
