@@ -3057,12 +3057,51 @@
       "file_path": "docs/plans/active/PLAN-20260711-067.md",
       "confirmed_by_user": false,
       "created_at": "2026-07-11T01:03:22Z",
-      "updated_at": "2026-07-11T01:05:21Z",
+      "updated_at": "2026-07-18T06:47:35Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-07-11T01:05:21Z",
           "text": "User requested a high-quality open-source readiness pass and local submission after blocker repair; start Sprint 1 from the audited clean baseline."
+        },
+        {
+          "at": "2026-07-15T23:59:15Z",
+          "text": "Reopened release acceptance scope to make the locked uv environment a complete, tested local runtime path alongside optional Docker startup."
+        },
+        {
+          "at": "2026-07-16T00:43:18Z",
+          "text": "P0-F expectation check passed across clean Windows/WSL uv environments and a real PostgreSQL/Redis API-worker-beat smoke; Docker is now an optional path."
+        },
+        {
+          "at": "2026-07-16T14:26:24Z",
+          "text": "User review corrected uv environment ownership: backend/.venv is the only repository-local environment; public docs removed UV_PROJECT_ENVIRONMENT and external path indirection."
+        },
+        {
+          "at": "2026-07-18T04:13:09Z",
+          "text": "Corrected uv/database boundary: launcher now rejects legacy MySQL with a typed reason before release migration; fresh PostgreSQL preflight remains green."
+        },
+        {
+          "at": "2026-07-18T06:47:35Z",
+          "text": "Architecture review reopened only the database-ownership part of P0-F: PLAN-20260718-068 now owns moving provider policy and persistence coupling out of the uv launcher, queue, and Agent layers."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260718-068",
+      "title": "Backend database and agent persistence boundary decoupling",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260718-068.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-07-18T06:47:35Z",
+      "updated_at": "2026-07-18T06:47:35Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-07-18T06:47:35Z",
+          "text": "Drafted after code-level boundary review confirmed production Agent ORM/Session coupling, queue-owned persistence bootstrap, duplicated database-provider decisions, and missing PostgreSQL runtime transaction evidence; awaiting user confirmation before implementation."
         }
       ]
     }
