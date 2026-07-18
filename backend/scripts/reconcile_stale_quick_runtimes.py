@@ -3,7 +3,7 @@
 
 This script is intentionally narrow:
 - It only inspects quick-mode sessions in RUNNING/RESUMING.
-- It uses control-plane facts only via RuntimeSessionService.
+- It uses typed control-plane facts through the runtime store.
 - It marks irrecoverable stale runtimes failed when the execution lease is gone
   and no continuation checkpoint exists.
 """
@@ -14,7 +14,8 @@ import argparse
 import json
 
 from app.core.database import SessionLocal
-from app.services.runtime_session_service import RuntimeSessionService
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
+from app.services.runtime_reconciler import RuntimeReconciler
 
 
 def main() -> int:
@@ -28,12 +29,16 @@ def main() -> int:
     args = parser.parse_args()
 
     with SessionLocal() as db:
-        summary = RuntimeSessionService.reconcile_irrecoverable_quick_runtimes_sync(
-            db,
-            limit=args.limit,
-        )
+        try:
+            summary = RuntimeReconciler(
+                SqlAlchemyRuntimeAttemptStore(db)
+            ).reconcile_irrecoverable_quick_runtimes(limit=args.limit)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
-    print(json.dumps(summary, ensure_ascii=False))
+    print(json.dumps(summary.to_dict(), ensure_ascii=False))
     return 0
 
 

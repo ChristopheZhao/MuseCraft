@@ -244,9 +244,43 @@ def test_clear_node_diagnostics_rejects_stale_expected_snapshot(runtime_db):
 
     assert caught.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
     assert caught.value.operation == "clear_node_diagnostics"
-    assert node.diagnostics == [
+    refreshed_node = store.load_node(session.id, "image")
+    assert refreshed_node is not None
+    assert [item.to_dict() for item in refreshed_node.diagnostics] == [
         {"code": "lease_expired"},
         {"code": "concurrent_update"},
+    ]
+
+
+def test_upsert_node_diagnostic_replaces_same_code_for_same_attempt(runtime_db):
+    db, _ = runtime_db
+    _, session, _ = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+
+    for state in ("running", "stopped"):
+        store.upsert_node_diagnostic(
+            session_id=session.id,
+            attempt_id=attempt.attempt_id,
+            diagnostic=JsonObjectPayload.from_mapping(
+                {
+                    "code": "execution_host_keepalive",
+                    "attempt_id": attempt.attempt_id,
+                    "state": state,
+                },
+                field_path="test.keepalive_diagnostic",
+            ),
+        )
+
+    node = store.load_node(session.id, "image")
+    assert node is not None
+    diagnostics = [item.to_dict() for item in node.diagnostics]
+    assert diagnostics == [
+        {
+            "code": "execution_host_keepalive",
+            "attempt_id": attempt.attempt_id,
+            "state": "stopped",
+        }
     ]
 
 
@@ -976,6 +1010,36 @@ def test_session_control_plane_failure_invalidates_live_attempt_lease(runtime_db
     assert node.status == WorkflowNodeStatus.FAILED.value
     assert task.status == TaskStatus.FAILED.value
     assert task.error_message == "provider failed"
+
+
+def test_session_control_plane_cancellation_aborts_attempt_and_invalidates_lease(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    RuntimeAttemptControlPlane(
+        store,
+        clock=lambda: datetime(2026, 7, 19, 1, 0, tzinfo=timezone.utc),
+        token_factory=lambda: "runtime-cancel-lease",
+    ).grant_lease(
+        session_id=session.id,
+        attempt_id=attempt.attempt_id,
+        lease_owner="orchestrator:image",
+        lease_timeout_seconds=120,
+    )
+    db.commit()
+
+    result = RuntimeSessionControlPlane(store).mark_cancelled(session.id)
+    db.commit()
+    db.refresh(task)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert result.status is WorkflowSessionStatus.CANCELLED
+    assert persisted_attempt.status == WorkflowAttemptStatus.ABORTED.value
+    assert persisted_attempt.lease_token is None
+    assert node.status == WorkflowNodeStatus.SKIPPED.value
+    assert task.status == TaskStatus.CANCELLED.value
 
 
 def test_runtime_reconciler_fails_only_missing_checkpoint_candidates(runtime_db):

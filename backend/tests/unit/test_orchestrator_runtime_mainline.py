@@ -21,6 +21,7 @@ from app.domain import (
     JsonObjectPayload,
     RuntimeStoreError,
     RuntimeStoreReason,
+    RuntimeTaskTransition,
     TaskStatus,
     TaskType,
     WorkflowAttemptStatus,
@@ -28,7 +29,7 @@ from app.domain import (
     WorkflowSessionStatus,
 )
 from app.infrastructure import SqlAlchemyRuntimeAttemptStore
-from app.models import Task, WorkflowNodeAttempt
+from app.models import Task, WorkflowNodeAttempt, WorkflowSession
 from app.services.agent_execution_boundary import build_agent_execution_request
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
@@ -40,7 +41,13 @@ from app.services.orchestration_runtime_transition_facade import (
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
-from app.services.runtime_session_service import RuntimeSessionService
+from app.services.runtime_read_model_service import (
+    RuntimeReadModelPresenter,
+    RuntimeReadModelService,
+)
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
+from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
+from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
 
 class _FakeSharedStore(dict):
@@ -211,13 +218,85 @@ def _create_task(sync_db):
     return task
 
 
+def _create_runtime_session(sync_db, task):
+    record = RuntimeSessionBootstrapControlPlane(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).create_quick_session(
+        task_id=str(task.task_id),
+        expected_task_status=TaskStatus(str(task.status)),
+        expected_latest_session_id=None,
+        input_payload=JsonObjectPayload.from_mapping(
+            task.input_parameters or {},
+            field_path="test.runtime_input_payload",
+        ),
+    )
+    sync_db.commit()
+    return record
+
+
+def _submit_script_decision(
+    sync_db,
+    *,
+    session_id,
+    action,
+    feedback_text,
+    structured_constraints=None,
+):
+    sync_db.expire_all()
+    store = SqlAlchemyRuntimeAttemptStore(sync_db)
+    session = store.load_session(session_id)
+    assert session is not None
+    decision = ScriptGateDecisionControlPlane(store).submit(
+        session_id=session_id,
+        node_key="script",
+        action=action,
+        feedback_text=feedback_text,
+        structured_constraints=JsonObjectPayload.from_mapping(
+            structured_constraints or {},
+            field_path="test.script_decision_constraints",
+        ),
+        actor_type="human",
+        actor_id="test-reviewer",
+        task_id=session.task_id,
+        expected_task_status=session.task_status,
+    )
+    sync_db.commit()
+    return decision
+
+
+def _start_runtime_checkpoint_attempt(sync_db, session_id, *, node_key):
+    sync_db.expire_all()
+    store = SqlAlchemyRuntimeAttemptStore(sync_db)
+    session = store.load_session(session_id)
+    assert session is not None
+    attempt = RuntimeAttemptControlPlane(store).start_attempt(
+        session_id=session_id,
+        node_key=node_key,
+        trigger_reason="initial",
+        requested_by="test",
+        input_contract=JsonObjectPayload.empty(),
+        task_transition=RuntimeTaskTransition(
+            task_id=session.task_id,
+            expected_status=session.task_status,
+            target_status=TaskStatus.IN_PROGRESS,
+            requires_human_review=False,
+        ),
+    )
+    return store, attempt
+
+
 def _load_runtime_view_from_fresh_session(SessionLocal, task_id):
     inspect_db = SessionLocal()
     try:
         fresh_task = inspect_db.query(Task).filter(Task.id == int(task_id)).first()
         if fresh_task is None:
             raise AssertionError(f"task {task_id} missing in fresh-session inspection")
-        return RuntimeSessionService.build_runtime_view_for_task_sync(inspect_db, fresh_task)
+        model = RuntimeReadModelService(SqlAlchemyRuntimeAttemptStore(inspect_db)).load_for_task(
+            str(fresh_task.task_id)
+        )
+        if model is None:
+            raise AssertionError(f"runtime for task {task_id} missing in fresh-session inspection")
+        return RuntimeReadModelPresenter.to_payload(model).to_dict()
     finally:
         inspect_db.close()
 
@@ -239,14 +318,14 @@ def _load_task_snapshot_from_fresh_session(SessionLocal, task_id):
 def _load_runtime_session_snapshot_from_fresh_session(SessionLocal, session_id):
     inspect_db = SessionLocal()
     try:
-        fresh_session = RuntimeSessionService.get_session_by_id_sync(inspect_db, int(session_id))
+        fresh_session = SqlAlchemyRuntimeAttemptStore(inspect_db).load_session(int(session_id))
         if fresh_session is None:
             raise AssertionError(
                 f"runtime session {session_id} missing in fresh-session inspection"
             )
         return {
-            "id": fresh_session.id,
-            "status": fresh_session.status,
+            "id": fresh_session.session_id,
+            "status": fresh_session.status.value,
         }
     finally:
         inspect_db.close()
@@ -255,17 +334,15 @@ def _load_runtime_session_snapshot_from_fresh_session(SessionLocal, session_id):
 def _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session_id, node_key):
     inspect_db = SessionLocal()
     try:
-        fresh_node = RuntimeSessionService.get_node_by_key_sync(
-            inspect_db, int(session_id), node_key
-        )
+        fresh_node = SqlAlchemyRuntimeAttemptStore(inspect_db).load_node(int(session_id), node_key)
         if fresh_node is None:
             raise AssertionError(
                 f"runtime node {node_key} missing for session {session_id} in fresh-session inspection"
             )
         return {
-            "id": fresh_node.id,
-            "status": fresh_node.status,
-            "diagnostics": list(fresh_node.diagnostics or []),
+            "id": fresh_node.node_id,
+            "status": fresh_node.status.value,
+            "diagnostics": [item.to_dict() for item in fresh_node.diagnostics],
         }
     finally:
         inspect_db.close()
@@ -274,8 +351,7 @@ def _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session_id, nod
 def _load_runtime_attempt_snapshot_from_fresh_session(SessionLocal, session_id, attempt_id):
     inspect_db = SessionLocal()
     try:
-        fresh_attempt = RuntimeSessionService.get_attempt_by_id_sync(
-            inspect_db,
+        fresh_attempt = SqlAlchemyRuntimeAttemptStore(inspect_db).load_attempt(
             int(session_id),
             int(attempt_id),
         )
@@ -284,10 +360,10 @@ def _load_runtime_attempt_snapshot_from_fresh_session(SessionLocal, session_id, 
                 f"runtime attempt {attempt_id} missing for session {session_id} in fresh-session inspection"
             )
         return {
-            "id": fresh_attempt.id,
-            "status": fresh_attempt.status,
+            "id": fresh_attempt.attempt_id,
+            "status": fresh_attempt.status.value,
             "error_message": fresh_attempt.error_message,
-            "lease_token": getattr(fresh_attempt, "lease_token", None),
+            "lease_token": fresh_attempt.lease_token,
         }
     finally:
         inspect_db.close()
@@ -639,9 +715,7 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         result = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -651,7 +725,7 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert result["status"] == "waiting_gate"
-        assert result["session_id"] == session.id
+        assert result["session_id"] == session.session_id
         assert runtime_view["status"] == WorkflowSessionStatus.WAITING_GATE.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
@@ -673,9 +747,7 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
         facade = OrchestrationRuntimeTransitionFacade(
             context_contract_assembler=agent._context_contract_assembler,
             orchestration_state=agent._orchestration_state,
@@ -692,7 +764,7 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
             return "ok"
 
         result = facade._run_with_fresh_runtime_control_plane_session(
-            runtime_session_id=session.id,
+            runtime_session_id=session.session_id,
             task_id=str(task.task_id),
             action=_record_loaded_runtime_state,
         )
@@ -700,7 +772,7 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
         assert result == "ok"
         assert observed["db_id"] != id(sync_db)
         assert observed["store_type"] == "SqlAlchemyRuntimeAttemptStore"
-        assert observed["session_id"] == session.id
+        assert observed["session_id"] == session.session_id
         assert observed["task_id"] == str(task.task_id)
     finally:
         sync_db.close()
@@ -715,9 +787,7 @@ def test_runtime_transition_facade_compensates_published_payload_on_failure(monk
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
         facade = OrchestrationRuntimeTransitionFacade(
             context_contract_assembler=agent._context_contract_assembler,
             orchestration_state=agent._orchestration_state,
@@ -736,7 +806,7 @@ def test_runtime_transition_facade_compensates_published_payload_on_failure(monk
 
         with pytest.raises(RuntimeError, match="gate transition failed"):
             facade._run_with_fresh_runtime_control_plane_session(
-                runtime_session_id=session.id,
+                runtime_session_id=session.session_id,
                 task_id=str(task.task_id),
                 action=_fail_after_publication,
             )
@@ -759,9 +829,7 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
             session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         observed_db_ids = []
         original_clear = SqlAlchemyRuntimeAttemptStore.clear_node_diagnostics
@@ -777,7 +845,7 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
         )
 
         result = facade.start_runtime_attempt(
-            runtime_session_id=session.id,
+            runtime_session_id=session.session_id,
             task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
             current_agent_type=AgentType.CONCEPT_PLANNER,
             workflow_state_id=str(task.task_id),
@@ -803,7 +871,7 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
             match="Runtime node mapping is missing",
         ):
             facade.start_runtime_attempt(
-                runtime_session_id=session.id,
+                runtime_session_id=session.session_id,
                 task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
                 current_agent_type=AgentType.SERIES_PLANNER,
                 workflow_state_id=str(task.task_id),
@@ -835,9 +903,7 @@ def test_runtime_resume_bootstrap_rolls_back_attempt_when_continuation_bind_fail
             session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         def _fail_bind(self, **kwargs):
             raise RuntimeStoreError(
@@ -850,7 +916,7 @@ def test_runtime_resume_bootstrap_rolls_back_attempt_when_continuation_bind_fail
 
         with pytest.raises(RuntimeStoreError, match="injected continuation conflict"):
             facade.start_runtime_attempt(
-                runtime_session_id=session.id,
+                runtime_session_id=session.session_id,
                 task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
                 current_agent_type=AgentType.CONCEPT_PLANNER,
                 workflow_state_id=str(task.task_id),
@@ -865,13 +931,17 @@ def test_runtime_resume_bootstrap_rolls_back_attempt_when_continuation_bind_fail
             )
 
         sync_db.expire_all()
-        persisted_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-        persisted_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
+        store = SqlAlchemyRuntimeAttemptStore(sync_db)
+        persisted_session = store.load_session(session.session_id)
+        persisted_node = store.load_node(session.session_id, "concept")
+        assert persisted_session is not None
+        assert persisted_node is not None
         persisted_task = sync_db.get(Task, task.id)
+        assert persisted_task is not None
         assert sync_db.query(WorkflowNodeAttempt).count() == 0
-        assert persisted_session.status == WorkflowSessionStatus.QUEUED.value
+        assert persisted_session.status is WorkflowSessionStatus.QUEUED
         assert persisted_session.current_attempt_id is None
-        assert persisted_node.status == WorkflowNodeStatus.QUEUED.value
+        assert persisted_node.status is WorkflowNodeStatus.QUEUED
         assert persisted_task.status == TaskStatus.PENDING.value
     finally:
         sync_db.close()
@@ -886,9 +956,7 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         completion_calls = []
 
@@ -899,7 +967,7 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
             def open_script_review_gate(self, **kwargs):
                 return {
                     "status": "waiting_gate",
-                    "session_id": session.id,
+                    "session_id": session.session_id,
                     "gate_id": 1,
                     "node_key": "script",
                 }
@@ -912,7 +980,7 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
 
         assert result["status"] == "waiting_gate"
         assert completion_calls
-        assert completion_calls[0]["runtime_session_id"] == session.id
+        assert completion_calls[0]["runtime_session_id"] == session.session_id
         assert completion_calls[0]["node_key"] == "concept"
         assert completion_calls[0]["node_status"] == WorkflowNodeStatus.COMPLETED.value
     finally:
@@ -930,9 +998,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         completion_calls = []
         gate_calls = []
@@ -945,7 +1011,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
                 gate_calls.append(dict(kwargs))
                 return {
                     "status": "waiting_gate",
-                    "session_id": session.id,
+                    "session_id": session.session_id,
                     "gate_id": 1,
                     "node_key": "script",
                 }
@@ -959,7 +1025,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
         assert result["status"] == "waiting_gate"
         assert completion_calls
         assert gate_calls
-        assert gate_calls[0]["runtime_session_id"] == session.id
+        assert gate_calls[0]["runtime_session_id"] == session.session_id
         assert gate_calls[0]["task_id"] == str(task.task_id)
         assert gate_calls[0]["script_attempt_id"] >= 1
     finally:
@@ -985,9 +1051,7 @@ def test_orchestrator_mainline_routes_attempt_bootstrap_through_resume_facade(mo
         )
 
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         completion_calls = []
         gate_calls = []
@@ -1000,7 +1064,7 @@ def test_orchestrator_mainline_routes_attempt_bootstrap_through_resume_facade(mo
                 gate_calls.append(dict(kwargs))
                 return {
                     "status": "waiting_gate",
-                    "session_id": session.id,
+                    "session_id": session.session_id,
                     "gate_id": 1,
                     "node_key": "script",
                 }
@@ -1041,9 +1105,7 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
         )
 
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         with pytest.raises(AgentError, match="Execution host keepalive unavailable"):
             asyncio.run(
@@ -1051,8 +1113,12 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
             )
 
         fresh_task = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
-        fresh_session = _load_runtime_session_snapshot_from_fresh_session(SessionLocal, session.id)
-        node = _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session.id, "concept")
+        fresh_session = _load_runtime_session_snapshot_from_fresh_session(
+            SessionLocal, session.session_id
+        )
+        node = _load_runtime_node_snapshot_from_fresh_session(
+            SessionLocal, session.session_id, "concept"
+        )
         keepalive_diagnostic = next(
             item
             for item in (node["diagnostics"] or [])
@@ -1094,9 +1160,7 @@ def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failur
         agent._evaluate_runtime_boundary_cycle = _raise_runtime_decision_failure
 
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         with pytest.raises(AgentError, match="Runtime replan missing action"):
             asyncio.run(
@@ -1104,11 +1168,13 @@ def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failur
             )
 
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
-        node = _load_runtime_node_snapshot_from_fresh_session(SessionLocal, session.id, "concept")
+        node = _load_runtime_node_snapshot_from_fresh_session(
+            SessionLocal, session.session_id, "concept"
+        )
         task_snapshot = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
         attempt_snapshot = _load_runtime_attempt_snapshot_from_fresh_session(
             SessionLocal,
-            session.id,
+            session.session_id,
             runtime_view["current_attempt_id"],
         )
         stage_diagnostic = next(
@@ -1384,18 +1450,15 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         agent._llm_select_candidate_agents = _count_select
         agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
         first = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
-        RuntimeSessionService.submit_gate_decision_sync(
+        _submit_script_decision(
             sync_db,
-            session.id,
-            node_key="script",
+            session_id=session.session_id,
             action="approve",
             feedback_text="looks good",
         )
@@ -1428,7 +1491,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
             agent._orchestration_runtime_resume_bootstrap_facade.consume_calls[0][
                 "runtime_session_id"
             ]
-            == session.id
+            == session.session_id
         )
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
@@ -1462,14 +1525,9 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
         agent._llm_decompose_tasks = _count_decompose
 
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
-        attempt = RuntimeSessionService.start_node_attempt_sync(
-            sync_db,
-            session,
-            node_key="script",
-            task=task,
+        session = _create_runtime_session(sync_db, task)
+        store, attempt = _start_runtime_checkpoint_attempt(
+            sync_db, session.session_id, node_key="script"
         )
         continuation_checkpoint = agent._orchestration_state.build_continuation_checkpoint(
             task_specs={
@@ -1479,16 +1537,19 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
             candidate_agents=[AgentType.SCRIPT_WRITER],
             anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
             node_key="script",
-            attempt_id=attempt.id,
+            attempt_id=attempt.attempt_id,
             decision_id=None,
         )
-        RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
-            sync_db,
-            session,
-            attempt_id=attempt.id,
-            continuation_checkpoint=continuation_checkpoint,
+        RuntimeAttemptControlPlane(store).bind_continuation(
+            session_id=session.session_id,
+            attempt_id=attempt.attempt_id,
+            continuation_checkpoint=JsonObjectPayload.from_mapping(
+                continuation_checkpoint,
+                field_path="test.runtime_checkpoint",
+            ),
         )
-        RuntimeSessionService.mark_session_resuming_sync(sync_db, session, task=task)
+        RuntimeSessionControlPlane(store).mark_resuming(session.session_id)
+        sync_db.commit()
 
         result = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -1521,9 +1582,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
             agent, OrchestratorAgent
         )
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         first = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -1534,14 +1593,15 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
         agent._context_contract_assembler.assemble_agent_context = (
             real_assembler.assemble_agent_context
         )
-        RuntimeSessionService.submit_gate_decision_sync(
+        _submit_script_decision(
             sync_db,
-            session.id,
-            node_key="script",
+            session_id=session.session_id,
             action="approve",
             feedback_text="looks good",
         )
-        session.input_payload = {}
+        session_row = sync_db.get(WorkflowSession, session.session_id)
+        assert session_row is not None
+        session_row.input_payload = {}
         sync_db.commit()
 
         with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
@@ -1567,7 +1627,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
-        RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+        _create_runtime_session(sync_db, task)
 
         agent._llm_select_candidate_agents = _async_return(
             (
@@ -1644,19 +1704,16 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
         agent._llm_select_candidate_agents = _count_select
         agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         first = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
-        RuntimeSessionService.submit_gate_decision_sync(
+        _submit_script_decision(
             sync_db,
-            session.id,
-            node_key="script",
+            session_id=session.session_id,
             action="revise",
             feedback_text="tighten pacing",
             structured_constraints={"keep_character": True},
@@ -1730,19 +1787,16 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
         agent._llm_select_candidate_agents = _count_select
         agent._llm_decompose_tasks = _count_decompose
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         first = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
-        RuntimeSessionService.submit_gate_decision_sync(
+        _submit_script_decision(
             sync_db,
-            session.id,
-            node_key="script",
+            session_id=session.session_id,
             action="replan",
             feedback_text="change structure",
             structured_constraints={"new_arc": "stronger opening"},
@@ -1798,9 +1852,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
             calls=call_log["script_writer"],
         )
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         result = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -1809,7 +1861,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert result["status"] == "waiting_gate"
-        assert result["session_id"] == session.id
+        assert result["session_id"] == session.session_id
         assert runtime_view["status"] == WorkflowSessionStatus.WAITING_GATE.value
         assert runtime_view["active_gate"]["gate_name"] == "script_review"
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
@@ -1877,9 +1929,7 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
             session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
+        session = _create_runtime_session(sync_db, task)
 
         result = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -1887,7 +1937,7 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
 
         with SessionLocal() as verification_db:
             runtime_store = SqlAlchemyRuntimeAttemptStore(verification_db)
-            runtime_session = runtime_store.load_session(session.id)
+            runtime_session = runtime_store.load_session(session.session_id)
             assert runtime_session is not None
             assert runtime_session.current_attempt_id is not None
             attempt = runtime_store.load_attempt(

@@ -214,18 +214,6 @@ class RuntimeSessionCreateCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeNodeTransitionCommand:
-    session_id: int
-    node_key: str
-    expected_status: WorkflowNodeStatus | None
-    target_status: WorkflowNodeStatus
-    session_status: WorkflowSessionStatus | None = None
-    artifact_refs: tuple[JsonObjectPayload, ...] | None = None
-    diagnostics: tuple[JsonObjectPayload, ...] | None = None
-    task_transition: RuntimeTaskTransition | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeNodeDiagnosticsClearCommand:
     session_id: int
     node_key: str
@@ -693,9 +681,6 @@ class RuntimeControlPlaneStore(Protocol):
         ...
 
     def create_session(self, command: RuntimeSessionCreateCommand) -> RuntimeSessionRecord:
-        ...
-
-    def transition_node(self, command: RuntimeNodeTransitionCommand) -> RuntimeNodeRecord:
         ...
 
     def start_attempt(self, command: RuntimeAttemptStartCommand) -> RuntimeAttemptRecord:

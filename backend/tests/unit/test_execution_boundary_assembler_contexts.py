@@ -16,8 +16,11 @@ from app.domain import (
     AgentTaskReference,
     AgentType,
     JsonObjectPayload,
+    RuntimeTaskTransition,
     TaskStatus,
     TaskType,
+    WorkflowGateStatus,
+    WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
 from app.infrastructure import SqlAlchemyRuntimeAttemptStore
@@ -30,11 +33,14 @@ from app.services.orchestration_runtime_resume_bootstrap_facade import (
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.published_deliverable_adapter import build_script_deliverable_payload
 from app.services.published_deliverable_service import build_deliverable_ref
+from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
+from app.services.runtime_gate_control_plane import RuntimeGateControlPlane
 from app.services.runtime_published_deliverable_control_plane import (
     RuntimePublishedDeliverableControlPlane,
 )
-from app.services.runtime_session_service import RuntimeSessionService
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
 from app.services.scene_info_reference_service import SceneInfoReferencePersistenceError
+from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
@@ -120,13 +126,119 @@ def _create_task(db):
     return task
 
 
+def _create_runtime_session(db, task):
+    session = RuntimeSessionBootstrapControlPlane(
+        SqlAlchemyRuntimeAttemptStore(db)
+    ).create_quick_session(
+        task_id=str(task.task_id),
+        expected_task_status=TaskStatus(str(task.status)),
+        expected_latest_session_id=None,
+        input_payload=JsonObjectPayload.from_mapping(
+            task.input_parameters or {},
+            field_path="test.runtime_input_payload",
+        ),
+    )
+    db.commit()
+    return session
+
+
+def _start_script_attempt(db, session_id):
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    session = store.load_session(session_id)
+    assert session is not None
+    attempt = RuntimeAttemptControlPlane(store).start_attempt(
+        session_id=session_id,
+        node_key="script",
+        trigger_reason="initial",
+        requested_by="test",
+        input_contract=JsonObjectPayload.empty(),
+        task_transition=RuntimeTaskTransition(
+            task_id=session.task_id,
+            expected_status=session.task_status,
+            target_status=TaskStatus.IN_PROGRESS,
+            requires_human_review=False,
+        ),
+    )
+    db.commit()
+    return attempt
+
+
+def _open_script_review_gate(
+    db,
+    *,
+    session_id,
+    attempt_id,
+    artifact_refs,
+    continuation_checkpoint=None,
+):
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    refs = tuple(
+        JsonObjectPayload.from_mapping(ref, field_path="test.script_gate_artifact_ref")
+        for ref in artifact_refs
+    )
+    if continuation_checkpoint is not None:
+        RuntimeAttemptControlPlane(store).complete_attempt(
+            session_id=session_id,
+            node_key="script",
+            attempt_id=attempt_id,
+            expected_lease_token=None,
+            target_node_status=WorkflowNodeStatus.RUNNING,
+            output_artifacts=refs,
+            continuation_checkpoint=JsonObjectPayload.from_mapping(
+                continuation_checkpoint,
+                field_path="test.script_continuation_checkpoint",
+            ),
+            node_artifact_refs=refs,
+        )
+    session = store.load_session(session_id)
+    assert session is not None
+    RuntimeGateControlPlane(store).open_human_gate(
+        session_id=session_id,
+        node_key="script",
+        attempt_id=attempt_id,
+        gate_name="script_review",
+        gate_type="human_review",
+        contract_version="v1",
+        scope=JsonObjectPayload.empty(),
+        artifact_refs=refs,
+        facts=JsonObjectPayload.empty(),
+        allowed_actions=("approve", "revise"),
+        recommended_action="approve",
+        expected_lease_token=None,
+        result_code=WorkflowGateStatus.AWAITING_HUMAN.value,
+        reason_code="script_review_requested",
+        task_transition=RuntimeTaskTransition(
+            task_id=session.task_id,
+            expected_status=session.task_status,
+            target_status=TaskStatus.IN_PROGRESS,
+            requires_human_review=True,
+        ),
+    )
+    db.commit()
+
+
+def _submit_script_revision(db, *, session_id, feedback_text):
+    db.expire_all()
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    session = store.load_session(session_id)
+    assert session is not None
+    ScriptGateDecisionControlPlane(store).submit(
+        session_id=session_id,
+        node_key="script",
+        action="revise",
+        feedback_text=feedback_text,
+        structured_constraints=JsonObjectPayload.empty(),
+        actor_type="human",
+        actor_id="test-reviewer",
+        task_id=session.task_id,
+        expected_task_status=session.task_status,
+    )
+    db.commit()
+
+
 def test_script_review_boundary_draft_assembles_contract_without_persistence(sync_db):
     service = _build_service()
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db, session, node_key="script", task=task
-    )
     workflow_id = str(task.task_id)
 
     write_shared_fact(
@@ -306,13 +418,8 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
     source_service = _build_service()
     workflow_id = "wf-script-revise-projection"
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db,
-        session,
-        node_key="script",
-        task=task,
-    )
+    session = _create_runtime_session(sync_db, task)
+    attempt = _start_script_attempt(sync_db, session.session_id)
 
     write_shared_fact(
         workflow_id,
@@ -335,9 +442,9 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
     deliverable = RuntimePublishedDeliverableControlPlane(
         SqlAlchemyRuntimeAttemptStore(sync_db)
     ).publish_script(
-        session_id=session.id,
+        session_id=session.session_id,
         workflow_id=workflow_id,
-        attempt_id=attempt.id,
+        attempt_id=attempt.attempt_id,
         payload=JsonObjectPayload.from_mapping(
             build_script_deliverable_payload(workflow_id, service=source_service),
             field_path="test.script_payload",
@@ -361,25 +468,18 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
         candidate_agents=[AgentType.SCRIPT_WRITER],
         anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION,
         node_key="script",
-        attempt_id=attempt.id,
+        attempt_id=attempt.attempt_id,
     )
-    RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
+    _open_script_review_gate(
         sync_db,
-        session,
-        task=task,
-        workflow_state_id=workflow_id,
-        attempt_id=attempt.id,
-        trigger_reason="initial",
-        script_output={"scenes_generated": 1, "total_scenes": 1},
-        artifact_ref=artifact_ref,
-        script_preview_text="candidate preview",
+        session_id=session.session_id,
+        attempt_id=attempt.attempt_id,
+        artifact_refs=[artifact_ref],
         continuation_checkpoint=checkpoint,
     )
-    RuntimeSessionService.submit_gate_decision_sync(
+    _submit_script_revision(
         sync_db,
-        session.id,
-        node_key="script",
-        action="revise",
+        session_id=session.session_id,
         feedback_text="change the boy's camera angle",
     )
 
@@ -391,7 +491,7 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
     )
 
     receipt = facade.project_script_revision_context(
-        runtime_session_id=session.id,
+        runtime_session_id=session.session_id,
         workflow_state_id=workflow_id,
         resume_action="revise",
     )
@@ -419,13 +519,8 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
 def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db, tmp_path):
     workflow_id = "wf-script-revise-malformed"
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db,
-        session,
-        node_key="script",
-        task=task,
-    )
+    session = _create_runtime_session(sync_db, task)
+    attempt = _start_script_attempt(sync_db, session.session_id)
     payload_path = Path(tmp_path) / "malformed_script_payload.json"
     payload_path.write_text(
         json.dumps(
@@ -439,13 +534,10 @@ def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db,
         ),
         encoding="utf-8",
     )
-    RuntimeSessionService.open_human_gate_sync(
+    _open_script_review_gate(
         sync_db,
-        session,
-        node_key="script",
-        gate_name="script_review",
-        gate_type="human_review",
-        attempt_id=attempt.id,
+        session_id=session.session_id,
+        attempt_id=attempt.attempt_id,
         artifact_refs=[
             {
                 "type": "published_deliverable",
@@ -453,9 +545,6 @@ def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db,
                 "payload_ref": str(payload_path),
             }
         ],
-        allowed_actions=["approve", "revise"],
-        recommended_action="approve",
-        task=task,
     )
     memory_services = SimpleNamespace(short_term=_build_service())
     facade = OrchestrationRuntimeResumeBootstrapFacade(
@@ -467,7 +556,7 @@ def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db,
         OrchestrationRuntimeResumeBootstrapError, match="script_revision_scene_overview_missing"
     ):
         facade.project_script_revision_context(
-            runtime_session_id=session.id,
+            runtime_session_id=session.session_id,
             workflow_state_id=workflow_id,
             resume_action="revise",
         )

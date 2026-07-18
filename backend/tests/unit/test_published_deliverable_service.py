@@ -15,8 +15,10 @@ from app.domain import (
     JsonObjectPayload,
     RuntimeStoreError,
     RuntimeStoreReason,
+    RuntimeTaskTransition,
     TaskStatus,
     TaskType,
+    WorkflowGateStatus,
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
@@ -34,10 +36,13 @@ from app.services.published_deliverable_service import (
     load_published_payload,
     normalize_published_deliverable_ref,
 )
+from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
+from app.services.runtime_gate_control_plane import RuntimeGateControlPlane
 from app.services.runtime_published_deliverable_control_plane import (
     RuntimePublishedDeliverableControlPlane,
 )
-from app.services.runtime_session_service import RuntimeSessionService
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
+from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
 
 def _build_service() -> WorkingMemoryService:
@@ -110,7 +115,7 @@ def _seed_script_facts(service: WorkingMemoryService, workflow_id: str) -> None:
     )
 
 
-def _build_continuation_checkpoint():
+def _build_continuation_checkpoint(*, attempt_id=1):
     return OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
             AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
@@ -120,9 +125,104 @@ def _build_continuation_checkpoint():
         candidate_agents=[AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER],
         anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
         node_key="script",
-        attempt_id=1,
+        attempt_id=attempt_id,
         decision_id=None,
     )
+
+
+def _create_runtime_session(db, task):
+    session = RuntimeSessionBootstrapControlPlane(
+        SqlAlchemyRuntimeAttemptStore(db)
+    ).create_quick_session(
+        task_id=str(task.task_id),
+        expected_task_status=TaskStatus(str(task.status)),
+        expected_latest_session_id=None,
+        input_payload=JsonObjectPayload.from_mapping(
+            task.input_parameters or {},
+            field_path="test.runtime_input_payload",
+        ),
+    )
+    db.commit()
+    return session
+
+
+def _start_script_attempt(db, session_id):
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    session = store.load_session(session_id)
+    assert session is not None
+    attempt = RuntimeAttemptControlPlane(store).start_attempt(
+        session_id=session_id,
+        node_key="script",
+        trigger_reason="initial",
+        requested_by="test",
+        input_contract=JsonObjectPayload.empty(),
+        task_transition=RuntimeTaskTransition(
+            task_id=session.task_id,
+            expected_status=session.task_status,
+            target_status=TaskStatus.IN_PROGRESS,
+            requires_human_review=False,
+        ),
+    )
+    db.commit()
+    return attempt
+
+
+def _complete_script_attempt(db, *, session_id, attempt_id, artifact_refs):
+    refs = tuple(
+        JsonObjectPayload.from_mapping(ref, field_path="test.script_artifact_ref")
+        for ref in artifact_refs
+    )
+    RuntimeAttemptControlPlane(SqlAlchemyRuntimeAttemptStore(db)).complete_attempt(
+        session_id=session_id,
+        node_key="script",
+        attempt_id=attempt_id,
+        expected_lease_token=None,
+        target_node_status=WorkflowNodeStatus.RUNNING,
+        output_artifacts=refs,
+        metrics=JsonObjectPayload.from_mapping(
+            {"scenes_generated": 1},
+            field_path="test.script_metrics",
+        ),
+        node_artifact_refs=refs,
+        continuation_checkpoint=JsonObjectPayload.from_mapping(
+            _build_continuation_checkpoint(attempt_id=attempt_id),
+            field_path="test.script_continuation_checkpoint",
+        ),
+    )
+    db.commit()
+    return refs
+
+
+def _open_script_review_gate(db, *, session_id, attempt_id, artifact_refs):
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    session = store.load_session(session_id)
+    assert session is not None
+    RuntimeGateControlPlane(store).open_human_gate(
+        session_id=session_id,
+        node_key="script",
+        attempt_id=attempt_id,
+        gate_name="script_review",
+        gate_type="human_review",
+        contract_version="v1",
+        scope=JsonObjectPayload.empty(),
+        artifact_refs=artifact_refs,
+        facts=JsonObjectPayload.from_mapping(
+            {"script_preview_text": "draft"},
+            field_path="test.script_gate_facts",
+        ),
+        allowed_actions=("approve", "revise", "replan"),
+        recommended_action="approve",
+        expected_lease_token=None,
+        result_code=WorkflowGateStatus.AWAITING_HUMAN.value,
+        reason_code="script_review_requested",
+        task_transition=RuntimeTaskTransition(
+            task_id=session.task_id,
+            expected_status=session.task_status,
+            target_status=TaskStatus.IN_PROGRESS,
+            requires_human_review=True,
+        ),
+    )
+    db.commit()
 
 
 def test_load_published_payload_reports_missing_file_reason_code(tmp_path):
@@ -216,12 +316,8 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
     monkeypatch.setattr(settings, "TEMP_PATH", str(tmp_path))
 
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db,
-        session,
-        node_key="script",
-    )
+    session = _create_runtime_session(sync_db, task)
+    attempt = _start_script_attempt(sync_db, session.session_id)
     service = _build_service()
     workflow_id = str(task.task_id)
     _seed_script_facts(service, workflow_id)
@@ -229,9 +325,9 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
     deliverable = RuntimePublishedDeliverableControlPlane(
         SqlAlchemyRuntimeAttemptStore(sync_db)
     ).publish_script(
-        session_id=session.id,
+        session_id=session.session_id,
         workflow_id=workflow_id,
-        attempt_id=attempt.id,
+        attempt_id=attempt.attempt_id,
         payload=JsonObjectPayload.from_mapping(
             build_script_deliverable_payload(workflow_id, service=service),
             field_path="test.script_payload",
@@ -259,24 +355,23 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
         == "Han Li gathers spiritual energy in silence."
     )
 
-    payload_ref = get_published_deliverable_ref(session.input_payload, node_key="script")
+    payload_ref = get_published_deliverable_ref(
+        session.input_payload.to_dict(),
+        node_key="script",
+    )
     assert payload_ref is None
 
 
 def test_publish_script_deliverable_discards_payload_after_store_conflict(sync_db):
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db,
-        session,
-        node_key="script",
-    )
+    session = _create_runtime_session(sync_db, task)
+    attempt = _start_script_attempt(sync_db, session.session_id)
     discarded_refs = []
 
     def _write_then_invalidate(**_kwargs):
         node = (
             sync_db.query(WorkflowNodeState)
-            .filter_by(session_id=session.id, node_key="script")
+            .filter_by(session_id=session.session_id, node_key="script")
             .one()
         )
         node.status = WorkflowNodeStatus.QUEUED.value
@@ -291,9 +386,9 @@ def test_publish_script_deliverable_discards_payload_after_store_conflict(sync_d
 
     with pytest.raises(RuntimeStoreError) as excinfo:
         control_plane.publish_script(
-            session_id=session.id,
+            session_id=session.session_id,
             workflow_id=str(task.task_id),
-            attempt_id=attempt.id,
+            attempt_id=attempt.attempt_id,
             payload=JsonObjectPayload.from_mapping(
                 {"scene_scripts": {"1": {"script_text": "draft"}}},
                 field_path="test.script_payload",
@@ -310,12 +405,8 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
     monkeypatch.setattr(settings, "TEMP_PATH", str(tmp_path))
 
     task = _create_task(sync_db)
-    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
-    attempt = RuntimeSessionService.start_node_attempt_sync(
-        sync_db,
-        session,
-        node_key="script",
-    )
+    session = _create_runtime_session(sync_db, task)
+    attempt = _start_script_attempt(sync_db, session.session_id)
     service = _build_service()
     workflow_id = str(task.task_id)
     _seed_script_facts(service, workflow_id)
@@ -323,9 +414,9 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
     deliverable = RuntimePublishedDeliverableControlPlane(
         SqlAlchemyRuntimeAttemptStore(sync_db)
     ).publish_script(
-        session_id=session.id,
+        session_id=session.session_id,
         workflow_id=workflow_id,
-        attempt_id=attempt.id,
+        attempt_id=attempt.attempt_id,
         payload=JsonObjectPayload.from_mapping(
             build_script_deliverable_payload(workflow_id, service=service),
             field_path="test.script_payload",
@@ -336,36 +427,33 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
         ),
     )
     artifact_refs = [build_deliverable_ref(deliverable)]
-    RuntimeSessionService.complete_node_attempt_sync(
+    normalized_refs = _complete_script_attempt(
         sync_db,
-        session,
-        node_key="script",
-        attempt_id=attempt.id,
-        output_artifacts=artifact_refs,
-        metrics={"scenes_generated": 1},
+        session_id=session.session_id,
+        attempt_id=attempt.attempt_id,
         artifact_refs=artifact_refs,
     )
-    attempt.continuation_checkpoint = _build_continuation_checkpoint()
-    sync_db.commit()
-    RuntimeSessionService.open_human_gate_sync(
+    _open_script_review_gate(
         sync_db,
-        session,
-        node_key="script",
-        gate_name="script_review",
-        gate_type="human_review",
-        attempt_id=attempt.id,
-        artifact_refs=artifact_refs,
-        facts={"script_preview_text": "draft"},
-        allowed_actions=["approve", "revise", "replan"],
-        recommended_action="approve",
+        session_id=session.session_id,
+        attempt_id=attempt.attempt_id,
+        artifact_refs=normalized_refs,
     )
 
-    decision = RuntimeSessionService.submit_gate_decision_sync(
-        sync_db,
-        session.id,
+    db_session = SqlAlchemyRuntimeAttemptStore(sync_db).load_session(session.session_id)
+    assert db_session is not None
+    decision = ScriptGateDecisionControlPlane(SqlAlchemyRuntimeAttemptStore(sync_db)).submit(
+        session_id=session.session_id,
         node_key="script",
         action="approve",
+        feedback_text=None,
+        structured_constraints=JsonObjectPayload.empty(),
+        actor_type="human",
+        actor_id="test-reviewer",
+        task_id=db_session.task_id,
+        expected_task_status=db_session.task_status,
     )
+    sync_db.commit()
 
     refreshed = (
         sync_db.query(WorkflowPublishedDeliverable).filter_by(id=deliverable.deliverable_id).one()
@@ -374,10 +462,12 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
     assert refreshed.is_candidate is False
     assert refreshed.is_approved is True
 
-    refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-    assert refreshed_session.status == WorkflowSessionStatus.RESUMING.value
+    refreshed_session = SqlAlchemyRuntimeAttemptStore(sync_db).load_session(session.session_id)
+    assert refreshed_session is not None
+    assert refreshed_session.status is WorkflowSessionStatus.RESUMING
     published_ref = get_published_deliverable_ref(
-        refreshed_session.input_payload, node_key="script"
+        refreshed_session.input_payload.to_dict(),
+        node_key="script",
     )
     assert published_ref is not None
     assert published_ref["is_approved"] is True

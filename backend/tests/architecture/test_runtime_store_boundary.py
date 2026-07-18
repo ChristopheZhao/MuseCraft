@@ -25,9 +25,7 @@ RUNTIME_SESSION_BOOTSTRAP_CONTROL_PLANE = (
     BACKEND_ROOT / "app" / "services" / "runtime_session_bootstrap_control_plane.py"
 )
 
-EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT = {
-    "runtime_session_service.py",
-}
+EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT: set[str] = set()
 RUNTIME_ORM_SYMBOLS = {
     "WorkflowSession",
     "WorkflowNodeAttempt",
@@ -115,8 +113,6 @@ def test_production_runtime_callers_do_not_reference_legacy_session_service():
     violations: list[str] = []
     for root in (BACKEND_ROOT / "app" / "api", BACKEND_ROOT / "app" / "services"):
         for path in root.rglob("*.py"):
-            if path.name == "runtime_session_service.py":
-                continue
             imports = _imports(path)
             imports_legacy_service = any(
                 module == "runtime_session_service" or module.endswith(".runtime_session_service")
@@ -124,6 +120,10 @@ def test_production_runtime_callers_do_not_reference_legacy_session_service():
             )
             if imports_legacy_service or "RuntimeSessionService" in _source(path):
                 violations.append(str(path.relative_to(BACKEND_ROOT)))
+    for path in (BACKEND_ROOT / "scripts").rglob("*.py"):
+        source = _source(path)
+        if "runtime_session_service" in source or "RuntimeSessionService" in source:
+            violations.append(str(path.relative_to(BACKEND_ROOT)))
 
     assert violations == []
 
@@ -150,7 +150,6 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         "load_latest_gate_decision",
         "load_published_deliverable",
         "create_session",
-        "transition_node",
         "start_attempt",
         "grant_attempt_lease",
         "heartbeat_attempt_lease",
@@ -271,8 +270,6 @@ def test_production_runtime_callers_do_not_use_legacy_projection_or_terminal_mut
     violations: list[str] = []
     for root in production_roots:
         for path in root.rglob("*.py"):
-            if path.name == "runtime_session_service.py":
-                continue
             tree = ast.parse(_source(path), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -280,6 +277,11 @@ def test_production_runtime_callers_do_not_use_legacy_projection_or_terminal_mut
                         violations.append(
                             f"{path.relative_to(BACKEND_ROOT)}:{node.lineno}:{node.func.attr}"
                         )
+    for path in (BACKEND_ROOT / "scripts").rglob("*.py"):
+        source = _source(path)
+        for forbidden_call in forbidden_calls:
+            if f".{forbidden_call}(" in source:
+                violations.append(f"{path.relative_to(BACKEND_ROOT)}:{forbidden_call}")
     assert violations == []
 
 
