@@ -1,7 +1,9 @@
 import subprocess
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
+from scripts import dev as dev_alias
+from scripts import start_dev as start_dev_alias
 from scripts import start_dev_uv as module
 
 
@@ -24,6 +26,11 @@ class _DummyProcess:
         if self._wait_exception is not None:
             raise self._wait_exception
         return 0 if self._returncode is None else self._returncode
+
+
+def test_legacy_dev_entrypoints_forward_to_canonical_launcher():
+    assert dev_alias.main is module.main
+    assert start_dev_alias.main is module.main
 
 
 def test_start_long_lived_process_inherits_logs_by_default(monkeypatch, capsys):
@@ -287,44 +294,14 @@ def test_load_project_environment_uses_root_without_overriding_process_values(mo
     assert calls == [(module.PROJECT_ROOT / ".env", False)]
 
 
-def test_database_runtime_contract_accepts_postgresql_urls():
-    contract = module._inspect_database_runtime_contract(
-        "postgresql://user:password@localhost:5432/musecraft"
+def test_mysql_dependency_check_fails_before_connection(capsys):
+    assert (
+        module._check_database_dependency(
+            profile="local",
+            database_url="mysql://user:password@localhost/db",
+        )
+        is False
     )
-
-    assert contract.accepted is True
-    assert contract.backend == "postgresql"
-    assert contract.reason_code is None
-
-
-def test_database_runtime_contract_rejects_mysql_with_typed_reason():
-    contract = module._inspect_database_runtime_contract(
-        "mysql://user:password@localhost:3306/musecraft"
-    )
-
-    assert contract.accepted is False
-    assert contract.backend == "mysql"
-    assert contract.reason_code == "unsupported_database_backend"
-
-
-def test_database_runtime_contract_rejects_invalid_url():
-    contract = module._inspect_database_runtime_contract("not a database url")
-
-    assert contract.accepted is False
-    assert contract.backend is None
-    assert contract.reason_code == "invalid_database_url"
-
-
-def test_mysql_dependency_check_fails_before_connection(monkeypatch, capsys):
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("unsupported database must not be contacted")
-        ),
-    )
-
-    assert module._check_database_dependency("mysql://user:password@localhost/db") is False
     output = capsys.readouterr().out
     assert "reason_code=unsupported_database_backend" in output
     assert "backend=mysql" in output

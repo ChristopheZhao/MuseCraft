@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
+
+import yaml
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-import yaml
-
 from app.models.base import BaseModel
-
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_ROOT.parent
@@ -23,6 +22,7 @@ BASELINE_REVISION = "20260711_0001"
 
 def _alembic_env(database_url: str) -> dict[str, str]:
     env = os.environ.copy()
+    env["DATABASE_PROFILE"] = "test"
     env["DATABASE_URL"] = database_url
     env["PYTHONPATH"] = str(BACKEND_ROOT)
     return env
@@ -81,6 +81,11 @@ def test_compose_requires_migrations_and_externalizes_database_credentials() -> 
     assert "${DATABASE_PASSWORD:?" in compose_text
     assert services["migrate"]["command"] == "alembic -c alembic.ini upgrade head"
     assert services["api"]["environment"]["DEBUG"] == "false"
+
+    for service_name in ("migrate", "api", "celery_worker", "celery_beat"):
+        assert services[service_name]["environment"]["DATABASE_PROFILE"] == (
+            "${DATABASE_PROFILE:-local}"
+        )
 
     for service_name in ("api", "celery_worker", "celery_beat"):
         assert services[service_name]["depends_on"]["migrate"] == {

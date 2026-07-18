@@ -46,18 +46,6 @@ wheels = [
 ]
 
 [[package]]
-name = "aiomysql"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pymysql" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/67/76/2c5b55e4406a1957ffdfd933a94c2517455291c97d2b81cec6813754791a/aiomysql-0.2.0.tar.gz", hash = "sha256:558b9c26d580d08b8c5fd1be23c5231ce3aeff2dadad989540fee740253deb67", size = 114706 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/87/c982ee8b333c85b8ae16306387d703a1fcdfc81a2f3f15a24820ab1a512d/aiomysql-0.2.0-py3-none-any.whl", hash = "sha256:b7c26da0daf23a5ec5e0b133c03d20657276e4eae9b73e040b72787f6f6ade0a", size = 44215 },
-]
-
-[[package]]
 name = "aiosignal"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1383,15 +1371,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pymysql"
-version = "1.1.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/ce59b5e5ed4ce8512f879ff1fa5ab699d211ae2495f1adaa5fbba2a1eada/pymysql-1.1.1.tar.gz", hash = "sha256:e127611aaf2b417403c60bf4dc570124aeb4a57f5f37b8e95ae399a42f904cd0", size = 47678 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/94/e4181a1f6286f545507528c78016e00065ea913276888db2262507693ce5/PyMySQL-1.1.1-py3-none-any.whl", hash = "sha256:4de15da4c61dc132f4fb9ab763063e693d521a80fd0e87943b9a453dd4c19d6c", size = 44972 },
-]
-
-[[package]]
 name = "pytest"
 version = "7.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1581,7 +1560,6 @@ source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
-    { name = "aiomysql" },
     { name = "alembic" },
     { name = "anthropic" },
     { name = "asyncpg" },
@@ -1606,7 +1584,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pygments" },
-    { name = "pymysql" },
     { name = "python-decouple" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-json-logger" },
@@ -1652,7 +1629,6 @@ test = [
 requires-dist = [
     { name = "aiofiles", specifier = "==23.2.1" },
     { name = "aiohttp", specifier = "==3.9.1" },
-    { name = "aiomysql", specifier = ">=0.2.0" },
     { name = "aiosqlite", marker = "extra == 'test'", specifier = "==0.20.0" },
     { name = "alembic", specifier = "==1.13.0" },
     { name = "anthropic", specifier = "==0.7.7" },
@@ -1689,7 +1665,6 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.5.0" },
     { name = "pydantic-settings", specifier = "==2.1.0" },
     { name = "pygments", specifier = "==2.17.2" },
-    { name = "pymysql", specifier = ">=1.1.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==7.4.3" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==7.4.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = "==0.21.1" },

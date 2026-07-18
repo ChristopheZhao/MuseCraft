@@ -52,12 +52,8 @@ class Settings(BaseSettings):
     ]
     
     # Database Settings
-    DATABASE_URL: str = config("DATABASE_URL", default="postgresql://user:password@localhost:5432/short_video_maker")
-    DATABASE_HOST: str = config("DATABASE_HOST", default="localhost")
-    DATABASE_PORT: int = config("DATABASE_PORT", default=5432, cast=int)
-    DATABASE_NAME: str = config("DATABASE_NAME", default="short_video_maker")
-    DATABASE_USER: str = config("DATABASE_USER", default="user")
-    DATABASE_PASSWORD: str = config("DATABASE_PASSWORD", default="password")
+    DATABASE_PROFILE: str = config("DATABASE_PROFILE", default="local")
+    DATABASE_URL: Optional[str] = config("DATABASE_URL", default=None)
     
     # Redis Settings
     REDIS_URL: str = config("REDIS_URL", default="redis://localhost:6379/0")
@@ -642,7 +638,8 @@ class Settings(BaseSettings):
     
     model_config = {
         "env_file": ".env",
-        "case_sensitive": True
+        "case_sensitive": True,
+        "extra": "ignore",
     }
 
 

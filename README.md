@@ -52,7 +52,7 @@ cp .env.local.example .env.local
 
 ### 2. 使用 uv 启动后端
 
-先确保 `.env` 指向的 PostgreSQL 和 Redis 已启动。uv 管理 Python 应用与依赖，不替代数据库、Redis 或 FFmpeg 这些系统服务。当前公开 runtime 只支持 PostgreSQL；历史 MySQL 数据库不能由 release baseline 自动接管，处理方式见 [数据库迁移说明](docs/database-migrations.md)。
+先确保本机 PostgreSQL 和 Redis 已启动。`DATABASE_PROFILE=local` 是默认配置；未提供 `DATABASE_URL` 时，后端使用文档化的本机开发 URL，`.env.example` 也显式给出同一配置。uv 管理 Python 应用与依赖，不替代数据库、Redis 或 FFmpeg 这些系统服务。当前公开 runtime 只支持 PostgreSQL；历史 MySQL 数据库不能由 release baseline 自动接管，处理方式见 [数据库迁移说明](docs/database-migrations.md)。
 
 ```bash
 uv sync --project backend --frozen
@@ -61,7 +61,7 @@ uv run --project backend --frozen python backend/scripts/start_dev_uv.py
 
 `--project backend` 以 `backend/pyproject.toml` 为项目入口，uv 默认在 `backend/.venv` 创建和使用虚拟环境。仓库根目录 `.venv` 不属于当前后端运行合同，也不应与 `backend/.venv` 混用。
 
-launcher 会先检查 PostgreSQL/Redis 并执行 Alembic migration，成功后再启动 API、Celery worker 和 beat；任一服务启动失败都会整体失败并清理已启动进程。API 默认监听 `http://localhost:8000`，按 `Ctrl+C` 可停止这组本地进程。
+launcher 会渲染统一 database composition preflight 的 typed diagnostic，随后检查 Redis 并执行 Alembic migration；成功后才启动 API、Celery worker 和 beat。任一服务启动失败都会整体失败并清理已启动进程。API 默认监听 `http://localhost:8000`，按 `Ctrl+C` 可停止这组本地进程。
 
 ### 3. 启动前端
 
@@ -81,6 +81,8 @@ docker compose -f backend/docker-compose.yml up --build
 ```
 
 Compose 同样会先运行 Alembic migration，成功后再启动 API、worker 和 beat。Docker 不是本地开发的唯一启动方式。
+
+生产部署必须显式设置 `DATABASE_PROFILE=production` 和远程 PostgreSQL 配置；production profile 会拒绝缺失 URL、localhost 和已知开发凭据。
 
 ## 本地后端开发
 

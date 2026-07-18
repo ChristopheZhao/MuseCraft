@@ -14,6 +14,10 @@ from fastapi.testclient import TestClient
 from httpx import AsyncClient
 import redis.asyncio as redis
 
+# Test database selection is explicit and independent from a developer's root .env.
+os.environ.setdefault("DATABASE_PROFILE", "test")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+
 # Import application components
 from app.main import app
 from app.core.config import settings
@@ -24,7 +28,7 @@ from app.services.websocket import websocket_manager
 
 
 # Test database configuration
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 TEST_REDIS_URL = "redis://localhost:6379/15"  # Use different DB for tests
 
 

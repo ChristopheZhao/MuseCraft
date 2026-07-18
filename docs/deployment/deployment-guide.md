@@ -19,13 +19,14 @@ cp .env.example .env
 
 ```dotenv
 SECRET_KEY=replace-with-a-long-random-value
+DATABASE_PROFILE=production
 DATABASE_NAME=short_video_maker
 DATABASE_USER=musecraft
 DATABASE_PASSWORD=replace-with-a-url-safe-password
 REDIS_URL=redis://redis:6379/0
 ```
 
-Compose 会用这些组件变量构造容器内的 PostgreSQL URL。只配置实际启用的 provider 凭据。不要把 `.env`、备份或生成媒体加入 Git。
+Compose 会用这些组件变量构造容器内的 PostgreSQL URL，并把 `production` profile 传给统一 database composition boundary。production profile 会拒绝 localhost 和已知开发凭据。只配置实际启用的 provider 凭据。不要把 `.env`、备份或生成媒体加入 Git。
 
 ## 启动
 

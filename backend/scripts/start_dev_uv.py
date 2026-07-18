@@ -2,20 +2,17 @@
 """Start the local backend development stack from the locked uv environment."""
 import argparse
 import os
-import sys
-import subprocess
-import signal
-import time
-import threading
 import re
+import signal
+import subprocess
+import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
 from dotenv import load_dotenv
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ArgumentError
-
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BACKEND_ROOT.parent
@@ -67,7 +64,7 @@ def _build_env_with_no_proxy(extra_hosts=None):
     return env
 
 
-# Add the backend directory to Python path.
+# Add the backend directory to Python path for launcher-owned lazy application imports.
 sys.path.insert(0, str(BACKEND_ROOT))
 
 _API_COMMAND_TOKEN = "uvicorn app.main:app"
@@ -91,13 +88,6 @@ class ManagedProcessGroup:
     commands: tuple[str, ...]
     cwd: str
     port: str | None = None
-
-
-@dataclass(frozen=True)
-class DatabaseRuntimeContract:
-    accepted: bool
-    backend: str | None
-    reason_code: str | None = None
 
 
 def _parse_args(argv=None):
@@ -363,73 +353,25 @@ def check_virtual_environment():
     return True
 
 
-def _inspect_database_runtime_contract(database_url: str) -> DatabaseRuntimeContract:
-    try:
-        backend = make_url(database_url).get_backend_name()
-    except (ArgumentError, TypeError, ValueError):
-        return DatabaseRuntimeContract(
-            accepted=False,
-            backend=None,
-            reason_code="invalid_database_url",
-        )
+def _check_database_dependency(*, profile: str, database_url: str | None) -> bool:
+    from app.infrastructure.database_runtime import preflight_database_runtime
 
-    if backend != "postgresql":
-        return DatabaseRuntimeContract(
-            accepted=False,
-            backend=backend,
-            reason_code="unsupported_database_backend",
-        )
-
-    return DatabaseRuntimeContract(accepted=True, backend=backend)
-
-
-def _check_database_dependency(database_url: str) -> bool:
-    contract = _inspect_database_runtime_contract(database_url)
-    if not contract.accepted:
-        backend = contract.backend or "unknown"
-        print(
-            f"[error] reason_code={contract.reason_code} backend={backend}; "
-            "the public runtime requires PostgreSQL"
-        )
-        print(
-            "Update DATABASE_URL to a PostgreSQL database. Existing pre-release MySQL "
-            "databases require reviewed schema reconciliation before baseline adoption."
-        )
-        return False
-
-    check_code = """
-from app.core.config import settings
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
-
-try:
-    database_url = make_url(settings.DATABASE_URL).set(drivername="postgresql+psycopg2")
-    engine = create_engine(database_url)
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    engine.dispose()
-    print("[ok] PostgreSQL connection successful")
-except Exception as exc:
-    print(f"[error] reason_code=database_connection_failed error_type={type(exc).__name__}")
-    print(str(exc))
-    raise SystemExit(1)
-"""
-    env = _build_env_with_no_proxy()
-    env["DATABASE_URL"] = database_url
-    result = subprocess.run(
-        [sys.executable, "-c", check_code],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
+    result = preflight_database_runtime(
+        profile=profile,
+        database_url=database_url,
     )
-
-    if result.returncode == 0:
-        print(result.stdout.strip())
+    profile_name = result.profile.value if result.profile is not None else profile
+    backend_name = result.backend_name or "unknown"
+    if result.accepted:
+        print(f"[ok] Database connection successful profile={profile_name} backend={backend_name}")
         return True
 
-    diagnostic = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-    print(diagnostic or "[error] reason_code=database_connection_failed")
+    reason_code = result.reason_code.value if result.reason_code is not None else "unknown"
+    error_type = f" error_type={result.error_type}" if result.error_type else ""
+    print(
+        f"[error] reason_code={reason_code} profile={profile_name} "
+        f"backend={backend_name}{error_type}"
+    )
     return False
 
 
@@ -441,7 +383,10 @@ def check_dependencies():
     try:
         from app.core.config import settings
 
-        if not _check_database_dependency(settings.DATABASE_URL):
+        if not _check_database_dependency(
+            profile=settings.DATABASE_PROFILE,
+            database_url=settings.DATABASE_URL,
+        ):
             return False
     except Exception as exc:
         print(
@@ -461,7 +406,6 @@ try:
     print("[ok] Redis connection successful")
 except Exception as e:
     print(f"[error] reason_code=redis_connection_failed error_type={type(e).__name__}")
-    print(str(e))
     print("Please ensure Redis is running")
     exit(1)
 """
@@ -480,7 +424,7 @@ except Exception as e:
             return False
 
     except Exception as e:
-        print(f"[error] Redis check failed: {e}")
+        print("[error] reason_code=redis_contract_check_failed " f"error_type={type(e).__name__}")
         return False
 
     return True
