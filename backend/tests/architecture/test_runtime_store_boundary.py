@@ -13,25 +13,26 @@ RUNTIME_SESSION_CONTROL_PLANE = (
     BACKEND_ROOT / "app" / "services" / "runtime_session_control_plane.py"
 )
 RUNTIME_RECONCILER = BACKEND_ROOT / "app" / "services" / "runtime_reconciler.py"
+CONTEXT_ASSEMBLER = BACKEND_ROOT / "app" / "services" / "context_assembler.py"
+PUBLISHED_DELIVERABLE_SERVICE = (
+    BACKEND_ROOT / "app" / "services" / "published_deliverable_service.py"
+)
+RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE = (
+    BACKEND_ROOT / "app" / "services" / "runtime_published_deliverable_control_plane.py"
+)
 
 EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT = {
-    "context_assembler.py",
     "orchestration_runtime_resume_bootstrap_facade.py",
-    "orchestration_runtime_transition_facade.py",
-    "published_deliverable_service.py",
     "runtime_session_service.py",
 }
-
-RUNTIME_OWNERSHIP_MARKERS = (
-    "RuntimeSessionService",
-    "PublishedDeliverableService",
-    "publish_script_review_boundary_sync",
+RUNTIME_ORM_SYMBOLS = {
     "WorkflowSession",
     "WorkflowNodeAttempt",
     "WorkflowNodeState",
     "WorkflowGate",
+    "WorkflowGateDecision",
     "WorkflowPublishedDeliverable",
-)
+}
 
 
 def _source(path: Path) -> str:
@@ -46,6 +47,15 @@ def _imports(path: Path) -> set[str]:
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
+    return imported
+
+
+def _imported_names(path: Path, *, modules: set[str]) -> set[str]:
+    imported: set[str] = set()
+    tree = ast.parse(_source(path), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in modules:
+            imported.update(alias.name for alias in node.names)
     return imported
 
 
@@ -65,6 +75,9 @@ def test_runtime_projection_and_session_policy_are_database_independent():
         RUNTIME_READ_MODEL_SERVICE,
         RUNTIME_SESSION_CONTROL_PLANE,
         RUNTIME_RECONCILER,
+        CONTEXT_ASSEMBLER,
+        PUBLISHED_DELIVERABLE_SERVICE,
+        RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE,
     }:
         imports = _imports(path)
         source = _source(path)
@@ -83,7 +96,11 @@ def test_runtime_control_plane_sql_debt_matches_exact_slice_d_ratchet():
         imports_sqlalchemy = any(
             module == "sqlalchemy" or module.startswith("sqlalchemy.") for module in imports
         )
-        if imports_sqlalchemy and any(marker in source for marker in RUNTIME_OWNERSHIP_MARKERS):
+        imports_runtime_models = bool(
+            _imported_names(path, modules={"app.models", "models"}) & RUNTIME_ORM_SYMBOLS
+        )
+        uses_legacy_runtime_service = "RuntimeSessionService" in source
+        if imports_sqlalchemy and (imports_runtime_models or uses_legacy_runtime_service):
             observed.add(path.name)
 
     assert observed == EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT
@@ -260,4 +277,23 @@ def test_runtime_store_keeps_attempt_and_gate_capability_ports_narrow():
         "open_gate",
         "create_gate_decision",
         "apply_gate_decision",
+    }
+
+    deliverable_protocol = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimePublishedDeliverableStore"
+    )
+    deliverable_methods = {
+        node.name
+        for node in deliverable_protocol.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert deliverable_methods == {
+        "load_session",
+        "load_node",
+        "load_attempt",
+        "load_published_deliverable",
+        "publish_deliverable",
+        "approve_deliverable",
     }

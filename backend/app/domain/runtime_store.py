@@ -431,8 +431,23 @@ class RuntimePublishedDeliverableWrite:
     scope_type: str
     scope_id: str | None
     revision_no: int
+    expected_session_status: WorkflowSessionStatus
+    expected_node_status: WorkflowNodeStatus
+    expected_attempt_status: WorkflowAttemptStatus
     is_candidate: bool = True
     is_approved: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePublishedDeliverableApprovalCommand:
+    session_id: int
+    node_key: str
+    attempt_id: int
+    deliverable_id: int
+    expected_is_candidate: bool
+    expected_is_approved: bool
+    target_is_candidate: bool
+    target_is_approved: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +590,35 @@ class RuntimeGateStore(Protocol):
 
 
 @runtime_checkable
+class RuntimePublishedDeliverableStore(Protocol):
+    """Published deliverable persistence capabilities."""
+
+    def load_session(self, session_id: int) -> RuntimeSessionRecord | None:
+        ...
+
+    def load_node(self, session_id: int, node_key: str) -> RuntimeNodeRecord | None:
+        ...
+
+    def load_attempt(self, session_id: int, attempt_id: int) -> RuntimeAttemptRecord | None:
+        ...
+
+    def load_published_deliverable(
+        self, session_id: int, node_key: str, attempt_id: int
+    ) -> RuntimePublishedDeliverableRecord | None:
+        ...
+
+    def publish_deliverable(
+        self, command: RuntimePublishedDeliverableWrite
+    ) -> RuntimePublishedDeliverableRecord:
+        ...
+
+    def approve_deliverable(
+        self, command: RuntimePublishedDeliverableApprovalCommand
+    ) -> RuntimePublishedDeliverableRecord:
+        ...
+
+
+@runtime_checkable
 class RuntimeControlPlaneStore(Protocol):
     """Persistence capabilities. Commands contain facts chosen by the control plane."""
 
@@ -658,7 +702,9 @@ class RuntimeControlPlaneStore(Protocol):
     ) -> RuntimePublishedDeliverableRecord:
         ...
 
-    def approve_deliverable(self, deliverable_id: int) -> RuntimePublishedDeliverableRecord:
+    def approve_deliverable(
+        self, command: RuntimePublishedDeliverableApprovalCommand
+    ) -> RuntimePublishedDeliverableRecord:
         ...
 
     def upsert_node_diagnostic(

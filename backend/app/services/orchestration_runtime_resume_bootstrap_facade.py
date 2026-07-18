@@ -9,6 +9,7 @@ SQL/session boundary:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +30,7 @@ from ..models import Task
 from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import (
     PublishedDeliverablePayloadError,
-    PublishedDeliverableService,
+    build_deliverable_ref,
     load_published_payload,
 )
 from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
@@ -87,7 +88,7 @@ class OrchestrationRuntimeResumeBootstrapFacade:
         *,
         orchestration_state: OrchestrationStateAdapter,
         logger: Optional[logging.Logger] = None,
-        session_factory=SyncSessionLocal,
+        session_factory: Callable[[], Session] = SyncSessionLocal,
     ) -> None:
         self._orchestration_state = orchestration_state
         self._logger = logger or logging.getLogger("orchestration_runtime_resume_bootstrap")
@@ -131,9 +132,11 @@ class OrchestrationRuntimeResumeBootstrapFacade:
     @staticmethod
     def _select_script_candidate_ref(gate: Any) -> Optional[Dict[str, Any]]:
         artifact_refs = getattr(gate, "artifact_refs", None)
-        if not isinstance(artifact_refs, list):
+        if not isinstance(artifact_refs, (list, tuple)):
             return None
         for ref in artifact_refs:
+            if isinstance(ref, JsonObjectPayload):
+                ref = ref.to_dict()
             if not isinstance(ref, dict):
                 continue
             if str(ref.get("deliverable_type") or "").strip().lower() != "script":
@@ -184,9 +187,9 @@ class OrchestrationRuntimeResumeBootstrapFacade:
                 "script_revision_context_missing: runtime_session_missing"
             )
 
-        gate = RuntimeSessionService.get_latest_gate_for_node_sync(
-            db,
-            runtime_session.id,
+        store = SqlAlchemyRuntimeAttemptStore(db)
+        gate = store.load_latest_gate(
+            int(runtime_session.id),
             "script",
         )
         if gate is None:
@@ -195,30 +198,31 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             )
 
         ref = self._select_script_candidate_ref(gate)
-        if ref is None:
-            ref = PublishedDeliverableService.get_node_deliverable_ref_sync(
-                db,
-                session=runtime_session,
-                node_key="script",
-                attempt_id=getattr(gate, "attempt_id", None),
+        if ref is None and gate.attempt_id is not None:
+            deliverable = store.load_published_deliverable(
+                int(runtime_session.id),
+                "script",
+                gate.attempt_id,
             )
+            ref = build_deliverable_ref(deliverable) if deliverable is not None else None
         if not isinstance(ref, dict):
             raise OrchestrationRuntimeResumeBootstrapError(
                 "script_revision_context_missing: candidate_deliverable_ref_missing"
             )
 
         try:
-            payload = load_published_payload(ref.get("payload_ref"))
+            payload_contract = load_published_payload(ref.get("payload_ref"))
         except PublishedDeliverablePayloadError as exc:
             raise OrchestrationRuntimeResumeBootstrapError(
                 "script_revision_context_missing: "
-                f"candidate_payload_unavailable reason_code={exc.reason_code}"
+                f"candidate_payload_unavailable reason_code={exc.reason_code.value}"
             ) from exc
-        if not isinstance(payload, dict):
+        if payload_contract is None:
             raise OrchestrationRuntimeResumeBootstrapError(
                 "script_revision_context_missing: "
                 "candidate_payload_unavailable reason_code=published_payload_empty"
             )
+        payload = payload_contract.to_dict()
 
         try:
             receipt = self._orchestration_state.project_script_revision_facts(
@@ -231,8 +235,8 @@ class OrchestrationRuntimeResumeBootstrapFacade:
 
         return {
             **dict(receipt),
-            "gate_id": getattr(gate, "id", None),
-            "attempt_id": getattr(gate, "attempt_id", None),
+            "gate_id": gate.gate_id,
+            "attempt_id": gate.attempt_id,
             "deliverable_id": ref.get("deliverable_id"),
         }
 

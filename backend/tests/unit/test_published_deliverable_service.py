@@ -5,30 +5,39 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.agents.memory.short_term.service import WorkingMemoryService
+from app.agents.memory.storage.in_memory import InMemoryShortTermStore
+from app.agents.utils.memory_helpers import write_shared_fact
 from app.core.config import settings
 from app.core.database import Base
 from app.domain import (
     AgentType,
+    JsonObjectPayload,
+    RuntimeStoreError,
+    RuntimeStoreReason,
     TaskStatus,
     TaskType,
+    WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from app.models import Task, WorkflowPublishedDeliverable
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
+from app.models import Task, WorkflowNodeState, WorkflowPublishedDeliverable
+from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.services.published_deliverable_adapter import build_script_deliverable_payload
 from app.services.published_deliverable_service import (
-    PublishedDeliverableService,
+    PublishedDeliverableContractError,
+    PublishedDeliverableContractReason,
     PublishedDeliverablePayloadError,
+    PublishedDeliverablePayloadReason,
     build_deliverable_ref,
     get_published_deliverable_ref,
     load_published_payload,
+    normalize_published_deliverable_ref,
 )
-from app.services.published_deliverable_adapter import (
-    build_script_deliverable_payload,
+from app.services.runtime_published_deliverable_control_plane import (
+    RuntimePublishedDeliverableControlPlane,
 )
 from app.services.runtime_session_service import RuntimeSessionService
-from app.services.orchestration_state_adapter import OrchestrationStateAdapter
-from app.agents.memory.short_term.service import WorkingMemoryService
-from app.agents.memory.storage.in_memory import InMemoryShortTermStore
-from app.agents.utils.memory_helpers import write_shared_fact
 
 
 def _build_service() -> WorkingMemoryService:
@@ -122,7 +131,7 @@ def test_load_published_payload_reports_missing_file_reason_code(tmp_path):
     with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
         load_published_payload(str(missing_ref))
 
-    assert excinfo.value.reason_code == "published_payload_missing"
+    assert excinfo.value.reason_code is PublishedDeliverablePayloadReason.MISSING
 
 
 def test_load_published_payload_reports_invalid_json_reason_code(tmp_path):
@@ -132,7 +141,7 @@ def test_load_published_payload_reports_invalid_json_reason_code(tmp_path):
     with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
         load_published_payload(str(payload_path))
 
-    assert excinfo.value.reason_code == "published_payload_json_invalid"
+    assert excinfo.value.reason_code is PublishedDeliverablePayloadReason.JSON_INVALID
 
 
 def test_load_published_payload_rejects_non_dict_contract(tmp_path):
@@ -142,7 +151,39 @@ def test_load_published_payload_rejects_non_dict_contract(tmp_path):
     with pytest.raises(PublishedDeliverablePayloadError) as excinfo:
         load_published_payload(str(payload_path))
 
-    assert excinfo.value.reason_code == "published_payload_contract_invalid"
+    assert excinfo.value.reason_code is PublishedDeliverablePayloadReason.CONTRACT_INVALID
+
+
+def test_published_deliverable_ref_rejects_unknown_keys():
+    ref = {
+        "type": "published_deliverable",
+        "deliverable_id": 1,
+        "deliverable_type": "script",
+        "scope_type": "episode",
+        "scope_id": None,
+        "attempt_id": 1,
+        "revision_no": 0,
+        "payload_ref": "tmp/script.json",
+        "summary": {},
+        "is_candidate": True,
+        "is_approved": False,
+        "discarded": "must-not-be-silent",
+    }
+
+    with pytest.raises(PublishedDeliverableContractError) as excinfo:
+        normalize_published_deliverable_ref(ref)
+
+    assert excinfo.value.reason_code is PublishedDeliverableContractReason.REF_UNKNOWN_KEYS
+
+
+def test_published_deliverable_collection_rejects_malformed_ref():
+    with pytest.raises(PublishedDeliverableContractError) as excinfo:
+        get_published_deliverable_ref(
+            {"published_deliverables": {"script": {"type": "published_deliverable"}}},
+            node_key="script",
+        )
+
+    assert excinfo.value.reason_code is PublishedDeliverableContractReason.REF_MISSING_KEYS
 
 
 def test_continuation_checkpoint_rejects_unknown_task_spec_keys():
@@ -169,7 +210,9 @@ def test_continuation_checkpoint_rejects_unknown_checkpoint_keys():
         )
 
 
-def test_publish_script_deliverable_persists_payload_without_direct_wm_projection(sync_db, tmp_path, monkeypatch):
+def test_publish_script_deliverable_persists_payload_without_direct_wm_projection(
+    sync_db, tmp_path, monkeypatch
+):
     monkeypatch.setattr(settings, "TEMP_PATH", str(tmp_path))
 
     task = _create_task(sync_db)
@@ -183,16 +226,25 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
     workflow_id = str(task.task_id)
     _seed_script_facts(service, workflow_id)
 
-    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-        sync_db,
-        session=session,
+    deliverable = RuntimePublishedDeliverableControlPlane(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).publish_script(
+        session_id=session.id,
         workflow_id=workflow_id,
         attempt_id=attempt.id,
-        payload=build_script_deliverable_payload(workflow_id, service=service),
-        summary={"total_scenes": 1},
+        payload=JsonObjectPayload.from_mapping(
+            build_script_deliverable_payload(workflow_id, service=service),
+            field_path="test.script_payload",
+        ),
+        summary=JsonObjectPayload.from_mapping(
+            {"total_scenes": 1},
+            field_path="test.script_summary",
+        ),
     )
 
-    stored = sync_db.query(WorkflowPublishedDeliverable).filter_by(id=deliverable.id).one()
+    stored = (
+        sync_db.query(WorkflowPublishedDeliverable).filter_by(id=deliverable.deliverable_id).one()
+    )
     assert stored.deliverable_type == "script"
     assert stored.is_candidate is True
     assert stored.is_approved is False
@@ -202,10 +254,56 @@ def test_publish_script_deliverable_persists_payload_without_direct_wm_projectio
         payload_path = Path(__file__).resolve().parents[2] / deliverable.payload_ref
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     assert payload["concept_plan"]["overview"] == "Han Li teaser"
-    assert payload["scene_scripts"]["1"]["script_text"] == "Han Li gathers spiritual energy in silence."
+    assert (
+        payload["scene_scripts"]["1"]["script_text"]
+        == "Han Li gathers spiritual energy in silence."
+    )
 
     payload_ref = get_published_deliverable_ref(session.input_payload, node_key="script")
     assert payload_ref is None
+
+
+def test_publish_script_deliverable_discards_payload_after_store_conflict(sync_db):
+    task = _create_task(sync_db)
+    session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
+    attempt = RuntimeSessionService.start_node_attempt_sync(
+        sync_db,
+        session,
+        node_key="script",
+    )
+    discarded_refs = []
+
+    def _write_then_invalidate(**_kwargs):
+        node = (
+            sync_db.query(WorkflowNodeState)
+            .filter_by(session_id=session.id, node_key="script")
+            .one()
+        )
+        node.status = WorkflowNodeStatus.QUEUED.value
+        sync_db.flush()
+        return "/tmp/uncommitted-script.json"
+
+    control_plane = RuntimePublishedDeliverableControlPlane(
+        SqlAlchemyRuntimeAttemptStore(sync_db),
+        payload_writer=_write_then_invalidate,
+        payload_discarder=discarded_refs.append,
+    )
+
+    with pytest.raises(RuntimeStoreError) as excinfo:
+        control_plane.publish_script(
+            session_id=session.id,
+            workflow_id=str(task.task_id),
+            attempt_id=attempt.id,
+            payload=JsonObjectPayload.from_mapping(
+                {"scene_scripts": {"1": {"script_text": "draft"}}},
+                field_path="test.script_payload",
+            ),
+            summary=JsonObjectPayload.empty(),
+        )
+
+    assert excinfo.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    assert discarded_refs == ["/tmp/uncommitted-script.json"]
+    assert sync_db.query(WorkflowPublishedDeliverable).count() == 0
 
 
 def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_path, monkeypatch):
@@ -222,13 +320,20 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
     workflow_id = str(task.task_id)
     _seed_script_facts(service, workflow_id)
 
-    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-        sync_db,
-        session=session,
+    deliverable = RuntimePublishedDeliverableControlPlane(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).publish_script(
+        session_id=session.id,
         workflow_id=workflow_id,
         attempt_id=attempt.id,
-        payload=build_script_deliverable_payload(workflow_id, service=service),
-        summary={"total_scenes": 1},
+        payload=JsonObjectPayload.from_mapping(
+            build_script_deliverable_payload(workflow_id, service=service),
+            field_path="test.script_payload",
+        ),
+        summary=JsonObjectPayload.from_mapping(
+            {"total_scenes": 1},
+            field_path="test.script_summary",
+        ),
     )
     artifact_refs = [build_deliverable_ref(deliverable)]
     RuntimeSessionService.complete_node_attempt_sync(
@@ -262,14 +367,18 @@ def test_submit_gate_decision_approve_marks_deliverable_approved(sync_db, tmp_pa
         action="approve",
     )
 
-    refreshed = sync_db.query(WorkflowPublishedDeliverable).filter_by(id=deliverable.id).one()
+    refreshed = (
+        sync_db.query(WorkflowPublishedDeliverable).filter_by(id=deliverable.deliverable_id).one()
+    )
     assert decision.action == "approve"
     assert refreshed.is_candidate is False
     assert refreshed.is_approved is True
 
     refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
     assert refreshed_session.status == WorkflowSessionStatus.RESUMING.value
-    published_ref = get_published_deliverable_ref(refreshed_session.input_payload, node_key="script")
+    published_ref = get_published_deliverable_ref(
+        refreshed_session.input_payload, node_key="script"
+    )
     assert published_ref is not None
     assert published_ref["is_approved"] is True
-    assert published_ref["deliverable_id"] == deliverable.id
+    assert published_ref["deliverable_id"] == deliverable.deliverable_id

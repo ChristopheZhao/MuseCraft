@@ -5,14 +5,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from sqlalchemy.orm import Session
-
 from ..agents.adapters.memory_views import (
-    build_script_stage_views,
-    build_script_writer_context,
     build_image_generation_context,
     build_media_agent_context,
     build_quality_checker_context,
+    build_script_stage_views,
+    build_script_writer_context,
     build_video_composer_context,
     build_video_generation_context,
     build_voice_synthesis_context,
@@ -22,21 +20,14 @@ from ..agents.utils.memory_helpers import read_shared_fact
 from ..core.config import settings
 from ..domain import AgentType
 from .memory_provider import MemoryServices
-from .published_deliverable_adapter import (
-    build_script_deliverable_payload,
-)
+from .published_deliverable_adapter import build_script_deliverable_payload
 from .published_deliverable_service import (
-    PublishedDeliverableService,
     PublishedDeliverablePayloadError,
-    build_deliverable_ref,
     get_published_deliverable_ref,
     get_published_deliverables,
     load_published_payload,
 )
-from .scene_info_reference_service import (
-    SceneInfoReferencePersistenceError,
-    persist_scene_info_ref,
-)
+from .scene_info_reference_service import SceneInfoReferencePersistenceError, persist_scene_info_ref
 from .script_review_contract import build_script_preview_text
 
 
@@ -149,19 +140,19 @@ class ContextContractAssembler:
             return receipt
 
         try:
-            payload = load_published_payload(payload_ref)
+            payload_contract = load_published_payload(payload_ref)
         except PublishedDeliverablePayloadError as exc:
             receipt["status"] = "payload_unavailable"
-            receipt["reason_code"] = exc.reason_code
+            receipt["reason_code"] = exc.reason_code.value
             if required:
                 raise AgentError(
                     "Published deliverable payload unavailable: "
                     f"workflow_id={workflow_state_id} node_key={node_key} "
                     f"payload_ref={payload_ref} source={source} "
-                    f"status=payload_unavailable reason_code={exc.reason_code}"
+                    f"status=payload_unavailable reason_code={exc.reason_code.value}"
                 ) from exc
             return receipt
-        if not isinstance(payload, dict):
+        if payload_contract is None:
             receipt["status"] = "payload_unavailable"
             receipt["reason_code"] = "published_payload_empty"
             if required:
@@ -172,6 +163,8 @@ class ContextContractAssembler:
                     "status=payload_unavailable reason_code=published_payload_empty"
                 )
             return receipt
+
+        payload = payload_contract.to_dict()
 
         receipt["status"] = "resolved"
         receipt["payload"] = payload
@@ -192,7 +185,7 @@ class ContextContractAssembler:
         )
         if isinstance(runtime_ref, dict):
             if prefer_approved and runtime_ref.get("is_approved") is not True:
-                receipt: Dict[str, Any] = {
+                unapproved_receipt: Dict[str, Any] = {
                     "workflow_state_id": workflow_state_id,
                     "node_key": node_key,
                     "prefer_approved": bool(prefer_approved),
@@ -207,7 +200,7 @@ class ContextContractAssembler:
                         f"workflow_id={workflow_state_id} node_key={node_key} "
                         f"prefer_approved={prefer_approved} status=runtime_input_ref_not_approved"
                     )
-                return receipt
+                return unapproved_receipt
             return self._resolve_payload_from_ref(
                 workflow_state_id=workflow_state_id,
                 node_key=node_key,
@@ -217,7 +210,7 @@ class ContextContractAssembler:
                 source="runtime_input",
             )
 
-        receipt: Dict[str, Any] = {
+        missing_receipt: Dict[str, Any] = {
             "workflow_state_id": workflow_state_id,
             "node_key": node_key,
             "prefer_approved": bool(prefer_approved),
@@ -231,7 +224,7 @@ class ContextContractAssembler:
                 f"workflow_id={workflow_state_id} node_key={node_key} "
                 f"prefer_approved={prefer_approved} status=missing_runtime_input_ref"
             )
-        return receipt
+        return missing_receipt
 
     def assemble_agent_context(
         self,
@@ -259,7 +252,8 @@ class ContextContractAssembler:
                 workflow_state_id=workflow_state_id,
                 node_key="script",
                 prefer_approved=True,
-                required=agent_type in {
+                required=agent_type
+                in {
                     AgentType.AUDIO_GENERATOR,
                     AgentType.IMAGE_GENERATOR,
                     AgentType.VIDEO_GENERATOR,
@@ -276,8 +270,12 @@ class ContextContractAssembler:
                 workflow_state_id,
                 service=self._memory_services.short_term,
             )
-            context_payload = script_writer_ctx.get("context") if isinstance(script_writer_ctx, dict) else {}
-            diagnostics = script_writer_ctx.get("diagnostics") if isinstance(script_writer_ctx, dict) else {}
+            context_payload = (
+                script_writer_ctx.get("context") if isinstance(script_writer_ctx, dict) else {}
+            )
+            diagnostics = (
+                script_writer_ctx.get("diagnostics") if isinstance(script_writer_ctx, dict) else {}
+            )
             if isinstance(context_payload, dict) and context_payload:
                 static_context.update(context_payload)
             if isinstance(diagnostics, dict) and diagnostics:
@@ -400,46 +398,38 @@ class ContextContractAssembler:
             assembled["_assembler_diagnostics"] = assembler_diagnostics
         return assembled
 
-    def publish_script_review_boundary_sync(
+    def build_script_review_boundary_draft(
         self,
         *,
-        db: Session,
-        session: Any,
         workflow_state_id: str,
-        attempt_id: int,
         script_output: Dict[str, Any],
     ) -> Dict[str, Any]:
-        scene_scripts = read_shared_fact(
-            workflow_state_id,
-            "project.scene_scripts",
-            {},
-            service=self._memory_services.short_term,
-        ) or {}
+        scene_scripts = (
+            read_shared_fact(
+                workflow_state_id,
+                "project.scene_scripts",
+                {},
+                service=self._memory_services.short_term,
+            )
+            or {}
+        )
         script_preview_text = build_script_preview_text(
             scene_scripts,
             script_output=script_output,
         )
-        deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-            db,
-            session=session,
-            workflow_id=workflow_state_id,
-            attempt_id=attempt_id,
-            payload=build_script_deliverable_payload(
+        return {
+            "payload": build_script_deliverable_payload(
                 workflow_state_id,
                 service=self._memory_services.short_term,
             ),
-            summary={
+            "summary": {
                 "script_preview_text": script_preview_text,
                 "scenes_generated": script_output.get("scenes_generated"),
                 "total_scenes": script_output.get("total_scenes"),
             },
-        )
-        artifact_ref = build_deliverable_ref(deliverable)
-        return {
-            "artifact_ref": artifact_ref,
-            "artifact_refs": [artifact_ref],
             "script_preview_text": script_preview_text,
         }
+
 
 context_assembler: Optional[ContextContractAssembler] = None
 

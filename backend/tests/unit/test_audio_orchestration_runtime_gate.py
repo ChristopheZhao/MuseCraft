@@ -1,13 +1,16 @@
 import asyncio
-import pytest
 import logging
 from types import SimpleNamespace
+
+import pytest
 
 from app.agents import orchestrator as orchestrator_module
 from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.tools.video_composition import composition_tool as composition_module
 from app.agents.tools.video_composition.composition_tool import CompositionTool
+from app.core.config import settings
+from app.core.prompt_manager import get_prompt_manager
 from app.domain import (
     AgentExecutionRequest,
     AgentExecutionResult,
@@ -16,8 +19,6 @@ from app.domain import (
     JsonObjectPayload,
     TaskStatus,
 )
-from app.core.config import settings
-from app.core.prompt_manager import get_prompt_manager
 from app.services import audio_delivery_gate_evaluator as audio_gate_module
 from app.services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from app.services.orchestration_control_plane import (
@@ -245,7 +246,10 @@ def _make_gate_result(**facts):
     }
     merged_facts.update(facts)
     result = "pass" if merged_facts.get("all_have_audio") else "fail"
-    if merged_facts.get("reason") in {"video_outputs_missing", "workflow_id_missing"} or merged_facts.get("unknown", 0):
+    if merged_facts.get("reason") in {
+        "video_outputs_missing",
+        "workflow_id_missing",
+    } or merged_facts.get("unknown", 0):
         result = "inconclusive"
     return {
         "gate_name": "workflow_video_audio_delivery",
@@ -373,7 +377,7 @@ def _build_main_loop_runtime_harness(
     agent._orchestration_control_plane = control_plane
     agent._context_contract_assembler = SimpleNamespace(
         assemble_agent_context=lambda **kwargs: {},
-        publish_script_review_boundary_sync=lambda **kwargs: {},
+        build_script_review_boundary_draft=lambda **kwargs: {},
     )
     agent._workflow_completion_adapter = SimpleNamespace(
         build_persistence_payload=lambda workflow_id: {},
@@ -441,8 +445,16 @@ def _build_main_loop_runtime_harness(
 
     async def _llm_decompose_tasks(*args, **kwargs):
         task_specs = {
-            AgentType.VIDEO_GENERATOR: {"run": True, "order": 0, "scope": {"workflow_id": "wf-mainloop-1"}},
-            AgentType.AUDIO_GENERATOR: {"run": False, "order": 1, "scope": {"workflow_id": "wf-mainloop-1"}},
+            AgentType.VIDEO_GENERATOR: {
+                "run": True,
+                "order": 0,
+                "scope": {"workflow_id": "wf-mainloop-1"},
+            },
+            AgentType.AUDIO_GENERATOR: {
+                "run": False,
+                "order": 1,
+                "scope": {"workflow_id": "wf-mainloop-1"},
+            },
         }
         return task_specs, {}
 
@@ -482,8 +494,12 @@ def _build_main_loop_runtime_harness(
     }
     agent._llm_select_candidate_agents = _llm_select_candidate_agents
     agent._llm_decompose_tasks = _llm_decompose_tasks
-    agent._build_execution_queue = lambda task_specs, candidate_agents=None: [AgentType.VIDEO_GENERATOR]
-    agent._build_standby_agents = lambda task_specs, candidate_agents=None: [AgentType.AUDIO_GENERATOR]
+    agent._build_execution_queue = lambda task_specs, candidate_agents=None: [
+        AgentType.VIDEO_GENERATOR
+    ]
+    agent._build_standby_agents = lambda task_specs, candidate_agents=None: [
+        AgentType.AUDIO_GENERATOR
+    ]
     agent._update_progress = _update_progress
     agent._prepare_agent_context = _prepare_agent_context
     agent._llm_decide_runtime_decision = _llm_decide_runtime_decision
@@ -511,7 +527,9 @@ def test_runtime_audio_facts_detect_all_scene_audio(monkeypatch):
             2: {"scene_number": 2, "video_path": "/tmp/s2.mp4"},
         },
     )
-    monkeypatch.setattr(audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm)
+    monkeypatch.setattr(
+        audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm
+    )
     monkeypatch.setattr(audio_gate_module.os.path, "exists", lambda _: True)
     monkeypatch.setattr(evaluator, "_probe_video_audio_stream", lambda _: True)
 
@@ -529,7 +547,9 @@ def test_runtime_audio_facts_marks_unknown_when_path_unavailable(monkeypatch):
             2: {"scene_number": 2, "video_url": "https://example.com/s2.mp4"},
         },
     )
-    monkeypatch.setattr(audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm)
+    monkeypatch.setattr(
+        audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm
+    )
     monkeypatch.setattr(audio_gate_module.os.path, "exists", lambda _: True)
     monkeypatch.setattr(evaluator, "_probe_video_audio_stream", lambda _: True)
 
@@ -548,9 +568,13 @@ def test_runtime_audio_facts_detects_silent_scene(monkeypatch):
             2: {"scene_number": 2, "video_path": "/tmp/s2.mp4"},
         },
     )
-    monkeypatch.setattr(audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm)
+    monkeypatch.setattr(
+        audio_gate_module, "get_mas_working_memory", lambda workflow_id, service=None: wm
+    )
     monkeypatch.setattr(audio_gate_module.os.path, "exists", lambda _: True)
-    monkeypatch.setattr(evaluator, "_probe_video_audio_stream", lambda path: path.endswith("s1.mp4"))
+    monkeypatch.setattr(
+        evaluator, "_probe_video_audio_stream", lambda path: path.endswith("s1.mp4")
+    )
 
     facts = evaluator._collect_runtime_video_audio_facts("wf-3")
     assert facts["without_audio"] == 1
@@ -587,7 +611,9 @@ def test_orchestration_state_adapter_build_audio_contract_writes_no_compat_proje
     def _capture_write(workflow_id, key, value, service=None):
         writes[key] = value
 
-    monkeypatch.setattr("app.services.orchestration_state_adapter.write_shared_fact", _capture_write)
+    monkeypatch.setattr(
+        "app.services.orchestration_state_adapter.write_shared_fact", _capture_write
+    )
 
     audio_contract = adapter.build_audio_contract(
         workflow_state_id="wf-plan-1",
@@ -747,7 +773,9 @@ def test_audio_agent_gate_no_longer_emits_llm_task_spec_route_payload(monkeypatc
 def test_orchestration_protocol_requires_explicit_subagent_report():
     protocol = OrchestrationProtocol()
 
-    with pytest.raises(OrchestrationProtocolError, match="must return explicit orchestration_report"):
+    with pytest.raises(
+        OrchestrationProtocolError, match="must return explicit orchestration_report"
+    ):
         protocol.build_subagent_report(
             workflow_state_id="wf-protocol-1",
             agent_type=AgentType.VIDEO_GENERATOR,
@@ -896,9 +924,7 @@ def _build_legacy_decision_agent(monkeypatch):
     agent = object.__new__(OrchestratorAgent)
     agent.logger = logging.getLogger("test.orchestrator.legacy_decision")
     agent._memory_services = SimpleNamespace(short_term=object())
-    agent.prompt_manager = SimpleNamespace(
-        render_template=lambda *args, **kwargs: "template"
-    )
+    agent.prompt_manager = SimpleNamespace(render_template=lambda *args, **kwargs: "template")
     agent.get_system_instructions = lambda: {}
     monkeypatch.setattr(
         "app.agents.adapters.state.agent_outputs.assess_agent_delivery",
@@ -1023,7 +1049,9 @@ def test_orchestrator_runtime_boundary_cycle_delegates_open_and_apply_to_control
             "status": "ready",
             "decision_request": {
                 "report": kwargs["report"],
-                "gate_events": [_make_gate_result(without_audio=1, reason="audio_missing_or_unknown")],
+                "gate_events": [
+                    _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
+                ],
             },
         }
 
@@ -1100,9 +1128,7 @@ def test_orchestrator_main_loop_runs_runtime_true_chain_via_control_plane(monkey
         gate_triggers=["workflow_video_audio_delivery"],
     )
 
-    result = asyncio.run(
-        _run_main_loop(agent, task)
-    )
+    result = asyncio.run(_run_main_loop(agent, task))
 
     assert result["status"] == "completed"
     assert len(runtime_calls["open"]) == 2
@@ -1119,9 +1145,7 @@ def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch
         gate_triggers=[],
     )
 
-    result = asyncio.run(
-        _run_main_loop(agent, task)
-    )
+    result = asyncio.run(_run_main_loop(agent, task))
 
     assert result["status"] == "completed"
     assert len(runtime_calls["open"]) == 1
@@ -1138,10 +1162,10 @@ def test_orchestrator_main_loop_fails_fast_when_runtime_decision_errors(monkeypa
         runtime_decision_mode="raise_runtime_error",
     )
 
-    with pytest.raises(AgentError, match="Runtime decision evaluation failed: synthetic_runtime_decision_failure"):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+    with pytest.raises(
+        AgentError, match="Runtime decision evaluation failed: synthetic_runtime_decision_failure"
+    ):
+        asyncio.run(_run_main_loop(agent, task))
 
     assert len(runtime_calls["open"]) == 1
     assert len(runtime_calls["llm"]) == 1
@@ -1157,9 +1181,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_missing(monkeypatch):
     )
 
     with pytest.raises(AgentError, match="Runtime protocol violated"):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+        asyncio.run(_run_main_loop(agent, task))
 
     assert runtime_calls["open"] == []
     assert runtime_calls["llm"] == []
@@ -1186,9 +1208,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_field_malformed(monkeypat
         AgentError,
         match="Runtime protocol violated: Subagent video_generator orchestration_report field gate_triggers must be list\\[str\\]",
     ):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+        asyncio.run(_run_main_loop(agent, task))
 
     assert runtime_calls["open"] == []
     assert runtime_calls["llm"] == []
@@ -1203,10 +1223,10 @@ def test_orchestrator_main_loop_aborts_workflow_on_runtime_abort_decision(monkey
         runtime_decision_mode="abort",
     )
 
-    with pytest.raises(AgentError, match="Workflow halted by runtime decision: synthetic_runtime_abort"):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+    with pytest.raises(
+        AgentError, match="Workflow halted by runtime decision: synthetic_runtime_abort"
+    ):
+        asyncio.run(_run_main_loop(agent, task))
 
     assert len(runtime_calls["open"]) == 1
     assert len(runtime_calls["llm"]) == 1
@@ -1220,6 +1240,7 @@ def test_orchestrator_main_loop_fails_fast_when_scheduled_agent_lacks_task_spec(
         monkeypatch,
         gate_triggers=[],
     )
+
     async def _missing_audio_task_spec(*args, **kwargs):
         return {
             AgentType.VIDEO_GENERATOR: {
@@ -1236,9 +1257,7 @@ def test_orchestrator_main_loop_fails_fast_when_scheduled_agent_lacks_task_spec(
     ]
 
     with pytest.raises(AgentError, match="Missing task_spec for scheduled agent: audio_generator"):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+        asyncio.run(_run_main_loop(agent, task))
 
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
@@ -1256,9 +1275,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unknown(monkeypatch
         AgentError,
         match="Runtime control-plane violated: Unknown gate trigger: unknown_runtime_gate",
     ):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+        asyncio.run(_run_main_loop(agent, task))
 
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
@@ -1279,9 +1296,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unauthorized(monkey
             "workflow_global_bgm_mix_delivery"
         ),
     ):
-        asyncio.run(
-            _run_main_loop(agent, task)
-        )
+        asyncio.run(_run_main_loop(agent, task))
 
     assert len(runtime_calls["open"]) == 1
     assert runtime_calls["llm"] == []
@@ -1313,7 +1328,9 @@ def test_control_plane_open_runtime_decision_collects_boundary_gate_events_for_v
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        orchestration_state=OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object())),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
         audio_delivery_gate=audio_gate,
         observation_adapter=observation_adapter,
         runtime_controller=SimpleNamespace(apply_runtime_decision=lambda **kwargs: {}),
@@ -1337,14 +1354,19 @@ def test_control_plane_open_runtime_decision_collects_boundary_gate_events_for_v
     assert payload is not None
     assert payload["status"] == "ready"
     assert len(payload["decision_request"]["gate_events"]) == 1
-    assert payload["decision_request"]["gate_events"][0]["gate_name"] == "workflow_video_audio_delivery"
+    assert (
+        payload["decision_request"]["gate_events"][0]["gate_name"]
+        == "workflow_video_audio_delivery"
+    )
 
 
 def test_control_plane_open_runtime_decision_collects_authorized_bgm_mix_gate():
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        orchestration_state=OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object())),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
         audio_delivery_gate=SimpleNamespace(
             evaluate_workflow_video_audio=lambda workflow_id: {},
             evaluate_global_bgm_mix_delivery=lambda workflow_id: {
@@ -1377,10 +1399,15 @@ def test_control_plane_open_runtime_decision_collects_authorized_bgm_mix_gate():
     )
 
     assert payload["status"] == "ready"
-    assert payload["decision_request"]["gate_events"][0]["gate_name"] == "workflow_global_bgm_mix_delivery"
+    assert (
+        payload["decision_request"]["gate_events"][0]["gate_name"]
+        == "workflow_global_bgm_mix_delivery"
+    )
 
 
-def test_control_plane_open_runtime_decision_skips_gate_collection_for_non_boundary_agent(monkeypatch):
+def test_control_plane_open_runtime_decision_skips_gate_collection_for_non_boundary_agent(
+    monkeypatch,
+):
     audio_gate = SimpleNamespace(
         evaluate_workflow_video_audio=lambda workflow_id: (_ for _ in ()).throw(
             AssertionError("audio gate should not run")
@@ -1392,7 +1419,9 @@ def test_control_plane_open_runtime_decision_skips_gate_collection_for_non_bound
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        orchestration_state=OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object())),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
         audio_delivery_gate=audio_gate,
         observation_adapter=SimpleNamespace(
             build_audio_route_payload=lambda **kwargs: {},
@@ -1424,7 +1453,9 @@ def test_control_plane_open_runtime_decision_fails_fast_on_unknown_gate_trigger(
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        orchestration_state=OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object())),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
         audio_delivery_gate=SimpleNamespace(
             evaluate_workflow_video_audio=lambda workflow_id: {},
             evaluate_global_bgm_mix_delivery=lambda workflow_id: {},
@@ -1436,7 +1467,9 @@ def test_control_plane_open_runtime_decision_fails_fast_on_unknown_gate_trigger(
         runtime_controller=SimpleNamespace(apply_runtime_decision=lambda **kwargs: {}),
     )
 
-    with pytest.raises(OrchestrationControlPlaneError, match="Unknown gate trigger: unknown_runtime_gate"):
+    with pytest.raises(
+        OrchestrationControlPlaneError, match="Unknown gate trigger: unknown_runtime_gate"
+    ):
         control_plane.open_runtime_decision(
             workflow_state_id="wf-protocol-unknown-gate",
             current_agent=AgentType.VIDEO_GENERATOR,
@@ -1457,7 +1490,9 @@ def test_control_plane_open_runtime_decision_fails_fast_on_unauthorized_known_ga
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        orchestration_state=OrchestrationStateAdapter(memory_services=SimpleNamespace(short_term=object())),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
         audio_delivery_gate=SimpleNamespace(
             evaluate_workflow_video_audio=lambda workflow_id: (_ for _ in ()).throw(
                 AssertionError("known gate handler should not run when authority check fails")
@@ -1761,9 +1796,7 @@ def test_llm_runtime_decision_fails_fast_when_action_missing(monkeypatch):
     agent._memory_services = SimpleNamespace(short_term=object())
     agent.logger = logging.getLogger("test.orchestrator.replan.missing_action")
     agent.get_llm = lambda role: SimpleNamespace(
-        chat_completion=_async_return_json(
-            {"reason": "missing_action"}
-        )
+        chat_completion=_async_return_json({"reason": "missing_action"})
     )
 
     with pytest.raises(AgentError, match="Runtime replan missing action"):
@@ -1790,7 +1823,9 @@ def test_llm_runtime_decision_fails_fast_when_llm_call_errors(monkeypatch):
 
     agent.get_llm = lambda role: SimpleNamespace(chat_completion=_raise_failure)
 
-    with pytest.raises(AgentError, match="Runtime replan LLM decision failed: synthetic_provider_failure"):
+    with pytest.raises(
+        AgentError, match="Runtime replan LLM decision failed: synthetic_provider_failure"
+    ):
         asyncio.run(
             agent._llm_decide_runtime_decision(
                 workflow_state_id="wf-replan-fail-1",
@@ -1894,7 +1929,9 @@ def test_state_adapter_appends_replan_trace_without_compat_projection(monkeypatc
     def _capture_write(workflow_id, key, value, service=None):
         writes[key] = value
 
-    monkeypatch.setattr("app.services.orchestration_state_adapter.write_shared_fact", _capture_write)
+    monkeypatch.setattr(
+        "app.services.orchestration_state_adapter.write_shared_fact", _capture_write
+    )
     monkeypatch.setattr(
         "app.services.orchestration_state_adapter.read_shared_fact",
         lambda *args, **kwargs: [],
@@ -2012,7 +2049,9 @@ def test_observation_adapter_persists_audio_gate_observation(monkeypatch):
     def _capture_write(workflow_id, key, value, service=None):
         writes[key] = value
 
-    monkeypatch.setattr("app.services.orchestration_observation_adapter.write_shared_fact", _capture_write)
+    monkeypatch.setattr(
+        "app.services.orchestration_observation_adapter.write_shared_fact", _capture_write
+    )
 
     route_payload = adapter.build_audio_route_payload(
         workflow_state_id="wf-obs-1",
@@ -2030,8 +2069,14 @@ def test_observation_adapter_persists_audio_gate_observation(monkeypatch):
     )
 
     assert route_payload["policy"] == "adaptive"
-    assert writes["workflow.diagnostics.audio_delivery_gate"]["reason_code"] == "audio_missing_or_unknown"
-    assert writes["workflow.diagnostics.audio_route"]["route_payload"]["route_source"] == "control_plane.boundary_trigger"
+    assert (
+        writes["workflow.diagnostics.audio_delivery_gate"]["reason_code"]
+        == "audio_missing_or_unknown"
+    )
+    assert (
+        writes["workflow.diagnostics.audio_route"]["route_payload"]["route_source"]
+        == "control_plane.boundary_trigger"
+    )
     assert "decision_basis" not in writes["workflow.diagnostics.audio_route"]["route_payload"]
     assert "decision_reason" not in writes["workflow.diagnostics.audio_route"]["route_payload"]
 
@@ -2055,7 +2100,11 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
     updated_task_specs = {
         AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
         AgentType.VIDEO_GENERATOR: {"run": True, "order": 1},
-        AgentType.AUDIO_GENERATOR: {"run": True, "order": 2, "scope": {"workflow_id": "wf-apply-1"}},
+        AgentType.AUDIO_GENERATOR: {
+            "run": True,
+            "order": 2,
+            "scope": {"workflow_id": "wf-apply-1"},
+        },
         AgentType.QUALITY_CHECKER: {"run": True, "order": 3},
     }
     result = controller.apply_runtime_decision(
@@ -2065,7 +2114,11 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
             "action": "activate_from_standby",
             "target_agent": AgentType.AUDIO_GENERATOR,
             "reason": "audio_missing_or_unknown",
-            "facts": {"gate_events": [_make_gate_result(without_audio=1, reason="audio_missing_or_unknown")]},
+            "facts": {
+                "gate_events": [
+                    _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
+                ]
+            },
             "execution_queue": updated_queue,
             "task_specs": updated_task_specs,
             "candidate_agents": updated_queue,
@@ -2092,7 +2145,9 @@ def test_runtime_controller_rejects_unknown_apply_action():
         ),
     )
 
-    with pytest.raises(OrchestrationRuntimeControllerError, match="Unsupported apply action: pause"):
+    with pytest.raises(
+        OrchestrationRuntimeControllerError, match="Unsupported apply action: pause"
+    ):
         controller.apply_runtime_decision(
             workflow_state_id="wf-apply-unknown-action",
             current_agent=AgentType.VIDEO_GENERATOR,
@@ -2125,7 +2180,11 @@ def test_control_plane_apply_requires_preplanned_task_spec():
                 "action": "activate_from_standby",
                 "target_agent": AgentType.AUDIO_GENERATOR,
                 "reason": "audio_missing_or_unknown",
-                "facts": {"gate_events": [_make_gate_result(without_audio=1, reason="audio_missing_or_unknown")]},
+                "facts": {
+                    "gate_events": [
+                        _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
+                    ]
+                },
             },
             execution_queue=[
                 AgentType.CONCEPT_PLANNER,
@@ -2200,9 +2259,7 @@ def test_control_plane_apply_uses_conditional_task_spec_for_activation():
     control_plane = OrchestrationControlPlane(
         memory_services=SimpleNamespace(short_term=object()),
         protocol=OrchestrationProtocol(),
-        runtime_controller=SimpleNamespace(
-            apply_runtime_decision=_capture_apply
-        ),
+        runtime_controller=SimpleNamespace(apply_runtime_decision=_capture_apply),
     )
 
     control_plane.apply_runtime_decision(
@@ -2215,7 +2272,9 @@ def test_control_plane_apply_uses_conditional_task_spec_for_activation():
             "reason": "global_bgm_missing",
             "facts": {
                 "llm_output": {"task_id": "bgm_mix"},
-                "gate_events": [_make_gate_result(without_audio=1, reason="audio_missing_or_unknown")],
+                "gate_events": [
+                    _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
+                ],
             },
         },
         execution_queue=[

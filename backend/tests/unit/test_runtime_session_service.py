@@ -1,26 +1,31 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from types import SimpleNamespace
 
+import app.services.runtime_session_service as runtime_session_service_module
 from app.core.database import Base
 from app.domain import (
     AgentType,
+    JsonObjectPayload,
     TaskStatus,
     TaskType,
     WorkflowGateStatus,
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task, WorkflowNodeState, WorkflowSession
-from app.services.runtime_session_service import RuntimeSessionService
-from app.services.published_deliverable_service import PublishedDeliverableService
-from app.services.script_review_contract import get_script_review_contract
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.published_deliverable_service import get_published_deliverable_ref
-import app.services.runtime_session_service as runtime_session_service_module
+from app.services.runtime_published_deliverable_control_plane import (
+    RuntimePublishedDeliverableControlPlane,
+)
+from app.services.runtime_session_service import RuntimeSessionService
+from app.services.script_review_contract import get_script_review_contract
 
 
 @pytest.fixture
@@ -128,9 +133,7 @@ def test_build_runtime_view_sync_does_not_repair_missing_nodes(sync_db):
         RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
 
     node_count = (
-        sync_db.query(WorkflowNodeState)
-        .filter(WorkflowNodeState.session_id == session.id)
-        .count()
+        sync_db.query(WorkflowNodeState).filter(WorkflowNodeState.session_id == session.id).count()
     )
     assert node_count == 0
 
@@ -162,7 +165,10 @@ def test_mark_session_running_and_completed_updates_projection(sync_db):
     completed_view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
     assert completed_view["status"] == WorkflowSessionStatus.COMPLETED.value
     assert completed_view["summary_output"]["final_video_url"] == "https://example.com/final.mp4"
-    assert completed_view["summary_output"]["role_continuity_diagnostics"]["review_status"] == "unverified"
+    assert (
+        completed_view["summary_output"]["role_continuity_diagnostics"]["review_status"]
+        == "unverified"
+    )
     assert completed_view["nodes"][0]["status"] == WorkflowNodeStatus.COMPLETED.value
     assert all(
         node["status"] in {WorkflowNodeStatus.COMPLETED.value, WorkflowNodeStatus.SKIPPED.value}
@@ -447,7 +453,9 @@ def test_fail_node_attempt_sync_clears_control_plane_lease(sync_db, monkeypatch)
     assert failed_attempt.lease_expires_at is None
 
 
-def test_fail_node_attempt_sync_preserves_lease_snapshot_after_cross_session_heartbeat(sync_db, monkeypatch):
+def test_fail_node_attempt_sync_preserves_lease_snapshot_after_cross_session_heartbeat(
+    sync_db, monkeypatch
+):
     lease_started_at = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
     heartbeat_at = lease_started_at + timedelta(seconds=45)
     assert_at = lease_started_at + timedelta(seconds=100)
@@ -501,8 +509,7 @@ def test_fail_node_attempt_sync_preserves_lease_snapshot_after_cross_session_hea
 
     node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "video")
     snapshot = next(
-        item for item in (node.diagnostics or [])
-        if item.get("code") == "execution_lease_snapshot"
+        item for item in (node.diagnostics or []) if item.get("code") == "execution_lease_snapshot"
     )
 
     assert failed_attempt.status == "failed"
@@ -553,9 +560,7 @@ def test_upsert_attempt_node_diagnostic_sync_replaces_keepalive_entry_for_same_a
 
     node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "video")
     keepalive_diagnostics = [
-        item
-        for item in (node.diagnostics or [])
-        if item.get("code") == "execution_host_keepalive"
+        item for item in (node.diagnostics or []) if item.get("code") == "execution_host_keepalive"
     ]
 
     assert len(keepalive_diagnostics) == 1
@@ -604,7 +609,10 @@ def test_complete_node_attempt_sync_persists_completion_validation_failed_receip
     assert len(completion_diagnostics) == 1
     assert completion_diagnostics[0]["attempt_id"] == attempt.id
     assert completion_diagnostics[0]["reason_code"] == "completion_validation_failed"
-    assert completion_diagnostics[0]["validation_error"] == f"Workflow attempt {attempt.id} execution lease expired"
+    assert (
+        completion_diagnostics[0]["validation_error"]
+        == f"Workflow attempt {attempt.id} execution lease expired"
+    )
 
 
 def test_open_human_gate_exposes_waiting_gate_in_runtime_view(sync_db):
@@ -901,8 +909,12 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
 
     view = RuntimeSessionService.build_runtime_view_for_task_sync(sync_db, task)
     refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(sync_db, session.id, attempt.id)
-    script_payload = get_published_deliverable_ref(refreshed_session.input_payload, node_key="script")
+    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(
+        sync_db, session.id, attempt.id
+    )
+    script_payload = get_published_deliverable_ref(
+        refreshed_session.input_payload, node_key="script"
+    )
 
     assert gate.gate_name == "script_review"
     assert gate.result_code == WorkflowGateStatus.AWAITING_HUMAN.value
@@ -913,7 +925,10 @@ def test_complete_script_attempt_and_open_review_gate_sync_rehomes_runtime_mutat
     assert view["active_gate"]["gate_name"] == "script_review"
     assert view["active_gate"]["result"] == WorkflowGateStatus.AWAITING_HUMAN.value
     assert view["active_gate"]["reason_code"] == "replan"
-    assert view["active_gate"]["scope"] == {"scope_type": "episode", "scope_ref": "wf-script-review"}
+    assert view["active_gate"]["scope"] == {
+        "scope_type": "episode",
+        "scope_ref": "wf-script-review",
+    }
     assert view["active_gate"]["diagnostics"] == []
     assert view["active_gate"]["facts"]["script_preview_text"] == "draft preview"
     assert refreshed_session.current_attempt_id == attempt.id
@@ -1005,7 +1020,9 @@ def test_submit_gate_decision_marks_revision_state(sync_db):
     assert nodes_by_key["script"]["revision_index"] == 1
     assert view["active_gate"]["latest_decision"]["feedback_text"] == "tighten scene pacing"
     refreshed_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
-    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(sync_db, session.id, attempt.id)
+    refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(
+        sync_db, session.id, attempt.id
+    )
     review_contract = get_script_review_contract(refreshed_session.input_payload)
     assert review_contract is not None
     assert review_contract["action"] == "revise"
@@ -1171,13 +1188,18 @@ def test_consume_script_approval_continuation_sync_rehomes_runtime_transition(sy
         progress_step="Waiting for script approval",
         progress_percentage=35,
     )
-    PublishedDeliverableService.publish_script_deliverable_sync(
-        sync_db,
-        session=session,
+    RuntimePublishedDeliverableControlPlane(SqlAlchemyRuntimeAttemptStore(sync_db)).publish_script(
+        session_id=session.id,
         workflow_id=str(task.task_id),
         attempt_id=attempt.id,
-        payload={"scene_scripts": {"1": {"script_text": "draft"}}},
-        summary={"total_scenes": 1},
+        payload=JsonObjectPayload.from_mapping(
+            {"scene_scripts": {"1": {"script_text": "draft"}}},
+            field_path="test.script_payload",
+        ),
+        summary=JsonObjectPayload.from_mapping(
+            {"total_scenes": 1},
+            field_path="test.script_summary",
+        ),
     )
 
     RuntimeSessionService.submit_gate_decision_sync(
@@ -1283,9 +1305,15 @@ def test_build_runtime_view_async_does_not_call_reconcile_helper(sync_db, monkey
         "reconcile_irrecoverable_quick_runtime_sync",
         staticmethod(_forbidden_reconcile),
     )
-    monkeypatch.setattr(RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session)
-    monkeypatch.setattr(RuntimeSessionService, "_load_runtime_nodes_async", _fake_load_runtime_nodes)
-    monkeypatch.setattr(RuntimeSessionService, "_get_latest_gate_for_session_async", _fake_get_latest_gate)
+    monkeypatch.setattr(
+        RuntimeSessionService, "get_latest_session_for_task", _fake_get_latest_session
+    )
+    monkeypatch.setattr(
+        RuntimeSessionService, "_load_runtime_nodes_async", _fake_load_runtime_nodes
+    )
+    monkeypatch.setattr(
+        RuntimeSessionService, "_get_latest_gate_for_session_async", _fake_get_latest_gate
+    )
 
     view = asyncio.run(RuntimeSessionService.build_runtime_view_for_task(_FakeAsyncDb(), task))
 
@@ -1322,7 +1350,9 @@ def test_create_session_for_task_refreshes_task_after_commit(monkeypatch):
     async def _noop_ensure_default_nodes(db, session):
         return None
 
-    monkeypatch.setattr(RuntimeSessionService, "_ensure_default_nodes_async", _noop_ensure_default_nodes)
+    monkeypatch.setattr(
+        RuntimeSessionService, "_ensure_default_nodes_async", _noop_ensure_default_nodes
+    )
 
     task = SimpleNamespace(
         id=7,
@@ -1332,7 +1362,9 @@ def test_create_session_for_task_refreshes_task_after_commit(monkeypatch):
     )
     fake_db = _FakeAsyncDb()
 
-    session = asyncio.run(RuntimeSessionService.create_session_for_task(fake_db, task, mode="quick"))
+    session = asyncio.run(
+        RuntimeSessionService.create_session_for_task(fake_db, task, mode="quick")
+    )
 
     assert session.id == 123
     assert task.output_metadata["workflow_session_id"] == 123

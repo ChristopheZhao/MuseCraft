@@ -6,18 +6,20 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.agents.base import AgentError
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
-from app.agents.base import AgentError
 from app.agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from app.core.database import Base
 from app.domain import (
     AgentTaskReference,
     AgentType,
+    JsonObjectPayload,
     TaskStatus,
     TaskType,
     WorkflowSessionStatus,
 )
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
@@ -26,9 +28,9 @@ from app.services.orchestration_runtime_resume_bootstrap_facade import (
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.published_deliverable_adapter import build_script_deliverable_payload
-from app.services.published_deliverable_service import (
-    PublishedDeliverableService,
-    build_deliverable_ref,
+from app.services.published_deliverable_service import build_deliverable_ref
+from app.services.runtime_published_deliverable_control_plane import (
+    RuntimePublishedDeliverableControlPlane,
 )
 from app.services.runtime_session_service import RuntimeSessionService
 from app.services.scene_info_reference_service import SceneInfoReferencePersistenceError
@@ -110,7 +112,7 @@ def _create_task(db):
     return task
 
 
-def test_publish_script_review_boundary_publishes_deliverable_without_shared_wm_projection(sync_db):
+def test_script_review_boundary_draft_assembles_contract_without_persistence(sync_db):
     service = _build_service()
     task = _create_task(sync_db)
     session = RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
@@ -140,31 +142,21 @@ def test_publish_script_review_boundary_publishes_deliverable_without_shared_wm_
 
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
 
-    boundary = assembler.publish_script_review_boundary_sync(
-        db=sync_db,
-        session=session,
+    boundary = assembler.build_script_review_boundary_draft(
         workflow_state_id=workflow_id,
-        attempt_id=attempt.id,
         script_output={"scenes_generated": 1, "total_scenes": 1},
     )
 
-    artifact_ref = boundary["artifact_ref"]
     projected_ref = read_shared_fact(
         workflow_id,
         "published_deliverables.script.latest",
         None,
         service=service,
     )
-    payload_path = Path(artifact_ref["payload_ref"])
-    if not payload_path.is_absolute():
-        payload_path = Path(__file__).resolve().parents[2] / payload_path
-
-    assert artifact_ref["deliverable_type"] == "script"
     assert boundary["script_preview_text"]
     assert projected_ref is None
-    assert payload_path.exists()
-    persisted_payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    assert persisted_payload["scene_scripts"]["1"]["script_text"] == "scene 1 script"
+    assert boundary["summary"]["total_scenes"] == 1
+    assert boundary["payload"]["scene_scripts"]["1"]["script_text"] == "scene 1 script"
 
 
 def test_resolve_published_stage_payload_returns_explicit_receipt_and_payload(tmp_path):
@@ -332,13 +324,20 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
         {"1": {"script_text": "candidate script"}},
         service=source_service,
     )
-    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-        sync_db,
-        session=session,
+    deliverable = RuntimePublishedDeliverableControlPlane(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).publish_script(
+        session_id=session.id,
         workflow_id=workflow_id,
         attempt_id=attempt.id,
-        payload=build_script_deliverable_payload(workflow_id, service=source_service),
-        summary={"total_scenes": 1},
+        payload=JsonObjectPayload.from_mapping(
+            build_script_deliverable_payload(workflow_id, service=source_service),
+            field_path="test.script_payload",
+        ),
+        summary=JsonObjectPayload.from_mapping(
+            {"total_scenes": 1},
+            field_path="test.script_summary",
+        ),
     )
     artifact_ref = build_deliverable_ref(deliverable)
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(

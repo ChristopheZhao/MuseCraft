@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.services.orchestration_runtime_transition_facade as transition_facade_module
 from app.agents import orchestrator as orchestrator_module
 from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
@@ -36,10 +37,6 @@ from app.services.orchestration_runtime_transition_facade import (
     OrchestrationRuntimeTransitionFacade,
 )
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
-from app.services.published_deliverable_service import (
-    PublishedDeliverableService,
-    build_deliverable_ref,
-)
 from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from app.services.runtime_session_service import RuntimeSessionService
 
@@ -167,22 +164,13 @@ class _QueuedPlanLLM:
 
 
 def _fake_script_review_boundary(**kwargs):
-    deliverable = PublishedDeliverableService.publish_script_deliverable_sync(
-        kwargs["db"],
-        session=kwargs["session"],
-        workflow_id=str(kwargs.get("workflow_state_id") or ""),
-        attempt_id=int(kwargs.get("attempt_id") or 0),
-        payload={
+    return {
+        "payload": {
             "concept_plan": {"scenes": [{"scene_number": 1}]},
             "scene_overview": {"scenes": [{"scene_number": 1, "visual_description": "stub scene"}]},
             "scene_scripts": {"1": {"script_text": "Scene 1 approved script"}},
         },
-        summary={"total_scenes": 1},
-    )
-    artifact_ref = build_deliverable_ref(deliverable)
-    return {
-        "artifact_ref": artifact_ref,
-        "artifact_refs": [artifact_ref],
+        "summary": {"total_scenes": 1},
         "script_preview_text": "preview",
     }
 
@@ -345,7 +333,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
         assemble_agent_context=lambda **kwargs: {},
-        publish_script_review_boundary_sync=_fake_script_review_boundary,
+        build_script_review_boundary_draft=_fake_script_review_boundary,
     )
     if session_factory is not None:
         agent._orchestration_runtime_resume_bootstrap_facade = (
@@ -492,7 +480,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
     agent._context_contract_assembler = SimpleNamespace(
         assemble_agent_context=lambda **kwargs: {},
-        publish_script_review_boundary_sync=_fake_script_review_boundary,
+        build_script_review_boundary_draft=_fake_script_review_boundary,
     )
     if session_factory is not None:
         agent._orchestration_runtime_resume_bootstrap_facade = (
@@ -652,9 +640,7 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         )
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         task_snapshot = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
@@ -694,10 +680,11 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
 
         observed = {}
 
-        def _record_loaded_runtime_state(runtime_db, runtime_session, runtime_task):
+        def _record_loaded_runtime_state(runtime_db, runtime_store, runtime_session):
             observed["db_id"] = id(runtime_db)
-            observed["session_id"] = runtime_session.id
-            observed["task_id"] = runtime_task.id if runtime_task is not None else None
+            observed["store_type"] = type(runtime_store).__name__
+            observed["session_id"] = runtime_session.session_id
+            observed["task_id"] = runtime_session.task_id
             return "ok"
 
         result = facade._run_with_fresh_runtime_control_plane_session(
@@ -708,8 +695,49 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
 
         assert result == "ok"
         assert observed["db_id"] != id(sync_db)
+        assert observed["store_type"] == "SqlAlchemyRuntimeAttemptStore"
         assert observed["session_id"] == session.id
-        assert observed["task_id"] == task.id
+        assert observed["task_id"] == str(task.task_id)
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_runtime_transition_facade_compensates_published_payload_on_failure(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(
+            sync_db, task, mode="quick"
+        )
+        facade = OrchestrationRuntimeTransitionFacade(
+            context_contract_assembler=agent._context_contract_assembler,
+            orchestration_state=agent._orchestration_state,
+            session_factory=SessionLocal,
+        )
+        discarded_refs = []
+        monkeypatch.setattr(
+            transition_facade_module,
+            "discard_published_payload",
+            discarded_refs.append,
+        )
+
+        def _fail_after_publication(runtime_db, _runtime_store, _runtime_session):
+            runtime_db.info[facade._PAYLOAD_COMPENSATION_INFO_KEY] = "/tmp/orphan.json"
+            raise RuntimeError("gate transition failed")
+
+        with pytest.raises(RuntimeError, match="gate transition failed"):
+            facade._run_with_fresh_runtime_control_plane_session(
+                runtime_session_id=session.id,
+                task_id=str(task.task_id),
+                action=_fail_after_publication,
+            )
+
+        assert discarded_refs == ["/tmp/orphan.json"]
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -854,9 +882,7 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
         agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
         assert result["status"] == "waiting_gate"
@@ -902,9 +928,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
         agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
         assert result["status"] == "waiting_gate"
@@ -959,9 +983,7 @@ def test_orchestrator_mainline_routes_attempt_bootstrap_through_resume_facade(mo
         agent._orchestration_runtime_transition_facade = _StubRuntimeTransitions()
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
         start_calls = agent._orchestration_runtime_resume_bootstrap_facade.start_calls
@@ -1000,9 +1022,7 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
 
         with pytest.raises(AgentError, match="Execution host keepalive unavailable"):
             asyncio.run(
-                agent._execute_impl(
-                    _orchestrator_request(task, {"user_prompt": "test prompt"})
-                )
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
             )
 
         fresh_task = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
@@ -1055,9 +1075,7 @@ def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failur
 
         with pytest.raises(AgentError, match="Runtime replan missing action"):
             asyncio.run(
-                agent._execute_impl(
-                    _orchestrator_request(task, {"user_prompt": "test prompt"})
-                )
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
             )
 
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1363,9 +1381,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         )
 
         first = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
@@ -1382,9 +1398,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         )
 
         second = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         fresh_task = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
@@ -1464,9 +1478,7 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
         RuntimeSessionService.mark_session_resuming_sync(sync_db, session, task=task)
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
         resolve_calls = agent._orchestration_runtime_resume_bootstrap_facade.resolve_calls
@@ -1501,9 +1513,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
         )
 
         first = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
@@ -1523,9 +1533,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
 
         with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
             asyncio.run(
-                agent._execute_impl(
-                    _orchestrator_request(task, {"user_prompt": "test prompt"})
-                )
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
             )
 
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1575,9 +1583,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
 
         with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
             asyncio.run(
-                agent._execute_impl(
-                    _orchestrator_request(task, {"user_prompt": "test prompt"})
-                )
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
             )
 
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1629,9 +1635,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
         )
 
         first = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
@@ -1646,9 +1650,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
         agent._memory_services.short_term._shared_store.clear()
 
         second = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
@@ -1719,9 +1721,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
         )
 
         first = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         assert first["status"] == "waiting_gate"
 
@@ -1736,9 +1736,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
         agent._memory_services.short_term._shared_store.clear()
 
         second = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
@@ -1791,9 +1789,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
         )
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
@@ -1869,9 +1865,7 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
         task = _create_task(sync_db)
 
         result = asyncio.run(
-            agent._execute_impl(
-                _orchestrator_request(task, {"user_prompt": "test prompt"})
-            )
+            agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
         session = RuntimeSessionService.get_or_create_session_for_task_sync(

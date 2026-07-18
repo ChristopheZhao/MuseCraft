@@ -12,6 +12,9 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from ..core.config import settings
+from ..core.constants import GenerationMode
+from ..core.generation_mode import resolve_generation_mode
 from ..domain import (
     TaskStatus,
     WorkflowAttemptStatus,
@@ -19,6 +22,7 @@ from ..domain import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
+from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from ..models import (
     Task,
     WorkflowGate,
@@ -27,22 +31,18 @@ from ..models import (
     WorkflowNodeState,
     WorkflowSession,
 )
-from ..core.constants import GenerationMode
-from ..core.config import settings
-from ..core.generation_mode import resolve_generation_mode
+from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import (
-    PublishedDeliverableService,
     build_deliverable_ref,
     clear_published_deliverable_ref,
     set_published_deliverable_ref,
 )
+from .runtime_published_deliverable_control_plane import RuntimePublishedDeliverableControlPlane
 from .script_review_contract import (
     build_script_review_contract,
     get_script_review_contract,
     set_script_review_contract,
 )
-from .orchestration_state_adapter import OrchestrationStateAdapter
-
 
 DEFAULT_NODE_BLUEPRINT = [
     {
@@ -251,11 +251,7 @@ def _fresh_session_node_attempt_sync(
     except Exception:
         pass
 
-    fresh_session = (
-        db.query(WorkflowSession)
-        .filter(WorkflowSession.id == session.id)
-        .first()
-    )
+    fresh_session = db.query(WorkflowSession).filter(WorkflowSession.id == session.id).first()
     if fresh_session is None:
         raise ValueError(f"Workflow session {session.id} not found")
 
@@ -396,14 +392,19 @@ def _build_resume_control_projection(
     }:
         return None
 
-    if active_gate is not None and str(active_gate.status or "").strip().lower() == WorkflowGateStatus.AWAITING_HUMAN.value:
+    if (
+        active_gate is not None
+        and str(active_gate.status or "").strip().lower() == WorkflowGateStatus.AWAITING_HUMAN.value
+    ):
         return {
             "state": "waiting_gate",
             "can_resume": False,
             "reason_code": "awaiting_gate_decision",
         }
 
-    attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, session.current_attempt_id)
+    attempt = RuntimeSessionService.get_attempt_by_id_sync(
+        db, session.id, session.current_attempt_id
+    )
     if attempt is None:
         return {
             "state": "resume_blocked",
@@ -590,9 +591,7 @@ class RuntimeSessionService:
             raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
 
         normalized_codes = {
-            str(code or "").strip()
-            for code in (codes or [])
-            if str(code or "").strip()
+            str(code or "").strip() for code in (codes or []) if str(code or "").strip()
         }
         if normalized_codes:
             existing = getattr(node, "diagnostics", None)
@@ -660,7 +659,10 @@ class RuntimeSessionService:
         if gate is None:
             raise ValueError(f"No gate found for node script in session {session.id}")
         latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, gate.id)
-        if latest_decision is None or str(latest_decision.action or "").strip().lower() != "approve":
+        if (
+            latest_decision is None
+            or str(latest_decision.action or "").strip().lower() != "approve"
+        ):
             raise ValueError(
                 f"Workflow node script for session {session.id} has no approved continuation decision"
             )
@@ -742,7 +744,9 @@ class RuntimeSessionService:
         return session
 
     @staticmethod
-    async def get_latest_session_for_task(db: AsyncSession, task_db_id: int) -> Optional[WorkflowSession]:
+    async def get_latest_session_for_task(
+        db: AsyncSession, task_db_id: int
+    ) -> Optional[WorkflowSession]:
         result = await db.execute(
             select(WorkflowSession)
             .where(WorkflowSession.task_db_id == task_db_id)
@@ -770,7 +774,9 @@ class RuntimeSessionService:
         active_gate = await RuntimeSessionService._get_latest_gate_for_session_async(db, session.id)
         latest_decision = None
         if active_gate is not None:
-            latest_decision = await RuntimeSessionService._get_latest_decision_for_gate_async(db, active_gate.id)
+            latest_decision = await RuntimeSessionService._get_latest_decision_for_gate_async(
+                db, active_gate.id
+            )
         resume_control = await db.run_sync(
             lambda sync_db: _build_resume_control_projection(
                 sync_db,
@@ -792,7 +798,9 @@ class RuntimeSessionService:
         )
 
     @staticmethod
-    async def mark_session_cancelled_for_task(db: AsyncSession, task: Task) -> Optional[WorkflowSession]:
+    async def mark_session_cancelled_for_task(
+        db: AsyncSession, task: Task
+    ) -> Optional[WorkflowSession]:
         session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
         if session is None:
             task.status = TaskStatus.CANCELLED.value
@@ -917,8 +925,12 @@ class RuntimeSessionService:
         active_gate = RuntimeSessionService.get_latest_gate_for_session_sync(db, session.id)
         latest_decision = None
         if active_gate is not None:
-            latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(db, active_gate.id)
-        resume_control = _build_resume_control_projection(db, task, session, active_gate=active_gate)
+            latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(
+                db, active_gate.id
+            )
+        resume_control = _build_resume_control_projection(
+            db, task, session, active_gate=active_gate
+        )
         return _serialize_session(
             session,
             list(nodes),
@@ -963,9 +975,7 @@ class RuntimeSessionService:
         ):
             return session
 
-        error_message = (
-            "Stale quick runtime detected: execution lease is no longer active and continuation checkpoint is missing"
-        )
+        error_message = "Stale quick runtime detected: execution lease is no longer active and continuation checkpoint is missing"
         logging.getLogger("runtime_session_service").warning(
             "Marking irrecoverable stale quick runtime failed: task_id=%s session_id=%s node=%s",
             getattr(task, "task_id", None),
@@ -1018,7 +1028,10 @@ class RuntimeSessionService:
             )
             db.refresh(session)
             after_status = str(session.status or "").strip().lower()
-            if before_status != WorkflowSessionStatus.FAILED.value and after_status == WorkflowSessionStatus.FAILED.value:
+            if (
+                before_status != WorkflowSessionStatus.FAILED.value
+                and after_status == WorkflowSessionStatus.FAILED.value
+            ):
                 failed += 1
             else:
                 skipped += 1
@@ -1181,13 +1194,9 @@ class RuntimeSessionService:
                 f"Workflow attempt {attempt_id} does not have an active execution lease"
             )
         if actual_token != expected_token:
-            raise ValueError(
-                f"Workflow attempt {attempt_id} execution lease token mismatch"
-            )
+            raise ValueError(f"Workflow attempt {attempt_id} execution lease token mismatch")
         if not allow_expired and not RuntimeSessionService.is_attempt_lease_live(attempt):
-            raise ValueError(
-                f"Workflow attempt {attempt_id} execution lease expired"
-            )
+            raise ValueError(f"Workflow attempt {attempt_id} execution lease expired")
         return attempt
 
     @staticmethod
@@ -1301,7 +1310,10 @@ class RuntimeSessionService:
             require_decision_id=require_decision_id,
         )
         checkpoint_anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
-        if expected_anchor_type is not None and checkpoint_anchor_type != str(expected_anchor_type).strip().lower():
+        if (
+            expected_anchor_type is not None
+            and checkpoint_anchor_type != str(expected_anchor_type).strip().lower()
+        ):
             raise ValueError(
                 f"Workflow session {session.id} continuation anchor_type mismatch: "
                 f"expected={expected_anchor_type} actual={checkpoint_anchor_type or '<empty>'}"
@@ -1330,7 +1342,9 @@ class RuntimeSessionService:
                 raise ValueError(
                     f"Workflow session {session.id} attempt anchor {attempt_id} does not match gate attempt {gate.attempt_id}"
                 )
-            if require_decision_id and int(checkpoint.get("decision_id")) != int(latest_decision.id):
+            if require_decision_id and int(checkpoint.get("decision_id")) != int(
+                latest_decision.id
+            ):
                 raise ValueError(
                     f"Continuation checkpoint decision binding is stale for session {session.id}: "
                     f"checkpoint={checkpoint.get('decision_id')} latest={latest_decision.id}"
@@ -1349,9 +1363,11 @@ class RuntimeSessionService:
         attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, attempt_id)
         if attempt is None:
             raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
-        attempt.continuation_checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-            continuation_checkpoint,
-            require_decision_id=False,
+        attempt.continuation_checkpoint = (
+            OrchestrationStateAdapter.validate_continuation_checkpoint(
+                continuation_checkpoint,
+                require_decision_id=False,
+            )
         )
         db.commit()
         db.refresh(attempt)
@@ -1573,7 +1589,9 @@ class RuntimeSessionService:
             raise ValueError(f"Workflow attempt {attempt_id} not found for session {session.id}")
         if lease_token is not None:
             if attempt_id is None:
-                raise ValueError("attempt_id is required when validating a gate-opening execution lease")
+                raise ValueError(
+                    "attempt_id is required when validating a gate-opening execution lease"
+                )
             RuntimeSessionService.assert_attempt_lease_sync(
                 db,
                 session,
@@ -1671,9 +1689,11 @@ class RuntimeSessionService:
         if continuation_checkpoint is None:
             attempt.continuation_checkpoint = None
         else:
-            attempt.continuation_checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-                continuation_checkpoint,
-                require_decision_id=False,
+            attempt.continuation_checkpoint = (
+                OrchestrationStateAdapter.validate_continuation_checkpoint(
+                    continuation_checkpoint,
+                    require_decision_id=False,
+                )
             )
 
         gate = WorkflowGate(
@@ -1755,7 +1775,9 @@ class RuntimeSessionService:
             raise ValueError(f"Action {normalized_action} is not allowed for gate {gate.id}")
         attempt = RuntimeSessionService.get_attempt_by_id_sync(db, session.id, gate.attempt_id)
         if attempt is None:
-            raise ValueError(f"Workflow attempt {gate.attempt_id} not found for session {session.id}")
+            raise ValueError(
+                f"Workflow attempt {gate.attempt_id} not found for session {session.id}"
+            )
         checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
             attempt.continuation_checkpoint,
             require_decision_id=False,
@@ -1796,11 +1818,19 @@ class RuntimeSessionService:
 
         payload = dict(session.input_payload or {})
         if normalized_action == "approve":
-            deliverable = PublishedDeliverableService.mark_node_deliverable_approved_sync(
-                db,
-                session=session,
+            if gate.attempt_id is None:
+                raise ValueError(
+                    f"Cannot approve deliverable for node {node_key} without attempt_id"
+                )
+            # The strict store reloads locked records; flush legacy mutations first so
+            # the transaction cannot refresh them back to their pre-decision state.
+            db.flush()
+            deliverable = RuntimePublishedDeliverableControlPlane(
+                SqlAlchemyRuntimeAttemptStore(db)
+            ).approve(
+                session_id=session.id,
                 node_key=node_key,
-                attempt_id=gate.attempt_id,
+                attempt_id=int(gate.attempt_id),
             )
             payload = set_published_deliverable_ref(
                 payload,
@@ -1846,7 +1876,9 @@ class RuntimeSessionService:
         return decision
 
     @staticmethod
-    def mark_session_running_sync(db: Session, session: WorkflowSession, task: Optional[Task] = None) -> WorkflowSession:
+    def mark_session_running_sync(
+        db: Session, session: WorkflowSession, task: Optional[Task] = None
+    ) -> WorkflowSession:
         session.status = WorkflowSessionStatus.RUNNING.value
         if not session.current_node_key:
             first_node = (
@@ -1990,7 +2022,9 @@ class RuntimeSessionService:
         return session
 
     @staticmethod
-    def mark_session_cancelled_sync(db: Session, session: WorkflowSession, task: Optional[Task] = None) -> WorkflowSession:
+    def mark_session_cancelled_sync(
+        db: Session, session: WorkflowSession, task: Optional[Task] = None
+    ) -> WorkflowSession:
         session.status = WorkflowSessionStatus.CANCELLED.value
         if task is not None:
             task.status = TaskStatus.CANCELLED.value

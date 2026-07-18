@@ -28,7 +28,9 @@ from ..domain import (
     RuntimeGateOpenCommand,
     RuntimeGateRecord,
     RuntimeNodeRecord,
+    RuntimePublishedDeliverableApprovalCommand,
     RuntimePublishedDeliverableRecord,
+    RuntimePublishedDeliverableWrite,
     RuntimeSessionRecord,
     RuntimeSessionTransitionCommand,
     RuntimeStoreError,
@@ -732,6 +734,100 @@ class SqlAlchemyRuntimeAttemptStore:
             return None
         return self._published_deliverable_record(deliverable, operation=operation)
 
+    def publish_deliverable(
+        self,
+        command: RuntimePublishedDeliverableWrite,
+    ) -> RuntimePublishedDeliverableRecord:
+        operation = "publish_deliverable"
+        session = self._locked_session(command.session_id, operation=operation)
+        node = self._locked_node(command.session_id, command.node_key, operation=operation)
+        attempt = self._locked_attempt(
+            command.session_id,
+            command.attempt_id,
+            operation=operation,
+        )
+        if session.status != command.expected_session_status.value:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime session status changed before deliverable publication",
+            )
+        if node.status != command.expected_node_status.value:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime node status changed before deliverable publication",
+            )
+        if attempt.status != command.expected_attempt_status.value:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime attempt status changed before deliverable publication",
+            )
+        if attempt.node_id != node.id:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime attempt does not belong to the deliverable node",
+            )
+        deliverable = WorkflowPublishedDeliverable()
+        setattr(deliverable, "session_id", session.id)
+        setattr(deliverable, "node_id", node.id)
+        setattr(deliverable, "attempt_id", attempt.id)
+        setattr(deliverable, "deliverable_type", command.deliverable_type)
+        setattr(deliverable, "scope_type", command.scope_type)
+        setattr(deliverable, "scope_id", command.scope_id)
+        setattr(deliverable, "revision_no", command.revision_no)
+        setattr(deliverable, "payload_ref", command.payload_ref)
+        setattr(deliverable, "summary", command.summary.to_dict())
+        setattr(deliverable, "is_candidate", command.is_candidate)
+        setattr(deliverable, "is_approved", command.is_approved)
+        self._db.add(deliverable)
+        self._db.flush()
+        return self._published_deliverable_record(deliverable, operation=operation)
+
+    def approve_deliverable(
+        self,
+        command: RuntimePublishedDeliverableApprovalCommand,
+    ) -> RuntimePublishedDeliverableRecord:
+        operation = "approve_deliverable"
+        node = self._locked_node(command.session_id, command.node_key, operation=operation)
+        attempt = self._locked_attempt(
+            command.session_id,
+            command.attempt_id,
+            operation=operation,
+        )
+        deliverable = self._db.execute(
+            select(WorkflowPublishedDeliverable)
+            .where(
+                WorkflowPublishedDeliverable.id == command.deliverable_id,
+                WorkflowPublishedDeliverable.session_id == command.session_id,
+                WorkflowPublishedDeliverable.node_id == node.id,
+                WorkflowPublishedDeliverable.attempt_id == attempt.id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if deliverable is None:
+            raise _error(
+                reason_code=RuntimeStoreReason.RECORD_NOT_FOUND,
+                operation=operation,
+                message="runtime published deliverable was not found for approval",
+            )
+        if (
+            bool(deliverable.is_candidate) is not command.expected_is_candidate
+            or bool(deliverable.is_approved) is not command.expected_is_approved
+        ):
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime published deliverable approval state changed",
+            )
+        setattr(deliverable, "is_candidate", command.target_is_candidate)
+        setattr(deliverable, "is_approved", command.target_is_approved)
+        self._db.flush()
+        return self._published_deliverable_record(deliverable, operation=operation)
+
     def start_attempt(self, command: RuntimeAttemptStartCommand) -> RuntimeAttemptRecord:
         operation = "start_attempt"
         session = self._locked_session(command.session_id, operation=operation)
@@ -791,7 +887,10 @@ class SqlAlchemyRuntimeAttemptStore:
                 operation=operation,
                 message="runtime attempt status does not permit lease grant",
             )
-        if attempt.lease_token is not None or attempt.lease_owner is not None:
+        if (
+            cast(str | None, attempt.lease_token) is not None
+            or cast(str | None, attempt.lease_owner) is not None
+        ):
             raise _error(
                 reason_code=RuntimeStoreReason.LEASE_CONFLICT,
                 operation=operation,

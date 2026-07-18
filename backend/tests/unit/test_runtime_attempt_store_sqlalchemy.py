@@ -15,6 +15,9 @@ from app.domain import (
     RuntimeAttemptStore,
     RuntimeContinuationBindCommand,
     RuntimeGateStore,
+    RuntimePublishedDeliverableApprovalCommand,
+    RuntimePublishedDeliverableStore,
+    RuntimePublishedDeliverableWrite,
     RuntimeReadModelQuery,
     RuntimeReadStore,
     RuntimeStoreError,
@@ -543,25 +546,29 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
             field_path="test.script_checkpoint",
         ),
     )
-    deliverable = WorkflowPublishedDeliverable(
-        session_id=session.id,
-        node_id=node.id,
-        attempt_id=attempt.attempt_id,
-        deliverable_type="script",
-        scope_type="episode",
-        scope_id="episode",
-        revision_no=0,
-        payload_ref="/tmp/script.json",
-        summary={"script_preview_text": "draft"},
-        is_candidate=True,
-        is_approved=False,
+    deliverable_record = store.publish_deliverable(
+        RuntimePublishedDeliverableWrite(
+            session_id=session.id,
+            node_key="script",
+            attempt_id=attempt.attempt_id,
+            deliverable_type="script",
+            scope_type="episode",
+            scope_id="episode",
+            revision_no=0,
+            payload_ref="/tmp/script.json",
+            summary=JsonObjectPayload.from_mapping(
+                {"script_preview_text": "draft"},
+                field_path="test.script_summary",
+            ),
+            expected_session_status=WorkflowSessionStatus.RUNNING,
+            expected_node_status=WorkflowNodeStatus.RUNNING,
+            expected_attempt_status=WorkflowAttemptStatus.SUCCEEDED,
+        )
     )
-    db.add(deliverable)
-    db.flush()
     artifact_ref = JsonObjectPayload.from_mapping(
         {
             "type": "published_deliverable",
-            "deliverable_id": deliverable.id,
+            "deliverable_id": deliverable_record.deliverable_id,
             "attempt_id": attempt.attempt_id,
         },
         field_path="test.script_artifact_ref",
@@ -604,7 +611,10 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
     db.refresh(session)
     db.refresh(node)
     db.refresh(task)
-    db.refresh(deliverable)
+    deliverable = db.get(
+        WorkflowPublishedDeliverable,
+        deliverable_record.deliverable_id,
+    )
     gate = db.query(WorkflowGate).filter(WorkflowGate.id == node.last_gate_id).one()
     persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
 
@@ -618,6 +628,83 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
     assert deliverable.is_approved is True
     assert task.requires_human_review is False
     assert task.progress_percentage == 40
+
+
+def test_published_deliverable_store_rejects_stale_runtime_preconditions(runtime_db):
+    db, _ = runtime_db
+    _, session, node = _seed_runtime(db)
+    node.node_key = "script"
+    node.node_type = "script"
+    db.commit()
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id, node_key="script"))
+
+    assert isinstance(store, RuntimePublishedDeliverableStore)
+    with pytest.raises(RuntimeStoreError) as excinfo:
+        store.publish_deliverable(
+            RuntimePublishedDeliverableWrite(
+                session_id=session.id,
+                node_key="script",
+                attempt_id=attempt.attempt_id,
+                deliverable_type="script",
+                scope_type="episode",
+                scope_id="episode",
+                revision_no=0,
+                payload_ref="/tmp/script.json",
+                summary=JsonObjectPayload.empty(),
+                expected_session_status=WorkflowSessionStatus.QUEUED,
+                expected_node_status=WorkflowNodeStatus.RUNNING,
+                expected_attempt_status=WorkflowAttemptStatus.RUNNING,
+            )
+        )
+
+    assert excinfo.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    assert db.query(WorkflowPublishedDeliverable).count() == 0
+
+
+def test_published_deliverable_store_rejects_stale_approval_state(runtime_db):
+    db, _ = runtime_db
+    _, session, node = _seed_runtime(db)
+    node.node_key = "script"
+    node.node_type = "script"
+    db.commit()
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id, node_key="script"))
+    deliverable = store.publish_deliverable(
+        RuntimePublishedDeliverableWrite(
+            session_id=session.id,
+            node_key="script",
+            attempt_id=attempt.attempt_id,
+            deliverable_type="script",
+            scope_type="episode",
+            scope_id="episode",
+            revision_no=0,
+            payload_ref="/tmp/script.json",
+            summary=JsonObjectPayload.empty(),
+            expected_session_status=WorkflowSessionStatus.RUNNING,
+            expected_node_status=WorkflowNodeStatus.RUNNING,
+            expected_attempt_status=WorkflowAttemptStatus.RUNNING,
+        )
+    )
+
+    with pytest.raises(RuntimeStoreError) as excinfo:
+        store.approve_deliverable(
+            RuntimePublishedDeliverableApprovalCommand(
+                session_id=session.id,
+                node_key="script",
+                attempt_id=attempt.attempt_id,
+                deliverable_id=deliverable.deliverable_id,
+                expected_is_candidate=False,
+                expected_is_approved=False,
+                target_is_candidate=False,
+                target_is_approved=True,
+            )
+        )
+
+    assert excinfo.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    persisted = db.get(WorkflowPublishedDeliverable, deliverable.deliverable_id)
+    assert persisted.is_candidate is True
+    assert persisted.is_approved is False
 
 
 def test_runtime_read_model_is_immutable_and_preserves_public_projection(runtime_db):
