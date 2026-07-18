@@ -13,6 +13,8 @@ uv run --project backend alembic -c backend/alembic.ini check
 
 Earlier local migration snapshots were never committed and contain MySQL-specific DDL. They are not a trustworthy shared upgrade history.
 
+The uv development launcher therefore rejects MySQL with `reason_code=unsupported_database_backend` before attempting release migrations. This is a database compatibility boundary, not a limitation of uv-based application startup.
+
 Before adopting the release baseline:
 
 1. Back up the database and test restoration.

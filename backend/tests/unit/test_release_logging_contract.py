@@ -12,6 +12,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
         ("app/agents/tools/storage/oss_storage_tool.py", "OSS_CLIENT_CONFIG key_id="),
         ("app/agents/tools/storage/oss_storage_tool.py", "secret_sha1="),
         ("app/agents/tools/ai_services/image_generation_tool.py", "source_url=%s"),
+        ("scripts/start_dev_uv.py", "Environment proxy variables after cleanup:"),
     ],
 )
 def test_release_runtime_does_not_log_credential_material(relative_path, forbidden_marker):

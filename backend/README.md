@@ -12,17 +12,33 @@ FastAPI backend for the MuseCraft multi-agent short-video runtime.
 
 Configuration is loaded from the repository-root `.env`. Explicit process or container environment variables take precedence over `.env` values.
 
-## Install and run
+## Install and run with uv
 
 From the repository root:
 
 ```bash
-uv sync --project backend --frozen --extra dev --extra test
+uv sync --project backend --frozen
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py
+```
+
+`--project backend` makes `backend/pyproject.toml` the project entry point and uses `backend/.venv` as the canonical virtual environment. A repository-root `.venv` is not part of the backend runtime contract.
+
+PostgreSQL, Redis, and FFmpeg are external system dependencies and must already be available through the root `.env` configuration. The public runtime supports PostgreSQL only; pre-release MySQL databases require the reviewed reconciliation process in [database-migrations.md](../docs/database-migrations.md). The launcher validates the database contract and Redis, applies Alembic migrations, then starts the API, Celery worker, and Celery beat from the active uv environment. It exits non-zero and cleans up already-started processes when a required service cannot start.
+
+Use `--check` to validate dependencies and migrations without starting long-lived processes:
+
+```bash
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py --check
+```
+
+The API listens on `http://localhost:8000` by default. OpenAPI is available at `/docs`. For API-only development, run:
+
+```bash
 uv run --project backend alembic -c backend/alembic.ini upgrade head
 uv run --project backend uvicorn app.main:app --app-dir backend --reload
 ```
 
-The API listens on `http://localhost:8000` by default. OpenAPI is available at `/docs`.
+API-only mode does not execute queued generation work. The complete local runtime requires the launcher or equivalent separately managed Celery worker and beat processes. Docker Compose remains an optional all-in-one path; it is not required to run the Python application.
 
 ## Dependency contract
 

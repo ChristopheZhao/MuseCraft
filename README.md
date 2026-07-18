@@ -50,13 +50,18 @@ cp .env.local.example .env.local
 
 至少修改 `.env` 中的 `SECRET_KEY`，并配置一个实际使用的 AI provider。`.env` 和 `.env.local` 都不会进入 Git。
 
-### 2. Docker 启动后端
+### 2. 使用 uv 启动后端
+
+先确保 `.env` 指向的 PostgreSQL 和 Redis 已启动。uv 管理 Python 应用与依赖，不替代数据库、Redis 或 FFmpeg 这些系统服务。当前公开 runtime 只支持 PostgreSQL；历史 MySQL 数据库不能由 release baseline 自动接管，处理方式见 [数据库迁移说明](docs/database-migrations.md)。
 
 ```bash
-docker compose -f backend/docker-compose.yml up --build
+uv sync --project backend --frozen
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py
 ```
 
-Compose 会先运行一次 Alembic migration，成功后再启动 API、worker 和 beat。API 默认监听 `http://localhost:8000`。
+`--project backend` 以 `backend/pyproject.toml` 为项目入口，uv 默认在 `backend/.venv` 创建和使用虚拟环境。仓库根目录 `.venv` 不属于当前后端运行合同，也不应与 `backend/.venv` 混用。
+
+launcher 会先检查 PostgreSQL/Redis 并执行 Alembic migration，成功后再启动 API、Celery worker 和 beat；任一服务启动失败都会整体失败并清理已启动进程。API 默认监听 `http://localhost:8000`，按 `Ctrl+C` 可停止这组本地进程。
 
 ### 3. 启动前端
 
@@ -67,12 +72,30 @@ npm run dev
 
 浏览器访问 `http://localhost:3000`。
 
+## Docker 可选启动
+
+需要由容器同时提供 PostgreSQL、Redis 和后端服务时，可改用：
+
+```bash
+docker compose -f backend/docker-compose.yml up --build
+```
+
+Compose 同样会先运行 Alembic migration，成功后再启动 API、worker 和 beat。Docker 不是本地开发的唯一启动方式。
+
 ## 本地后端开发
+
+只开发 API、不执行异步生成任务时，可单独运行：
 
 ```bash
 uv sync --project backend --frozen --extra dev --extra test
 uv run --project backend alembic -c backend/alembic.ini upgrade head
 uv run --project backend uvicorn app.main:app --app-dir backend --reload
+```
+
+完整生成流程必须同时运行 worker；请使用快速启动中的 uv launcher。可用 `--check` 只检查 PostgreSQL、Redis 和 migration，而不启动长期服务：
+
+```bash
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py --check
 ```
 
 `backend/pyproject.toml` 与受跟踪的 `backend/uv.lock` 是依赖事实源。`backend/requirements.txt` 仅是由 uv 自动导出的兼容清单，不能手工维护。
