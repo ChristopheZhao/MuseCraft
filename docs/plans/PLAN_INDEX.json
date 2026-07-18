@@ -3090,18 +3090,26 @@
       "id": "PLAN-20260718-068",
       "title": "Backend database and agent persistence boundary decoupling",
       "kind": "fix",
-      "status": "draft",
+      "status": "in_progress",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260718-068.md",
       "confirmed_by_user": false,
       "created_at": "2026-07-18T06:47:35Z",
-      "updated_at": "2026-07-18T06:47:35Z",
+      "updated_at": "2026-07-18T07:32:27Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-07-18T06:47:35Z",
           "text": "Drafted after code-level boundary review confirmed production Agent ORM/Session coupling, queue-owned persistence bootstrap, duplicated database-provider decisions, and missing PostgreSQL runtime transaction evidence; awaiting user confirmation before implementation."
+        },
+        {
+          "at": "2026-07-18T07:04:46Z",
+          "text": "User confirmed the execution contract after three checkpoint commits (01ab771, 873d5c5, a072392); begin Slice A boundary freeze only."
+        },
+        {
+          "at": "2026-07-18T07:32:27Z",
+          "text": "Gate A boundary freeze verified; 122 focused tests passed and Slice B is next."
         }
       ]
     }
