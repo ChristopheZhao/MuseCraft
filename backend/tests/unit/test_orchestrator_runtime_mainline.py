@@ -27,10 +27,12 @@ from app.domain import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task, WorkflowNodeAttempt
 from app.services.agent_execution_boundary import build_agent_execution_request
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
+    OrchestrationRuntimeResumeBootstrapError,
     OrchestrationRuntimeResumeBootstrapFacade,
 )
 from app.services.orchestration_runtime_transition_facade import (
@@ -595,6 +597,7 @@ def _build_recording_resume_bootstrap_facade(agent):
         def __init__(self):
             self.resolve_calls = []
             self.load_calls = []
+            self.consume_calls = []
             self.start_calls = []
 
         def resolve_runtime_resume_context(self, **kwargs):
@@ -609,6 +612,7 @@ def _build_recording_resume_bootstrap_facade(agent):
             return real_facade.project_script_revision_context(**kwargs)
 
         def consume_script_approval_continuation(self, **kwargs):
+            self.consume_calls.append(dict(kwargs))
             return real_facade.consume_script_approval_continuation(**kwargs)
 
         def start_runtime_attempt(self, **kwargs):
@@ -760,14 +764,16 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
         )
 
         observed_db_ids = []
-        original_clear = RuntimeSessionService.clear_node_diagnostic_codes_sync
+        original_clear = SqlAlchemyRuntimeAttemptStore.clear_node_diagnostics
 
-        def _record_clear(db, runtime_session, **kwargs):
-            observed_db_ids.append(("clear", id(db)))
-            return original_clear(db, runtime_session, **kwargs)
+        def _record_clear(store, command):
+            observed_db_ids.append(("clear", id(store._db)))
+            return original_clear(store, command)
 
         monkeypatch.setattr(
-            RuntimeSessionService, "clear_node_diagnostic_codes_sync", staticmethod(_record_clear)
+            SqlAlchemyRuntimeAttemptStore,
+            "clear_node_diagnostics",
+            _record_clear,
         )
 
         result = facade.start_runtime_attempt(
@@ -791,6 +797,25 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
         assert observed_db_ids
         assert len({db_id for _name, db_id in observed_db_ids}) == 1
         assert id(sync_db) not in {db_id for _name, db_id in observed_db_ids}
+
+        with pytest.raises(
+            OrchestrationRuntimeResumeBootstrapError,
+            match="Runtime node mapping is missing",
+        ):
+            facade.start_runtime_attempt(
+                runtime_session_id=session.id,
+                task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
+                current_agent_type=AgentType.SERIES_PLANNER,
+                workflow_state_id=str(task.task_id),
+                task_specs={
+                    AgentType.SERIES_PLANNER: {"run": True, "order": 0, "scope": {}},
+                },
+                conditional_task_specs={},
+                candidate_agents=[AgentType.SERIES_PLANNER],
+                script_trigger_reason="initial",
+                script_requested_by="system",
+                resume_anchor_agent=None,
+            )
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1332,7 +1357,6 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         planning_calls = {"select": 0, "decompose": 0}
-        continuation_calls = []
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
 
         async def _count_select(*args, **kwargs):
@@ -1363,23 +1387,6 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         session = RuntimeSessionService.get_or_create_session_for_task_sync(
             sync_db, task, mode="quick"
         )
-        original_consume = RuntimeSessionService.consume_script_approval_continuation_sync
-
-        def _record_consume(db, runtime_session, *, task=None):
-            continuation_calls.append(
-                {
-                    "session_id": runtime_session.id,
-                    "task_id": getattr(task, "id", None),
-                }
-            )
-            return original_consume(db, runtime_session, task=task)
-
-        monkeypatch.setattr(
-            RuntimeSessionService,
-            "consume_script_approval_continuation_sync",
-            staticmethod(_record_consume),
-        )
-
         first = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
@@ -1416,7 +1423,13 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
             == "approve"
         )
         assert planning_calls == {"select": 1, "decompose": 1}
-        assert continuation_calls == [{"session_id": session.id, "task_id": task.id}]
+        assert len(agent._orchestration_runtime_resume_bootstrap_facade.consume_calls) == 1
+        assert (
+            agent._orchestration_runtime_resume_bootstrap_facade.consume_calls[0][
+                "runtime_session_id"
+            ]
+            == session.id
+        )
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert len(call_log["image_generator"]) == 1
@@ -1554,6 +1567,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         task = _create_task(sync_db)
+        RuntimeSessionService.get_or_create_session_for_task_sync(sync_db, task, mode="quick")
 
         agent._llm_select_candidate_agents = _async_return(
             (
@@ -1863,20 +1877,26 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
             session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(
+            sync_db, task, mode="quick"
+        )
 
         result = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
         )
 
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            sync_db, task, mode="quick"
-        )
-        attempt = RuntimeSessionService.get_attempt_by_id_sync(
-            sync_db,
-            session.id,
-            session.current_attempt_id,
-        )
-        checkpoint = dict(getattr(attempt, "continuation_checkpoint", {}) or {})
+        with SessionLocal() as verification_db:
+            runtime_store = SqlAlchemyRuntimeAttemptStore(verification_db)
+            runtime_session = runtime_store.load_session(session.id)
+            assert runtime_session is not None
+            assert runtime_session.current_attempt_id is not None
+            attempt = runtime_store.load_attempt(
+                runtime_session.session_id,
+                runtime_session.current_attempt_id,
+            )
+            assert attempt is not None
+            assert attempt.continuation_checkpoint is not None
+            checkpoint = attempt.continuation_checkpoint.to_dict()
 
         assert result["status"] == "waiting_gate"
         assert shared_store.get("workflow.diagnostics.compat.plan_snapshot") is None

@@ -224,6 +224,15 @@ class RuntimeNodeTransitionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeNodeDiagnosticsClearCommand:
+    session_id: int
+    node_key: str
+    codes: tuple[str, ...]
+    expected_status: WorkflowNodeStatus
+    expected_diagnostics: tuple[JsonObjectPayload, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeAttemptStartCommand:
     session_id: int
     node_key: str
@@ -493,6 +502,24 @@ class RuntimeSessionStore(RuntimeReadStore, Protocol):
 
 
 @runtime_checkable
+class RuntimeResumeStore(RuntimeSessionStore, Protocol):
+    """Continuation reads and resume-consumption capabilities."""
+
+    def load_node(self, session_id: int, node_key: str) -> RuntimeNodeRecord | None:
+        ...
+
+    def load_published_deliverable(
+        self, session_id: int, node_key: str, attempt_id: int
+    ) -> RuntimePublishedDeliverableRecord | None:
+        ...
+
+    def clear_node_diagnostics(
+        self, command: RuntimeNodeDiagnosticsClearCommand
+    ) -> RuntimeNodeRecord:
+        ...
+
+
+@runtime_checkable
 class RuntimeMaintenanceStore(RuntimeSessionStore, Protocol):
     """Bounded candidate access for explicit control-plane maintenance."""
 
@@ -550,6 +577,11 @@ class RuntimeAttemptStore(Protocol):
         session_id: int,
         attempt_id: int,
         diagnostic: JsonObjectPayload,
+    ) -> RuntimeNodeRecord:
+        ...
+
+    def clear_node_diagnostics(
+        self, command: RuntimeNodeDiagnosticsClearCommand
     ) -> RuntimeNodeRecord:
         ...
 
@@ -713,6 +745,11 @@ class RuntimeControlPlaneStore(Protocol):
         session_id: int,
         attempt_id: int,
         diagnostic: JsonObjectPayload,
+    ) -> RuntimeNodeRecord:
+        ...
+
+    def clear_node_diagnostics(
+        self, command: RuntimeNodeDiagnosticsClearCommand
     ) -> RuntimeNodeRecord:
         ...
 

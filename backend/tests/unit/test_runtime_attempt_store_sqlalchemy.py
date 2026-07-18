@@ -15,11 +15,13 @@ from app.domain import (
     RuntimeAttemptStore,
     RuntimeContinuationBindCommand,
     RuntimeGateStore,
+    RuntimeNodeDiagnosticsClearCommand,
     RuntimePublishedDeliverableApprovalCommand,
     RuntimePublishedDeliverableStore,
     RuntimePublishedDeliverableWrite,
     RuntimeReadModelQuery,
     RuntimeReadStore,
+    RuntimeResumeStore,
     RuntimeStoreError,
     RuntimeStoreReason,
     RuntimeTaskTransition,
@@ -47,6 +49,7 @@ from app.services.runtime_read_model_service import (
     RuntimeReadModelService,
 )
 from app.services.runtime_reconciler import RuntimeReconciler
+from app.services.runtime_resume_control_plane import RuntimeResumeControlPlane
 from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
@@ -155,6 +158,40 @@ def test_attempt_store_rejects_corrupt_persisted_status(runtime_db):
 
     assert caught.value.reason_code is RuntimeStoreReason.INTEGRITY_ERROR
     assert caught.value.operation == "load_session"
+
+
+def test_clear_node_diagnostics_rejects_stale_expected_snapshot(runtime_db):
+    db, _ = runtime_db
+    _, session, node = _seed_runtime(db)
+    node.diagnostics = [{"code": "lease_expired"}]
+    db.commit()
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    expected_node = store.load_node(session.id, "image")
+    assert expected_node is not None
+
+    node.diagnostics = [
+        {"code": "lease_expired"},
+        {"code": "concurrent_update"},
+    ]
+    db.commit()
+
+    with pytest.raises(RuntimeStoreError) as caught:
+        store.clear_node_diagnostics(
+            RuntimeNodeDiagnosticsClearCommand(
+                session_id=session.id,
+                node_key="image",
+                codes=("lease_expired",),
+                expected_status=expected_node.status,
+                expected_diagnostics=expected_node.diagnostics,
+            )
+        )
+
+    assert caught.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    assert caught.value.operation == "clear_node_diagnostics"
+    assert node.diagnostics == [
+        {"code": "lease_expired"},
+        {"code": "concurrent_update"},
+    ]
 
 
 def test_start_attempt_applies_explicit_runtime_and_task_transitions(runtime_db):
@@ -628,6 +665,44 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
     assert deliverable.is_approved is True
     assert task.requires_human_review is False
     assert task.progress_percentage == 40
+    assert isinstance(store, RuntimeResumeStore)
+
+    stale_checkpoint = dict(persisted_attempt.continuation_checkpoint)
+    stale_checkpoint["decision_id"] = decision.decision_id + 1
+    persisted_attempt.continuation_checkpoint = stale_checkpoint
+    db.commit()
+    resume_control = RuntimeResumeControlPlane(store)
+
+    with pytest.raises(RuntimeStoreError) as caught:
+        resume_control.load_continuation(
+            session.id,
+            expected_anchor_type=(OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION),
+            require_decision_id=True,
+            require_resuming=True,
+            expected_node_key="script",
+        )
+
+    assert caught.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    assert caught.value.operation == "load_runtime_continuation"
+
+    valid_checkpoint = dict(stale_checkpoint)
+    valid_checkpoint["decision_id"] = decision.decision_id
+    persisted_attempt.continuation_checkpoint = valid_checkpoint
+    db.commit()
+
+    resumed = resume_control.consume_script_approval(session.id)
+    db.commit()
+    db.refresh(session)
+    db.refresh(node)
+    db.refresh(task)
+
+    assert resumed.status is WorkflowSessionStatus.RUNNING
+    assert session.status == WorkflowSessionStatus.RUNNING.value
+    assert session.current_node_key is None
+    assert session.current_attempt_id is None
+    assert node.status == WorkflowNodeStatus.COMPLETED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.requires_human_review is False
 
 
 def test_published_deliverable_store_rejects_stale_runtime_preconditions(runtime_db):

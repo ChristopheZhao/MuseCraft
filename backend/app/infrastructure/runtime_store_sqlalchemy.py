@@ -27,6 +27,7 @@ from ..domain import (
     RuntimeGateDecisionRecord,
     RuntimeGateOpenCommand,
     RuntimeGateRecord,
+    RuntimeNodeDiagnosticsClearCommand,
     RuntimeNodeRecord,
     RuntimePublishedDeliverableApprovalCommand,
     RuntimePublishedDeliverableRecord,
@@ -1278,6 +1279,33 @@ class SqlAlchemyRuntimeAttemptStore:
         else:
             existing.append(incoming)
         setattr(node, "diagnostics", existing)
+        self._db.flush()
+        return self._node_record(node, operation=operation)
+
+    def clear_node_diagnostics(
+        self,
+        command: RuntimeNodeDiagnosticsClearCommand,
+    ) -> RuntimeNodeRecord:
+        operation = "clear_node_diagnostics"
+        node = self._locked_node(command.session_id, command.node_key, operation=operation)
+        existing = _payloads(
+            node.diagnostics,
+            operation=operation,
+            field_path="workflow_node_states.diagnostics",
+        )
+        if node.status != command.expected_status.value or existing != command.expected_diagnostics:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime node state changed before diagnostic cleanup",
+            )
+        codes = set(command.codes)
+        filtered = tuple(
+            diagnostic
+            for diagnostic in existing
+            if str(diagnostic.to_dict().get("code") or "").strip() not in codes
+        )
+        setattr(node, "diagnostics", [diagnostic.to_dict() for diagnostic in filtered])
         self._db.flush()
         return self._node_record(node, operation=operation)
 

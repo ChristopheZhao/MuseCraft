@@ -20,9 +20,9 @@ PUBLISHED_DELIVERABLE_SERVICE = (
 RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE = (
     BACKEND_ROOT / "app" / "services" / "runtime_published_deliverable_control_plane.py"
 )
+RUNTIME_RESUME_CONTROL_PLANE = BACKEND_ROOT / "app" / "services" / "runtime_resume_control_plane.py"
 
 EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT = {
-    "orchestration_runtime_resume_bootstrap_facade.py",
     "runtime_session_service.py",
 }
 RUNTIME_ORM_SYMBOLS = {
@@ -78,6 +78,7 @@ def test_runtime_projection_and_session_policy_are_database_independent():
         CONTEXT_ASSEMBLER,
         PUBLISHED_DELIVERABLE_SERVICE,
         RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE,
+        RUNTIME_RESUME_CONTROL_PLANE,
     }:
         imports = _imports(path)
         source = _source(path)
@@ -143,6 +144,7 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         "publish_deliverable",
         "approve_deliverable",
         "upsert_node_diagnostic",
+        "clear_node_diagnostics",
     }
     assert method_names == required
 
@@ -188,6 +190,22 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert session_store_methods == {"transition_session"}
+
+    resume_store = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeResumeStore"
+    )
+    resume_store_methods = {
+        node.name
+        for node in resume_store.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert resume_store_methods == {
+        "load_node",
+        "load_published_deliverable",
+        "clear_node_diagnostics",
+    }
 
     maintenance_store = next(
         node
@@ -256,6 +274,7 @@ def test_runtime_store_keeps_attempt_and_gate_capability_ports_narrow():
         "complete_attempt",
         "fail_attempt",
         "upsert_node_diagnostic",
+        "clear_node_diagnostics",
     }
 
     gate_protocol = next(

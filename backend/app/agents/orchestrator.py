@@ -417,7 +417,6 @@ class OrchestratorAgent(BaseAgent):
         if facade is None:
             facade = OrchestrationRuntimeResumeBootstrapFacade(
                 orchestration_state=self._get_orchestration_state_adapter(),
-                logger=self.logger,
             )
             self._orchestration_runtime_resume_bootstrap_facade = facade
         return facade
@@ -692,6 +691,10 @@ class OrchestratorAgent(BaseAgent):
                 task_specs, candidate_agents=list(candidate_agents)
             )
         elif runtime_resume_checkpoint is not None:
+            if resume_anchor_agent is None:
+                raise AgentError(
+                    "Runtime continuation checkpoint is missing a dispatchable agent anchor"
+                )
             self.logger.info(
                 "ORCH_PLAN_MODE workflow=%s mode=resume_checkpoint anchor=%s",
                 wf_id,
@@ -785,11 +788,11 @@ class OrchestratorAgent(BaseAgent):
             nonlocal current_runtime_node_key, current_attempt_id, current_attempt_lease_token
 
             if (
-                runtime_session_id is None
-                or current_runtime_node_key is None
+                current_runtime_node_key is None
                 or current_attempt_id is None
+                or current_attempt_lease_token is None
             ):
-                return False
+                raise AgentError("Runtime attempt bootstrap returned an incomplete lease scope")
 
             activated = activate_current_attempt_keepalive(
                 runtime_session_id=runtime_session_id,

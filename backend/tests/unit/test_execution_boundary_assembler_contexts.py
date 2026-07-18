@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.services.orchestration_runtime_resume_bootstrap_facade as resume_bootstrap_module
 from app.agents.base import AgentError
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
@@ -44,9 +45,33 @@ def _build_service() -> WorkingMemoryService:
 def test_runtime_resume_facade_fails_closed_when_continuation_loader_returns_none(monkeypatch):
     fake_db = SimpleNamespace(close=lambda: None)
     runtime_session = SimpleNamespace(
-        id=41,
-        status=WorkflowSessionStatus.RESUMING.value,
-        input_payload={},
+        session_id=41,
+        status=WorkflowSessionStatus.RESUMING,
+        input_payload=JsonObjectPayload.empty(),
+        current_node_key="image",
+        current_attempt_id=5,
+    )
+
+    class _FakeRuntimeStore:
+        def __init__(self, _db):
+            pass
+
+        def load_latest_session_for_task(self, _task_id):
+            return runtime_session
+
+        def load_latest_gate(self, _session_id, _node_key):
+            return None
+
+        def load_session(self, _session_id):
+            return runtime_session
+
+        def load_attempt(self, _session_id, _attempt_id):
+            return SimpleNamespace(continuation_checkpoint=None)
+
+    monkeypatch.setattr(
+        resume_bootstrap_module,
+        "SqlAlchemyRuntimeAttemptStore",
+        _FakeRuntimeStore,
     )
     facade = OrchestrationRuntimeResumeBootstrapFacade(
         orchestration_state=OrchestrationStateAdapter(
@@ -55,26 +80,9 @@ def test_runtime_resume_facade_fails_closed_when_continuation_loader_returns_non
         session_factory=lambda: fake_db,
     )
 
-    monkeypatch.setattr(facade, "_require_task", lambda _db, _task: SimpleNamespace(id=7))
-    monkeypatch.setattr(
-        RuntimeSessionService,
-        "get_or_create_session_for_task_sync",
-        staticmethod(lambda *_args, **_kwargs: runtime_session),
-    )
-    monkeypatch.setattr(
-        RuntimeSessionService,
-        "get_latest_gate_for_node_sync",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
-    monkeypatch.setattr(
-        RuntimeSessionService,
-        "load_active_continuation_sync",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
-
     with pytest.raises(
         OrchestrationRuntimeResumeBootstrapError,
-        match="Missing runtime continuation checkpoint",
+        match="runtime continuation checkpoint is missing",
     ):
         facade.resolve_runtime_resume_context(
             task=AgentTaskReference(
