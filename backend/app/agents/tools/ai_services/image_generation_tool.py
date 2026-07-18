@@ -719,12 +719,8 @@ class ImageGenerationTool(AsyncTool):
 
         try:
             self.logger.info(
-                "OSS_UPLOAD_DEBUG(local) local_path=%s remote_path=%s key_id=%s endpoint=%s bucket=%s",
-                local_path,
+                "OSS upload requested: source=local remote_path=%s",
                 remote_path,
-                getattr(settings, "OSS_ACCESS_KEY_ID", None),
-                getattr(settings, "OSS_ENDPOINT", None),
-                getattr(settings, "OSS_BUCKET_NAME", None),
             )
             from ..tool_registry import get_tool_registry
             from ..base_tool import ToolInput as TI
@@ -765,12 +761,8 @@ class ImageGenerationTool(AsyncTool):
         temp_file = None
         try:
             self.logger.info(
-                "OSS_UPLOAD_DEBUG(remote) source_url=%s remote_path=%s key_id=%s endpoint=%s bucket=%s",
-                source_url,
+                "OSS upload requested: source=remote remote_path=%s",
                 remote_path,
-                getattr(settings, "OSS_ACCESS_KEY_ID", None),
-                getattr(settings, "OSS_ENDPOINT", None),
-                getattr(settings, "OSS_BUCKET_NAME", None),
             )
             timeout_seconds = 30
             try:
@@ -791,7 +783,12 @@ class ImageGenerationTool(AsyncTool):
             return url
         except Exception as exc:
             try:
-                self.logger.warning(f"OSS mirror failed for {source_url}: {exc}")
+                response = getattr(exc, "response", None)
+                self.logger.warning(
+                    "OSS mirror failed: error_type=%s status_code=%s",
+                    type(exc).__name__,
+                    getattr(response, "status_code", None),
+                )
             except Exception:
                 pass
             return None

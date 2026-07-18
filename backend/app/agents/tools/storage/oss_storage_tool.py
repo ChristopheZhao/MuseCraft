@@ -108,24 +108,17 @@ class OSSStorageTool(AsyncTool):
         endpoint = runtime.get('OSS_ENDPOINT') or getattr(settings, 'OSS_ENDPOINT', None)
         bucket_name = runtime.get('OSS_BUCKET_NAME') or getattr(settings, 'OSS_BUCKET_NAME', None)
 
-        # 记录当前加载的密钥指纹，便于排查（仅输出哈希，不泄露明文）
-        try:
-            import hashlib
-
-            secret_fingerprint = hashlib.sha1((key_secret or "").encode()).hexdigest()
-            self.logger.info(
-                "OSS_CLIENT_CONFIG key_id=%s endpoint=%s bucket=%s secret_sha1=%s",
-                key_id,
-                endpoint,
-                bucket_name,
-                secret_fingerprint,
-            )
-        except Exception:
-            pass
-
         signature = (key_id, key_secret, endpoint, bucket_name)
         if not force and signature == self._config_signature:
             return
+
+        self.logger.info(
+            "OSS client configuration updated: credentials_configured=%s "
+            "endpoint_configured=%s bucket_configured=%s",
+            bool(key_id and key_secret),
+            bool(endpoint),
+            bool(bucket_name),
+        )
 
         self.access_key_id = key_id
         self.access_key_secret = key_secret

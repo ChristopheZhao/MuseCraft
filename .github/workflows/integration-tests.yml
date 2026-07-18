@@ -88,6 +88,7 @@ jobs:
         run: >-
           uv run --project backend pytest -q
           backend/tests/unit/test_env_loading.py
+          backend/tests/unit/test_release_logging_contract.py
           backend/tests/unit/test_release_migration_contract.py
 
   mas-runtime:
