@@ -27,7 +27,7 @@ async def test_add_audio_ducking_fallback(monkeypatch, tmp_path: Path):
             return SimpleNamespace(returncode=0, stdout="0\n", stderr="")
         if cmd and cmd[0] == "ffmpeg" and "-i" in cmd:
             # mimic ffmpeg -i with an audio stream present
-            return SimpleNamespace(returncode=0, stdout="", stderr="Stream #0:1: Audio")
+            return SimpleNamespace(returncode=0, stdout="", stderr="Stream #0:1: Audio: aac")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)

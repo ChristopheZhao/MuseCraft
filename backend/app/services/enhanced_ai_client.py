@@ -7,17 +7,19 @@ Enhanced AI Client with advanced features:
 - Performance monitoring and analytics
 """
 import asyncio
-import aiohttp
-import openai
+import hashlib
+import json
 import logging
 import time
-import hashlib
-from typing import Dict, Any, Optional, List, Union, Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from datetime import datetime, timedelta
-import json
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import aiohttp
+import openai
 import redis.asyncio as redis
+
 from ..core.config import settings
 
 
@@ -165,27 +167,15 @@ class EnhancedAIClient:
     def __init__(self):
         self.logger = logging.getLogger("enhanced_ai_client")
         
-        # Initialize Redis for caching and coordination
-        self.redis_client = None
-        # Safely initialize async Redis from a sync context
+        # Construct a lazy client without performing external I/O in the constructor.
         try:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = None
-            if loop and loop.is_running():
-                loop.create_task(self._init_redis())
-            else:
-                # No running loop yet; run a short init synchronously
-                asyncio.run(self._init_redis())
-        except Exception as _e:
-            # Defer initialization gracefully; client will be None until first use
-            self.logger.warning(f"Redis async init deferred: {_e}")
-            try:
-                # Provide a lazy client without ping to avoid loud warnings
-                self.redis_client = redis.from_url(settings.REDIS_URL)
-            except Exception:
-                self.redis_client = None
+            self.redis_client = redis.from_url(settings.REDIS_URL)
+        except Exception as exc:
+            self.logger.info(
+                "Optional Redis cache client unavailable error_type=%s",
+                type(exc).__name__,
+            )
+            self.redis_client = None
         
         # Service configurations
         self.service_configs = self._initialize_service_configs()
@@ -224,16 +214,6 @@ class EnhancedAIClient:
         # Initialize AI service clients
         self.ai_clients = {}
         self._initialize_ai_clients()
-    
-    async def _init_redis(self):
-        """Initialize Redis connection"""
-        try:
-            self.redis_client = redis.from_url(settings.REDIS_URL)
-            await self.redis_client.ping()
-            self.logger.info("Redis connection established")
-        except Exception as e:
-            self.logger.warning(f"Redis connection failed: {e}")
-            self.redis_client = None
     
     def _initialize_service_configs(self) -> Dict[AIServiceProvider, ServiceConfig]:
         """Initialize AI service configurations"""

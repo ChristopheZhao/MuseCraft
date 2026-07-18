@@ -24,6 +24,7 @@ def edit_context(
         "scenes": _sanitize_scenes(raw_view.get("scenes")),
         "completed_scene_numbers": _coerce_int_list(raw_view.get("completed_scene_numbers")),
         "failed_scene_numbers": _coerce_int_list(raw_view.get("failed_scene_numbers")),
+        "prepared_assets_refs": _coerce_int_list(raw_view.get("prepared_assets_refs")),
         "notes": _sanitize_notes(raw_view.get("notes")),
     }
     if "act_log" in raw_view and isinstance(raw_view["act_log"], list):

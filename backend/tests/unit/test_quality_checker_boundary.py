@@ -13,8 +13,8 @@ from app.agents.quality_checker import QualityCheckerAgent
 from app.agents.utils.memory_helpers import write_shared_fact
 from app.core.config import settings
 from app.domain import AgentType
-from app.services.context_assembler import ContextContractAssembler
 from app.services.character_identity_contract import normalize_character_identity_contract
+from app.services.context_assembler import ContextContractAssembler
 from app.services.scene_info_reference_service import persist_scene_info_ref
 
 
@@ -41,11 +41,16 @@ def _load_intro_outro_real_sample() -> tuple[dict, dict]:
     return published, composer
 
 
-def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypatch):
+def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(
+    monkeypatch,
+    tmp_path,
+):
     service = _build_service()
     workflow_id = "wf-quality-boundary"
+    output_root = tmp_path / "final_outputs"
+    expected_video_path = (output_root / "videos" / "final.mp4").resolve()
 
-    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", "/tmp/final_outputs")
+    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", str(output_root))
     monkeypatch.setattr(
         "app.agents.adapters.memory_views.probe_local_video_metadata_sync",
         lambda path: {
@@ -55,7 +60,7 @@ def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypat
             "file_size_mb": 16.24,
             "resolution": "1920x1080",
         }
-        if path == "/tmp/final_outputs/videos/final.mp4"
+        if Path(path) == expected_video_path
         else {},
     )
 
@@ -85,7 +90,7 @@ def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypat
     context = result["context"]
     diagnostics = result["diagnostics"]
 
-    assert context["final_video"]["path"] == "/tmp/final_outputs/videos/final.mp4"
+    assert Path(context["final_video"]["path"]) == expected_video_path
     assert context["final_video"]["url"] == "/files/outputs/videos/final.mp4"
     assert context["concept_plan"]["overview"] == "original brief"
     assert context["original_requirements"]["overview"] == "original brief"
@@ -365,12 +370,14 @@ def test_real_sample_scene_type_is_absent_across_quality_checker_inputs():
     assert result["diagnostics"]["timeline_source"] == "scene_overview"
 
 
-def test_context_assembler_projects_quality_checker_static_context(monkeypatch):
+def test_context_assembler_projects_quality_checker_static_context(monkeypatch, tmp_path):
     service = _build_service()
     workflow_id = "wf-quality-assembler"
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+    output_root = tmp_path / "final_outputs"
+    expected_video_path = (output_root / "videos" / "final.mp4").resolve()
 
-    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", "/tmp/final_outputs")
+    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", str(output_root))
     monkeypatch.setattr(
         "app.agents.adapters.memory_views.probe_local_video_metadata_sync",
         lambda _path: {"duration": 12.5, "format": "mp4"},
@@ -395,7 +402,7 @@ def test_context_assembler_projects_quality_checker_static_context(monkeypatch):
         workflow_data={},
     )
 
-    assert boundary["static_context"]["final_video"]["path"] == "/tmp/final_outputs/videos/final.mp4"
+    assert Path(boundary["static_context"]["final_video"]["path"]) == expected_video_path
     assert boundary["static_context"]["video_metadata"]["duration"] == 12.5
     assert boundary["_assembler_diagnostics"]["quality_checker_context"]["status"] == "resolved_with_fallbacks"
 
