@@ -1,0 +1,45 @@
+{
+  "plan_id": "PLAN-20260718-068",
+  "checkpoint": "CHK-gate-b-agent-pure",
+  "title": "Gate B - Agent persistence isolation",
+  "profile": "default",
+  "verdict": "pass",
+  "summary": "Validation passed without remediation.",
+  "updated_at": "2026-07-18T10:24:43Z",
+  "checklist_path": "docs/checkpoints/PLAN-20260718-068/CHK-gate-b-agent-pure-checklist.md",
+  "attempts": [
+    {
+      "attempt": 1,
+      "started_at": "2026-07-18T10:22:49Z",
+      "finished_at": "2026-07-18T10:24:43Z",
+      "validation_results": [
+        {
+          "commands": [
+            {
+              "command": "git -c safe.directory=/mnt/d/code/agent/Opensource/vertical_application/short-video-maker diff --check",
+              "started_at": "2026-07-18T10:22:49Z",
+              "finished_at": "2026-07-18T10:24:03Z",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "warning: in the working copy of 'backend/app/core/config.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'backend/tests/test_ai_service_integration.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/PLAN_INDEX.json', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260705-066.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260711-067.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260718-068.md', CRLF will be replaced by LF the next time Git touches it\n"
+            },
+            {
+              "command": "UV_CACHE_DIR=/tmp/musecraft-uv-cache UV_PROJECT_ENVIRONMENT=/tmp/musecraft-plan068-test-venv uv run --project backend --extra test --frozen pytest -q backend/tests/architecture/test_agent_persistence_boundary.py backend/tests/unit/test_agent_execution_application_boundary.py --tb=short",
+              "started_at": "2026-07-18T10:24:03Z",
+              "finished_at": "2026-07-18T10:24:43Z",
+              "returncode": 0,
+              "stdout": "..........                                                               [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\n../../../../../../../tmp/musecraft-plan068-test-venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /tmp/musecraft-plan068-test-venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n10 passed, 2 warnings in 25.51s\n",
+              "stderr": ""
+            }
+          ],
+          "passed": true,
+          "matched_user_confirmation_triggers": [],
+          "round": 0
+        }
+      ],
+      "auto_fix_rounds": [],
+      "matched_user_confirmation_triggers": []
+    }
+  ],
+  "waiver": null
+}
