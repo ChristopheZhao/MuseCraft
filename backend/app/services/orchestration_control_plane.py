@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..models import AgentType
+from ..domain import AgentType
 from .audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from .memory_provider import MemoryServices
 from .orchestration_observation_adapter import OrchestrationObservationAdapter

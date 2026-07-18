@@ -4,22 +4,18 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents.concept_planner import ConceptPlannerAgent
-
-
-class _StubSession:
-    def add(self, *_):
-        return None
-
-    def commit(self):
-        return None
-
-    def refresh(self, *_):
-        return None
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
+from app.services.memory_provider import build_memory_services
 
 
 @pytest.mark.asyncio
 async def test_project_mode_skips_scene_generation(monkeypatch):
-    agent = ConceptPlannerAgent()
+    agent = ConceptPlannerAgent(memory_services=build_memory_services())
 
     async def noop_update_progress(*args, **kwargs):
         return None
@@ -73,34 +69,32 @@ async def test_project_mode_skips_scene_generation(monkeypatch):
     async def fail_scene_details(*args, **kwargs):
         raise AssertionError("scene generation should be skipped in project mode")
 
-    def fail_create_scenes(*args, **kwargs):
-        raise AssertionError("no workflow scenes should be created in project mode")
-
     monkeypatch.setattr(agent, "_generate_skeleton", stub_generate_skeleton)
     monkeypatch.setattr(agent, "_generate_style_bundle", stub_generate_style)
     monkeypatch.setattr(agent, "_generate_voice_plan", stub_generate_voice)
     monkeypatch.setattr(agent, "_generate_scene_details", fail_scene_details)
-    monkeypatch.setattr(agent, "_create_scenes_in_workflow_state", fail_create_scenes)
-
-    task = SimpleNamespace(
-        task_id="task-id",
-        status="pending",
-        update_progress=lambda *args, **kwargs: None,
-    )
-    execution = SimpleNamespace(output_data={}, tokens_used=0, api_calls_made=0, estimate_cost=lambda: None)
+    assert not hasattr(agent, "_create_scenes_in_workflow_state")
 
     result = await agent._execute_impl(
-        task,
-        {
-            "user_prompt": "制作史诗动漫项目",
-            "duration": 180,
-            "aspect_ratio": "16:9",
-            "workflow_state_id": "wf-project-mode",
-            "concept_mode": "project",
-            "style_taxonomy_summary": "动漫风格",
-        },
-        execution,
-        _StubSession(),
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-id",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.CONCEPT_PLANNER.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {
+                    "user_prompt": "制作史诗动漫项目",
+                    "duration": 180,
+                    "aspect_ratio": "16:9",
+                    "workflow_state_id": "wf-project-mode",
+                    "concept_mode": "project",
+                    "style_taxonomy_summary": "动漫风格",
+                },
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-project-mode",
+        )
     )
 
     concept_plan = result["concept_plan"]

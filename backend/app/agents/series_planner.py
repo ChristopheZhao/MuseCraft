@@ -6,10 +6,8 @@ import math
 import json
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentType
 from ..core.story_plan import (
     CharacterProfile,
     EpisodePlan,
@@ -44,10 +42,9 @@ class SeriesPlannerAgent(BaseAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
+        input_data = request.input_data.to_dict()
         self._validate_input(input_data, ["project_id", "user_prompt", "target_duration_seconds"])
 
         project_id = input_data["project_id"]

@@ -18,7 +18,8 @@ import json
 import aiohttp
 from sqlalchemy.orm import Session
 
-from ..models import Task, Scene, Resource, AgentType
+from ..domain import AgentType
+from ..models import Resource, Scene, Task
 from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
 from ..core.config import settings
 

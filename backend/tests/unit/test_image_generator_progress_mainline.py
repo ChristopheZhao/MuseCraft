@@ -96,7 +96,6 @@ async def test_image_generator_does_not_block_cross_iteration_repeat_before_act(
             ],
         },
         input_data={},
-        db=None,
         iteration=1,
     )
 

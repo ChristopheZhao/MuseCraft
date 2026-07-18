@@ -10,7 +10,8 @@ from sqlalchemy import create_engine
 from ..core.config import settings
 from ..core.constants import GenerationMode
 from ..core.generation_mode import resolve_generation_mode
-from ..models import Task, TaskStatus
+from ..domain import TaskStatus
+from ..models import Task
 from ..services.runtime_session_service import RuntimeSessionService
 from .queued_task_execution_host import run_generation_in_host
 from .task_execution_policy import get_queue_execution_block_reason

@@ -7,7 +7,7 @@ from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
 from app.agents.video_generator import VideoGeneratorAgent
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.video_execution_contract import build_video_generation_execution_contract
 
 

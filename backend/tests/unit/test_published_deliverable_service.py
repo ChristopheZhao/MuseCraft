@@ -7,14 +7,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models import (
+from app.domain import (
     AgentType,
-    Task,
     TaskStatus,
     TaskType,
-    WorkflowPublishedDeliverable,
     WorkflowSessionStatus,
 )
+from app.models import Task, WorkflowPublishedDeliverable
 from app.services.published_deliverable_service import (
     PublishedDeliverableService,
     PublishedDeliverablePayloadError,

@@ -6,7 +6,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models import Task, TaskStatus, TaskType
+from app.domain import TaskStatus, TaskType
+from app.models import Task
 from app.services import execution_host_lease
 from app.services.runtime_session_service import RuntimeSessionService
 

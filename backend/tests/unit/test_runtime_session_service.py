@@ -6,17 +6,15 @@ from sqlalchemy.orm import sessionmaker
 from types import SimpleNamespace
 
 from app.core.database import Base
-from app.models import (
+from app.domain import (
     AgentType,
-    Task,
-    TaskType,
     TaskStatus,
+    TaskType,
     WorkflowGateStatus,
-    WorkflowNodeState,
-    WorkflowSessionStatus,
-    WorkflowSession,
     WorkflowNodeStatus,
+    WorkflowSessionStatus,
 )
+from app.models import Task, WorkflowNodeState, WorkflowSession
 from app.services.runtime_session_service import RuntimeSessionService
 from app.services.published_deliverable_service import PublishedDeliverableService
 from app.services.script_review_contract import get_script_review_contract

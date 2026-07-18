@@ -20,7 +20,7 @@ from ..agents.adapters.memory_views import (
 from ..agents.base import AgentError
 from ..agents.utils.memory_helpers import read_shared_fact
 from ..core.config import settings
-from ..models import AgentType
+from ..domain import AgentType
 from .memory_provider import MemoryServices
 from .published_deliverable_adapter import (
     build_script_deliverable_payload,

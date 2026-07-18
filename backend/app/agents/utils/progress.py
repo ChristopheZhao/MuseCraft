@@ -13,7 +13,7 @@ async def send_progress_event(
 ) -> None:
     """
     统一发布进度事件的辅助函数，避免在各 Agent 内重复组装上下文。
-    依赖 Agent 上的上下文字段：_current_execution、_current_task、_task_db_id、
+    依赖 Agent 上的上下文字段：_current_execution、_current_task、
     workflow_state_id、agent_type、agent_name、_current_execution_order。
     """
     logger = getattr(agent, "logger", logging.getLogger(__name__))
@@ -30,7 +30,6 @@ async def send_progress_event(
             kind=EventKind.PROGRESS,
             payload=payload,
             task_id=task_id,
-            task_db_id=getattr(agent, "_task_db_id", None),
             workflow_state_id=getattr(agent, "workflow_state_id", None),
             agent_type=getattr(getattr(agent, "agent_type", None), "value", None),
             agent_name=getattr(agent, "agent_name", None),

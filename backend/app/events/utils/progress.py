@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from ..models import EventKind
 from ..publisher import publish_event
@@ -28,7 +28,6 @@ async def send_progress_event(
         final_substep = substep if substep is not None else exec_state.current_substep
         
         task_id = getattr(agent_context, "task_id", None)
-        task_db_id = getattr(agent_context, "_task_db_id", None)
         workflow_state_id = getattr(agent_context, "workflow_state_id", None)
         
         # Handle agent type enum or string
@@ -45,7 +44,6 @@ async def send_progress_event(
             kind=EventKind.PROGRESS,
             payload=payload,
             task_id=task_id,
-            task_db_id=task_db_id,
             workflow_state_id=workflow_state_id,
             agent_type=agent_type_val,
             agent_name=getattr(agent_context, "agent_name", None),

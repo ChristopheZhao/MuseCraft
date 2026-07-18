@@ -28,7 +28,12 @@ from app.agents.utils.memory_helpers import (
     write_shared_fact,
 )
 from app.agents.video_composer import VideoComposerAgent
-from app.models import Task, TaskType
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from app.services.memory_provider import build_memory_services
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
@@ -166,12 +171,6 @@ async def test_video_composer_voiceover_flow() -> None:
     scene_media_ref = static_context.get("scene_media_ref") or ""
     assert scene_media_ref
 
-    task = Task(
-        title="composer-voiceover-flow",
-        description="voiceover flow regression",
-        task_type=TaskType.VIDEO_EDITING,
-    )
-
     agent = VideoComposerAgent(memory_services=memory_services)
     output_filename = f"voiceover_{uuid.uuid4().hex[:6]}.mp4"
     if not use_real_llm:
@@ -184,7 +183,22 @@ async def test_video_composer_voiceover_flow() -> None:
         "static_context": static_context,
     }
 
-    result = await agent.execute(task, input_data)
+    result = (
+        await agent.execute(
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id=f"composer-voiceover-{uuid.uuid4()}",
+                    task_type="video_editing",
+                ),
+                agent_type=AgentType.VIDEO_COMPOSER.value,
+                input_data=JsonObjectPayload.from_mapping(
+                    input_data,
+                    field_path="test.input_data",
+                ),
+                workflow_state_id=wf_id,
+            )
+        )
+    ).output_data.to_dict()
 
     final_path = result.get("final_video_path") or ""
     mix_receipt = result.get("mix_receipt") or {}

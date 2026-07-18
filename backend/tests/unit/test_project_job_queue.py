@@ -4,7 +4,8 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.core.story_plan import ProjectOperationState, ProjectState, StoryPlan, project_state_repository
-from app.models import Task, TaskStatus, TaskType
+from app.domain import TaskStatus, TaskType
+from app.models import Task
 from app.services import project_job_queue
 from app.services.project_job_contract import (
     PROJECT_JOB_HANDLER_PLAN_PROJECT,

@@ -8,7 +8,14 @@ from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.tools.video_composition import composition_tool as composition_module
 from app.agents.tools.video_composition.composition_tool import CompositionTool
-from app.models import AgentType, TaskStatus
+from app.domain import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+    TaskStatus,
+)
 from app.core.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.services import audio_delivery_gate_evaluator as audio_gate_module
@@ -92,10 +99,55 @@ class _StubWorkflowAgent:
         self.agent_name = agent_name
         self._outputs = list(outputs)
 
-    async def execute(self, **kwargs):
+    async def execute(self, request):
+        assert isinstance(request, AgentExecutionRequest)
         if not self._outputs:
             raise AssertionError(f"{self.agent_name} executed more times than expected")
-        return self._outputs.pop(0)
+        output = self._outputs.pop(0)
+        return output if isinstance(output, AgentExecutionResult) else _make_agent_result(output)
+
+
+def _make_agent_result(output=None, *, report=None):
+    normalized = dict(output or {})
+    explicit_report = normalized.pop("orchestration_report", report)
+    return AgentExecutionResult(
+        output_data=JsonObjectPayload.from_mapping(
+            normalized,
+            field_path="test.agent_output",
+        ),
+        orchestration_report=(
+            JsonObjectPayload.from_mapping(
+                explicit_report,
+                field_path="test.orchestration_report",
+            )
+            if explicit_report is not None
+            else None
+        ),
+    )
+
+
+def _make_orchestrator_request(task, input_data):
+    return AgentExecutionRequest(
+        task=AgentTaskReference(
+            task_id=str(task.task_id),
+            task_type="video_generation",
+        ),
+        agent_type=AgentType.ORCHESTRATOR.value,
+        input_data=JsonObjectPayload.from_mapping(
+            input_data,
+            field_path="test.orchestrator_input",
+        ),
+        workflow_state_id=str(task.task_id),
+    )
+
+
+def _run_main_loop(agent, task):
+    return agent._execute_impl(
+        _make_orchestrator_request(
+            task,
+            {"user_prompt": "make a short video", "resolution": "720p"},
+        )
+    )
 
 
 def _build_video_wm(total_scenes, scene_records):
@@ -312,7 +364,6 @@ def _build_main_loop_runtime_harness(
     agent.agent_type = AgentType.ORCHESTRATOR
     agent.agent_name = "orchestrator"
     agent.logger = logging.getLogger("test.orchestrator.main_loop")
-    agent._task_db_id = None
     agent._memory_services = memory_services
     agent._orchestration_state = state_adapter
     agent._orchestration_observation = observation_adapter
@@ -329,6 +380,19 @@ def _build_main_loop_runtime_harness(
         publish_completed=_async_return_json({"final_video_url": ""}),
         publish_failed=_async_return_json({}),
         build_runtime_summary_output=lambda **kwargs: dict(kwargs),
+    )
+    agent._orchestration_runtime_resume_bootstrap_facade = SimpleNamespace(
+        resolve_runtime_resume_context=lambda **kwargs: SimpleNamespace(
+            runtime_session_id=None,
+            runtime_session_status="",
+            runtime_input_payload={},
+            script_gate_id=None,
+            latest_script_decision_exists=False,
+            latest_script_decision_actor_type="",
+            script_resume_action="",
+            runtime_resume_checkpoint=None,
+            resume_anchor_agent=None,
+        )
     )
     agent._last_audio_route_payload = {}
     video_agent_output = video_output or {
@@ -687,7 +751,7 @@ def test_orchestration_protocol_requires_explicit_subagent_report():
         protocol.build_subagent_report(
             workflow_state_id="wf-protocol-1",
             agent_type=AgentType.VIDEO_GENERATOR,
-            agent_output={},
+            agent_result=_make_agent_result(),
             execution_id="exec-1",
         )
 
@@ -698,10 +762,12 @@ def test_orchestration_protocol_prefers_explicit_subagent_report():
     report = protocol.build_subagent_report(
         workflow_state_id="wf-protocol-explicit",
         agent_type=AgentType.VIDEO_COMPOSER,
-        agent_output={
-            "success": True,
-            "reflection_summary": "compose ok",
-            "orchestration_report": {
+        agent_result=_make_agent_result(
+            {
+                "success": True,
+                "reflection_summary": "compose ok",
+            },
+            report={
                 "status": "completed",
                 "boundary_event": "custom_boundary",
                 "gate_triggers": ["workflow_video_audio_delivery"],
@@ -712,7 +778,7 @@ def test_orchestration_protocol_prefers_explicit_subagent_report():
                     "reported_hints": ["prefer_custom_report"],
                 },
             },
-        },
+        ),
         execution_id="exec-explicit",
     )
 
@@ -790,10 +856,10 @@ def test_orchestration_protocol_rejects_malformed_explicit_report_fields(
         protocol.build_subagent_report(
             workflow_state_id="wf-protocol-malformed",
             agent_type=AgentType.VIDEO_GENERATOR,
-            agent_output={
-                "success": True,
-                "orchestration_report": explicit_report,
-            },
+            agent_result=_make_agent_result(
+                {"success": True},
+                report=explicit_report,
+            ),
             execution_id="exec-malformed",
         )
 
@@ -812,7 +878,7 @@ def test_orchestrator_runtime_boundary_cycle_fails_fast_on_protocol_violation():
             agent._evaluate_runtime_boundary_cycle(
                 workflow_state_id="wf-protocol-2",
                 current_agent=AgentType.VIDEO_GENERATOR,
-                agent_output={},
+                agent_result=_make_agent_result(),
                 audio_contract={"policy": "adaptive"},
                 candidate_agents=[AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR],
                 standby_agents=[AgentType.AUDIO_GENERATOR],
@@ -920,13 +986,13 @@ def test_orchestrator_runtime_boundary_cycle_skips_runtime_llm_without_gate_even
         agent._evaluate_runtime_boundary_cycle(
             workflow_state_id="wf-no-gate-1",
             current_agent=AgentType.VIDEO_GENERATOR,
-            agent_output={
-                "success": True,
-                "orchestration_report": _make_explicit_report(
+            agent_result=_make_agent_result(
+                {"success": True},
+                report=_make_explicit_report(
                     boundary_event="scene_video_completed",
                     gate_triggers=[],
                 ),
-            },
+            ),
             audio_contract={"policy": "adaptive"},
             candidate_agents=[AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR],
             standby_agents=[AgentType.AUDIO_GENERATOR],
@@ -994,13 +1060,13 @@ def test_orchestrator_runtime_boundary_cycle_delegates_open_and_apply_to_control
         agent._evaluate_runtime_boundary_cycle(
             workflow_state_id="wf-handoff-1",
             current_agent=AgentType.VIDEO_GENERATOR,
-            agent_output={
-                "success": True,
-                "orchestration_report": _make_explicit_report(
+            agent_result=_make_agent_result(
+                {"success": True},
+                report=_make_explicit_report(
                     boundary_event="scene_video_completed",
                     gate_triggers=["workflow_video_audio_delivery"],
                 ),
-            },
+            ),
             audio_contract={"policy": "adaptive"},
             candidate_agents=[
                 AgentType.VIDEO_GENERATOR,
@@ -1035,11 +1101,7 @@ def test_orchestrator_main_loop_runs_runtime_true_chain_via_control_plane(monkey
     )
 
     result = asyncio.run(
-        agent._execute_impl(
-            task=task,
-            input_data={"user_prompt": "make a short video", "resolution": "720p"},
-            db=None,
-        )
+        _run_main_loop(agent, task)
     )
 
     assert result["status"] == "completed"
@@ -1058,11 +1120,7 @@ def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch
     )
 
     result = asyncio.run(
-        agent._execute_impl(
-            task=task,
-            input_data={"user_prompt": "make a short video", "resolution": "720p"},
-            db=None,
-        )
+        _run_main_loop(agent, task)
     )
 
     assert result["status"] == "completed"
@@ -1082,11 +1140,7 @@ def test_orchestrator_main_loop_fails_fast_when_runtime_decision_errors(monkeypa
 
     with pytest.raises(AgentError, match="Runtime decision evaluation failed: synthetic_runtime_decision_failure"):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert len(runtime_calls["open"]) == 1
@@ -1104,11 +1158,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_missing(monkeypatch):
 
     with pytest.raises(AgentError, match="Runtime protocol violated"):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert runtime_calls["open"] == []
@@ -1137,11 +1187,7 @@ def test_orchestrator_main_loop_fails_fast_when_report_field_malformed(monkeypat
         match="Runtime protocol violated: Subagent video_generator orchestration_report field gate_triggers must be list\\[str\\]",
     ):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert runtime_calls["open"] == []
@@ -1159,11 +1205,7 @@ def test_orchestrator_main_loop_aborts_workflow_on_runtime_abort_decision(monkey
 
     with pytest.raises(AgentError, match="Workflow halted by runtime decision: synthetic_runtime_abort"):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert len(runtime_calls["open"]) == 1
@@ -1195,11 +1237,7 @@ def test_orchestrator_main_loop_fails_fast_when_scheduled_agent_lacks_task_spec(
 
     with pytest.raises(AgentError, match="Missing task_spec for scheduled agent: audio_generator"):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert len(runtime_calls["open"]) == 1
@@ -1219,11 +1257,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unknown(monkeypatch
         match="Runtime control-plane violated: Unknown gate trigger: unknown_runtime_gate",
     ):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert len(runtime_calls["open"]) == 1
@@ -1246,11 +1280,7 @@ def test_orchestrator_main_loop_fails_fast_when_gate_trigger_unauthorized(monkey
         ),
     ):
         asyncio.run(
-            agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "make a short video", "resolution": "720p"},
-                db=None,
-            )
+            _run_main_loop(agent, task)
         )
 
     assert len(runtime_calls["open"]) == 1

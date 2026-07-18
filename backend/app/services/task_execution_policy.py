@@ -6,7 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from ..models import Task, TaskStatus, WorkflowSession, WorkflowSessionStatus
+from ..domain import TaskStatus, WorkflowSessionStatus
+from ..models import Task, WorkflowSession
 from ..core.config import settings
 
 

@@ -14,7 +14,7 @@ from app.agents.tools.image_prompt_composer_tool import ImagePromptComposerTool
 from app.agents.tools.video_prompt_composer_tool import VideoPromptComposerTool
 from app.agents.utils.memory_helpers import write_shared_fact
 from app.core.config import settings
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.character_identity_contract import normalize_character_identity_contract
 from app.services.scene_info_reference_service import persist_scene_info_ref
 from app.services.workflow_completion_adapter import WorkflowCompletionAdapter

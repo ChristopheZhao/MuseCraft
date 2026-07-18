@@ -4,7 +4,7 @@ from app.agents.base import BaseAgent
 from app.agents.tools.tool_registry import get_tool_registry
 from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
 from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
-from app.models import AgentType
+from app.domain import AgentExecutionRequest, AgentType
 from app.services.memory_provider import build_memory_services
 
 
@@ -17,7 +17,7 @@ class _DummyAgent(BaseAgent):
             memory_services=build_memory_services(),
         )
 
-    async def _execute_impl(self, task, input_data, execution, db):  # type: ignore
+    async def _execute_impl(self, request: AgentExecutionRequest):
         return {}
 
 

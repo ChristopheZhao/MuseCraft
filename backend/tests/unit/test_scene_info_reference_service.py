@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.scene_info_reference_service import (
     SceneInfoReferencePersistenceError,
     persist_scene_info_ref,

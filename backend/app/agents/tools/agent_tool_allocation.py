@@ -5,7 +5,7 @@ Agent工具分配系统 - 为不同Agent提供专门的工具列表
 from typing import Dict, List, Set
 from enum import Enum
 
-from ...models import AgentType
+from ...domain import AgentType
 
 
 class ToolCategory(Enum):

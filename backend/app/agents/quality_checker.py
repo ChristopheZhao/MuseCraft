@@ -4,10 +4,8 @@ Quality Checker Agent - Analyzes and validates the final video quality
 import os
 import json
 from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentType
 from .utils.media_runtime import resolve_local_public_path
 from ..services.character_identity_contract import build_default_role_continuity_expectations
 
@@ -30,12 +28,11 @@ class QualityCheckerAgent(BaseAgent):
         )
     
     async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
-        db: Session
+        self,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """Perform comprehensive quality check on the final video"""
+        input_data = request.input_data.to_dict()
         
         # Validate input
         self._validate_input(input_data, ["workflow_state_id"])
@@ -57,7 +54,7 @@ class QualityCheckerAgent(BaseAgent):
         character_identity_diagnostics = quality_inputs["character_identity_diagnostics"]
         character_identity_contract_carrier = quality_inputs["character_identity_contract_carrier"]
 
-        await self._update_progress(10, "Loading final video from workflow", db)
+        await self._update_progress(10, "Loading final video from workflow")
 
         if not (final_video_path or final_video_url):
             raise AgentError(
@@ -65,14 +62,14 @@ class QualityCheckerAgent(BaseAgent):
                 f"(diagnostics={context_diagnostics})"
             )
         
-        await self._update_progress(20, "Performing technical analysis", db)
+        await self._update_progress(20, "Performing technical analysis")
         
         # Perform technical quality checks
         technical_quality = await self._analyze_technical_quality(
             final_video_path or final_video_url, video_metadata
         )
         
-        await self._update_progress(40, "Analyzing content quality", db)
+        await self._update_progress(40, "Analyzing content quality")
         
         # Perform content quality analysis
         content_quality = await self._analyze_content_quality(
@@ -90,27 +87,21 @@ class QualityCheckerAgent(BaseAgent):
             character_identity_contract_carrier=character_identity_contract_carrier,
         )
         
-        await self._update_progress(60, "Checking requirement compliance", db)
+        await self._update_progress(60, "Checking requirement compliance")
         
         # Check compliance with original requirements
         compliance_check = await self._check_requirement_compliance(
-            task, concept_plan, composition_timeline, video_metadata
+            original_requirements, concept_plan, composition_timeline, video_metadata
         )
         
-        await self._update_progress(80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report")
         
         # Generate overall quality score and recommendations
         quality_assessment = await self._generate_quality_assessment(
             technical_quality, content_quality, compliance_check
         )
         
-        await self._update_progress(95, "Finalizing quality check", db)
-        
-        # Update task with quality information
-        task.quality_score = quality_assessment["overall_score"]
-        task.quality_feedback = quality_assessment["summary"]
-        task.requires_human_review = quality_assessment["requires_human_review"]
-        db.commit()
+        await self._update_progress(95, "Finalizing quality check")
         
         output_data = {
             "success": True,
@@ -138,7 +129,7 @@ class QualityCheckerAgent(BaseAgent):
             },
         }
         
-        await self._update_progress(100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed")
         
         return output_data
 
@@ -255,12 +246,11 @@ class QualityCheckerAgent(BaseAgent):
     async def _perform_image_based_quality_check(
         self, 
         scenes_data: List, 
-        input_data: Dict[str, Any], 
-        db: Session
+        input_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         """对图像进行质量检查（当没有视频时的降级方案）"""
         
-        await self._update_progress(30, "Analyzing image quality", db)
+        await self._update_progress(30, "Analyzing image quality")
         
         # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
         available_images = []
@@ -285,7 +275,7 @@ class QualityCheckerAgent(BaseAgent):
                     }
                 )
         
-        await self._update_progress(60, "Evaluating content appropriateness", db)
+        await self._update_progress(60, "Evaluating content appropriateness")
         
         # 简化的质量检查
         quality_score = 75  # 图像质量默认分数
@@ -303,7 +293,7 @@ class QualityCheckerAgent(BaseAgent):
             if any(word in description for word in ["violent", "inappropriate", "explicit"]):
                 content_issues.append(f"Scene {img['scene_number']} may contain inappropriate content")
         
-        await self._update_progress(80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report")
         
         # 生成建议
         suggestions = []
@@ -342,7 +332,7 @@ class QualityCheckerAgent(BaseAgent):
             "fallback_reason": "no_videos_available"
         }
         
-        await self._update_progress(100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed")
         
         return output_data
     
@@ -1019,16 +1009,13 @@ class QualityCheckerAgent(BaseAgent):
             }
     
     async def _check_requirement_compliance(
-        self, 
-        task: Task, 
+        self,
+        original_params: Dict[str, Any],
         concept_plan: Dict[str, Any], 
         composition_timeline: List[Dict],
         video_metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Check compliance with original requirements"""
-        
-        # Get original requirements from task parameters
-        original_params = task.input_parameters or {}
         
         compliance_checks = {
             "duration_compliance": True,

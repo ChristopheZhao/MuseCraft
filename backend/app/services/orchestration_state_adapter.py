@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
-from ..models import AgentType
+from ..domain import AgentType
 from .memory_provider import MemoryServices
 
 

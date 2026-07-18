@@ -20,23 +20,27 @@ async def test_audio_smart_truncation(tmp_path):
     try:
         from app.core.database import engine, SessionLocal  # type: ignore
         from app.models.base import BaseModel  # type: ignore
-        from app.models import Task, TaskType  # type: ignore
+        from app.domain import TaskType  # type: ignore
+        from app.models import Task  # type: ignore
         from app.core.workflow_state import workflow_manager, SceneData  # type: ignore
         from app.agents.audio_generator import AudioGeneratorAgent  # type: ignore
         from app.agents.video_composer import VideoComposerAgent  # type: ignore
         from app.services.video_composer_execution_contract import build_video_composer_execution_contract  # type: ignore
         from app.agents.tools import register_default_tools  # type: ignore
         from app.agents.tools.tool_registry import get_tool_registry  # type: ignore
+        from app.services.agent_execution_boundary import build_agent_execution_request  # type: ignore
     except ModuleNotFoundError:
         from backend.app.core.database import engine, SessionLocal
         from backend.app.models.base import BaseModel
-        from backend.app.models import Task, TaskType
+        from backend.app.domain import TaskType
+        from backend.app.models import Task
         from backend.app.core.workflow_state import workflow_manager, SceneData
         from backend.app.agents.audio_generator import AudioGeneratorAgent
         from backend.app.agents.video_composer import VideoComposerAgent
         from backend.app.services.video_composer_execution_contract import build_video_composer_execution_contract
         from backend.app.agents.tools import register_default_tools
         from backend.app.agents.tools.tool_registry import get_tool_registry
+        from backend.app.services.agent_execution_boundary import build_agent_execution_request
 
     BaseModel.metadata.create_all(bind=engine)
     db = SessionLocal()
@@ -102,22 +106,35 @@ async def test_audio_smart_truncation(tmp_path):
         agent.llm_function_call = fake_llm  # type: ignore
 
         # Execute AudioAgent (analysis+smart apply)
-        out = await agent.execute(task=task, input_data={"workflow_state_id": ws.task_id}, db=db, execution_order=1)
+        out = (
+            await agent.execute(
+                build_agent_execution_request(
+                    task=task,
+                    agent_type=agent.agent_type,
+                    input_data={"workflow_state_id": ws.task_id},
+                    execution_order=1,
+                )
+            )
+        ).output_data.to_dict()
 
         # Composer add_bgm
         comp = VideoComposerAgent()
-        comp_out = await comp.execute(
-            task=task,
-            input_data={
-                "workflow_state_id": ws.task_id,
-                "execution_contract": build_video_composer_execution_contract(
-                    workflow_state_id=ws.task_id,
-                    compose_mode="bgm",
-                ),
-            },
-            db=db,
-            execution_order=2,
-        )
+        comp_out = (
+            await comp.execute(
+                build_agent_execution_request(
+                    task=task,
+                    agent_type=comp.agent_type,
+                    input_data={
+                        "workflow_state_id": ws.task_id,
+                        "execution_contract": build_video_composer_execution_contract(
+                            workflow_state_id=ws.task_id,
+                            compose_mode="bgm",
+                        ),
+                    },
+                    execution_order=2,
+                )
+            )
+        ).output_data.to_dict()
 
         # Restore
         registry.get_tool = orig_get  # type: ignore

@@ -11,7 +11,8 @@ from sqlalchemy import select, desc
 from pydantic import BaseModel, Field
 
 from ....core.database import get_db
-from ....models import Task, TaskStatus, TaskType, Scene, Resource, WorkflowSession, WorkflowSessionStatus
+from ....domain import TaskStatus, TaskType, WorkflowSessionStatus
+from ....models import Resource, Scene, Task, WorkflowSession
 from ....services.task_queue import TaskQueueService, cancel_celery_task
 from ....services.runtime_session_service import RuntimeSessionService
 from ....services.task_execution_policy import (

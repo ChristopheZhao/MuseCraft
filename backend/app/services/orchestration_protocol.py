@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..models import AgentType
+from ..domain import AgentExecutionContractError, AgentExecutionResult, AgentType
 
 
 class OrchestrationProtocolError(ValueError):
@@ -126,15 +126,20 @@ class OrchestrationProtocol:
         *,
         workflow_state_id: str,
         agent_type: AgentType,
-        agent_output: Optional[Dict[str, Any]],
+        agent_result: AgentExecutionResult,
         execution_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        output = dict(agent_output or {})
-        explicit_report = output.get("orchestration_report")
-        if not isinstance(explicit_report, dict) or not explicit_report:
+        if not isinstance(agent_result, AgentExecutionResult):
             raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} must return explicit orchestration_report"
+                f"Subagent {agent_type.value} must return AgentExecutionResult"
             )
+        output = agent_result.output_data.to_dict()
+        try:
+            explicit_report = agent_result.require_orchestration_report().to_dict()
+        except AgentExecutionContractError as exc:
+            raise OrchestrationProtocolError(
+                f"Subagent {agent_type.value} must return explicit orchestration_report: {exc}"
+            ) from exc
         report: Dict[str, Any] = {
             "contract_version": "v1",
             "workflow_state_id": str(workflow_state_id or ""),

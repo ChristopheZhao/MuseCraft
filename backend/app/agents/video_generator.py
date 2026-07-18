@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .react_agent import ReActAgent
 from .base import AgentError
-from ..models import AgentType, Task
+from ..domain import AgentTaskReference, AgentType
 from ..core.config import settings
  
 from ..core.video_config_manager import get_video_config
@@ -63,7 +63,7 @@ class VideoGeneratorAgent(ReActAgent):
     async def _think_and_plan(
         self,
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         """单段式纯 ReAct：本轮 FC 产出 tool_calls，并在紧随其后的 ACT 中执行。
@@ -209,7 +209,6 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        db,
         iteration: int,
     ) -> Dict[str, Any]:
         action = action_plan["action"]
@@ -633,7 +632,7 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         performed = action_result.get("action_performed")
@@ -698,7 +697,7 @@ class VideoGeneratorAgent(ReActAgent):
     async def _finalize_incomplete_results(
         self,
         context: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
     ) -> Dict[str, Any]:
         base = await super()._finalize_incomplete_results(context, task)
         runtime = self.wm

@@ -11,7 +11,7 @@ from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.memory_helpers import write_shared_fact
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.context_assembler import ContextContractAssembler
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 

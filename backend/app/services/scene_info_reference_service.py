@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from ..core.config import settings
-from ..models import AgentType
+from ..domain import AgentType
 
 
 class SceneInfoReferencePersistenceError(RuntimeError):

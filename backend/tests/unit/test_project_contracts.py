@@ -17,7 +17,14 @@ from app.core.story_plan import (
     EpisodePlan,
     project_state_repository,
 )
-from app.models import Task, TaskStatus, TaskType
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    JsonObjectPayload,
+    TaskStatus,
+    TaskType,
+)
+from app.models import Task
 from app.api.v1.endpoints.projects import _serialize_project_state
 from app.services.project_job_contract import (
     PROJECT_JOB_HANDLER_PLAN_PROJECT,
@@ -336,25 +343,25 @@ def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
 
     agent._resolve_episode_selection = lambda _project_state, _input: [_project_state.story_plan.episodes[0]]
 
-    task = SimpleNamespace(
-        status=TaskStatus.PENDING.value,
-        error_message=None,
-        session_id="session-force-rerun",
-        user_id=None,
-        update_progress=lambda *args, **kwargs: None,
-    )
-    db = SimpleNamespace(commit=lambda: None)
-
     result = asyncio.run(
         EpisodeOrchestratorAgent._execute_impl(
             agent,
-            task,
-            {
-                "project_id": project_state.project_id,
-                "mode": GenerationMode.PROJECT.value,
-                "force_rerun": True,
-            },
-            db,
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id="task-force-rerun",
+                    task_type=TaskType.VIDEO_GENERATION.value,
+                    session_id="session-force-rerun",
+                ),
+                agent_type="episode_orchestrator",
+                input_data=JsonObjectPayload.from_mapping(
+                    {
+                        "project_id": project_state.project_id,
+                        "mode": GenerationMode.PROJECT.value,
+                        "force_rerun": True,
+                    },
+                    field_path="input_data",
+                ),
+            ),
         )
     )
 

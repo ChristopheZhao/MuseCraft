@@ -8,15 +8,15 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import (
-    Task,
-    TaskStatus,
+from ..domain import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentTaskReference,
     AgentType,
-    WorkflowSessionStatus,
+    JsonObjectPayload,
     WorkflowNodeStatus,
+    WorkflowSessionStatus,
 )
 from ..services.memory_provider import build_memory_services, MemoryServices
 from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
@@ -41,7 +41,6 @@ from ..services.orchestration_runtime_transition_facade import (
 )
 from ..services.orchestration_state_adapter import OrchestrationStateAdapter
 from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
-from ..services.runtime_session_service import RuntimeSessionService
 from ..services.execution_host_lease import (
     activate_current_attempt_keepalive,
     deactivate_current_attempt_keepalive,
@@ -573,10 +572,13 @@ class OrchestratorAgent(BaseAgent):
         return candidate_agents, rationale
 
     async def _execute_impl(
-        self, task: Task, input_data: Dict[str, Any], db: Session
+        self,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """Execute the complete video generation workflow using Shared Working Memory"""
 
+        task = request.task
+        input_data = request.input_data.to_dict()
         self._current_task = task
         mem_service = self._memory_services.short_term
         mem_service.create_or_get(str(task.task_id), mas_scope(str(task.task_id)))
@@ -598,24 +600,26 @@ class OrchestratorAgent(BaseAgent):
         runtime_resume_bootstrap = self._get_orchestration_runtime_resume_bootstrap_facade()
         try:
             runtime_resume_context = runtime_resume_bootstrap.resolve_runtime_resume_context(
-                db=db,
                 task=task,
             )
         except OrchestrationRuntimeResumeBootstrapError as exc:
             raise AgentError(str(exc)) from exc
-        runtime_session = runtime_resume_context.runtime_session
-        script_gate = runtime_resume_context.script_gate
-        latest_script_decision = runtime_resume_context.latest_script_decision
+        runtime_session_id = runtime_resume_context.runtime_session_id
+        runtime_session_status = runtime_resume_context.runtime_session_status
+        script_gate_id = runtime_resume_context.script_gate_id
         script_resume_action = runtime_resume_context.script_resume_action
-        if script_gate is not None and latest_script_decision is None:
+        if (
+            script_gate_id is not None
+            and not runtime_resume_context.latest_script_decision_exists
+        ):
             return {
                 "status": "waiting_gate",
-                "session_id": runtime_session.id,
-                "gate_id": script_gate.id,
+                "session_id": runtime_session_id,
+                "gate_id": script_gate_id,
                 "node_key": "script",
             }
 
-        runtime_input_payload = dict(getattr(runtime_session, "input_payload", {}) or {})
+        runtime_input_payload = dict(runtime_resume_context.runtime_input_payload or {})
         workflow_data = runtime_input_payload.copy() if runtime_input_payload else input_data.copy()
         workflow_data.setdefault(
             "resolution", input_data.get("resolution") or settings.DEFAULT_VIDEO_RESOLUTION
@@ -634,7 +638,7 @@ class OrchestratorAgent(BaseAgent):
                 except Exception:
                     continue
         review_contract = get_script_review_contract(
-            getattr(runtime_session, "input_payload", None)
+            runtime_input_payload
         )
         if (
             script_resume_action in {"revise", "replan"}
@@ -648,7 +652,7 @@ class OrchestratorAgent(BaseAgent):
         runtime_resume_checkpoint = runtime_resume_context.runtime_resume_checkpoint
         resume_anchor_agent = runtime_resume_context.resume_anchor_agent
 
-        workflow_results = {}
+        workflow_results: Dict[str, Any] = {}
         if script_resume_action in {"approve", "revise"}:
             self.logger.info(
                 "ORCH_PLAN_MODE workflow=%s mode=resume_script action=%s",
@@ -657,8 +661,7 @@ class OrchestratorAgent(BaseAgent):
             )
             try:
                 resume_bundle = runtime_resume_bootstrap.load_authoritative_resume_task_specs(
-                    db=db,
-                    runtime_session=runtime_session,
+                    runtime_session_id=runtime_session_id,
                     resume_action=script_resume_action,
                 )
             except OrchestrationRuntimeResumeBootstrapError as exc:
@@ -668,16 +671,14 @@ class OrchestratorAgent(BaseAgent):
             candidate_agents = resume_bundle.candidate_agents
             if script_resume_action == "approve":
                 skip_agents.update({AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER})
-                RuntimeSessionService.consume_script_approval_continuation_sync(
-                    db,
-                    runtime_session,
+                runtime_resume_bootstrap.consume_script_approval_continuation(
+                    runtime_session_id=runtime_session_id,
                     task=task,
                 )
             else:
                 try:
                     runtime_resume_bootstrap.project_script_revision_context(
-                        db=db,
-                        runtime_session=runtime_session,
+                        runtime_session_id=runtime_session_id,
                         workflow_state_id=wf_id,
                         resume_action=script_resume_action,
                     )
@@ -754,10 +755,13 @@ class OrchestratorAgent(BaseAgent):
         if runtime_resume_checkpoint is not None and resume_anchor_agent == AgentType.SCRIPT_WRITER:
             script_trigger_reason = "resume"
         script_requested_by = (
-            str(getattr(latest_script_decision, "actor_type", "") or "system")
-            if latest_script_decision is not None
-            else "system"
+            runtime_resume_context.latest_script_decision_actor_type or "system"
         )
+        current_runtime_node_key: Optional[str] = None
+        current_attempt_id: Optional[int] = None
+        current_attempt_trigger_reason = ""
+        current_attempt_lease_token: Optional[str] = None
+        current_attempt_keepalive_active = False
 
         def _build_execution_host_keepalive_diagnostic(
             *,
@@ -781,14 +785,14 @@ class OrchestratorAgent(BaseAgent):
             nonlocal current_runtime_node_key, current_attempt_id, current_attempt_lease_token
 
             if (
-                runtime_session is None
+                runtime_session_id is None
                 or current_runtime_node_key is None
                 or current_attempt_id is None
             ):
                 return False
 
             activated = activate_current_attempt_keepalive(
-                runtime_session_id=runtime_session.id,
+                runtime_session_id=runtime_session_id,
                 attempt_id=current_attempt_id,
                 lease_token=current_attempt_lease_token,
             )
@@ -798,7 +802,7 @@ class OrchestratorAgent(BaseAgent):
             message = "Execution host keepalive unavailable for leased runtime attempt"
             try:
                 self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
-                    runtime_session_id=runtime_session.id,
+                    runtime_session_id=runtime_session_id,
                     node_key=current_runtime_node_key,
                     attempt_id=current_attempt_id,
                     error_message=message,
@@ -852,10 +856,10 @@ class OrchestratorAgent(BaseAgent):
             for step_index, agent_type in enumerate(execution_queue):
                 total_steps = max(len(execution_queue), 1)
                 agent = self.agents[agent_type]
-                current_runtime_node_key: Optional[str] = None
-                current_attempt_id: Optional[int] = None
+                current_runtime_node_key = None
+                current_attempt_id = None
                 current_attempt_trigger_reason = ""
-                current_attempt_lease_token: Optional[str] = None
+                current_attempt_lease_token = None
                 current_attempt_keepalive_active = False
                 retired_completed_attempt_context: Optional[Dict[str, Any]] = None
                 if agent_type in skip_agents:
@@ -892,7 +896,7 @@ class OrchestratorAgent(BaseAgent):
                 except Exception:
                     pass
 
-                if runtime_session is not None:
+                if runtime_session_id is not None:
                     self._ensure_dispatch_prerequisites(
                         agent_type=agent_type,
                         workflow_state_id=wf_id,
@@ -900,11 +904,10 @@ class OrchestratorAgent(BaseAgent):
                     )
 
                 self._emit_pre_dispatch_diagnostics(agent_type, wf_id)
-                if runtime_session is not None:
+                if runtime_session_id is not None:
                     try:
                         attempt_bootstrap = runtime_resume_bootstrap.start_runtime_attempt(
-                            db=db,
-                            runtime_session=runtime_session,
+                            runtime_session_id=runtime_session_id,
                             task=task,
                             current_agent_type=agent_type,
                             workflow_state_id=wf_id,
@@ -927,10 +930,7 @@ class OrchestratorAgent(BaseAgent):
                 progress_percentage = int((step_index / total_steps) * 90)  # 为持久化预留10%
                 current_step = f"Executing {agent.agent_name}"
 
-                await self._update_progress(progress_percentage, current_step, db)
-
-                # Update task progress
-                task.update_progress(current_step, progress_percentage)
+                await self._update_progress(progress_percentage, current_step)
                 self.logger.info(
                     f"Starting workflow step {step_index + 1}/{total_steps}: {agent.agent_name}"
                 )
@@ -974,12 +974,19 @@ class OrchestratorAgent(BaseAgent):
                             ) from err
 
                     # Execute the agent (now purely stateless)
-                    agent_output = await agent.execute(
-                        task=task,
-                        input_data=agent_input,
-                        db=db,
-                        execution_order=step_index + 1,
+                    agent_result = await agent.execute(
+                        AgentExecutionRequest(
+                            task=task,
+                            agent_type=agent_type.value,
+                            input_data=JsonObjectPayload.from_mapping(
+                                agent_input,
+                                field_path=f"agent_input.{agent_type.value}",
+                            ),
+                            workflow_state_id=wf_id,
+                            execution_order=step_index + 1,
+                        )
                     )
+                    agent_output = agent_result.output_data.to_dict()
 
                     # Store results and commit any authoritative shared facts for downstream gates.
                     self._record_agent_output(
@@ -991,13 +998,13 @@ class OrchestratorAgent(BaseAgent):
                     )
 
                     if (
-                        runtime_session is not None
+                        runtime_session_id is not None
                         and agent_type != AgentType.SCRIPT_WRITER
                         and current_runtime_node_key is not None
                         and current_attempt_id is not None
                     ):
                         self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
-                            runtime_session_id=runtime_session.id,
+                            runtime_session_id=runtime_session_id,
                             node_key=current_runtime_node_key,
                             attempt_id=current_attempt_id,
                             lease_token=current_attempt_lease_token,
@@ -1009,18 +1016,18 @@ class OrchestratorAgent(BaseAgent):
                         )
 
                     if (
-                        runtime_session is not None
+                        runtime_session_id is not None
                         and agent_type == AgentType.SCRIPT_WRITER
                         and current_attempt_id is not None
                     ):
                         return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
-                            runtime_session_id=runtime_session.id,
-                            task_db_id=task.id,
+                            runtime_session_id=runtime_session_id,
+                            task_id=task.task_id,
                             workflow_id=wf_id,
                             script_attempt_id=current_attempt_id,
                             lease_token=current_attempt_lease_token,
                             trigger_reason=current_attempt_trigger_reason or script_trigger_reason,
-                            script_output=dict(agent_output or {}),
+                            script_output=dict(agent_output),
                             task_specs=task_specs,
                             conditional_task_specs=_conditional_task_specs,
                             candidate_agents=list(candidate_agents),
@@ -1031,7 +1038,7 @@ class OrchestratorAgent(BaseAgent):
                         runtime_cycle = await self._evaluate_runtime_boundary_cycle(
                             workflow_state_id=wf_id,
                             current_agent=agent_type,
-                            agent_output=agent_output,
+                            agent_result=agent_result,
                             audio_contract=dict(audio_contract or {}),
                             candidate_agents=list(candidate_agents),
                             standby_agents=standby_agents,
@@ -1155,12 +1162,12 @@ class OrchestratorAgent(BaseAgent):
 
                 except Exception as e:
                     if (
-                        runtime_session is not None
+                        runtime_session_id is not None
                         and current_runtime_node_key is not None
                         and current_attempt_id is not None
                     ):
                         self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
-                            runtime_session_id=runtime_session.id,
+                            runtime_session_id=runtime_session_id,
                             node_key=current_runtime_node_key,
                             attempt_id=current_attempt_id,
                             error_message=str(e),
@@ -1175,12 +1182,12 @@ class OrchestratorAgent(BaseAgent):
                         )
                         _retire_runtime_attempt_scope(reason="attempt_failed")
                     elif (
-                        runtime_session is not None
+                        runtime_session_id is not None
                         and retired_completed_attempt_context is not None
                     ):
                         try:
                             self._get_orchestration_runtime_transition_facade().upsert_runtime_attempt_diagnostic(
-                                runtime_session_id=runtime_session.id,
+                                runtime_session_id=runtime_session_id,
                                 attempt_id=int(retired_completed_attempt_context["attempt_id"]),
                                 diagnostic={
                                     "code": f"{retired_completed_attempt_context['node_key']}_stage_failed",
@@ -1196,7 +1203,7 @@ class OrchestratorAgent(BaseAgent):
                         except Exception as diag_err:
                             self.logger.warning(
                                 "Failed to persist post-completion runtime diagnostic for session=%s attempt=%s: %s",
-                                runtime_session.id,
+                                runtime_session_id,
                                 retired_completed_attempt_context.get("attempt_id"),
                                 diag_err,
                             )
@@ -1208,7 +1215,7 @@ class OrchestratorAgent(BaseAgent):
                     self.logger.error(error_msg)
 
                     # Check if we should retry the failed step
-                    if await self._should_retry_step(agent_type, e, db):
+                    if await self._should_retry_step(agent_type, e):
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
                         retry_trigger_reason = (
                             script_trigger_reason
@@ -1216,11 +1223,10 @@ class OrchestratorAgent(BaseAgent):
                             and script_trigger_reason in {"revise", "replan"}
                             else "retry"
                         )
-                        if runtime_session is not None:
+                        if runtime_session_id is not None:
                             try:
                                 attempt_bootstrap = runtime_resume_bootstrap.start_runtime_attempt(
-                                    db=db,
-                                    runtime_session=runtime_session,
+                                    runtime_session_id=runtime_session_id,
                                     task=task,
                                     current_agent_type=agent_type,
                                     workflow_state_id=wf_id,
@@ -1248,12 +1254,19 @@ class OrchestratorAgent(BaseAgent):
                             task_specs=task_specs,
                             runtime_input_payload=runtime_input_payload,
                         )
-                        agent_output = await agent.execute(
-                            task=task,
-                            input_data=agent_input,
-                            db=db,
-                            execution_order=step_index + 1,
+                        agent_result = await agent.execute(
+                            AgentExecutionRequest(
+                                task=task,
+                                agent_type=agent_type.value,
+                                input_data=JsonObjectPayload.from_mapping(
+                                    agent_input,
+                                    field_path=f"agent_input.{agent_type.value}",
+                                ),
+                                workflow_state_id=wf_id,
+                                execution_order=step_index + 1,
+                            )
                         )
+                        agent_output = agent_result.output_data.to_dict()
                         self._record_agent_output(
                             workflow_id=str(wf_id),
                             agent_type=agent_type,
@@ -1276,26 +1289,26 @@ class OrchestratorAgent(BaseAgent):
                             except Exception:
                                 pass
                         if (
-                            runtime_session is not None
+                            runtime_session_id is not None
                             and agent_type != AgentType.SCRIPT_WRITER
                             and current_runtime_node_key is not None
                             and current_attempt_id is not None
                         ):
                             self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
-                                runtime_session_id=runtime_session.id,
+                                runtime_session_id=runtime_session_id,
                                 node_key=current_runtime_node_key,
                                 attempt_id=current_attempt_id,
                                 lease_token=current_attempt_lease_token,
                                 node_status=WorkflowNodeStatus.COMPLETED.value,
                             )
                         if (
-                            runtime_session is not None
+                            runtime_session_id is not None
                             and agent_type == AgentType.SCRIPT_WRITER
                             and current_attempt_id is not None
                         ):
                             return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
-                                runtime_session_id=runtime_session.id,
-                                task_db_id=task.id,
+                                runtime_session_id=runtime_session_id,
+                                task_id=task.task_id,
                                 workflow_id=wf_id,
                                 script_attempt_id=current_attempt_id,
                                 lease_token=current_attempt_lease_token,
@@ -1316,7 +1329,7 @@ class OrchestratorAgent(BaseAgent):
                         current_attempt_keepalive_active = False
 
             # Workflow completed successfully
-            await self._update_progress(90, "Workflow completed, dispatching completion event", db)
+            await self._update_progress(90, "Workflow completed, dispatching completion event")
 
             # 发布完成事件（监听器异步落库），不再同步持久化
             persistence_payload = self._workflow_completion_adapter.build_persistence_payload(
@@ -1332,9 +1345,6 @@ class OrchestratorAgent(BaseAgent):
                     "runtime summary and persistence projection would diverge"
                 )
 
-            task.status = TaskStatus.COMPLETED
-            task.update_progress("Completed", 100)
-
             completion_payload = await self._workflow_completion_adapter.publish_completed(
                 task=task,
                 workflow_id=wf_id,
@@ -1347,10 +1357,10 @@ class OrchestratorAgent(BaseAgent):
             quality_result = workflow_results.get("quality_checker")
             quality_result = quality_result if isinstance(quality_result, dict) else {}
             quality_score = quality_result.get("quality_score")
-            if runtime_session is not None:
+            if runtime_session_id is not None:
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
-                    runtime_session_id=runtime_session.id,
-                    task_db_id=task.id,
+                    runtime_session_id=runtime_session_id,
+                    task_id=task.task_id,
                     summary_output=self._workflow_completion_adapter.build_runtime_summary_output(
                         final_video_url=final_url,
                         final_video_path=final_path,
@@ -1388,12 +1398,12 @@ class OrchestratorAgent(BaseAgent):
             except Exception as evt_err:
                 self.logger.warning("Failed to publish workflow_failed event: %s", evt_err)
             if (
-                runtime_session is not None
-                and runtime_session.status != WorkflowSessionStatus.FAILED.value
+                runtime_session_id is not None
+                and runtime_session_status != WorkflowSessionStatus.FAILED.value
             ):
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_failed(
-                    runtime_session_id=runtime_session.id,
-                    task_db_id=task.id,
+                    runtime_session_id=runtime_session_id,
+                    task_id=task.task_id,
                     error_message=error_msg,
                 )
 
@@ -1578,7 +1588,7 @@ class OrchestratorAgent(BaseAgent):
     # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
 
     async def _should_retry_step(
-        self, agent_type: AgentType, error: Exception, db: Session
+        self, agent_type: AgentType, error: Exception
     ) -> bool:
         """Determine if a failed workflow step should be retried"""
         # 简化：按错误类型和策略决定，不依赖 AgentExecution 表
@@ -1648,7 +1658,7 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.warning("No memory data found in ConceptPlanner output")
                 return
 
-            success = await self.memory_service.store_creative_guidance(
+            success = await self._global_memory.store_creative_guidance(
                 workflow_id=memory_data["workflow_id"],
                 concept_plan=memory_data["concept_plan"],
                 agent_name=memory_data["agent_name"],
@@ -1760,7 +1770,7 @@ class OrchestratorAgent(BaseAgent):
         *,
         workflow_state_id: str,
         current_agent: AgentType,
-        agent_output: Dict[str, Any],
+        agent_result: AgentExecutionResult,
         audio_contract: Dict[str, Any],
         candidate_agents: List[AgentType],
         standby_agents: List[AgentType],
@@ -1776,7 +1786,7 @@ class OrchestratorAgent(BaseAgent):
             report = self._orchestration_protocol.build_subagent_report(
                 workflow_state_id=workflow_state_id,
                 agent_type=current_agent,
-                agent_output=agent_output,
+                agent_result=agent_result,
                 execution_id=execution_id,
             )
             control_plane = self._get_orchestration_control_plane()

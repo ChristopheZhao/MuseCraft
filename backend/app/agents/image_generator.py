@@ -3,8 +3,6 @@ Image Generator ReAct Agent - 正确的批量处理迭代逻辑
 """
 import json
 from typing import Dict, Any, List
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent
 from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.artifacts import (
@@ -12,7 +10,7 @@ from .utils.artifacts import (
     finalize_scene_outputs,
 )
 from .utils.memory_helpers import get_mas_working_memory
-from ..models import Task, AgentType
+from ..domain import AgentTaskReference, AgentType
 from ..core.config import settings
 
 
@@ -73,7 +71,6 @@ class ImageGeneratorAgent(ReActAgent):
         self, 
         action_plan: Dict[str, Any], 
         input_data: Dict[str, Any],
-        db: Session,
         iteration: int
     ) -> Dict[str, Any]:
         """ACT: 执行批量图像生成"""
@@ -215,7 +212,7 @@ class ImageGeneratorAgent(ReActAgent):
         result.setdefault("loop_end_reason", "task_complete")
         return result
 
-    async def _finalize_incomplete_results(self, context: Dict[str, Any], task: Task) -> Dict[str, Any]:
+    async def _finalize_incomplete_results(self, context: Dict[str, Any], task: AgentTaskReference) -> Dict[str, Any]:
         result = await super()._finalize_incomplete_results(context, task)
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
         shared = None
@@ -247,7 +244,7 @@ class ImageGeneratorAgent(ReActAgent):
         self, 
         action_result: Dict[str, Any], 
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int
     ) -> Dict[str, Any]:
         """REFLECT：领域规约与轻量摘要（不做完成判定）。
@@ -272,7 +269,7 @@ class ImageGeneratorAgent(ReActAgent):
     async def _think_and_plan(
         self,
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int
     ) -> Dict[str, Any]:
         """PLAN：通过 FC 产出本轮 tool_calls，ACT 在同一迭代执行。"""

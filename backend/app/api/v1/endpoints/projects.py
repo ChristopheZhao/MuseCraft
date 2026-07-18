@@ -22,7 +22,8 @@ from ....core.story_plan import (
     StoryPlan,
     project_state_repository,
 )
-from ....models import Task, TaskStatus, TaskType
+from ....domain import TaskStatus, TaskType
+from ....models import Task
 from ....services.project_job_contract import attach_project_plan_contract
 from ....services.project_job_queue import ProjectJobQueueService
 from ....services.task_queue import TaskQueueService

@@ -5,11 +5,9 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent
 from .base import AgentError
-from ..models import Task, AgentType
+from ..domain import AgentTaskReference, AgentType
 from ..core.config import settings
 from .utils.artifacts import pick_artifact_path_from_results
 from .utils.media_runtime import build_local_public_url
@@ -48,7 +46,7 @@ class VideoComposerAgent(ReActAgent):
             memory_services=memory_services,
         )
 
-    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+    async def _think_and_plan(self, current_state: Dict[str, Any], task: AgentTaskReference, iteration: int) -> Dict[str, Any]:
         """PLAN：使用模板和分区化上下文生成本轮 FC 调用请求。"""
         messages = self.build_plan_messages(current_state or {})
         fc_plan = await self.llm_function_call(
@@ -207,7 +205,6 @@ class VideoComposerAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        db: Session,
         iteration: int,
     ) -> Dict[str, Any]:
         """ACT：执行本轮 FC 返回的工具调用并写回成片事实。"""
@@ -309,7 +306,7 @@ class VideoComposerAgent(ReActAgent):
         self,
         action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         ok = bool(action_result.get("success"))

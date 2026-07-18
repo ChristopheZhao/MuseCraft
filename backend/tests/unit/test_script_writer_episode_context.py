@@ -9,6 +9,12 @@ from app.agents.base import AgentError
 from app.agents.script_writer import ScriptWriterAgent
 from app.agents.memory.short_term import SceneSnapshot
 from app.agents.utils.memory_helpers import ensure_mas_working_memory, write_shared_fact
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 
 
 def test_script_writer_passes_episode_context(monkeypatch):
@@ -129,7 +135,22 @@ def test_script_writer_uses_assembler_static_context_for_scene_inputs():
         },
     }
 
-    result = asyncio.run(agent._execute_impl(task=None, input_data=input_data, db=None))
+    result = asyncio.run(
+        agent._execute_impl(
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id="task-script-static-context",
+                    task_type="video_generation",
+                ),
+                agent_type=AgentType.SCRIPT_WRITER.value,
+                input_data=JsonObjectPayload.from_mapping(
+                    input_data,
+                    field_path="test.input_data",
+                ),
+                workflow_state_id=workflow_id,
+            )
+        )
+    )
 
     assert result["success"] is True
     assert result["execution_boundary"] == {

@@ -175,87 +175,7 @@ def scan_python_tree(root: Path, *, backend_root: Path) -> set[BoundaryViolation
     return violations
 
 
-_SESSION_FILES = {
-    "app/agents/audio_generator.py",
-    "app/agents/base.py",
-    "app/agents/concept_planner.py",
-    "app/agents/episode_orchestrator.py",
-    "app/agents/episode_script_planner.py",
-    "app/agents/image_generator.py",
-    "app/agents/orchestrator.py",
-    "app/agents/quality_checker.py",
-    "app/agents/react_agent.py",
-    "app/agents/script_writer.py",
-    "app/agents/series_planner.py",
-    "app/agents/video_composer.py",
-    "app/agents/voice_synthesizer.py",
-}
-
-_ORM_DEBT = {
-    "app/agents/audio_generator.py": {"Resource", "Task"},
-    "app/agents/base.py": {"Task"},
-    "app/agents/concept_planner.py": {"Scene", "Task"},
-    "app/agents/episode_orchestrator.py": {"Task"},
-    "app/agents/episode_script_planner.py": {"Task"},
-    "app/agents/image_generator.py": {"Task"},
-    "app/agents/orchestrator.py": {"Task"},
-    "app/agents/quality_checker.py": {"Task"},
-    "app/agents/react_agent.py": {"Task"},
-    "app/agents/script_writer.py": {"Task"},
-    "app/agents/series_planner.py": {"Task"},
-    "app/agents/video_composer.py": {"Task"},
-    "app/agents/video_generator.py": {"Task"},
-    "app/agents/voice_synthesizer.py": {"Task"},
-}
-
-_DOMAIN_PACKAGING_DEBT = {
-    "app/agents/adapters/memory_views.py": {"AgentType"},
-    "app/agents/adapters/state/agent_outputs.py": {"AgentType"},
-    "app/agents/audio_generator.py": {"AgentType", "ResourceType"},
-    "app/agents/base.py": {"AgentStatus", "AgentType"},
-    "app/agents/concept_planner.py": {"AgentType", "SceneType"},
-    "app/agents/episode_orchestrator.py": {"AgentType", "TaskStatus", "TaskType"},
-    "app/agents/episode_script_planner.py": {"AgentType"},
-    "app/agents/image_generator.py": {"AgentType"},
-    "app/agents/orchestrator.py": {
-        "AgentType",
-        "TaskStatus",
-        "WorkflowNodeStatus",
-        "WorkflowSessionStatus",
-    },
-    "app/agents/quality_checker.py": {"AgentType"},
-    "app/agents/react_agent.py": {"AgentType"},
-    "app/agents/script_writer.py": {"AgentType"},
-    "app/agents/series_planner.py": {"AgentType"},
-    "app/agents/tools/agent_tool_allocation.py": {"AgentType"},
-    "app/agents/tools/manager.py": {"AgentType"},
-    "app/agents/video_composer.py": {"AgentType"},
-    "app/agents/video_generator.py": {"AgentType"},
-    "app/agents/voice_synthesizer.py": {"AgentType"},
-}
-
-EXPECTED_TRANSITIONAL_DEBT = {
-    BoundaryViolation(path, "persistence_framework", "sqlalchemy.orm", "Session")
-    for path in _SESSION_FILES
-}
-EXPECTED_TRANSITIONAL_DEBT.update(
-    BoundaryViolation(path, "orm_mapping", "app.models", symbol)
-    for path, symbols in _ORM_DEBT.items()
-    for symbol in symbols
-)
-EXPECTED_TRANSITIONAL_DEBT.update(
-    BoundaryViolation(path, "domain_contract_in_orm_package", "app.models", symbol)
-    for path, symbols in _DOMAIN_PACKAGING_DEBT.items()
-    for symbol in symbols
-)
-EXPECTED_TRANSITIONAL_DEBT.add(
-    BoundaryViolation(
-        "app/agents/script_writer.py",
-        "domain_contract_in_orm_package",
-        "app.models.task",
-        "TaskType",
-    )
-)
+EXPECTED_TRANSITIONAL_DEBT: set[BoundaryViolation] = set()
 
 
 def _format_diff(
@@ -282,6 +202,30 @@ def test_production_agent_persistence_debt_is_explicit_and_cannot_expand():
         observed,
         EXPECTED_TRANSITIONAL_DEBT,
     )
+
+
+def test_production_agent_callables_do_not_accept_persistence_shaped_parameters():
+    violations: list[str] = []
+    for path in sorted(AGENT_ROOT.rglob("*.py")):
+        relative = path.relative_to(AGENT_ROOT)
+        if EXCLUDED_TREE_PARTS.intersection(relative.parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            parameter_names = {
+                argument.arg
+                for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            }
+            forbidden = sorted(parameter_names.intersection({"db", "database_session"}))
+            if forbidden:
+                violations.append(
+                    f"{path.relative_to(BACKEND_ROOT).as_posix()}:{node.lineno} "
+                    f"{node.name} accepts {', '.join(forbidden)}"
+                )
+
+    assert violations == []
 
 
 def test_boundary_guard_scans_agent_helpers_not_only_agent_classes(tmp_path):
@@ -339,3 +283,14 @@ def test_domain_execution_contract_is_persistence_free():
     observed = scan_python_tree(BACKEND_ROOT / "app" / "domain", backend_root=BACKEND_ROOT)
 
     assert observed == set()
+
+
+def test_production_code_imports_domain_enums_from_domain_package():
+    observed = scan_python_tree(BACKEND_ROOT / "app", backend_root=BACKEND_ROOT)
+    packaging_leaks = {
+        violation
+        for violation in observed
+        if violation.category == "domain_contract_in_orm_package"
+    }
+
+    assert packaging_leaks == set()

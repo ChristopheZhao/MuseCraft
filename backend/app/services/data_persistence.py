@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Resource, ResourceType, Scene, SceneType, Task, TaskStatus, TaskType
+from ..domain import ResourceType, SceneType, TaskStatus, TaskType
+from ..models import Resource, Scene, Task
 
 
 class DataPersistenceService:

@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
-from ..models.task import TaskType
+from ..domain import TaskType
 from ..agents.memory.long_term.stores import MemoryType, MemoryImportance
 from .memory_provider import MemoryServices
 from .monitoring_service import MonitoringService, MetricType

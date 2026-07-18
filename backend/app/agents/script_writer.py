@@ -4,10 +4,8 @@ Script Writer Agent - 简化版批量脚本生成
 """
 import json
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
 from .adapters.video.models import SceneSnapshot
 from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
@@ -175,11 +173,11 @@ class ScriptWriterAgent(BaseAgent):
         
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """批量脚本生成 - 实现在 _execute_impl，使用 BaseAgent.execute 统一包装"""
+        task = request.task
+        input_data = request.input_data.to_dict()
         try:
             from ..core.config import settings
 
@@ -309,7 +307,7 @@ class ScriptWriterAgent(BaseAgent):
         scenes: List[SceneSnapshot],
         concept_plan: Dict[str, Any],
         workflow_state_id: str,
-        task: Task,
+        task: AgentTaskReference,
         *,
         episode_context: Optional[Dict[str, Any]] = None,
         project_context: Optional[Dict[str, Any]] = None,
@@ -1194,7 +1192,7 @@ class ScriptWriterAgent(BaseAgent):
                     wf_id = str(workflow_state_id or "")
                     if wf_id:
                         from ..services.memory_writer import MemoryWriter
-                        from ..models.task import TaskType
+                        from ..domain import TaskType
                         writer = MemoryWriter(self._memory_services)
                         await writer.write(
                             TaskType.SCRIPT_WRITING,

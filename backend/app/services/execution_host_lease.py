@@ -6,11 +6,11 @@ validation, expiry, and runtime transitions remain in the control plane.
 """
 from __future__ import annotations
 
+import logging
+import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import logging
-import threading
 from typing import Any, Callable, Dict, Optional
 
 from ..core.config import settings
@@ -53,6 +53,8 @@ class AttemptLeaseKeepaliveController:
         self._lock = threading.RLock()
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
+        self._heartbeat_idle_event = threading.Event()
+        self._heartbeat_idle_event.set()
         self._target: AttemptLeaseKeepaliveTarget | None = None
         self._last_published_signature: tuple[Any, ...] | None = None
         self._unhealthy_diagnostic: Dict[str, Any] | None = None
@@ -91,6 +93,16 @@ class AttemptLeaseKeepaliveController:
             self._unhealthy_diagnostic = None
             self._successful_heartbeat_seen = False
         if target is not None:
+            heartbeat_idle = self._heartbeat_idle_event.wait(
+                timeout=max(1.0, self._interval_seconds * 2)
+            )
+            if not heartbeat_idle:
+                self._logger.warning(
+                    "Attempt lease keepalive deactivation timed out waiting for heartbeat "
+                    "session=%s attempt=%s",
+                    target.runtime_session_id,
+                    target.attempt_id,
+                )
             self._publish_target_receipt(
                 target,
                 code="execution_host_keepalive_deactivated",
@@ -281,12 +293,28 @@ class AttemptLeaseKeepaliveController:
             if signaled:
                 continue
 
+            with self._lock:
+                if self._target != target:
+                    continue
+                self._heartbeat_idle_event.clear()
+
             self._publish_target_receipt(
                 target,
                 code="execution_host_keepalive_heartbeat_begin",
                 message="Execution host keepalive heartbeat started",
             )
-            db = self._session_factory()
+            try:
+                db = self._session_factory()
+            except Exception as exc:
+                self._heartbeat_idle_event.set()
+                self._logger.warning(
+                    "Attempt lease keepalive could not open a session for session=%s "
+                    "attempt=%s: %s",
+                    target.runtime_session_id,
+                    target.attempt_id,
+                    exc,
+                )
+                continue
             try:
                 runtime_session = self._load_session(db, target.runtime_session_id)
                 if runtime_session is None:
@@ -368,6 +396,7 @@ class AttemptLeaseKeepaliveController:
                     db.close()
                 except Exception:
                     pass
+                self._heartbeat_idle_event.set()
 
 
 @dataclass(frozen=True)

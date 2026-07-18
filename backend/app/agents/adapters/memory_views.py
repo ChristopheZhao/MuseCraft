@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
-from ...models import AgentType
+from ...domain import AgentType
 from ...services.character_identity_contract import normalize_character_identity_contract
 from ...services.role_continuity_observation_contract import (
     normalize_role_continuity_observation,

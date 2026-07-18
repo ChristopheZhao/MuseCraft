@@ -20,7 +20,7 @@ register_default_tools()
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.video_generator import VideoGeneratorAgent
 from app.agents.tools.agent_tool_allocation import get_agent_tools
-from app.models import AgentType
+from app.domain import AgentType
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

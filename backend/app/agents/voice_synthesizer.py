@@ -4,11 +4,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
 from ..core.config import settings
 from .utils.artifacts import (
     normalize_executed_calls_to_artifacts,
@@ -69,11 +67,9 @@ class VoiceSynthesizerAgent(ReActAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
-        return await super()._execute_impl(task, input_data, db)
+        return await super()._execute_impl(request)
 
 
     def _resolve_voice_settings(
@@ -222,7 +218,7 @@ class VoiceSynthesizerAgent(ReActAgent):
     async def _think_and_plan(
         self,
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         plan_ctx = current_state or {}
@@ -285,7 +281,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        db: Session,
         iteration: int,
     ) -> Dict[str, Any]:
         action = action_plan.get("action")
@@ -397,7 +392,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         artifacts = action_result.get("voice_artifacts") or []
@@ -431,7 +426,7 @@ class VoiceSynthesizerAgent(ReActAgent):
     async def _finalize_incomplete_results(
         self,
         context: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
     ) -> Dict[str, Any]:
         result = await super()._finalize_incomplete_results(context, task)
         wf_id = context.get("workflow_state_id") or self.workflow_state_id

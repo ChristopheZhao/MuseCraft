@@ -5,10 +5,8 @@ ReAct 版：本轮 FC 产出工具调用请求，并在同一迭代执行，失�
 import asyncio
 from typing import Dict, Any, List
 import json
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent, AgentError
-from ..models import Task, AgentType, Resource, ResourceType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
  
 from ..core.config import settings
 from .utils.artifacts import extract_tool_payload
@@ -37,15 +35,13 @@ class AudioGeneratorAgent(ReActAgent):
     
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """Delegate to ReAct loop (ReActAgent)."""
-        return await super()._execute_impl(task, input_data, db)
+        return await super()._execute_impl(request)
 
 
-    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+    async def _think_and_plan(self, current_state: Dict[str, Any], task: AgentTaskReference, iteration: int) -> Dict[str, Any]:
         """PLAN：使用模板和分区化上下文生成本轮 FC 调用请求。"""
         # current_state 已包含 orchestrator 组装的上下文（task/static/iteration 分区）；
         # Agent 内不再二次拼装/覆盖，避免双轨事实源。
@@ -69,7 +65,7 @@ class AudioGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], db: Session, iteration: int) -> Dict[str, Any]:
+    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], iteration: int) -> Dict[str, Any]:
         """ACT：只执行本轮 FC 返回的 tool_calls；不在 Agent 内自组参数直接 use_tool。"""
         # 不在 Agent 内对 action 做白名单判断；
         # 执行层只关心是否存在规划的 call_tools，权限/范围由工具系统与 schema 控制。
@@ -196,7 +192,7 @@ class AudioGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+    async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: AgentTaskReference, iteration: int) -> Dict[str, Any]:
         ok = bool(action_result.get("success"))
         summary = "音频生成成功" if ok else "音频生成未成功"
         return {"success": ok, "reflection_summary": summary}

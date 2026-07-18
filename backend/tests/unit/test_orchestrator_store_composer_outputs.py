@@ -1,8 +1,10 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from app.agents.orchestrator import OrchestratorAgent
-from app.models import AgentType
+from app.domain import AgentType
 
 
 def test_store_composer_outputs_derives_public_final_video_url(monkeypatch):
@@ -69,3 +71,33 @@ def test_record_agent_output_routes_video_composer_through_shared_handoff(monkey
     assert workflow_data["final_video_path"] == "/tmp/final.mp4"
     assert captured["workflow_id"] == "wf-123"
     assert captured["agent_output"]["final_video_url"] == "/files/outputs/videos/final.mp4"
+
+
+@pytest.mark.asyncio
+async def test_store_creative_guidance_uses_injected_global_memory_service():
+    captured = {}
+
+    class _GlobalMemory:
+        async def store_creative_guidance(self, **kwargs):
+            captured.update(kwargs)
+            return True
+
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.store_creative_guidance")
+    agent._global_memory = _GlobalMemory()
+
+    await agent._store_creative_guidance_from_output(
+        {
+            "memory_for_storage": {
+                "workflow_id": "wf-memory-boundary",
+                "concept_plan": {"overview": "concept"},
+                "agent_name": "concept_planner",
+            }
+        }
+    )
+
+    assert captured == {
+        "workflow_id": "wf-memory-boundary",
+        "concept_plan": {"overview": "concept"},
+        "agent_name": "concept_planner",
+    }

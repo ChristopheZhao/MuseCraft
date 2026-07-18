@@ -34,7 +34,7 @@ async def test_complete_system_integration():
         from app.agents.tools.ai_services.suno_client import SunoClientTool
         from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         from types import SimpleNamespace
-        from app.models.agent import AgentType
+        from app.domain import AgentType
         
         print("   ✅ All core components imported successfully")
         

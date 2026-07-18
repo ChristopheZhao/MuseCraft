@@ -10,7 +10,8 @@ from sqlalchemy.orm import sessionmaker
 
 from ..core.config import settings
 from ..core.story_plan import ProjectOperationState, project_state_repository
-from ..models import Task, TaskStatus
+from ..domain import TaskStatus
+from ..models import Task
 from .project_job_contract import resolve_project_job_contract
 from .project_job_execution_host import run_project_job_in_host
 from .task_execution_policy import get_queue_execution_block_reason

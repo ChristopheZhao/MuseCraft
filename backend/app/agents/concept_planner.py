@@ -7,11 +7,9 @@ import asyncio
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
 from ..core.config import settings
-from ..models import Task, AgentType, Scene, SceneType
+from ..domain import AgentExecutionRequest, AgentType
 from ..core.prompt_manager import get_prompt_manager
 from ..core.story_plan import normalize_character_elements
 from .utils import SceneDurationCalculator,safe_json_loads
@@ -37,10 +35,9 @@ class ConceptPlannerAgent(BaseAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
+        input_data = request.input_data.to_dict()
         self._validate_input(input_data, ["user_prompt", "duration", "workflow_state_id"])
 
         concept_mode = str(input_data.get("concept_mode", "episode") or "episode").lower()
@@ -145,7 +142,7 @@ class ConceptPlannerAgent(BaseAgent):
         voice_temperature = min(0.7, base_temperature)
         scene_temperature = base_temperature
 
-        await self._update_progress(20, "Drafting concept skeleton", db)
+        await self._update_progress(20, "Drafting concept skeleton")
 
         skeleton_timeout = self._resolve_stage_timeout("skeleton", deadline_ts)
 
@@ -173,7 +170,7 @@ class ConceptPlannerAgent(BaseAgent):
         skeleton_json = self._compact_json(skeleton_payload)
         user_prompt_brief = self._build_prompt_snippet(user_prompt)
 
-        await self._update_progress(40, "Designing style and voice plan", db)
+        await self._update_progress(40, "Designing style and voice plan")
 
         style_timeout = self._resolve_stage_timeout("style", deadline_ts)
         voice_timeout = self._resolve_stage_timeout("voice", deadline_ts)
@@ -262,7 +259,7 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception:
             self.logger.warning("voice_plan 写回 MAS WM 失败，忽略")
 
-        await self._update_progress(65, "Detailing scenes", db)
+        await self._update_progress(65, "Detailing scenes")
 
         if concept_mode == "project":
             scenes = []
@@ -294,7 +291,7 @@ class ConceptPlannerAgent(BaseAgent):
 
         self._update_token_usage(scene_results_usage)
 
-        await self._update_progress(85, "Finalizing concept plan", db)
+        await self._update_progress(85, "Finalizing concept plan")
 
         concept_plan = self._finalize_concept_plan(
             skeleton_payload,
@@ -375,7 +372,7 @@ class ConceptPlannerAgent(BaseAgent):
         except Exception as exc:
             self.logger.warning(f"⚠️ ConceptPlanner: failed to store creative guidance - {exc}")
 
-        await self._update_progress(100, "Concept planning completed", db)
+        await self._update_progress(100, "Concept planning completed")
 
         return {
             "success": True,
@@ -1207,122 +1204,6 @@ class ConceptPlannerAgent(BaseAgent):
             raise AgentError(f"ConceptPlanner received invalid response during {context_description}")
         return response
 
-
-    async def _create_scenes(
-        self,
-        task: Task,
-        concept_plan: Dict[str, Any],
-        db: Session,
-    ) -> List[Scene]:
-        scenes = []
-        current_start_time = 0.0
-        for scene_data in concept_plan.get("scenes", []):
-            scene = Scene(
-                task_id=task.id,
-                scene_number=scene_data.get("scene_number", len(scenes) + 1),
-                scene_type=self._map_scene_type(scene_data.get("scene_type", "main_content")),
-                title=scene_data.get("title", f"Scene {len(scenes) + 1}"),
-                description=scene_data.get("description", ""),
-                narrative_description=scene_data.get("narrative_description", ""),
-                visual_description=scene_data.get("visual_description", ""),
-                duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
-                start_time=current_start_time,
-                duration_reasoning=scene_data.get("duration_reasoning", ""),
-                background_prompt=scene_data.get("visual_description", ""),
-                character_descriptions=scene_data.get("content_elements", {}).get("characters_present", []),
-                props_and_objects=scene_data.get("content_elements", {}).get("key_objects", []),
-                mood_and_atmosphere=scene_data.get("mood_and_atmosphere", "")[:100],
-                camera_angle=scene_data.get("camera_angle", "medium shot")[:50],
-                lighting_style=scene_data.get("lighting_style", scene_data.get("lighting", "natural"))[:50],
-                art_style=concept_plan.get("intelligent_style_design", {}).get("style_name", "")[:100],
-                color_palette=concept_plan.get("intelligent_style_design", {}).get("color_palette", []),
-            )
-            scene.end_time = current_start_time + scene.duration
-            current_start_time = scene.end_time
-            db.add(scene)
-            scenes.append(scene)
-        db.commit()
-        for scene in scenes:
-            db.refresh(scene)
-        return scenes
-
-    async def _create_scenes_in_workflow_state(
-        self,
-        workflow_state,
-        concept_plan: Dict[str, Any],
-    ) -> List:
-        scenes_data = []
-        current_start_time = 0.0
-        from ..core.workflow_state import SceneData
-
-        for scene_data in concept_plan.get("scenes", []):
-            scene = SceneData(
-                scene_number=scene_data.get("scene_number", len(scenes_data) + 1),
-                scene_type=scene_data.get("scene_type", "main_content"),
-                title=scene_data.get("title", f"Scene {len(scenes_data) + 1}"),
-                description=scene_data.get("description", ""),
-                scene_thesis=scene_data.get("scene_thesis", ""),
-                narrative_description=scene_data.get("narrative_description", ""),
-                visual_description=scene_data.get("visual_description", ""),
-                duration=float(scene_data.get("final_duration", scene_data.get("duration", 5))),
-                start_time=current_start_time,
-                duration_reasoning=scene_data.get("duration_reasoning", ""),
-                characters_present=scene_data.get("content_elements", {}).get("characters_present", []),
-                props_and_objects=scene_data.get("content_elements", {}).get("key_objects", []),
-                mood_and_atmosphere=scene_data.get("mood_and_atmosphere", ""),
-                camera_angle=scene_data.get("camera_angle", "medium shot"),
-                lighting_style=scene_data.get("lighting_style", scene_data.get("lighting", "natural")),
-                art_style=concept_plan.get("intelligent_style_design", {}).get("style_name", ""),
-                color_palette=concept_plan.get("intelligent_style_design", {}).get("color_palette", []),
-            )
-            scene.end_time = current_start_time + scene.duration
-            current_start_time = scene.end_time
-            workflow_state.add_scene(scene)
-            scenes_data.append(scene)
-        return scenes_data
-
-    def _map_scene_type(self, scene_type_str: str) -> SceneType:
-        if not scene_type_str:
-            return SceneType.MAIN_CONTENT
-        scene_type_lower = scene_type_str.lower().strip()
-        english_mapping = {
-            "intro": SceneType.INTRO,
-            "introduction": SceneType.INTRO,
-            "opening": SceneType.INTRO,
-            "main_content": SceneType.MAIN_CONTENT,
-            "main": SceneType.MAIN_CONTENT,
-            "content": SceneType.MAIN_CONTENT,
-            "transition": SceneType.TRANSITION,
-            "bridge": SceneType.TRANSITION,
-            "outro": SceneType.OUTRO,
-            "conclusion": SceneType.OUTRO,
-            "ending": SceneType.OUTRO,
-            "background": SceneType.BACKGROUND,
-        }
-        if scene_type_lower in english_mapping:
-            return english_mapping[scene_type_lower]
-        return SceneType.MAIN_CONTENT
-
-    def _scene_to_dict(self, scene: Scene) -> Dict[str, Any]:
-        return {
-            "id": scene.id,
-            "scene_number": scene.scene_number,
-            "scene_type": scene.scene_type.value,
-            "title": scene.title,
-            "description": scene.description,
-            "duration": scene.duration,
-            "start_time": scene.start_time,
-            "end_time": scene.end_time,
-            "visual_description": scene.visual_description,
-            "narrative_description": scene.narrative_description,
-            "mood": scene.mood_and_atmosphere,
-            "camera_angle": scene.camera_angle,
-            "lighting": scene.lighting_style,
-            "art_style": scene.art_style,
-            "characters": scene.character_descriptions,
-            "props": scene.props_and_objects,
-            "color_palette": scene.color_palette,
-        }
 
     def _extract_intelligent_style_summary(self, concept_plan: Dict[str, Any]) -> str:
         style_design = concept_plan.get("intelligent_style_design", {})

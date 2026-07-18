@@ -1,10 +1,13 @@
-from types import SimpleNamespace
-
 import pytest
 
 from app.agents.base import BaseAgent
 from app.agents.react_agent import ReActAgent
-from app.models import AgentType
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from app.services.memory_provider import build_memory_services
 
 
@@ -38,7 +41,7 @@ class _ConflictReactAgent(ReActAgent):
             "plan_llm": {"content": "任务已经完成，不需要继续生成。"},
         }
 
-    async def _execute_action(self, action_plan, input_data, db, iteration):
+    async def _execute_action(self, action_plan, input_data, iteration):
         self.executed = True
         return {"executed_calls": []}
 
@@ -65,7 +68,7 @@ class _CompletionGateReactAgent(ReActAgent):
             "plan_llm": {"content": "任务已完成。"},
         }
 
-    async def _execute_action(self, action_plan, input_data, db, iteration):
+    async def _execute_action(self, action_plan, input_data, iteration):
         raise AssertionError("ACT must not run when no tool calls are planned")
 
     def _accept_completion_request(
@@ -103,9 +106,18 @@ async def test_react_contract_conflict_stops_before_act(monkeypatch):
     monkeypatch.setattr(agent, "_normalize_plan_contract_from_text", _fake_normalize)
 
     result = await agent._execute_impl(
-        task=SimpleNamespace(),
-        input_data={"workflow_state_id": "wf-react-conflict"},
-        db=None,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-conflict",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-conflict"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-conflict",
+        )
     )
 
     assert agent.executed is False
@@ -124,9 +136,18 @@ async def test_react_completion_gate_rejects_plan_only_completion(monkeypatch):
     agent = _CompletionGateReactAgent(memory_services=build_memory_services())
 
     result = await agent._execute_impl(
-        task=SimpleNamespace(),
-        input_data={"workflow_state_id": "wf-react-gate"},
-        db=None,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-gate",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-gate"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-gate",
+        )
     )
 
     assert agent.gate_calls == 2

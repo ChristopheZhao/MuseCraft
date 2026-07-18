@@ -19,7 +19,8 @@ import json
 import redis.asyncio as redis
 from sqlalchemy.orm import Session
 
-from ..models import Task, AgentType, TaskStatus
+from ..domain import AgentType, TaskStatus
+from ..models import Task
 from ..core.config import settings
 
 

@@ -1,19 +1,11 @@
 """
 Scene model for video scenes and segments
 """
-import enum
 from sqlalchemy import Column, String, Text, JSON, Enum, Integer, ForeignKey, Float
 from sqlalchemy.orm import relationship
 
+from ..domain import SceneType as _SceneType
 from .base import BaseModel
-
-
-class SceneType(str, enum.Enum):
-    INTRO = "intro"
-    MAIN_CONTENT = "main_content"
-    TRANSITION = "transition" 
-    OUTRO = "outro"
-    BACKGROUND = "background"
 
 
 class Scene(BaseModel):
@@ -25,7 +17,7 @@ class Scene(BaseModel):
     
     # Scene basic information
     scene_number = Column(Integer, nullable=False)  # Order in video
-    scene_type = Column(Enum(SceneType), nullable=False)
+    scene_type = Column(Enum(_SceneType), nullable=False)
     title = Column(String(255))
     description = Column(Text)
     

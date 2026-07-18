@@ -2,6 +2,12 @@ import pytest
 from types import SimpleNamespace
 
 from app.agents.series_planner import SeriesPlannerAgent
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from app.core.story_plan import (
     CharacterProfile,
     EpisodePlan,
@@ -82,20 +88,28 @@ async def test_series_planner_persists_planned_state_into_shared_store():
 
     result = await SeriesPlannerAgent._execute_impl(
         agent,
-        task=SimpleNamespace(),
-        input_data={
-            "project_id": project_id,
-            "user_prompt": "Rabbit hero project",
-            "target_duration_seconds": 120,
-            "mode": "project",
-            "aspect_ratio": "16:9",
-            "resolution": "1080p",
-            "style_preference": "storybook",
-            "episode_cap_seconds": 60,
-            "episode_min_seconds": 45,
-            "auto_generate_scripts": True,
-        },
-        db=None,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-series-planner-store",
+                task_type="project_workflow",
+            ),
+            agent_type=AgentType.SERIES_PLANNER.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {
+                    "project_id": project_id,
+                    "user_prompt": "Rabbit hero project",
+                    "target_duration_seconds": 120,
+                    "mode": "project",
+                    "aspect_ratio": "16:9",
+                    "resolution": "1080p",
+                    "style_preference": "storybook",
+                    "episode_cap_seconds": 60,
+                    "episode_min_seconds": 45,
+                    "auto_generate_scripts": True,
+                },
+                field_path="test.input_data",
+            ),
+        )
     )
 
     saved = project_state_repository.get(project_id)

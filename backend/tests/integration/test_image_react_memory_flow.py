@@ -1,7 +1,5 @@
 import asyncio
 import logging
-from types import SimpleNamespace
-
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.DEBUG)
@@ -27,6 +25,12 @@ from app.agents.tools.ai_services.zhipu_client import ZhipuClientTool
 from app.agents.tools.ai_services.image_generation_tool import ImageGenerationTool
 from app.agents.tools.consistency_tool import ConsistencyTool
 from app.agents.tools.storage.file_storage_tool import FileStorageTool
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 
 
 
@@ -83,32 +87,27 @@ async def _run_agent():
     _seed_concept_plan(wf_id)
     wm, context = _seed_working_memory(wf_id, "image_generator")
 
-    class DummySession:
-        def add(self, obj):
-            self.last_added = obj
-
-        def flush(self):
-            pass
-
-        def commit(self):
-            pass
-
-        def rollback(self):
-            pass
-
-        def refresh(self, obj):
-            pass
-
     # 使用真实 LLM（从 llm_policies.yaml 自动加载）
     # Agent 自主决策，与 MAS 中运行完全一致
     agent = ImageGeneratorAgent()
     input_data = {
         "workflow_state_id": wf_id,
     }
-    task = SimpleNamespace(id=456, task_id=wf_id, status=None, update_progress=lambda *args, **kwargs: None)
-
-    result = await agent.execute(task=task, input_data=input_data, db=DummySession())
-    return result, agent, context
+    result = await agent.execute(
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id=wf_id,
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                input_data,
+                field_path="test.input_data",
+            ),
+            workflow_state_id=wf_id,
+        )
+    )
+    return result.output_data.to_dict(), agent, context
 
 
 def test_image_generator_react_flow():

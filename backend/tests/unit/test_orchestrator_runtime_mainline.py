@@ -13,15 +13,18 @@ from app.agents import orchestrator as orchestrator_module
 from app.agents.base import AgentError
 from app.core.prompt_manager import get_prompt_manager
 from app.core.database import Base
-from app.models import (
+from app.domain import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
     AgentType,
-    Task,
+    JsonObjectPayload,
     TaskStatus,
-    WorkflowAttemptStatus,
     TaskType,
-    WorkflowSessionStatus,
+    WorkflowAttemptStatus,
     WorkflowNodeStatus,
+    WorkflowSessionStatus,
 )
+from app.models import Task
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
@@ -35,6 +38,7 @@ from app.services.published_deliverable_service import (
     build_deliverable_ref,
 )
 from app.services.runtime_session_service import RuntimeSessionService
+from app.services.agent_execution_boundary import build_agent_execution_request
 
 
 class _FakeSharedStore(dict):
@@ -65,15 +69,16 @@ class _FakeAgent:
         self._output = dict(output)
         self._calls = calls
 
-    async def execute(self, *, task, input_data, db, execution_order):
+    async def execute(self, request):
+        assert isinstance(request, AgentExecutionRequest)
         self._calls.append(
             {
                 "agent_name": self.agent_name,
-                "input_data": dict(input_data),
-                "execution_order": execution_order,
+                "input_data": request.input_data.to_dict(),
+                "execution_order": request.execution_order,
             }
         )
-        return dict(self._output)
+        return _agent_result(self._output)
 
 
 class _FlakyAgent:
@@ -84,19 +89,20 @@ class _FlakyAgent:
         self._calls = calls
         self._attempt = 0
 
-    async def execute(self, *, task, input_data, db, execution_order):
+    async def execute(self, request):
+        assert isinstance(request, AgentExecutionRequest)
         self._attempt += 1
         self._calls.append(
             {
                 "agent_name": self.agent_name,
-                "input_data": dict(input_data),
-                "execution_order": execution_order,
+                "input_data": request.input_data.to_dict(),
+                "execution_order": request.execution_order,
                 "attempt": self._attempt,
             }
         )
         if self._attempt == 1:
             raise self._first_error
-        return dict(self._success_output)
+        return _agent_result(self._success_output)
 
 
 def _fake_report(boundary_event: str, artifact_ref: str) -> dict:
@@ -111,6 +117,34 @@ def _fake_report(boundary_event: str, artifact_ref: str) -> dict:
             "reported_hints": [],
         },
     }
+
+
+def _agent_result(output: dict) -> AgentExecutionResult:
+    normalized = dict(output)
+    report = normalized.pop("orchestration_report", None)
+    return AgentExecutionResult(
+        output_data=JsonObjectPayload.from_mapping(
+            normalized,
+            field_path="test.agent_output",
+        ),
+        orchestration_report=(
+            JsonObjectPayload.from_mapping(
+                report,
+                field_path="test.orchestration_report",
+            )
+            if report is not None
+            else None
+        ),
+    )
+
+
+def _orchestrator_request(task: Task, input_data: dict) -> AgentExecutionRequest:
+    return build_agent_execution_request(
+        task=task,
+        agent_type=AgentType.ORCHESTRATOR,
+        input_data=input_data,
+        execution_order=0,
+    )
 
 
 def _runtime_summary_stub(**kwargs):
@@ -302,7 +336,6 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent.agent_type = AgentType.ORCHESTRATOR
     agent.agent_name = "orchestrator"
     agent.logger = logging.getLogger("test.orchestrator.runtime_mainline")
-    agent._task_db_id = None
     agent._memory_services = memory_services
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
@@ -312,6 +345,12 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
     if session_factory is not None:
+        agent._orchestration_runtime_resume_bootstrap_facade = (
+            OrchestrationRuntimeResumeBootstrapFacade(
+                orchestration_state=agent._orchestration_state,
+                session_factory=session_factory,
+            )
+        )
         agent._orchestration_runtime_transition_facade = OrchestrationRuntimeTransitionFacade(
             context_contract_assembler=agent._context_contract_assembler,
             orchestration_state=agent._orchestration_state,
@@ -444,7 +483,6 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     agent.logger = logging.getLogger("test.orchestrator.stage_g")
     agent.prompt_manager = get_prompt_manager()
     agent._llms = {"plan": _QueuedPlanLLM(llm_responses)}
-    agent._task_db_id = None
     agent._memory_services = memory_services
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
@@ -454,6 +492,12 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
         publish_script_review_boundary_sync=_fake_script_review_boundary,
     )
     if session_factory is not None:
+        agent._orchestration_runtime_resume_bootstrap_facade = (
+            OrchestrationRuntimeResumeBootstrapFacade(
+                orchestration_state=agent._orchestration_state,
+                session_factory=session_factory,
+            )
+        )
         agent._orchestration_runtime_transition_facade = OrchestrationRuntimeTransitionFacade(
             context_contract_assembler=agent._context_contract_assembler,
             orchestration_state=agent._orchestration_state,
@@ -554,9 +598,7 @@ async def _async_identity(*args, **kwargs):
 
 
 def _build_recording_resume_bootstrap_facade(agent):
-    real_facade = OrchestrationRuntimeResumeBootstrapFacade(
-        orchestration_state=agent._orchestration_state,
-    )
+    real_facade = agent._orchestration_runtime_resume_bootstrap_facade
 
     class _RecordingResumeBootstrapFacade:
         def __init__(self):
@@ -574,6 +616,9 @@ def _build_recording_resume_bootstrap_facade(agent):
 
         def project_script_revision_context(self, **kwargs):
             return real_facade.project_script_revision_context(**kwargs)
+
+        def consume_script_approval_continuation(self, **kwargs):
+            return real_facade.consume_script_approval_continuation(**kwargs)
 
         def start_runtime_attempt(self, **kwargs):
             result = real_facade.start_runtime_attempt(**kwargs)
@@ -605,12 +650,11 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
+        task_snapshot = _load_task_snapshot_from_fresh_session(SessionLocal, task.id)
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert result["status"] == "waiting_gate"
@@ -619,7 +663,7 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value
         assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.PENDING_GATE.value
         assert runtime_view["active_gate"]["gate_name"] == "script_review"
-        assert task.status == TaskStatus.IN_PROGRESS.value
+        assert task_snapshot["status"] == TaskStatus.IN_PROGRESS.value
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 1
         assert call_log["image_generator"] == []
@@ -655,7 +699,7 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
 
         result = facade._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=session.id,
-            task_db_id=task.id,
+            task_id=str(task.task_id),
             action=_record_loaded_runtime_state,
         )
 
@@ -669,7 +713,7 @@ def test_runtime_transition_facade_opens_fresh_session(monkeypatch):
         engine.dispose()
 
 
-def test_runtime_resume_bootstrap_facade_uses_caller_owned_session(monkeypatch):
+def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
     try:
@@ -677,6 +721,7 @@ def test_runtime_resume_bootstrap_facade_uses_caller_owned_session(monkeypatch):
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
         facade = OrchestrationRuntimeResumeBootstrapFacade(
             orchestration_state=agent._orchestration_state,
+            session_factory=SessionLocal,
         )
         task = _create_task(sync_db)
         session = RuntimeSessionService.get_or_create_session_for_task_sync(
@@ -721,9 +766,8 @@ def test_runtime_resume_bootstrap_facade_uses_caller_owned_session(monkeypatch):
         )
 
         result = facade.start_runtime_attempt(
-            db=sync_db,
-            runtime_session=session,
-            task=task,
+            runtime_session_id=session.id,
+            task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
             current_agent_type=AgentType.CONCEPT_PLANNER,
             workflow_state_id=str(task.task_id),
             task_specs={
@@ -740,7 +784,8 @@ def test_runtime_resume_bootstrap_facade_uses_caller_owned_session(monkeypatch):
         assert result.attempt_id is not None
         assert result.lease_token
         assert observed_db_ids
-        assert {db_id for _name, db_id in observed_db_ids} == {id(sync_db)}
+        assert len({db_id for _name, db_id in observed_db_ids}) == 1
+        assert id(sync_db) not in {db_id for _name, db_id in observed_db_ids}
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)
@@ -776,9 +821,7 @@ def test_orchestrator_mainline_routes_attempt_completion_through_fresh_session_h
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
 
@@ -826,9 +869,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
 
@@ -836,7 +877,7 @@ def test_orchestrator_mainline_routes_script_gate_transition_through_runtime_tra
         assert completion_calls
         assert gate_calls
         assert gate_calls[0]["runtime_session_id"] == session.id
-        assert gate_calls[0]["task_db_id"] == task.id
+        assert gate_calls[0]["task_id"] == str(task.task_id)
         assert gate_calls[0]["script_attempt_id"] >= 1
     finally:
         sync_db.close()
@@ -885,9 +926,7 @@ def test_orchestrator_mainline_routes_attempt_bootstrap_through_resume_facade(mo
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
 
@@ -928,9 +967,7 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
         with pytest.raises(AgentError, match="Execution host keepalive unavailable"):
             asyncio.run(
                 agent._execute_impl(
-                    task=task,
-                    input_data={"user_prompt": "test prompt"},
-                    db=sync_db,
+                    _orchestrator_request(task, {"user_prompt": "test prompt"})
                 )
             )
 
@@ -985,9 +1022,7 @@ def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failur
         with pytest.raises(AgentError, match="Runtime replan missing action"):
             asyncio.run(
                 agent._execute_impl(
-                    task=task,
-                    input_data={"user_prompt": "test prompt"},
-                    db=sync_db,
+                    _orchestrator_request(task, {"user_prompt": "test prompt"})
                 )
             )
 
@@ -1295,9 +1330,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
 
         first = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         assert first["status"] == "waiting_gate"
@@ -1316,9 +1349,7 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
 
         second = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1400,9 +1431,7 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
 
@@ -1439,9 +1468,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
 
         first = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         assert first["status"] == "waiting_gate"
@@ -1463,9 +1490,7 @@ def test_orchestrator_mainline_fails_closed_when_runtime_script_boundary_missing
         with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
             asyncio.run(
                 agent._execute_impl(
-                    task=task,
-                    input_data={"user_prompt": "test prompt"},
-                    db=sync_db,
+                    _orchestrator_request(task, {"user_prompt": "test prompt"})
                 )
             )
 
@@ -1517,9 +1542,7 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
         with pytest.raises(AgentError, match="script_prerequisite_not_satisfied"):
             asyncio.run(
                 agent._execute_impl(
-                    task=task,
-                    input_data={"user_prompt": "test prompt"},
-                    db=sync_db,
+                    _orchestrator_request(task, {"user_prompt": "test prompt"})
                 )
             )
 
@@ -1573,9 +1596,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
 
         first = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         assert first["status"] == "waiting_gate"
@@ -1592,9 +1613,7 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
 
         second = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1667,9 +1686,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
 
         first = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         assert first["status"] == "waiting_gate"
@@ -1686,9 +1703,7 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
 
         second = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1743,9 +1758,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
         runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
@@ -1823,9 +1836,7 @@ def test_orchestrator_stage_g_execute_impl_wires_candidate_selection_to_queue(mo
 
         result = asyncio.run(
             agent._execute_impl(
-                task=task,
-                input_data={"user_prompt": "test prompt"},
-                db=sync_db,
+                _orchestrator_request(task, {"user_prompt": "test prompt"})
             )
         )
 

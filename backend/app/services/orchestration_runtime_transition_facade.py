@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ..core.database import SessionLocal as SyncSessionLocal
-from ..models import AgentType, Task
+from ..domain import AgentType
+from ..models import Task
 from .context_assembler import ContextContractAssembler
 from .orchestration_state_adapter import OrchestrationStateAdapter
 from .runtime_session_service import RuntimeSessionService
@@ -36,7 +37,7 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: Optional[int] = None,
+        task_id: Optional[str] = None,
         action,
     ) -> Any:
         runtime_db = self._session_factory()
@@ -51,11 +52,11 @@ class OrchestrationRuntimeTransitionFacade:
                 )
 
             runtime_task = None
-            if task_db_id is not None:
-                runtime_task = runtime_db.query(Task).filter(Task.id == int(task_db_id)).first()
+            if task_id is not None:
+                runtime_task = runtime_db.query(Task).filter(Task.task_id == str(task_id)).first()
                 if runtime_task is None:
                     raise OrchestrationRuntimeTransitionError(
-                        f"Task {task_db_id} missing during runtime control-plane transition"
+                        f"Task {task_id} missing during runtime control-plane transition"
                     )
 
             return action(runtime_db, fresh_runtime_session, runtime_task)
@@ -127,7 +128,7 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         workflow_id: str,
         script_attempt_id: int,
         lease_token: Optional[str],
@@ -176,7 +177,7 @@ class OrchestrationRuntimeTransitionFacade:
 
         return self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
+            task_id=task_id,
             action=_open_gate,
         )
 
@@ -184,12 +185,12 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         summary_output: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
+            task_id=task_id,
             action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_completed_sync(
                 runtime_db,
                 fresh_runtime_session,
@@ -202,12 +203,12 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         error_message: str,
     ) -> None:
         self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
+            task_id=task_id,
             action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_failed_sync(
                 runtime_db,
                 fresh_runtime_session,

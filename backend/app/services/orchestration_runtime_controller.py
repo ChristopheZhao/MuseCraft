@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ..models import AgentType
+from ..domain import AgentType
 from .memory_provider import MemoryServices
 from .orchestration_state_adapter import OrchestrationStateAdapter
 

@@ -11,6 +11,12 @@ from app.agents.memory.short_term import get_working_memory_service
 from app.agents.memory.short_term import SceneSnapshot
 from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
 from app.agents.audio_generator import AudioGeneratorAgent
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 
 
 async def test_full_audio_generator_workflow():
@@ -49,26 +55,7 @@ async def test_full_audio_generator_workflow():
         
         print(f"✅ 工作流状态创建成功，视频路径: {video_path}")
         
-        # 2. 创建模拟的 Task 和 Execution
-        class MockTask:
-            def __init__(self):
-                self.id = "test_task_123"
-                self.user_prompt = "小老虎遇险记测试"
-        
-        class MockExecution:
-            def __init__(self):
-                self.id = "test_execution_456"
-                self.task_id = "test_task_123"
-        
-        class MockDB:
-            def commit(self):
-                pass
-        
-        mock_task = MockTask()
-        mock_execution = MockExecution()
-        mock_db = MockDB()
-        
-        # 3. 创建 AudioGenerator 并执行
+        # 2. 创建 AudioGenerator 并执行
         print("🎵 创建 AudioGenerator...")
         audio_generator = AudioGeneratorAgent()
         
@@ -80,10 +67,18 @@ async def test_full_audio_generator_workflow():
         
         try:
             result = await audio_generator._execute_impl(
-                task=mock_task,
-                input_data=input_data,
-                execution=mock_execution,
-                db=mock_db
+                AgentExecutionRequest(
+                    task=AgentTaskReference(
+                        task_id="test-task-123",
+                        task_type="video_generation",
+                    ),
+                    agent_type=AgentType.AUDIO_GENERATOR.value,
+                    input_data=JsonObjectPayload.from_mapping(
+                        input_data,
+                        field_path="test.input_data",
+                    ),
+                    workflow_state_id=wf_id,
+                )
             )
             print("✅ AudioGenerator 执行完成（结果结构依赖工具可用性，此处仅验证执行链路）")
                 

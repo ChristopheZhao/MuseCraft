@@ -11,7 +11,14 @@ from sqlalchemy.orm import sessionmaker
 import app.core.database as core_database
 from app.core.constants import GenerationMode
 from app.core.database import Base
-from app.models import Task, TaskStatus, TaskType, WorkflowSessionStatus
+from app.domain import (
+    AgentExecutionResult,
+    JsonObjectPayload,
+    TaskStatus,
+    TaskType,
+    WorkflowSessionStatus,
+)
+from app.models import Task
 from app.services import execution_host_lease
 from app.services import queued_task_execution_host
 from app.services import task_queue
@@ -62,6 +69,15 @@ def _find_published_diagnostic(published, *, code: str, reason_code: str | None 
     return None
 
 
+def _execution_result(payload):
+    return AgentExecutionResult(
+        output_data=JsonObjectPayload.from_mapping(
+            payload,
+            field_path="test.output_data",
+        )
+    )
+
+
 def _build_threaded_sqlite_session_factory(tmp_path, name: str):
     engine = create_engine(
         f"sqlite:///{(tmp_path / name).as_posix()}",
@@ -84,13 +100,13 @@ def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orch
     orchestrator_calls = {}
 
     class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            orchestrator_calls["task_id"] = task.id
-            orchestrator_calls["input_data"] = dict(input_data)
-            orchestrator_calls["execution_order"] = execution_order
-            task.status = TaskStatus.COMPLETED.value
-            db.commit()
-            return {"status": "completed", "final_video_url": "https://example.com/final.mp4"}
+        async def execute(self, request):
+            orchestrator_calls["task_id"] = request.task.task_id
+            orchestrator_calls["input_data"] = request.input_data.to_dict()
+            orchestrator_calls["execution_order"] = request.execution_order
+            return _execution_result(
+                {"status": "completed", "final_video_url": "https://example.com/final.mp4"}
+            )
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
@@ -120,7 +136,7 @@ def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orch
     assert result["route"] == "orchestrator_mainline"
     assert result["mode"] == "quick"
     assert result["status"] == "completed"
-    assert orchestrator_calls["task_id"] == task_id
+    assert orchestrator_calls["task_id"] == str(task.task_id)
     assert orchestrator_calls["input_data"]["voice_settings"] == {"voice_id": "narrator_a"}
 
 
@@ -132,11 +148,11 @@ def test_run_generation_in_host_exposes_execution_host_lease_context(monkeypatch
     seen = {}
 
     class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
+        async def execute(self, request):
             context = execution_host_lease.get_current_execution_host_lease_context()
             seen["has_context"] = context is not None
             seen["has_keepalive"] = bool(context and context.attempt_lease_keepalive is not None)
-            return {"status": "completed"}
+            return _execution_result({"status": "completed"})
 
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
@@ -177,7 +193,8 @@ def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receip
     probe = {}
 
     class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
+        async def execute(self, request):
+            assert request.task.task_id == str(task.task_id)
             runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
                 db,
                 task,
@@ -259,7 +276,7 @@ def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receip
                     "ack_seen": ack_seen,
                 }
             )
-            return {"status": "completed"}
+            return _execution_result({"status": "completed"})
 
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
@@ -351,7 +368,8 @@ def test_run_generation_in_host_can_silently_expire_when_heartbeat_blocks(monkey
         )
 
     class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
+        async def execute(self, request):
+            assert request.task.task_id == str(task.task_id)
             runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
                 db,
                 task,
@@ -432,7 +450,7 @@ def test_run_generation_in_host_can_silently_expire_when_heartbeat_blocks(monkey
 
             execution_host_lease.deactivate_current_attempt_keepalive(reason="test_done")
             probe["late_unhealthy"] = late_unhealthy
-            return {"status": "completed"}
+            return _execution_result({"status": "completed"})
 
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
@@ -732,11 +750,13 @@ def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(
     orchestrator_calls = {}
 
     class _FakeEpisodeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            orchestrator_calls["task_id"] = task.id
-            orchestrator_calls["input_data"] = dict(input_data)
-            orchestrator_calls["execution_order"] = execution_order
-            return {"status": "completed", "final_video_url": "https://example.com/project.mp4"}
+        async def execute(self, request):
+            orchestrator_calls["task_id"] = request.task.task_id
+            orchestrator_calls["input_data"] = request.input_data.to_dict()
+            orchestrator_calls["execution_order"] = request.execution_order
+            return _execution_result(
+                {"status": "completed", "final_video_url": "https://example.com/project.mp4"}
+            )
 
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
@@ -766,7 +786,7 @@ def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(
     assert result["route"] == "project_orchestrator_mainline"
     assert result["mode"] == "project"
     assert result["status"] == "completed"
-    assert orchestrator_calls["task_id"] == task_id
+    assert orchestrator_calls["task_id"] == str(task.task_id)
     assert orchestrator_calls["input_data"]["project_id"] == "project-1"
     assert orchestrator_calls["execution_order"] == 2
 

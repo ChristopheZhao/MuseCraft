@@ -11,7 +11,14 @@ from app.agents.memory.storage.in_memory import InMemoryShortTermStore
 from app.agents.base import AgentError
 from app.agents.utils.memory_helpers import read_shared_fact, write_shared_fact
 from app.core.database import Base
-from app.models import AgentType, Task, TaskStatus, TaskType
+from app.domain import (
+    AgentTaskReference,
+    AgentType,
+    TaskStatus,
+    TaskType,
+    WorkflowSessionStatus,
+)
+from app.models import Task
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
     OrchestrationRuntimeResumeBootstrapError,
@@ -30,6 +37,49 @@ from app.services.video_composer_execution_contract import build_video_composer_
 
 def _build_service() -> WorkingMemoryService:
     return WorkingMemoryService(store_factory=lambda: InMemoryShortTermStore())
+
+
+def test_runtime_resume_facade_fails_closed_when_continuation_loader_returns_none(monkeypatch):
+    fake_db = SimpleNamespace(close=lambda: None)
+    runtime_session = SimpleNamespace(
+        id=41,
+        status=WorkflowSessionStatus.RESUMING.value,
+        input_payload={},
+    )
+    facade = OrchestrationRuntimeResumeBootstrapFacade(
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=_build_service())
+        ),
+        session_factory=lambda: fake_db,
+    )
+
+    monkeypatch.setattr(facade, "_require_task", lambda _db, _task: SimpleNamespace(id=7))
+    monkeypatch.setattr(
+        RuntimeSessionService,
+        "get_or_create_session_for_task_sync",
+        staticmethod(lambda *_args, **_kwargs: runtime_session),
+    )
+    monkeypatch.setattr(
+        RuntimeSessionService,
+        "get_latest_gate_for_node_sync",
+        staticmethod(lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        RuntimeSessionService,
+        "load_active_continuation_sync",
+        staticmethod(lambda *_args, **_kwargs: None),
+    )
+
+    with pytest.raises(
+        OrchestrationRuntimeResumeBootstrapError,
+        match="Missing runtime continuation checkpoint",
+    ):
+        facade.resolve_runtime_resume_context(
+            task=AgentTaskReference(
+                task_id="task-missing-runtime-continuation",
+                task_type=TaskType.VIDEO_GENERATION.value,
+            )
+        )
 
 
 @pytest.fixture
@@ -330,12 +380,11 @@ def test_script_revise_resume_projects_candidate_deliverable_into_mas_boundary(s
     memory_services = SimpleNamespace(short_term=fresh_service)
     facade = OrchestrationRuntimeResumeBootstrapFacade(
         orchestration_state=OrchestrationStateAdapter(memory_services=memory_services),
+        session_factory=sessionmaker(bind=sync_db.get_bind(), autocommit=False, autoflush=False),
     )
-    fresh_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
 
     receipt = facade.project_script_revision_context(
-        db=sync_db,
-        runtime_session=fresh_session,
+        runtime_session_id=session.id,
         workflow_state_id=workflow_id,
         resume_action="revise",
     )
@@ -404,14 +453,14 @@ def test_script_revise_resume_fails_fast_on_malformed_candidate_payload(sync_db,
     memory_services = SimpleNamespace(short_term=_build_service())
     facade = OrchestrationRuntimeResumeBootstrapFacade(
         orchestration_state=OrchestrationStateAdapter(memory_services=memory_services),
+        session_factory=sessionmaker(bind=sync_db.get_bind(), autocommit=False, autoflush=False),
     )
 
     with pytest.raises(
         OrchestrationRuntimeResumeBootstrapError, match="script_revision_scene_overview_missing"
     ):
         facade.project_script_revision_context(
-            db=sync_db,
-            runtime_session=session,
+            runtime_session_id=session.id,
             workflow_state_id=workflow_id,
             resume_action="revise",
         )

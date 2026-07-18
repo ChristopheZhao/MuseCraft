@@ -2,10 +2,9 @@
 Orchestration-facing facade for pre-execution runtime resume/load/bootstrap choreography.
 
 SQL/session boundary:
-- this facade consumes the caller-owned current sync SQLAlchemy session only
-- it must not open, replace, or close DB sessions
+- this facade owns short-lived sync SQLAlchemy sessions
+- Agents pass only database-independent task/runtime identifiers
 - RuntimeSessionService remains the sole owner of runtime persistence semantics
-- fresh-session control-plane transitions stay in OrchestrationRuntimeTransitionFacade
 """
 from __future__ import annotations
 
@@ -15,7 +14,9 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import AgentType, Task, WorkflowSessionStatus
+from ..core.database import SessionLocal as SyncSessionLocal
+from ..domain import AgentTaskReference, AgentType, WorkflowSessionStatus
+from ..models import Task
 from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import (
     PublishedDeliverableService,
@@ -31,9 +32,12 @@ class OrchestrationRuntimeResumeBootstrapError(RuntimeError):
 
 @dataclass(frozen=True)
 class RuntimeResumeContext:
-    runtime_session: Any
-    script_gate: Any
-    latest_script_decision: Any
+    runtime_session_id: Optional[int]
+    runtime_session_status: str
+    runtime_input_payload: Dict[str, Any]
+    script_gate_id: Optional[int]
+    latest_script_decision_exists: bool
+    latest_script_decision_actor_type: str
     script_resume_action: str
     runtime_resume_checkpoint: Optional[Dict[str, Any]]
     resume_anchor_agent: Optional[AgentType]
@@ -73,9 +77,32 @@ class OrchestrationRuntimeResumeBootstrapFacade:
         *,
         orchestration_state: OrchestrationStateAdapter,
         logger: Optional[logging.Logger] = None,
+        session_factory=SyncSessionLocal,
     ) -> None:
         self._orchestration_state = orchestration_state
         self._logger = logger or logging.getLogger("orchestration_runtime_resume_bootstrap")
+        self._session_factory = session_factory
+
+    @staticmethod
+    def _require_task(db: Session, task: AgentTaskReference) -> Task:
+        runtime_task = db.query(Task).filter(Task.task_id == task.task_id).first()
+        if runtime_task is None:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                f"Runtime task {task.task_id} missing during resume/bootstrap"
+            )
+        return runtime_task
+
+    @staticmethod
+    def _require_runtime_session(db: Session, runtime_session_id: int) -> Any:
+        runtime_session = RuntimeSessionService.get_session_by_id_sync(
+            db,
+            int(runtime_session_id),
+        )
+        if runtime_session is None:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                f"Runtime session {runtime_session_id} missing during resume/bootstrap"
+            )
+        return runtime_session
 
     @classmethod
     def _runtime_node_key_for_agent(cls, agent_type: AgentType) -> Optional[str]:
@@ -107,6 +134,25 @@ class OrchestrationRuntimeResumeBootstrapFacade:
         return None
 
     def project_script_revision_context(
+        self,
+        *,
+        runtime_session_id: int,
+        workflow_state_id: str,
+        resume_action: str,
+    ) -> Dict[str, Any]:
+        db = self._session_factory()
+        try:
+            runtime_session = self._require_runtime_session(db, runtime_session_id)
+            return self._project_script_revision_context_sync(
+                db=db,
+                runtime_session=runtime_session,
+                workflow_state_id=workflow_state_id,
+                resume_action=resume_action,
+            )
+        finally:
+            db.close()
+
+    def _project_script_revision_context_sync(
         self,
         *,
         db: Session,
@@ -183,92 +229,101 @@ class OrchestrationRuntimeResumeBootstrapFacade:
     def resolve_runtime_resume_context(
         self,
         *,
-        db: Session,
-        task: Task,
+        task: AgentTaskReference,
     ) -> RuntimeResumeContext:
-        """Resolve resume inputs using the caller-owned current session; no fresh SQL session is created here."""
-        if db is None:
-            return RuntimeResumeContext(
-                runtime_session=None,
-                script_gate=None,
-                latest_script_decision=None,
-                script_resume_action="",
-                runtime_resume_checkpoint=None,
-                resume_anchor_agent=None,
-            )
-
-        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            db,
-            task,
-            mode="quick",
-        )
-        script_gate = RuntimeSessionService.get_latest_gate_for_node_sync(
-            db,
-            runtime_session.id,
-            "script",
-        )
-        latest_decision = None
-        if script_gate is not None:
-            latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(
+        """Resolve resume inputs into a database-independent runtime view."""
+        db = self._session_factory()
+        try:
+            runtime_task = self._require_task(db, task)
+            runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
                 db,
-                script_gate.id,
+                runtime_task,
+                mode="quick",
             )
-
-        script_resume_action = ""
-        if (
-            latest_decision is not None
-            and runtime_session.status == WorkflowSessionStatus.RESUMING.value
-        ):
-            script_resume_action = str(latest_decision.action or "").strip().lower()
-
-        runtime_resume_checkpoint: Optional[Dict[str, Any]] = None
-        resume_anchor_agent: Optional[AgentType] = None
-        if (
-            runtime_session.status == WorkflowSessionStatus.RESUMING.value
-            and not script_resume_action
-        ):
-            try:
-                runtime_resume_checkpoint = RuntimeSessionService.load_active_continuation_sync(
+            script_gate = RuntimeSessionService.get_latest_gate_for_node_sync(
+                db,
+                runtime_session.id,
+                "script",
+            )
+            latest_decision = None
+            if script_gate is not None:
+                latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(
                     db,
-                    runtime_session,
-                    expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
-                    require_decision_id=False,
-                    require_resuming=True,
-                )
-            except ValueError as exc:
-                raise OrchestrationRuntimeResumeBootstrapError(
-                    f"Missing runtime continuation checkpoint for generic resume: {exc}"
-                ) from exc
-            resume_anchor_agent = self._agent_type_for_runtime_node_key(
-                str(runtime_resume_checkpoint.get("node_key") or "")
-            )
-            if resume_anchor_agent is None:
-                raise OrchestrationRuntimeResumeBootstrapError(
-                    "Runtime continuation checkpoint cannot be mapped to a scheduled agent"
+                    script_gate.id,
                 )
 
-        return RuntimeResumeContext(
-            runtime_session=runtime_session,
-            script_gate=script_gate,
-            latest_script_decision=latest_decision,
-            script_resume_action=script_resume_action,
-            runtime_resume_checkpoint=runtime_resume_checkpoint,
-            resume_anchor_agent=resume_anchor_agent,
-        )
+            script_resume_action = ""
+            if (
+                latest_decision is not None
+                and runtime_session.status == WorkflowSessionStatus.RESUMING.value
+            ):
+                script_resume_action = str(latest_decision.action or "").strip().lower()
+
+            runtime_resume_checkpoint: Optional[Dict[str, Any]] = None
+            resume_anchor_agent: Optional[AgentType] = None
+            if (
+                runtime_session.status == WorkflowSessionStatus.RESUMING.value
+                and not script_resume_action
+            ):
+                try:
+                    runtime_resume_checkpoint = RuntimeSessionService.load_active_continuation_sync(
+                        db,
+                        runtime_session,
+                        expected_anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+                        require_decision_id=False,
+                        require_resuming=True,
+                    )
+                except ValueError as exc:
+                    raise OrchestrationRuntimeResumeBootstrapError(
+                        f"Missing runtime continuation checkpoint for generic resume: {exc}"
+                    ) from exc
+                if not isinstance(runtime_resume_checkpoint, dict):
+                    raise OrchestrationRuntimeResumeBootstrapError(
+                        "Missing runtime continuation checkpoint for generic resume"
+                    )
+                resume_anchor_agent = self._agent_type_for_runtime_node_key(
+                    str(runtime_resume_checkpoint.get("node_key") or "")
+                )
+                if resume_anchor_agent is None:
+                    raise OrchestrationRuntimeResumeBootstrapError(
+                        "Runtime continuation checkpoint cannot be mapped to a scheduled agent"
+                    )
+
+            return RuntimeResumeContext(
+                runtime_session_id=int(runtime_session.id),
+                runtime_session_status=str(runtime_session.status or ""),
+                runtime_input_payload=dict(runtime_session.input_payload or {}),
+                script_gate_id=(int(script_gate.id) if script_gate is not None else None),
+                latest_script_decision_exists=latest_decision is not None,
+                latest_script_decision_actor_type=(
+                    str(latest_decision.actor_type or "")
+                    if latest_decision is not None
+                    else ""
+                ),
+                script_resume_action=script_resume_action,
+                runtime_resume_checkpoint=runtime_resume_checkpoint,
+                resume_anchor_agent=resume_anchor_agent,
+            )
+        finally:
+            db.close()
 
     def load_authoritative_resume_task_specs(
         self,
         *,
-        db: Session,
-        runtime_session: Any,
+        runtime_session_id: int,
         resume_action: str,
     ) -> RuntimeResumeTaskSpecBundle:
-        """Load persisted continuation specs through RuntimeSessionService on the caller-owned current session."""
-        checkpoint = RuntimeSessionService.load_active_script_continuation_sync(
-            db,
-            runtime_session,
-            node_key="script",
-        )
+        """Load persisted continuation specs behind the persistence boundary."""
+        db = self._session_factory()
+        try:
+            runtime_session = self._require_runtime_session(db, runtime_session_id)
+            checkpoint = RuntimeSessionService.load_active_script_continuation_sync(
+                db,
+                runtime_session,
+                node_key="script",
+            )
+        finally:
+            db.close()
         (
             task_specs,
             conditional_task_specs,
@@ -295,7 +350,61 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             candidate_agents=list(candidate_agents),
         )
 
+    def consume_script_approval_continuation(
+        self,
+        *,
+        runtime_session_id: int,
+        task: AgentTaskReference,
+    ) -> None:
+        db = self._session_factory()
+        try:
+            runtime_session = self._require_runtime_session(db, runtime_session_id)
+            runtime_task = self._require_task(db, task)
+            RuntimeSessionService.consume_script_approval_continuation_sync(
+                db,
+                runtime_session,
+                task=runtime_task,
+            )
+        finally:
+            db.close()
+
     def start_runtime_attempt(
+        self,
+        *,
+        runtime_session_id: int,
+        task: AgentTaskReference,
+        current_agent_type: AgentType,
+        workflow_state_id: str,
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        conditional_task_specs: Dict[str, Dict[str, Any]],
+        candidate_agents: List[AgentType],
+        script_trigger_reason: str,
+        script_requested_by: str,
+        resume_anchor_agent: Optional[AgentType],
+        trigger_reason_override: Optional[str] = None,
+    ) -> RuntimeAttemptBootstrapResult:
+        db = self._session_factory()
+        try:
+            runtime_session = self._require_runtime_session(db, runtime_session_id)
+            runtime_task = self._require_task(db, task)
+            return self._start_runtime_attempt_sync(
+                db=db,
+                runtime_session=runtime_session,
+                task=runtime_task,
+                current_agent_type=current_agent_type,
+                workflow_state_id=workflow_state_id,
+                task_specs=task_specs,
+                conditional_task_specs=conditional_task_specs,
+                candidate_agents=candidate_agents,
+                script_trigger_reason=script_trigger_reason,
+                script_requested_by=script_requested_by,
+                resume_anchor_agent=resume_anchor_agent,
+                trigger_reason_override=trigger_reason_override,
+            )
+        finally:
+            db.close()
+
+    def _start_runtime_attempt_sync(
         self,
         *,
         db: Session,

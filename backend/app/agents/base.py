@@ -7,11 +7,19 @@ import time
 import logging
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Dict, Any, Optional, List, Callable, Tuple
 import re
-from sqlalchemy.orm import Session
 
-from ..models import Task, AgentType, AgentStatus
+from ..domain import (
+    AgentExecutionContractError,
+    AgentExecutionContractReason,
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from ..core.config import settings
 from ..events import EventKind
 from ..events.publisher import publish_state_event
@@ -76,7 +84,6 @@ class BaseAgent(ABC):
         self._wm_cache = None
         self.workflow_state_id: Optional[str] = None
         self.task_id: Optional[str] = None
-        self._task_db_id: Optional[int] = None
         self._max_iterations_hint: int = int(getattr(self, "max_iterations", 0) or 0)
         # 不在 Agent 上保存跨回合状态；仅在同轮内以局部变量传递控制信息
         
@@ -436,48 +443,60 @@ class BaseAgent(ABC):
             self.logger.error("Artifact write failed: %s (kind=%s stage=%s)", e, kind, stage, exc_info=True)
             return None
 
-    def _ensure_orchestration_report(self, output_data: Any) -> Any:
-        # Boundary reports are agent-owned protocol facts. Do not synthesize one here;
-        # OrchestrationProtocol must see and reject missing reports explicitly.
-        return output_data
+    @staticmethod
+    def _normalize_execution_result(
+        output_data: Mapping[str, object] | AgentExecutionResult,
+    ) -> AgentExecutionResult:
+        if isinstance(output_data, AgentExecutionResult):
+            return output_data
+        if not isinstance(output_data, Mapping):
+            raise AgentExecutionContractError(
+                reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+                field_path="output_data",
+                message="Agent implementation must return a JSON object or AgentExecutionResult",
+            )
+
+        normalized_output = dict(output_data)
+        explicit_report = normalized_output.pop("orchestration_report", None)
+        report_payload = None
+        if explicit_report is not None:
+            if not isinstance(explicit_report, Mapping):
+                raise AgentExecutionContractError(
+                    reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+                    field_path="orchestration_report",
+                    message="orchestration_report must be a JSON object",
+                )
+            report_payload = JsonObjectPayload.from_mapping(
+                explicit_report,
+                field_path="orchestration_report",
+            )
+        return AgentExecutionResult(
+            output_data=JsonObjectPayload.from_mapping(
+                normalized_output,
+                field_path="output_data",
+            ),
+            orchestration_report=report_payload,
+        )
     
     async def execute(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
-        execution_order: int = 0,
-    ) -> Dict[str, Any]:
-        """
-        Execute the agent with the given task and input data
-        
-        Args:
-            task: The task to execute
-            input_data: Input data for the agent
-            db: Database session
-            execution_order: Order of execution in the workflow
-            
-        Returns:
-            Dict containing the agent's output data
-        """
+        request: AgentExecutionRequest,
+    ) -> AgentExecutionResult:
+        """Execute one Agent request without persistence-layer inputs."""
+        if not isinstance(request, AgentExecutionRequest):
+            raise AgentExecutionContractError(
+                reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+                field_path="request",
+                message="expected AgentExecutionRequest",
+            )
+
+        task = request.task
+        input_data = request.input_data.to_dict()
+        execution_order = request.execution_order
         # 每次执行重置 WM 引用缓存，避免跨任务状态污染
         self.reset_iteration_memory_cache()
-        workflow_state_id = input_data.get("workflow_state_id")
-        if workflow_state_id:
-            wf_id_str = str(workflow_state_id)
-            self.workflow_state_id = wf_id_str
-        else:
-            self.workflow_state_id = None
-        task_identifier = getattr(task, "task_id", None) or getattr(task, "id", None)
-        if task_identifier is not None:
-            task_id_str = str(task_identifier)
-            self.task_id = task_id_str
-        else:
-            self.task_id = None
-        try:
-            self._task_db_id = int(getattr(task, "id", None)) if getattr(task, "id", None) is not None else None
-        except Exception:
-            self._task_db_id = None
+        self.workflow_state_id = request.workflow_state_id
+        self.task_id = task.task_id
 
         # Reset FC执行轨迹（避免跨任务泄露）
         try:
@@ -485,31 +504,6 @@ class BaseAgent(ABC):
         except Exception:
             self._fc_exec_trace = []
 
-        # Create execution state (local scope, transient)
-        def _to_jsonable(obj):
-            # Recursively convert objects to JSON-serializable structures
-            from pydantic import BaseModel as _PydanticBaseModel  # type: ignore
-            if obj is None:
-                return None
-            if isinstance(obj, (str, int, float, bool)):
-                return obj
-            if isinstance(obj, dict):
-                return {k: _to_jsonable(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple, set)):
-                return [_to_jsonable(v) for v in obj]
-            # Pydantic BaseModel (e.g., ToolOutput)
-            if isinstance(obj, _PydanticBaseModel):
-                try:
-                    return _to_jsonable(obj.model_dump())
-                except Exception:
-                    try:
-                        return _to_jsonable(obj.dict())
-                    except Exception:
-                        return str(obj)
-            # Fallback to __dict__ or string
-            return getattr(obj, "__dict__", str(obj))
-
-        sanitized_input = _to_jsonable(input_data)
         run_id = f"{self.agent_name}-{int(time.time()*1000)}"
         
         exec_state = ExecutionState(
@@ -517,7 +511,7 @@ class BaseAgent(ABC):
             agent_type=self.agent_type,
             agent_name=self.agent_name,
             execution_order=execution_order,
-            input_data=sanitized_input
+            input_data=input_data
         )
         
         # 将当前任务挂到实例上，便于进度上报和子类访问
@@ -535,12 +529,11 @@ class BaseAgent(ABC):
             await publish_state_event(
                 status="running",
                 extra_payload={
-                    "input_data": sanitized_input,
+                    "input_data": input_data,
                     "timeout_seconds": self.timeout_seconds,
                     "max_retries": self.max_retries,
                 },
                 task_id=self.task_id,
-                task_db_id=self._task_db_id,
                 workflow_state_id=self.workflow_state_id,
                 agent_type=self.agent_type.value,
                 agent_name=self.agent_name,
@@ -556,12 +549,11 @@ class BaseAgent(ABC):
             self.logger.info(f"Starting {self.agent_name} for task {task.task_id}")
 
             # Execute with timeout
-            output_data = await asyncio.wait_for(
-                self._execute_impl(task, input_data, db),
+            raw_output = await asyncio.wait_for(
+                self._execute_impl(request),
                 timeout=self.timeout_seconds
             )
-            output_data = self._ensure_orchestration_report(output_data)
-            sanitized_output = _to_jsonable(output_data)
+            result = self._normalize_execution_result(raw_output)
 
             # Complete execution (in-memory)
             exec_state.finish(status="completed")
@@ -569,7 +561,7 @@ class BaseAgent(ABC):
             await publish_state_event(
                 status="completed",
                 extra_payload={
-                    "output_data": sanitized_output, 
+                    "output_data": result.to_payload(),
                     "duration": exec_state.duration,
                     "metrics": {
                         "tokens_used": exec_state.tokens_used,
@@ -577,7 +569,6 @@ class BaseAgent(ABC):
                     }
                 },
                 task_id=self.task_id,
-                task_db_id=self._task_db_id,
                 workflow_state_id=self.workflow_state_id,
                 agent_type=self.agent_type.value,
                 agent_name=self.agent_name,
@@ -586,7 +577,7 @@ class BaseAgent(ABC):
             )
             await self._send_progress_update("completed")
             self.logger.info(f"Completed {self.agent_name} for task {task.task_id}")
-            return output_data
+            return result
 
         except asyncio.TimeoutError:
             error_msg = f"Agent {self.agent_name} timed out after {self.timeout_seconds} seconds"
@@ -596,7 +587,6 @@ class BaseAgent(ABC):
                 status="failed",
                 error=error_msg,
                 task_id=self.task_id,
-                task_db_id=self._task_db_id,
                 workflow_state_id=self.workflow_state_id,
                 agent_type=self.agent_type.value,
                 agent_name=self.agent_name,
@@ -606,7 +596,23 @@ class BaseAgent(ABC):
             await self._send_progress_update("failed")
             self.logger.error(error_msg)
             raise AgentTimeoutError(error_msg)
-            
+
+        except AgentExecutionContractError as exc:
+            exec_state.finish(status="failed", error=str(exc))
+            await publish_state_event(
+                status="failed",
+                error=str(exc),
+                task_id=self.task_id,
+                workflow_state_id=self.workflow_state_id,
+                agent_type=self.agent_type.value,
+                agent_name=self.agent_name,
+                execution_order=exec_state.execution_order,
+                execution_id=exec_state.id,
+            )
+            await self._send_progress_update("failed")
+            self.logger.error("Agent execution contract failed: %s", exc)
+            raise
+
         except Exception as e:
             error_msg = f"Agent {self.agent_name} failed: {str(e)}"
             exec_state.finish(status="failed", error=error_msg)
@@ -615,7 +621,6 @@ class BaseAgent(ABC):
                 status="failed",
                 error=error_msg,
                 task_id=self.task_id,
-                task_db_id=self._task_db_id,
                 workflow_state_id=self.workflow_state_id,
                 agent_type=self.agent_type.value,
                 agent_name=self.agent_name,
@@ -641,21 +646,9 @@ class BaseAgent(ABC):
     @abstractmethod
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
-    ) -> Dict[str, Any]:
-        """
-        Internal implementation of agent execution
-        
-        Args:
-            task: The task to execute
-            input_data: Input data for the agent
-            db: Database session
-            
-        Returns:
-            Dict containing the agent's output data
-        """
+        request: AgentExecutionRequest,
+    ) -> Mapping[str, object] | AgentExecutionResult:
+        """Implement one database-independent Agent execution."""
         pass
     
     async def _send_progress_update(
@@ -673,7 +666,6 @@ class BaseAgent(ABC):
         self,
         percentage: int,
         substep: str = None,
-        db: Session = None,
     ):
         """Update execution progress"""
         exec_state = execution_context_var.get()
@@ -1595,9 +1587,8 @@ class BaseAgent(ABC):
     
     async def _handle_retry(
         self,
-        task: Task,
+        task: AgentTaskReference,
         error: Exception,
-        db: Session = None
     ) -> bool:
         """Handle retry logic for failed executions (default: no retry)."""
         return False

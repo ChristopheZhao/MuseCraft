@@ -4,7 +4,7 @@ from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.video_composer import VideoComposerAgent
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.video_composer_execution_contract import (
     build_video_composer_execution_contract,
     get_video_composer_compose_mode,

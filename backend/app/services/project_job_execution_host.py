@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from ..core.story_plan import ProjectOperationState, project_state_repository
+from ..domain import AgentType
 from ..events.provider import reset_event_bus
 from .project_job_contract import is_project_plan_contract
+from .agent_execution_boundary import build_agent_execution_request
 
 
 ProjectJobHandler = Callable[..., Awaitable[Dict[str, Any]]]
@@ -50,12 +52,15 @@ async def _run_project_plan_handler(
     planner_llms = policy_manager.build_llms_for_agent("series_planner")
 
     planner = SeriesPlannerAgent.create_default(llms=planner_llms)
-    result = await planner.execute(
-        task=task,
-        input_data=input_data,
-        db=db,
-        execution_order=execution_order,
+    execution_result = await planner.execute(
+        build_agent_execution_request(
+            task=task,
+            agent_type=AgentType.SERIES_PLANNER,
+            input_data=input_data,
+            execution_order=execution_order,
+        )
     )
+    result = execution_result.output_data.to_dict()
 
     try:
         if project_id:

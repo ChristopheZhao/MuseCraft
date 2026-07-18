@@ -20,7 +20,8 @@ import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from ..models import Task, AgentType, TaskStatus, AgentStatus
+from ..domain import AgentStatus, AgentType, TaskStatus
+from ..models import Task
 from ..core.config import settings
 from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
 

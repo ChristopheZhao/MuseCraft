@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict
 
 from ..core.constants import GenerationMode
+from ..domain import AgentType
 from ..events.provider import reset_event_bus
 from .execution_host_lease import (
     AttemptLeaseKeepaliveController,
@@ -22,6 +23,7 @@ from .execution_host_lease import (
     reset_current_execution_host_lease_context,
     set_current_execution_host_lease_context,
 )
+from .agent_execution_boundary import build_agent_execution_request
 
 
 def prepare_queued_execution_host(*, logger: logging.Logger | None = None) -> None:
@@ -108,12 +110,14 @@ def run_generation_in_host(
             orchestrator = OrchestratorAgent.create_default()
             result = loop.run_until_complete(
                 orchestrator.execute(
-                    task=task,
-                    input_data=input_data,
-                    db=db,
-                    execution_order=execution_order,
+                    build_agent_execution_request(
+                        task=task,
+                        agent_type=AgentType.ORCHESTRATOR,
+                        input_data=input_data,
+                        execution_order=execution_order,
+                    )
                 )
-            )
+            ).output_data.to_dict()
         elif mode == GenerationMode.PROJECT:
             from ..agents.episode_orchestrator import EpisodeOrchestratorAgent
 
@@ -126,12 +130,14 @@ def run_generation_in_host(
             orchestrator = EpisodeOrchestratorAgent.create_default()
             result = loop.run_until_complete(
                 orchestrator.execute(
-                    task=task,
-                    input_data=input_data,
-                    db=db,
-                    execution_order=execution_order,
+                    build_agent_execution_request(
+                        task=task,
+                        agent_type=AgentType.EPISODE_ORCHESTRATOR,
+                        input_data=input_data,
+                        execution_order=execution_order,
+                    )
                 )
-            )
+            ).output_data.to_dict()
         else:
             raise ValueError(f"Unsupported generation mode for queued execution host: {mode.value}")
         logger.info("Queued execution host completed with result: %s", result)

@@ -12,7 +12,7 @@ from app.agents.memory.storage.in_memory import InMemoryShortTermStore
 from app.agents.quality_checker import QualityCheckerAgent
 from app.agents.utils.memory_helpers import write_shared_fact
 from app.core.config import settings
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.context_assembler import ContextContractAssembler
 from app.services.character_identity_contract import normalize_character_identity_contract
 from app.services.scene_info_reference_service import persist_scene_info_ref

@@ -9,7 +9,7 @@ from ..agents.adapters.state.mas_state import build_mas_state_view
 from ..agents.utils.memory_helpers import get_mas_working_memory
 from ..events.models import EventKind
 from ..events.publisher import publish_event
-from ..models import Task
+from ..domain import AgentTaskReference
 from .memory_provider import MemoryServices
 from .role_continuity_read_model import (
     build_role_continuity_read_model_from_quality,
@@ -207,7 +207,7 @@ class WorkflowCompletionAdapter:
     async def publish_completed(
         self,
         *,
-        task: Task,
+        task: AgentTaskReference,
         workflow_id: str,
         persistence_payload: Optional[Dict[str, Any]] = None,
         results: Optional[Dict[str, Any]] = None,
@@ -245,7 +245,6 @@ class WorkflowCompletionAdapter:
             kind=EventKind.STATE,
             payload=payload,
             task_id=str(task.task_id),
-            task_db_id=task.id,
             workflow_state_id=str(workflow_id),
             agent_name=self._owner_agent_name,
         )
@@ -260,7 +259,7 @@ class WorkflowCompletionAdapter:
     async def publish_failed(
         self,
         *,
-        task: Task,
+        task: AgentTaskReference,
         workflow_id: str,
         error_message: str,
     ) -> None:
@@ -275,7 +274,6 @@ class WorkflowCompletionAdapter:
                 "error": str(error_message or ""),
             },
             task_id=str(task.task_id),
-            task_db_id=task.id,
             workflow_state_id=str(workflow_id),
             agent_name=self._owner_agent_name,
         )

@@ -55,7 +55,7 @@ async def upload_file(
             task = task_result.scalar_one_or_none()
             
             if task:
-                from ....models import ResourceType
+                from ....domain import ResourceType
                 
                 # Determine resource type
                 resource_type = ResourceType.IMAGE

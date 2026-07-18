@@ -5,26 +5,7 @@ from types import SimpleNamespace
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.tools.ai_services.service_interfaces import LLMServiceInterface, ServiceProvider
 from app.agents.utils import llm_policy as llm_policy_module
-
-
-class _StubTask:
-    def __init__(self, task_id: str):
-        self.task_id = task_id
-        self.status = "pending"
-
-    def update_progress(self, *_args, **_kwargs):
-        return None
-
-
-class _StubDB:
-    def add(self, *_args, **_kwargs):
-        return None
-
-    def commit(self, *_args, **_kwargs):
-        return None
-
-    def refresh(self, *_args, **_kwargs):
-        return None
+from app.domain import AgentExecutionRequest, AgentTaskReference, JsonObjectPayload
 
 
 class _ProviderConfig:
@@ -213,15 +194,24 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
 
     result = asyncio.run(
         agent._execute_impl(
-            _StubTask("concept-proof-task"),
-            {
-                "user_prompt": "制作猴子捞月动画短片",
-                "duration": 10,
-                "aspect_ratio": "16:9",
-                "workflow_state_id": "wf-proof",
-                "concept_mode": "episode",
-            },
-            _StubDB(),
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id="concept-proof-task",
+                    task_type="video_generation",
+                ),
+                agent_type="concept_planner",
+                workflow_state_id="wf-proof",
+                input_data=JsonObjectPayload.from_mapping(
+                    {
+                        "user_prompt": "制作猴子捞月动画短片",
+                        "duration": 10,
+                        "aspect_ratio": "16:9",
+                        "workflow_state_id": "wf-proof",
+                        "concept_mode": "episode",
+                    },
+                    field_path="input_data",
+                ),
+            )
         )
     )
 

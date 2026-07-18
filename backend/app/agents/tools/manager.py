@@ -24,7 +24,7 @@ import os
 from ..tools.tool_registry import get_tool_registry
 from ..tools.agent_tool_allocation import get_agent_tools
 from ..tools.base_tool import BaseTool
-from ...models import AgentType
+from ...domain import AgentType
 
 
 # ---------- Data contracts ----------

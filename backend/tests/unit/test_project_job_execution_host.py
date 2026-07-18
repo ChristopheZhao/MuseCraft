@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.story_plan import ProjectOperationState, ProjectState, StoryPlan, project_state_repository
+from app.domain import AgentExecutionResult, JsonObjectPayload
 from app.services import project_job_execution_host
 from app.services.project_job_contract import (
     PROJECT_JOB_HANDLER_PLAN_PROJECT,
@@ -33,11 +34,16 @@ def test_run_project_job_in_host_executes_project_planning_handler(monkeypatch):
     host_events = {}
 
     class _FakePlanner:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            host_events["task_id"] = task.task_id
-            host_events["input_data"] = dict(input_data)
-            host_events["execution_order"] = execution_order
-            return {"status": "completed", "story_plan": {"project_id": project_id}}
+        async def execute(self, request):
+            host_events["task_id"] = request.task.task_id
+            host_events["input_data"] = request.input_data.to_dict()
+            host_events["execution_order"] = request.execution_order
+            return AgentExecutionResult(
+                output_data=JsonObjectPayload.from_mapping(
+                    {"status": "completed", "story_plan": {"project_id": project_id}},
+                    field_path="test.output_data",
+                )
+            )
 
     class _FakePolicyManager:
         def __init__(self, _path):
@@ -73,6 +79,9 @@ def test_run_project_job_in_host_executes_project_planning_handler(monkeypatch):
     task = SimpleNamespace(
         id=1,
         task_id="project-job-host-task",
+        task_type="project_workflow",
+        user_id=None,
+        session_id=None,
         update_progress=lambda message, progress: progress_calls.append((message, progress)),
     )
     db = SimpleNamespace(commit=lambda: None)

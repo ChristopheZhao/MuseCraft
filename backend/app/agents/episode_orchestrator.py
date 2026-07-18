@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from .orchestrator import OrchestratorAgent
-from ..models import Task, AgentType, TaskStatus, TaskType
+from ..domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    EpisodeWorkflowExecutionPort,
+    JsonObjectPayload,
+)
 from ..core.config import settings
 from ..core.story_plan import (
     EpisodePlan,
@@ -27,17 +30,27 @@ class EpisodeOrchestratorAgent(BaseAgent):
 
     @classmethod
     def create_default(cls) -> "EpisodeOrchestratorAgent":
-        return cls(memory_services=build_memory_services())
+        from .orchestrator import OrchestratorAgent
+        from ..services.episode_workflow_execution import PersistentEpisodeWorkflowExecutor
+
+        memory_services = build_memory_services()
+        orchestrator = OrchestratorAgent(memory_services=memory_services)
+        return cls(
+            memory_services=memory_services,
+            episode_executor=PersistentEpisodeWorkflowExecutor(orchestrator=orchestrator),
+        )
 
     def __init__(
         self,
+        *,
+        episode_executor: EpisodeWorkflowExecutionPort,
         memory_services: Optional[MemoryServices] = None,
         llms=None,
-        orchestrator: Optional[OrchestratorAgent] = None,
     ) -> None:
         if memory_services is None:
             raise ValueError("memory_services is required for EpisodeOrchestratorAgent")
         self._memory_services = memory_services
+        self._episode_executor = episode_executor
         super().__init__(
             agent_type=AgentType.EPISODE_ORCHESTRATOR,
             agent_name="episode_orchestrator",
@@ -47,25 +60,18 @@ class EpisodeOrchestratorAgent(BaseAgent):
             llms=llms,
             memory_services=self._memory_services,
         )
-        self._base_orchestrator = orchestrator or OrchestratorAgent(memory_services=self._memory_services)
-
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
+        task = request.task
+        input_data = request.input_data.to_dict()
         self._validate_input(input_data, ["project_id"])
 
         project_id = input_data["project_id"]
         project_state = project_state_repository.get(project_id)
         if not project_state:
             raise AgentError(f"Project state not found: {project_id}")
-
-        task.error_message = None
-        task.status = TaskStatus.IN_PROGRESS.value
-        task.update_progress("Episode orchestration started", 0)
-        db.commit()
 
         self._sync_project_foundation(project_state)
         await self._ensure_project_character_reference_images(project_state, input_data)
@@ -119,38 +125,35 @@ class EpisodeOrchestratorAgent(BaseAgent):
                 )
                 continue
 
-            await self._update_progress(int((idx - 1) / total * 90), f"Generating episode {idx}/{total}", db)
-            task.update_progress(f"Generating episode {idx}/{total}", int((idx - 1) / total * 90))
-            db.commit()
+            await self._update_progress(
+                int((idx - 1) / total * 90),
+                f"Generating episode {idx}/{total}",
+            )
 
             episode_result = await self._run_single_episode(
                 base_task=task,
                 episode=episode,
                 project_state=project_state,
-                db=db,
+                execution_order=idx,
             )
             results.append(episode_result)
 
-            await self._update_progress(int(idx / total * 90), f"Episode {idx}/{total} completed", db)
-            task.update_progress(f"Episode {idx}/{total} completed", int(idx / total * 90))
-            db.commit()
+            await self._update_progress(
+                int(idx / total * 90),
+                f"Episode {idx}/{total} completed",
+            )
 
         project_state_repository.save(project_state)
-        db.commit()
+        await self._update_progress(100, "Episode orchestration finished")
 
-        await self._update_progress(100, "Episode orchestration finished", db)
-        task.update_progress("Episode orchestration finished", 100)
-
-        if any(res.get("status") == EpisodeExecutionStatus.FAILED.value for res in results):
-            task.status = TaskStatus.FAILED.value
-            task.error_message = "One or more episodes failed during orchestration"
-        else:
-            task.status = TaskStatus.COMPLETED.value
-            task.error_message = None
-        db.commit()
+        status = (
+            "failed"
+            if any(res.get("status") == EpisodeExecutionStatus.FAILED.value for res in results)
+            else "completed"
+        )
 
         return {
-            "status": task.status,
+            "status": status,
             "project_id": project_id,
             "episodes": results,
             "total_completed": project_state.completed_episodes,
@@ -238,10 +241,10 @@ class EpisodeOrchestratorAgent(BaseAgent):
 
     async def _run_single_episode(
         self,
-        base_task: Task,
+        base_task: AgentTaskReference,
         episode: EpisodePlan,
         project_state: ProjectState,
-        db: Session,
+        execution_order: int,
     ) -> Dict[str, Any]:
         runtime_state = project_state.ensure_runtime_state(episode.episode_id)
         runtime_state.status = EpisodeExecutionStatus.GENERATING
@@ -252,34 +255,24 @@ class EpisodeOrchestratorAgent(BaseAgent):
             project_state=project_state,
         )
 
-        episode_task = Task(
-            title=f"Episode {episode.sequence_index + 1} workflow",
-            description=f"Project {project_state.project_id} episode {episode.sequence_index + 1}",
-            task_type=TaskType.VIDEO_GENERATION,
-            status=TaskStatus.PENDING.value,
-            session_id=base_task.session_id,
-            user_id=base_task.user_id,
-            input_parameters=episode_payload.copy(),
-        )
-        db.add(episode_task)
-        db.commit()
-        db.refresh(episode_task)
-
         try:
-            if hasattr(self._base_orchestrator, "reset_repeat_counters"):
-                self._base_orchestrator.reset_repeat_counters()
-            orchestrator_result = await self._base_orchestrator.execute(
-                task=episode_task,
-                input_data=episode_payload,
-                db=db,
-                execution_order=1,
+            receipt = await self._episode_executor.execute_episode(
+                parent_task=base_task,
+                title=f"Episode {episode.sequence_index + 1} workflow",
+                description=(
+                    f"Project {project_state.project_id} "
+                    f"episode {episode.sequence_index + 1}"
+                ),
+                input_data=JsonObjectPayload.from_mapping(
+                    episode_payload,
+                    field_path=f"episode.{episode.episode_id}.input_data",
+                ),
+                execution_order=execution_order,
             )
+            orchestrator_result = receipt.result.output_data.to_dict()
         except Exception as exc:  # noqa: BLE001 - preserve MAS errors
             runtime_state.status = EpisodeExecutionStatus.FAILED
             runtime_state.error = str(exc)
-            episode_task.status = TaskStatus.FAILED.value
-            episode_task.error_message = str(exc)
-            db.commit()
             project_state_repository.save(project_state)
             return {
                 "episode_id": episode.episode_id,
@@ -290,8 +283,6 @@ class EpisodeOrchestratorAgent(BaseAgent):
         runtime_state.status = EpisodeExecutionStatus.COMPLETED
         runtime_state.workflow_task_id = orchestrator_result.get("workflow_state_id")
         runtime_state.output_assets = self._extract_episode_assets(orchestrator_result)
-        episode_task.status = TaskStatus.COMPLETED.value
-        db.commit()
 
         project_state.mark_episode_runtime_status(episode.episode_id, EpisodeExecutionStatus.COMPLETED)
         project_state_repository.save(project_state)
@@ -301,7 +292,7 @@ class EpisodeOrchestratorAgent(BaseAgent):
             "status": EpisodeExecutionStatus.COMPLETED.value,
             "assets": runtime_state.output_assets,
             "workflow_state_id": runtime_state.workflow_task_id,
-            "task_id": episode_task.task_id,
+            "task_id": receipt.task_id,
         }
 
     def _build_episode_payload(

@@ -5,7 +5,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from app.models.task import TaskType
+from app.domain import TaskType
 
 
 class _DummyMonitoringService:
