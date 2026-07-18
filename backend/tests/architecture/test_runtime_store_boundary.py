@@ -8,6 +8,11 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 SERVICES_ROOT = BACKEND_ROOT / "app" / "services"
 DOMAIN_CONTRACT = BACKEND_ROOT / "app" / "domain" / "runtime_store.py"
+RUNTIME_READ_MODEL_SERVICE = BACKEND_ROOT / "app" / "services" / "runtime_read_model_service.py"
+RUNTIME_SESSION_CONTROL_PLANE = (
+    BACKEND_ROOT / "app" / "services" / "runtime_session_control_plane.py"
+)
+RUNTIME_RECONCILER = BACKEND_ROOT / "app" / "services" / "runtime_reconciler.py"
 
 EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT = {
     "context_assembler.py",
@@ -53,6 +58,21 @@ def test_runtime_store_domain_contract_has_no_persistence_or_untyped_escape_hatc
     assert "sqlalchemy.orm import Session" not in source
     assert "Any" not in source
     assert "dict[str," not in source
+
+
+def test_runtime_projection_and_session_policy_are_database_independent():
+    for path in {
+        RUNTIME_READ_MODEL_SERVICE,
+        RUNTIME_SESSION_CONTROL_PLANE,
+        RUNTIME_RECONCILER,
+    }:
+        imports = _imports(path)
+        source = _source(path)
+        assert not any(
+            module == "sqlalchemy" or module.startswith("sqlalchemy.") for module in imports
+        )
+        assert not any(module == "models" or module.endswith(".models") for module in imports)
+        assert "RuntimeSessionService" not in source
 
 
 def test_runtime_control_plane_sql_debt_matches_exact_slice_d_ratchet():
@@ -121,6 +141,82 @@ def test_runtime_store_exposes_required_atomic_capabilities():
     }
     assert query_methods == {"load_for_task"}
 
+    read_store = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeReadStore"
+    )
+    read_store_methods = {
+        node.name
+        for node in read_store.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert read_store_methods == {
+        "load_session",
+        "load_latest_session_for_task",
+        "load_nodes",
+        "load_attempt",
+        "load_latest_gate",
+        "load_latest_gate_decision",
+    }
+
+    session_store = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeSessionStore"
+    )
+    session_store_methods = {
+        node.name
+        for node in session_store.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert session_store_methods == {"transition_session"}
+
+    maintenance_store = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeMaintenanceStore"
+    )
+    maintenance_store_methods = {
+        node.name
+        for node in maintenance_store.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert maintenance_store_methods == {"load_reconcilable_sessions"}
+
+
+def test_production_runtime_callers_do_not_use_legacy_projection_or_terminal_mutators():
+    forbidden_calls = {
+        "build_runtime_view_for_task",
+        "build_runtime_view_for_task_sync",
+        "get_resume_control_sync",
+        "mark_session_running_sync",
+        "mark_session_resuming_sync",
+        "mark_session_completed_sync",
+        "mark_session_failed_sync",
+        "mark_session_cancelled_sync",
+        "mark_session_cancelled_for_task",
+        "reconcile_irrecoverable_quick_runtime_sync",
+        "reconcile_irrecoverable_quick_runtimes_sync",
+    }
+    production_roots = [BACKEND_ROOT / "app" / "api", BACKEND_ROOT / "app" / "services"]
+    violations: list[str] = []
+    for root in production_roots:
+        for path in root.rglob("*.py"):
+            if path.name == "runtime_session_service.py":
+                continue
+            tree = ast.parse(_source(path), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in forbidden_calls:
+                        violations.append(
+                            f"{path.relative_to(BACKEND_ROOT)}:{node.lineno}:{node.func.attr}"
+                        )
+    assert violations == []
+
+
+def test_runtime_store_keeps_attempt_and_gate_capability_ports_narrow():
+    tree = ast.parse(_source(DOMAIN_CONTRACT), filename=str(DOMAIN_CONTRACT))
     attempt_protocol = next(
         node
         for node in tree.body

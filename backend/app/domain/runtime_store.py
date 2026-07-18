@@ -57,6 +57,7 @@ class RuntimeStoreError(RuntimeError):
 class RuntimeSessionRecord:
     session_id: int
     task_id: str
+    task_status: TaskStatus
     mode: str
     status: WorkflowSessionStatus
     project_id: str | None = None
@@ -68,10 +69,14 @@ class RuntimeSessionRecord:
     gate_policy: JsonObjectPayload = field(default_factory=JsonObjectPayload.empty)
     summary_output: JsonObjectPayload = field(default_factory=JsonObjectPayload.empty)
     error_message: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_id(self.session_id, field_name="session_id")
         _require_text(self.task_id, field_name="task_id")
+        if not isinstance(self.task_status, TaskStatus):
+            raise ValueError("task_status must be TaskStatus")
         _require_text(self.mode, field_name="mode")
         if not isinstance(self.status, WorkflowSessionStatus):
             raise ValueError("status must be WorkflowSessionStatus")
@@ -133,6 +138,8 @@ class RuntimeGateRecord:
     diagnostics: tuple[JsonObjectPayload, ...] = ()
     allowed_actions: tuple[str, ...] = ()
     recommended_action: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +154,8 @@ class RuntimeGateDecisionRecord:
     feedback_text: str | None = None
     structured_constraints: JsonObjectPayload = field(default_factory=JsonObjectPayload.empty)
     invalidation_scope: str = "node"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +182,7 @@ class RuntimeTaskTransition:
     progress_step: str | None = None
     progress_percentage: int | None = None
     error_message: str | None = None
+    clear_error_message: bool = False
     requires_human_review: bool | None = None
 
 
@@ -381,11 +391,33 @@ class RuntimeSessionTransitionCommand:
     session_id: int
     expected_statuses: tuple[WorkflowSessionStatus, ...]
     target_status: WorkflowSessionStatus
-    current_node_key: str | None = None
-    current_attempt_id: int | None = None
+    expected_current_node_key: str | None
+    expected_current_attempt_id: int | None
+    target_current_node_key: str | None
+    target_current_attempt_id: int | None
+    node_transitions: tuple[RuntimeSessionNodeTransition, ...] = ()
+    attempt_transition: RuntimeSessionAttemptTransition | None = None
     summary_output: JsonObjectPayload | None = None
     error_message: str | None = None
+    clear_error_message: bool = False
     task_transition: RuntimeTaskTransition | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSessionNodeTransition:
+    node_key: str
+    expected_status: WorkflowNodeStatus
+    target_status: WorkflowNodeStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSessionAttemptTransition:
+    attempt_id: int
+    expected_status: WorkflowAttemptStatus
+    target_status: WorkflowAttemptStatus
+    clear_lease: bool
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,7 +441,54 @@ class RuntimeReadModel:
     nodes: tuple[RuntimeNodeRecord, ...]
     active_gate: RuntimeGateRecord | None
     latest_decision: RuntimeGateDecisionRecord | None
-    resume_control: JsonObjectPayload
+    resume_control: JsonObjectPayload | None
+
+
+@runtime_checkable
+class RuntimeReadStore(Protocol):
+    """Read-only access to immutable committed runtime records."""
+
+    def load_session(self, session_id: int) -> RuntimeSessionRecord | None:
+        ...
+
+    def load_latest_session_for_task(self, task_id: str) -> RuntimeSessionRecord | None:
+        ...
+
+    def load_nodes(self, session_id: int) -> tuple[RuntimeNodeRecord, ...]:
+        ...
+
+    def load_attempt(self, session_id: int, attempt_id: int) -> RuntimeAttemptRecord | None:
+        ...
+
+    def load_latest_gate(
+        self, session_id: int, node_key: str | None = None
+    ) -> RuntimeGateRecord | None:
+        ...
+
+    def load_latest_gate_decision(self, gate_id: int) -> RuntimeGateDecisionRecord | None:
+        ...
+
+
+@runtime_checkable
+class RuntimeSessionStore(RuntimeReadStore, Protocol):
+    """Atomic session-terminal transition capabilities."""
+
+    def transition_session(self, command: RuntimeSessionTransitionCommand) -> RuntimeSessionRecord:
+        ...
+
+
+@runtime_checkable
+class RuntimeMaintenanceStore(RuntimeSessionStore, Protocol):
+    """Bounded candidate access for explicit control-plane maintenance."""
+
+    def load_reconcilable_sessions(
+        self,
+        *,
+        mode: str,
+        statuses: tuple[WorkflowSessionStatus, ...],
+        limit: int,
+    ) -> tuple[RuntimeSessionRecord, ...]:
+        ...
 
 
 @runtime_checkable

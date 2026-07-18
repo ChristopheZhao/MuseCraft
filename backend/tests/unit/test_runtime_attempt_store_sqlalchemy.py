@@ -15,6 +15,8 @@ from app.domain import (
     RuntimeAttemptStore,
     RuntimeContinuationBindCommand,
     RuntimeGateStore,
+    RuntimeReadModelQuery,
+    RuntimeReadStore,
     RuntimeStoreError,
     RuntimeStoreReason,
     RuntimeTaskTransition,
@@ -37,6 +39,12 @@ from app.models import (
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from app.services.runtime_gate_control_plane import RuntimeGateControlPlane
+from app.services.runtime_read_model_service import (
+    RuntimeReadModelPresenter,
+    RuntimeReadModelService,
+)
+from app.services.runtime_reconciler import RuntimeReconciler
+from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
 
@@ -128,7 +136,9 @@ def test_attempt_store_maps_stable_task_identity_and_strict_records(runtime_db):
     assert record is not None
     assert record.task_id == "public-task-1"
     assert record.status is WorkflowSessionStatus.QUEUED
+    assert record.task_status is TaskStatus.PENDING
     assert isinstance(store, RuntimeAttemptStore)
+    assert isinstance(store, RuntimeReadStore)
 
 
 def test_attempt_store_rejects_corrupt_persisted_status(runtime_db):
@@ -608,3 +618,165 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
     assert deliverable.is_approved is True
     assert task.requires_human_review is False
     assert task.progress_percentage == 40
+
+
+def test_runtime_read_model_is_immutable_and_preserves_public_projection(runtime_db):
+    db, _ = runtime_db
+    _, session, _ = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        conditional_task_specs={},
+        candidate_agents=[AgentType.IMAGE_GENERATOR],
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        node_key="image",
+        attempt_id=attempt.attempt_id,
+    )
+    RuntimeAttemptControlPlane(store).bind_continuation(
+        session_id=session.id,
+        attempt_id=attempt.attempt_id,
+        continuation_checkpoint=JsonObjectPayload.from_mapping(
+            checkpoint,
+            field_path="test.runtime_checkpoint",
+        ),
+    )
+    db.commit()
+
+    query = RuntimeReadModelService(store)
+    model = query.load_for_task("public-task-1")
+
+    assert isinstance(query, RuntimeReadModelQuery)
+    assert model is not None
+    assert model.session.session_id == session.id
+    assert model.resume_control is not None
+    assert model.resume_control.to_dict() == {
+        "state": "resume_available",
+        "can_resume": True,
+        "reason_code": "checkpoint_available",
+    }
+    payload = RuntimeReadModelPresenter.to_payload(model).to_dict()
+    assert payload["task_id"] == "public-task-1"
+    assert "task_db_id" not in payload
+    assert payload["nodes"][0]["node_key"] == "image"
+
+
+def test_session_control_plane_resumes_with_explicit_attempt_and_node_outcomes(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        conditional_task_specs={},
+        candidate_agents=[AgentType.IMAGE_GENERATOR],
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        node_key="image",
+        attempt_id=attempt.attempt_id,
+    )
+    RuntimeAttemptControlPlane(store).bind_continuation(
+        session_id=session.id,
+        attempt_id=attempt.attempt_id,
+        continuation_checkpoint=JsonObjectPayload.from_mapping(
+            checkpoint,
+            field_path="test.resume_checkpoint",
+        ),
+    )
+    db.commit()
+
+    result = RuntimeSessionControlPlane(store).mark_resuming(session.id)
+    db.commit()
+    db.refresh(task)
+    db.refresh(session)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert result.status is WorkflowSessionStatus.RESUMING
+    assert session.status == WorkflowSessionStatus.RESUMING.value
+    assert node.status == WorkflowNodeStatus.STALE.value
+    assert persisted_attempt.status == WorkflowAttemptStatus.ABORTED.value
+    assert persisted_attempt.lease_token is None
+    assert task.status == TaskStatus.IN_PROGRESS.value
+
+
+def test_session_control_plane_completion_closes_running_attempt_and_nodes(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    db.commit()
+
+    result = RuntimeSessionControlPlane(store).mark_completed(
+        session.id,
+        summary_output=JsonObjectPayload.from_mapping(
+            {"final_video_url": "https://example.com/final.mp4"},
+            field_path="test.runtime_summary",
+        ),
+    )
+    db.commit()
+    db.refresh(task)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert result.status is WorkflowSessionStatus.COMPLETED
+    assert result.summary_output.to_dict()["final_video_url"].endswith("final.mp4")
+    assert node.status == WorkflowNodeStatus.COMPLETED.value
+    assert persisted_attempt.status == WorkflowAttemptStatus.SUCCEEDED.value
+    assert task.status == TaskStatus.COMPLETED.value
+    assert task.progress_percentage == 100
+
+
+def test_session_control_plane_failure_invalidates_live_attempt_lease(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    RuntimeAttemptControlPlane(
+        store,
+        clock=lambda: datetime(2026, 7, 19, 1, 0, tzinfo=timezone.utc),
+        token_factory=lambda: "runtime-lease-token",
+    ).grant_lease(
+        session_id=session.id,
+        attempt_id=attempt.attempt_id,
+        lease_owner="worker-1",
+        lease_timeout_seconds=120,
+    )
+    db.commit()
+
+    RuntimeSessionControlPlane(store).mark_failed(
+        session.id,
+        error_message="provider failed",
+    )
+    db.commit()
+    db.refresh(task)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert persisted_attempt.status == WorkflowAttemptStatus.FAILED.value
+    assert persisted_attempt.error_code == "runtime_session_failed"
+    assert persisted_attempt.lease_token is None
+    assert node.status == WorkflowNodeStatus.FAILED.value
+    assert task.status == TaskStatus.FAILED.value
+    assert task.error_message == "provider failed"
+
+
+def test_runtime_reconciler_fails_only_missing_checkpoint_candidates(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    db.commit()
+
+    summary = RuntimeReconciler(store).reconcile_irrecoverable_quick_runtimes(limit=10)
+    db.commit()
+    db.refresh(task)
+    db.refresh(session)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert summary.to_dict() == {"inspected": 1, "failed": 1, "skipped": 0}
+    assert session.status == WorkflowSessionStatus.FAILED.value
+    assert node.status == WorkflowNodeStatus.FAILED.value
+    assert persisted_attempt.status == WorkflowAttemptStatus.FAILED.value
+    assert task.status == TaskStatus.FAILED.value
+    assert "continuation checkpoint is missing" in task.error_message

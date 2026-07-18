@@ -25,6 +25,7 @@ from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import clear_published_deliverable_ref
 from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from .runtime_gate_control_plane import RuntimeGateControlPlane
+from .runtime_session_control_plane import RuntimeSessionControlPlane
 from .runtime_session_service import RuntimeSessionService
 from .script_review_contract import get_script_review_contract, set_script_review_contract
 
@@ -367,16 +368,32 @@ class OrchestrationRuntimeTransitionFacade:
         task_id: str,
         summary_output: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self._run_with_fresh_runtime_control_plane_session(
-            runtime_session_id=runtime_session_id,
-            task_id=task_id,
-            action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_completed_sync(
-                runtime_db,
-                fresh_runtime_session,
-                task=runtime_task,
-                summary_output=summary_output,
-            ),
+        normalized_summary = JsonObjectPayload.from_mapping(
+            summary_output or {},
+            field_path="runtime_session.completion_summary",
         )
+        runtime_db = self._session_factory()
+        try:
+            store = SqlAlchemyRuntimeAttemptStore(runtime_db)
+            session = store.load_session(runtime_session_id)
+            if session is None:
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} missing during completion"
+                )
+            if session.task_id != str(task_id):
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} does not belong to task {task_id}"
+                )
+            RuntimeSessionControlPlane(store).mark_completed(
+                runtime_session_id,
+                summary_output=normalized_summary,
+            )
+            runtime_db.commit()
+        except Exception:
+            runtime_db.rollback()
+            raise
+        finally:
+            runtime_db.close()
 
     def mark_runtime_session_failed(
         self,
@@ -385,13 +402,25 @@ class OrchestrationRuntimeTransitionFacade:
         task_id: str,
         error_message: str,
     ) -> None:
-        self._run_with_fresh_runtime_control_plane_session(
-            runtime_session_id=runtime_session_id,
-            task_id=task_id,
-            action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_failed_sync(
-                runtime_db,
-                fresh_runtime_session,
+        runtime_db = self._session_factory()
+        try:
+            store = SqlAlchemyRuntimeAttemptStore(runtime_db)
+            session = store.load_session(runtime_session_id)
+            if session is None:
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} missing during failure transition"
+                )
+            if session.task_id != str(task_id):
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} does not belong to task {task_id}"
+                )
+            RuntimeSessionControlPlane(store).mark_failed(
+                runtime_session_id,
                 error_message=error_message,
-                task=runtime_task,
-            ),
-        )
+            )
+            runtime_db.commit()
+        except Exception:
+            runtime_db.rollback()
+            raise
+        finally:
+            runtime_db.close()

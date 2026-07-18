@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from ..domain import TaskStatus, WorkflowSessionStatus
-from ..models import Task, WorkflowSession
+from ..models import Task
 from ..core.config import settings
 
 
@@ -133,7 +133,7 @@ def is_terminal_runtime_status(status: Any) -> bool:
 
 def get_queue_execution_block_reason(
     task: Optional[Task],
-    runtime_session: Optional[WorkflowSession] = None,
+    runtime_session: Optional[object] = None,
 ) -> Optional[str]:
     """
     Return a stable reason string when a queued worker must not execute a task.
@@ -145,7 +145,7 @@ def get_queue_execution_block_reason(
         return "task_missing"
 
     if runtime_session is not None:
-        runtime_status = _status_value(runtime_session.status)
+        runtime_status = _status_value(getattr(runtime_session, "status", None))
         if runtime_status in TERMINAL_RUNTIME_STATUSES:
             return f"runtime_terminal:{runtime_status}"
         if runtime_status not in QUEUE_DISPATCHABLE_RUNTIME_STATUSES:

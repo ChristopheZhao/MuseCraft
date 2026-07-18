@@ -14,6 +14,7 @@ from ....core.database import get_db
 from ....domain import (
     JsonObjectPayload,
     RuntimeStoreError,
+    RuntimeStoreReason,
     TaskStatus,
     TaskType,
     WorkflowSessionStatus,
@@ -22,6 +23,11 @@ from ....infrastructure import SqlAlchemyRuntimeAttemptStore
 from ....models import Resource, Scene, Task, WorkflowSession
 from ....services.task_queue import TaskQueueService, cancel_celery_task
 from ....services.runtime_session_service import RuntimeSessionService
+from ....services.runtime_read_model_service import (
+    RuntimeReadModelPresenter,
+    RuntimeReadModelService,
+)
+from ....services.runtime_session_control_plane import RuntimeSessionControlPlane
 from ....services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 from ....services.task_execution_policy import (
     is_terminal_task_status,
@@ -202,6 +208,22 @@ def _serialize_quick_run_summary(task: Task) -> QuickRunSummaryResponse:
     )
 
 
+def _load_runtime_model_sync(sync_db, task_id: str):
+    return RuntimeReadModelService(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).load_for_task(task_id)
+
+
+async def _load_runtime_view(
+    db: AsyncSession,
+    task_id: str,
+) -> Optional[Dict[str, Any]]:
+    model = await db.run_sync(lambda sync_db: _load_runtime_model_sync(sync_db, task_id))
+    if model is None:
+        return None
+    return RuntimeReadModelPresenter.to_payload(model).to_dict()
+
+
 async def _find_current_quick_run_for_session(
     db: AsyncSession,
     session_id: str,
@@ -217,8 +239,8 @@ async def _find_current_quick_run_for_session(
 
     for task in candidate_tasks:
         try:
-            runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-        except ValueError as exc:
+            runtime_view = await _load_runtime_view(db, str(task.task_id))
+        except RuntimeStoreError as exc:
             logger.error(
                 "Aborting quick run discovery after runtime projection integrity error: task_id=%s session_id=%s detail=%s",
                 getattr(task, "task_id", None),
@@ -264,7 +286,24 @@ async def _cancel_task_for_replacement(
             )
 
     _set_task_queue_handle(task, None)
-    await RuntimeSessionService.mark_session_cancelled_for_task(db, task)
+
+    def _cancel_runtime(sync_db):
+        store = SqlAlchemyRuntimeAttemptStore(sync_db)
+        model = RuntimeReadModelService(store).load_for_task(str(task.task_id))
+        if model is None:
+            sync_task = sync_db.query(Task).filter(Task.task_id == str(task.task_id)).first()
+            if sync_task is None:
+                raise RuntimeStoreError(
+                    reason_code=RuntimeStoreReason.RECORD_NOT_FOUND,
+                    operation="cancel_task_runtime",
+                    message=f"Task {task.task_id} was not found during cancellation",
+                )
+            sync_task.status = TaskStatus.CANCELLED.value
+        else:
+            RuntimeSessionControlPlane(store).mark_cancelled(model.session.session_id)
+        sync_db.commit()
+
+    await db.run_sync(_cancel_runtime)
 
 
 @router.post("/", response_model=TaskResponse)
@@ -359,7 +398,7 @@ async def get_current_quick_run(
     logger = logging.getLogger("tasks_api")
     try:
         task, runtime_view = await _find_current_quick_run_for_session(db, session_id)
-    except ValueError as exc:
+    except RuntimeStoreError as exc:
         logger.error(
             "Current quick run discovery failed after runtime projection integrity error: session_id=%s detail=%s",
             session_id,
@@ -552,8 +591,8 @@ async def get_task_runtime(
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-    except ValueError as exc:
+        runtime_view = await _load_runtime_view(db, str(task.task_id))
+    except RuntimeStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if runtime_view is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
@@ -576,23 +615,18 @@ async def resume_task_runtime(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, int(task.id))
-    if runtime_session is None:
+    runtime_model = await db.run_sync(
+        lambda sync_db: _load_runtime_model_sync(sync_db, str(task.task_id))
+    )
+    if runtime_model is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
-    if runtime_session.mode != "quick":
+    if runtime_model.session.mode != "quick":
         raise HTTPException(status_code=400, detail="Runtime resume is only supported for quick mode")
-
-    def _load_resume_control(sync_db):
-        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
-        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
-        if sync_task is None or sync_session is None:
-            raise ValueError("Runtime session not found")
-        return RuntimeSessionService.get_resume_control_sync(sync_db, sync_task, sync_session)
-
-    try:
-        resume_control = await db.run_sync(_load_resume_control)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    resume_control = (
+        runtime_model.resume_control.to_dict()
+        if runtime_model.resume_control is not None
+        else None
+    )
 
     if not resume_control or not bool(resume_control.get("can_resume")):
         state = str((resume_control or {}).get("state") or "unavailable")
@@ -603,27 +637,18 @@ async def resume_task_runtime(
         )
 
     def _mark_runtime_resuming(sync_db):
-        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
-        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
-        if sync_task is None or sync_session is None:
-            raise ValueError("Runtime session not found")
-        RuntimeSessionService.load_active_continuation_sync(
-            sync_db,
-            sync_session,
-            expected_anchor_type="runtime_checkpoint",
-            require_decision_id=False,
-            require_resuming=False,
-        )
-        RuntimeSessionService.mark_session_resuming_sync(sync_db, sync_session, task=sync_task)
+        RuntimeSessionControlPlane(
+            SqlAlchemyRuntimeAttemptStore(sync_db)
+        ).mark_resuming(runtime_model.session.session_id)
+        sync_db.commit()
 
     try:
         await db.run_sync(_mark_runtime_resuming)
-    except ValueError as exc:
+    except RuntimeStoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    await db.refresh(task)
     _schedule_task_execution(background_tasks, str(task.task_id))
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    runtime_view = await _load_runtime_view(db, str(task.task_id))
     if runtime_view is None:
         raise HTTPException(
             status_code=500,
@@ -711,18 +736,20 @@ async def submit_script_gate_decision(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, int(task.id))
-    if runtime_session is None:
+    runtime_model = await db.run_sync(
+        lambda sync_db: _load_runtime_model_sync(sync_db, str(task.task_id))
+    )
+    if runtime_model is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
 
     try:
-        expected_task_status = TaskStatus(str(task.status))
+        expected_task_status = runtime_model.session.task_status
 
         def _submit_decision(sync_db):
             decision = ScriptGateDecisionControlPlane(
                 SqlAlchemyRuntimeAttemptStore(sync_db)
             ).submit(
-                session_id=int(runtime_session.id),
+                session_id=runtime_model.session.session_id,
                 node_key="script",
                 action=request.action,
                 feedback_text=request.feedback_text,
@@ -743,7 +770,7 @@ async def submit_script_gate_decision(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _schedule_task_execution(background_tasks, str(task.task_id))
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    runtime_view = await _load_runtime_view(db, str(task.task_id))
     if runtime_view is None:
         raise HTTPException(
             status_code=500,

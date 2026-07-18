@@ -30,6 +30,7 @@ from ..domain import (
     RuntimeNodeRecord,
     RuntimePublishedDeliverableRecord,
     RuntimeSessionRecord,
+    RuntimeSessionTransitionCommand,
     RuntimeStoreError,
     RuntimeStoreReason,
     RuntimeTaskTransition,
@@ -291,6 +292,12 @@ class SqlAlchemyRuntimeAttemptStore:
         return RuntimeSessionRecord(
             session_id=cast(int, session.id),
             task_id=cast(str, task.task_id),
+            task_status=_status(
+                TaskStatus,
+                task.status,
+                operation=operation,
+                field_path="tasks.status",
+            ),
             mode=cast(str, session.mode),
             status=_status(
                 WorkflowSessionStatus,
@@ -319,6 +326,8 @@ class SqlAlchemyRuntimeAttemptStore:
                 field_path="workflow_sessions.summary_output",
             ),
             error_message=cast(str | None, session.error_message),
+            created_at=cast(datetime | None, session.created_at),
+            updated_at=cast(datetime | None, session.updated_at),
         )
 
     @staticmethod
@@ -465,6 +474,8 @@ class SqlAlchemyRuntimeAttemptStore:
                 field_path="workflow_gates.allowed_actions",
             ),
             recommended_action=cast(str | None, gate.recommended_action),
+            created_at=cast(datetime | None, gate.created_at),
+            updated_at=cast(datetime | None, gate.updated_at),
         )
 
     @staticmethod
@@ -488,6 +499,8 @@ class SqlAlchemyRuntimeAttemptStore:
                 field_path="workflow_gate_decisions.structured_constraints",
             ),
             invalidation_scope=cast(str, decision.invalidation_scope),
+            created_at=cast(datetime | None, decision.created_at),
+            updated_at=cast(datetime | None, decision.updated_at),
         )
 
     @staticmethod
@@ -559,6 +572,8 @@ class SqlAlchemyRuntimeAttemptStore:
             setattr(task, "progress_percentage", transition.progress_percentage)
         if transition.error_message is not None:
             setattr(task, "error_message", transition.error_message)
+        elif transition.clear_error_message:
+            setattr(task, "error_message", None)
         if transition.requires_human_review is not None:
             setattr(task, "requires_human_review", transition.requires_human_review)
 
@@ -568,6 +583,66 @@ class SqlAlchemyRuntimeAttemptStore:
         if session is None:
             return None
         return self._session_record(session, operation=operation)
+
+    def load_latest_session_for_task(self, task_id: str) -> RuntimeSessionRecord | None:
+        operation = "load_latest_session_for_task"
+        session = (
+            self._db.execute(
+                select(WorkflowSession)
+                .join(Task, Task.id == WorkflowSession.task_db_id)
+                .where(Task.task_id == task_id)
+                .order_by(WorkflowSession.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if session is None:
+            return None
+        return self._session_record(session, operation=operation)
+
+    def load_reconcilable_sessions(
+        self,
+        *,
+        mode: str,
+        statuses: tuple[WorkflowSessionStatus, ...],
+        limit: int,
+    ) -> tuple[RuntimeSessionRecord, ...]:
+        operation = "load_reconcilable_sessions"
+        normalized_mode = str(mode or "").strip().lower()
+        if not normalized_mode or not statuses or limit <= 0:
+            raise _error(
+                reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                operation=operation,
+                message="runtime reconcile query requires mode, statuses, and a positive limit",
+            )
+        sessions = (
+            self._db.execute(
+                select(WorkflowSession)
+                .where(
+                    WorkflowSession.mode == normalized_mode,
+                    WorkflowSession.status.in_(status.value for status in statuses),
+                )
+                .order_by(WorkflowSession.updated_at.asc(), WorkflowSession.id.asc())
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(self._session_record(session, operation=operation) for session in sessions)
+
+    def load_nodes(self, session_id: int) -> tuple[RuntimeNodeRecord, ...]:
+        operation = "load_nodes"
+        nodes = (
+            self._db.execute(
+                select(WorkflowNodeState)
+                .where(WorkflowNodeState.session_id == session_id)
+                .order_by(WorkflowNodeState.order_index.asc(), WorkflowNodeState.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(self._node_record(node, operation=operation) for node in nodes)
 
     def load_node(self, session_id: int, node_key: str) -> RuntimeNodeRecord | None:
         operation = "load_node"
@@ -593,31 +668,37 @@ class SqlAlchemyRuntimeAttemptStore:
             return None
         return self._attempt_record(attempt, operation=operation)
 
-    def load_latest_gate(self, session_id: int, node_key: str) -> RuntimeGateRecord | None:
+    def load_latest_gate(
+        self,
+        session_id: int,
+        node_key: str | None = None,
+    ) -> RuntimeGateRecord | None:
         operation = "load_latest_gate"
-        node = self._db.execute(
-            select(WorkflowNodeState).where(
-                WorkflowNodeState.session_id == session_id,
-                WorkflowNodeState.node_key == node_key,
-            )
-        ).scalar_one_or_none()
-        if node is None:
+        statement = select(WorkflowGate).where(WorkflowGate.session_id == session_id)
+        if node_key is not None:
+            statement = statement.join(
+                WorkflowNodeState,
+                WorkflowNodeState.id == WorkflowGate.node_id,
+            ).where(WorkflowNodeState.node_key == node_key)
+        gate = self._db.execute(statement.order_by(WorkflowGate.id.desc())).scalars().first()
+        if gate is None:
             return None
-        gate = (
+        return self._gate_record(gate, operation=operation)
+
+    def load_latest_gate_decision(self, gate_id: int) -> RuntimeGateDecisionRecord | None:
+        operation = "load_latest_gate_decision"
+        decision = (
             self._db.execute(
-                select(WorkflowGate)
-                .where(
-                    WorkflowGate.session_id == session_id,
-                    WorkflowGate.node_id == node.id,
-                )
-                .order_by(WorkflowGate.id.desc())
+                select(WorkflowGateDecision)
+                .where(WorkflowGateDecision.gate_id == gate_id)
+                .order_by(WorkflowGateDecision.id.desc())
             )
             .scalars()
             .first()
         )
-        if gate is None:
+        if decision is None:
             return None
-        return self._gate_record(gate, operation=operation)
+        return self._gate_decision_record(decision, operation=operation)
 
     def load_published_deliverable(
         self,
@@ -1359,6 +1440,101 @@ class SqlAlchemyRuntimeAttemptStore:
         self._apply_task_transition(session, command.task_transition, operation=operation)
         self._db.flush()
         return self._gate_decision_record(decision, operation=operation)
+
+    def transition_session(
+        self,
+        command: RuntimeSessionTransitionCommand,
+    ) -> RuntimeSessionRecord:
+        operation = "transition_session"
+        session = self._locked_session(command.session_id, operation=operation)
+        if not command.expected_statuses or session.status not in {
+            status.value for status in command.expected_statuses
+        }:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message=(
+                    f"runtime session status conflict: expected="
+                    f"{[status.value for status in command.expected_statuses]} actual={session.status}"
+                ),
+            )
+        if (
+            session.current_node_key != command.expected_current_node_key
+            or session.current_attempt_id != command.expected_current_attempt_id
+        ):
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message="runtime session anchor changed before session transition",
+            )
+
+        node_keys: set[str] = set()
+        for transition in command.node_transitions:
+            if transition.node_key in node_keys:
+                raise _error(
+                    reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                    operation=operation,
+                    message=f"duplicate runtime node transition for {transition.node_key}",
+                )
+            node_keys.add(transition.node_key)
+            node = self._locked_node(
+                command.session_id,
+                transition.node_key,
+                operation=operation,
+            )
+            if node.status != transition.expected_status.value:
+                raise _error(
+                    reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                    operation=operation,
+                    message=(
+                        f"runtime node {transition.node_key} status conflict: "
+                        f"expected={transition.expected_status.value} actual={node.status}"
+                    ),
+                )
+            setattr(node, "status", transition.target_status.value)
+
+        attempt_transition = command.attempt_transition
+        if attempt_transition is not None:
+            if attempt_transition.attempt_id != command.expected_current_attempt_id:
+                raise _error(
+                    reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                    operation=operation,
+                    message="runtime attempt transition must target the current attempt anchor",
+                )
+            attempt = self._locked_attempt(
+                command.session_id,
+                attempt_transition.attempt_id,
+                operation=operation,
+            )
+            if attempt.status != attempt_transition.expected_status.value:
+                raise _error(
+                    reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                    operation=operation,
+                    message=(
+                        f"runtime attempt {attempt_transition.attempt_id} status conflict: "
+                        f"expected={attempt_transition.expected_status.value} actual={attempt.status}"
+                    ),
+                )
+            setattr(attempt, "status", attempt_transition.target_status.value)
+            if attempt_transition.error_code is not None:
+                setattr(attempt, "error_code", attempt_transition.error_code)
+            if attempt_transition.error_message is not None:
+                setattr(attempt, "error_message", attempt_transition.error_message)
+            if attempt_transition.clear_lease:
+                self._clear_attempt_lease(attempt)
+
+        setattr(session, "status", command.target_status.value)
+        setattr(session, "current_node_key", command.target_current_node_key)
+        setattr(session, "current_attempt_id", command.target_current_attempt_id)
+        if command.summary_output is not None:
+            setattr(session, "summary_output", command.summary_output.to_dict())
+        if command.error_message is not None:
+            setattr(session, "error_message", command.error_message)
+        elif command.clear_error_message:
+            setattr(session, "error_message", None)
+        self._apply_task_transition(session, command.task_transition, operation=operation)
+        self._db.flush()
+        return self._session_record(session, operation=operation)
 
 
 class SqlAlchemyRuntimeAttemptUnitOfWork:

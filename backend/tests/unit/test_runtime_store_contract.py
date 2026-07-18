@@ -15,6 +15,7 @@ from app.domain import (
     RuntimeSessionRecord,
     RuntimeStoreError,
     RuntimeStoreReason,
+    TaskStatus,
     WorkflowSessionStatus,
 )
 
@@ -23,6 +24,7 @@ def test_runtime_session_record_uses_stable_task_id_and_strict_json_payloads():
     record = RuntimeSessionRecord(
         session_id=7,
         task_id="task-public-7",
+        task_status=TaskStatus.IN_PROGRESS,
         mode="quick",
         status=WorkflowSessionStatus.RUNNING,
         input_payload=JsonObjectPayload.from_mapping(
@@ -42,6 +44,7 @@ def test_runtime_session_record_rejects_database_identity_and_raw_status_strings
         RuntimeSessionRecord(
             session_id=1,
             task_id="",
+            task_status=TaskStatus.PENDING,
             mode="quick",
             status=WorkflowSessionStatus.QUEUED,
         )
@@ -50,6 +53,7 @@ def test_runtime_session_record_rejects_database_identity_and_raw_status_strings
         RuntimeSessionRecord(
             session_id=1,
             task_id="task-1",
+            task_status=TaskStatus.PENDING,
             mode="quick",
             status="queued",
         )

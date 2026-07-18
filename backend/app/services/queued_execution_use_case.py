@@ -21,6 +21,7 @@ from ..domain import (
     QueuedExecutionKind,
     TaskStatus,
 )
+from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from ..models import Task
 from .agent_execution_boundary import build_agent_execution_request
 from .project_job_contract import resolve_project_job_contract
@@ -94,9 +95,10 @@ class QueuedExecutionUseCase:
             if command.execution_kind == QueuedExecutionKind.VIDEO_GENERATION:
                 mode = resolve_generation_mode(task_payload.get("mode"))
                 if mode == GenerationMode.QUICK:
-                    runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(
-                        db,
-                        task.id,
+                    runtime_session = SqlAlchemyRuntimeAttemptStore(
+                        db
+                    ).load_latest_session_for_task(
+                        command.task_id,
                     )
             else:
                 project_contract = resolve_project_job_contract(task_payload)
@@ -223,9 +225,10 @@ class QueuedExecutionUseCase:
                 )
                 runtime_session = None
                 if mode == GenerationMode.QUICK:
-                    runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(
-                        db,
-                        task.id,
+                    runtime_session = SqlAlchemyRuntimeAttemptStore(
+                        db
+                    ).load_latest_session_for_task(
+                        command.task_id,
                     )
                 block_reason = get_queue_execution_block_reason(task, runtime_session)
                 if block_reason:
