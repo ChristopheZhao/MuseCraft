@@ -4,7 +4,12 @@ import pytest
 
 from app.domain import (
     JsonObjectPayload,
+    RuntimeAttemptCompletionCommand,
+    RuntimeAttemptFailureCommand,
     RuntimeAttemptHeartbeatCommand,
+    RuntimeGateDecisionApplyCommand,
+    RuntimeGateOpenCommand,
+    RuntimeNodeCreate,
     RuntimeReadModel,
     RuntimeReadModelQuery,
     RuntimeSessionRecord,
@@ -71,7 +76,76 @@ def test_runtime_heartbeat_command_requires_explicit_caller_facts():
         "lease_token",
         "heartbeat_at",
         "lease_expires_at",
+        "expected_attempt_status",
     }
+
+
+def test_runtime_session_blueprint_contains_no_persistence_identity():
+    fields = set(RuntimeNodeCreate.__dataclass_fields__)
+    assert fields == {
+        "node_key",
+        "node_type",
+        "order_index",
+        "scope_type",
+        "target_status",
+        "scope_ref",
+        "revision_index",
+        "gate_required",
+    }
+    assert "node_id" not in fields
+    assert "session_id" not in fields
+
+
+@pytest.mark.parametrize(
+    ("command_type", "required_target_facts"),
+    [
+        (
+            RuntimeAttemptCompletionCommand,
+            {
+                "observed_at",
+                "expected_attempt_status",
+                "target_attempt_status",
+                "target_node_status",
+                "target_session_status",
+            },
+        ),
+        (
+            RuntimeAttemptFailureCommand,
+            {
+                "observed_at",
+                "expected_attempt_status",
+                "target_attempt_status",
+                "target_node_status",
+                "target_session_status",
+            },
+        ),
+        (
+            RuntimeGateOpenCommand,
+            {
+                "observed_at",
+                "target_gate_status",
+                "target_node_status",
+                "target_session_status",
+                "result_code",
+            },
+        ),
+        (
+            RuntimeGateDecisionApplyCommand,
+            {
+                "expected_gate_status",
+                "target_gate_status",
+                "target_node_status",
+                "target_node_revision_index",
+                "target_session_status",
+                "session_input_payload",
+            },
+        ),
+    ],
+)
+def test_atomic_commands_carry_control_plane_selected_target_facts(
+    command_type, required_target_facts
+):
+    assert required_target_facts <= set(command_type.__dataclass_fields__)
 
 
 def test_runtime_read_model_is_explicit_not_an_orm_mapping():

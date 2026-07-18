@@ -168,8 +168,17 @@ class OrchestrationStateAdapter:
                 ]
             else:
                 raise ValueError("Continuation spec constraints must be a list")
-        if spec.get("order") is not None:
-            normalized["order"] = int(spec.get("order"))
+        raw_order = spec.get("order")
+        if raw_order is not None:
+            if type(raw_order) is int:
+                normalized["order"] = raw_order
+            elif isinstance(raw_order, str):
+                normalized_order = raw_order.strip()
+                if not normalized_order or not normalized_order.lstrip("-").isdigit():
+                    raise ValueError("Continuation spec order must be an integer")
+                normalized["order"] = int(normalized_order)
+            else:
+                raise ValueError("Continuation spec order must be an integer")
         if "runtime_hints" in spec:
             raw_runtime_hints = spec.get("runtime_hints")
             if raw_runtime_hints is None:
@@ -386,8 +395,23 @@ class OrchestrationStateAdapter:
             require_decision_id=require_decision_id,
         )
 
+        candidate_agents = [
+            AgentType(str(raw_agent)) for raw_agent in (normalized.get("candidate_agents") or [])
+        ]
+        candidate_order = {agent_type: index for index, agent_type in enumerate(candidate_agents)}
+        normalized_task_specs = normalized.get("task_specs", {})
+        ordered_task_specs = sorted(
+            normalized_task_specs.items(),
+            key=lambda item: (
+                int(item[1]["order"])
+                if item[1].get("order") is not None
+                else candidate_order.get(AgentType(str(item[0])), len(candidate_order)),
+                candidate_order.get(AgentType(str(item[0])), len(candidate_order)),
+                str(item[0]),
+            ),
+        )
         task_specs: Dict[AgentType, Dict[str, Any]] = {}
-        for raw_agent, spec in normalized.get("task_specs", {}).items():
+        for raw_agent, spec in ordered_task_specs:
             agent_type = AgentType(str(raw_agent))
             task_specs[agent_type] = dict(spec)
 
@@ -395,9 +419,6 @@ class OrchestrationStateAdapter:
             str(task_id): dict(spec)
             for task_id, spec in (normalized.get("conditional_task_specs") or {}).items()
         }
-        candidate_agents = [
-            AgentType(str(raw_agent)) for raw_agent in (normalized.get("candidate_agents") or [])
-        ]
         return task_specs, conditional_task_specs, candidate_agents
 
     def build_audio_contract(

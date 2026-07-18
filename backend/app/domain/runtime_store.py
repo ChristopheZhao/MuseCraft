@@ -177,10 +177,24 @@ class RuntimeTaskTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeNodeCreate:
+    node_key: str
+    node_type: str
+    order_index: int
+    scope_type: str
+    target_status: WorkflowNodeStatus
+    scope_ref: str | None = None
+    revision_index: int = 0
+    gate_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSessionCreateCommand:
     task_id: str
     mode: str
     input_payload: JsonObjectPayload
+    target_status: WorkflowSessionStatus
+    nodes: tuple[RuntimeNodeCreate, ...]
     project_id: str | None = None
     episode_id: str | None = None
     shared_memory_id: str | None = None
@@ -206,7 +220,11 @@ class RuntimeAttemptStartCommand:
     trigger_reason: str
     requested_by: str
     input_contract: JsonObjectPayload
+    expected_session_status: WorkflowSessionStatus
     expected_node_status: WorkflowNodeStatus | None = None
+    target_session_status: WorkflowSessionStatus = WorkflowSessionStatus.RUNNING
+    target_node_status: WorkflowNodeStatus = WorkflowNodeStatus.RUNNING
+    target_attempt_status: WorkflowAttemptStatus = WorkflowAttemptStatus.RUNNING
     task_transition: RuntimeTaskTransition | None = None
 
 
@@ -228,6 +246,7 @@ class RuntimeAttemptHeartbeatCommand:
     lease_token: str
     heartbeat_at: datetime
     lease_expires_at: datetime
+    expected_attempt_status: WorkflowAttemptStatus = WorkflowAttemptStatus.RUNNING
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +254,7 @@ class RuntimeAttemptReleaseCommand:
     session_id: int
     attempt_id: int
     lease_token: str | None
+    expected_attempt_status: WorkflowAttemptStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,9 +271,19 @@ class RuntimeAttemptCompletionCommand:
     node_key: str
     attempt_id: int
     expected_lease_token: str | None
+    observed_at: datetime
+    expected_session_status: WorkflowSessionStatus
+    expected_node_status: WorkflowNodeStatus
+    expected_attempt_status: WorkflowAttemptStatus
+    target_attempt_status: WorkflowAttemptStatus
     target_node_status: WorkflowNodeStatus
+    target_session_status: WorkflowSessionStatus
     output_artifacts: tuple[JsonObjectPayload, ...] = ()
     metrics: JsonObjectPayload = field(default_factory=JsonObjectPayload.empty)
+    continuation_checkpoint: JsonObjectPayload | None = None
+    node_artifact_refs: tuple[JsonObjectPayload, ...] | None = None
+    node_diagnostics: tuple[JsonObjectPayload, ...] | None = None
+    task_transition: RuntimeTaskTransition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,9 +292,20 @@ class RuntimeAttemptFailureCommand:
     node_key: str
     attempt_id: int
     expected_lease_token: str | None
+    observed_at: datetime
+    expected_session_status: WorkflowSessionStatus
+    expected_node_status: WorkflowNodeStatus
+    expected_attempt_status: WorkflowAttemptStatus
+    target_attempt_status: WorkflowAttemptStatus
+    target_node_status: WorkflowNodeStatus
+    target_session_status: WorkflowSessionStatus
     error_code: str
     error_message: str
+    output_artifacts: tuple[JsonObjectPayload, ...] = ()
+    metrics: JsonObjectPayload = field(default_factory=JsonObjectPayload.empty)
+    node_artifact_refs: tuple[JsonObjectPayload, ...] | None = None
     diagnostics: tuple[JsonObjectPayload, ...] = ()
+    task_transition: RuntimeTaskTransition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,11 +321,26 @@ class RuntimeGateOpenCommand:
     facts: JsonObjectPayload
     allowed_actions: tuple[str, ...]
     recommended_action: str | None
+    expected_lease_token: str | None
+    observed_at: datetime
+    expected_session_status: WorkflowSessionStatus
+    expected_node_status: WorkflowNodeStatus
+    expected_attempt_status: WorkflowAttemptStatus | None
+    target_gate_status: WorkflowGateStatus
+    target_node_status: WorkflowNodeStatus
+    target_session_status: WorkflowSessionStatus
+    result_code: str
+    reason_code: str | None = None
+    diagnostics: tuple[JsonObjectPayload, ...] = ()
+    session_input_payload: JsonObjectPayload | None = None
+    node_artifact_refs: tuple[JsonObjectPayload, ...] | None = None
+    node_diagnostics: tuple[JsonObjectPayload, ...] | None = None
+    release_attempt_lease: bool = True
     task_transition: RuntimeTaskTransition | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeGateDecisionCommand:
+class RuntimeGateDecisionCreateCommand:
     session_id: int
     gate_id: int
     node_key: str
@@ -294,8 +350,29 @@ class RuntimeGateDecisionCommand:
     feedback_text: str | None
     structured_constraints: JsonObjectPayload
     invalidation_scope: str
-    expected_gate_status: WorkflowGateStatus = WorkflowGateStatus.PENDING
-    continuation_checkpoint: JsonObjectPayload | None = None
+    expected_gate_status: WorkflowGateStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeGateDecisionApplyCommand:
+    session_id: int
+    gate_id: int
+    node_key: str
+    decision_id: int
+    expected_gate_status: WorkflowGateStatus
+    expected_session_status: WorkflowSessionStatus
+    expected_node_status: WorkflowNodeStatus
+    expected_node_revision_index: int
+    expected_attempt_status: WorkflowAttemptStatus
+    target_gate_status: WorkflowGateStatus
+    gate_result_code: str
+    gate_reason_code: str
+    target_node_status: WorkflowNodeStatus
+    target_node_revision_index: int
+    target_session_status: WorkflowSessionStatus
+    session_input_payload: JsonObjectPayload
+    continuation_checkpoint: JsonObjectPayload
+    approved_deliverable_id: int | None = None
     task_transition: RuntimeTaskTransition | None = None
 
 
@@ -333,6 +410,89 @@ class RuntimeReadModel:
     active_gate: RuntimeGateRecord | None
     latest_decision: RuntimeGateDecisionRecord | None
     resume_control: JsonObjectPayload
+
+
+@runtime_checkable
+class RuntimeAttemptStore(Protocol):
+    """Attempt capability port implemented before the remaining runtime store."""
+
+    def load_session(self, session_id: int) -> RuntimeSessionRecord | None:
+        ...
+
+    def load_node(self, session_id: int, node_key: str) -> RuntimeNodeRecord | None:
+        ...
+
+    def load_attempt(self, session_id: int, attempt_id: int) -> RuntimeAttemptRecord | None:
+        ...
+
+    def start_attempt(self, command: RuntimeAttemptStartCommand) -> RuntimeAttemptRecord:
+        ...
+
+    def grant_attempt_lease(self, command: RuntimeAttemptLeaseCommand) -> RuntimeAttemptRecord:
+        ...
+
+    def heartbeat_attempt_lease(
+        self, command: RuntimeAttemptHeartbeatCommand
+    ) -> RuntimeAttemptRecord:
+        ...
+
+    def release_attempt_lease(self, command: RuntimeAttemptReleaseCommand) -> RuntimeAttemptRecord:
+        ...
+
+    def bind_attempt_continuation(
+        self, command: RuntimeContinuationBindCommand
+    ) -> RuntimeAttemptRecord:
+        ...
+
+    def complete_attempt(self, command: RuntimeAttemptCompletionCommand) -> RuntimeAttemptRecord:
+        ...
+
+    def fail_attempt(self, command: RuntimeAttemptFailureCommand) -> RuntimeAttemptRecord:
+        ...
+
+    def upsert_node_diagnostic(
+        self,
+        *,
+        session_id: int,
+        attempt_id: int,
+        diagnostic: JsonObjectPayload,
+    ) -> RuntimeNodeRecord:
+        ...
+
+
+@runtime_checkable
+class RuntimeGateStore(Protocol):
+    """Human and automated gate persistence capabilities."""
+
+    def load_session(self, session_id: int) -> RuntimeSessionRecord | None:
+        ...
+
+    def load_node(self, session_id: int, node_key: str) -> RuntimeNodeRecord | None:
+        ...
+
+    def load_attempt(self, session_id: int, attempt_id: int) -> RuntimeAttemptRecord | None:
+        ...
+
+    def load_latest_gate(self, session_id: int, node_key: str) -> RuntimeGateRecord | None:
+        ...
+
+    def load_published_deliverable(
+        self, session_id: int, node_key: str, attempt_id: int
+    ) -> RuntimePublishedDeliverableRecord | None:
+        ...
+
+    def open_gate(self, command: RuntimeGateOpenCommand) -> RuntimeGateRecord:
+        ...
+
+    def create_gate_decision(
+        self, command: RuntimeGateDecisionCreateCommand
+    ) -> RuntimeGateDecisionRecord:
+        ...
+
+    def apply_gate_decision(
+        self, command: RuntimeGateDecisionApplyCommand
+    ) -> RuntimeGateDecisionRecord:
+        ...
 
 
 @runtime_checkable
@@ -401,8 +561,13 @@ class RuntimeControlPlaneStore(Protocol):
     def open_gate(self, command: RuntimeGateOpenCommand) -> RuntimeGateRecord:
         ...
 
-    def submit_gate_decision(
-        self, command: RuntimeGateDecisionCommand
+    def create_gate_decision(
+        self, command: RuntimeGateDecisionCreateCommand
+    ) -> RuntimeGateDecisionRecord:
+        ...
+
+    def apply_gate_decision(
+        self, command: RuntimeGateDecisionApplyCommand
     ) -> RuntimeGateDecisionRecord:
         ...
 
@@ -432,6 +597,32 @@ class RuntimeReadModelQuery(Protocol):
     """Read-only projection port over authoritative committed runtime records."""
 
     def load_for_task(self, task_id: str) -> RuntimeReadModel | None:
+        ...
+
+
+@runtime_checkable
+class RuntimeAttemptUnitOfWork(Protocol):
+    """One transaction over attempt capabilities; no Session escapes this port."""
+
+    @property
+    def runtime(self) -> RuntimeAttemptStore:
+        ...
+
+    def __enter__(self) -> RuntimeAttemptUnitOfWork:
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        ...
+
+    def commit(self) -> None:
+        ...
+
+    def rollback(self) -> None:
         ...
 
 

@@ -8,24 +8,26 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.agents.orchestrator import OrchestratorAgent
 from app.agents import orchestrator as orchestrator_module
 from app.agents.base import AgentError
-from app.core.prompt_manager import get_prompt_manager
+from app.agents.orchestrator import OrchestratorAgent
 from app.core.database import Base
+from app.core.prompt_manager import get_prompt_manager
 from app.domain import (
     AgentExecutionRequest,
     AgentExecutionResult,
     AgentType,
     JsonObjectPayload,
+    RuntimeStoreError,
+    RuntimeStoreReason,
     TaskStatus,
     TaskType,
     WorkflowAttemptStatus,
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from app.models import Task
-from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.models import Task, WorkflowNodeAttempt
+from app.services.agent_execution_boundary import build_agent_execution_request
 from app.services.context_assembler import ContextContractAssembler
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
     OrchestrationRuntimeResumeBootstrapFacade,
@@ -33,12 +35,13 @@ from app.services.orchestration_runtime_resume_bootstrap_facade import (
 from app.services.orchestration_runtime_transition_facade import (
     OrchestrationRuntimeTransitionFacade,
 )
+from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 from app.services.published_deliverable_service import (
     PublishedDeliverableService,
     build_deliverable_ref,
 )
+from app.services.runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from app.services.runtime_session_service import RuntimeSessionService
-from app.services.agent_execution_boundary import build_agent_execution_request
 
 
 class _FakeSharedStore(dict):
@@ -729,38 +732,12 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
         )
 
         observed_db_ids = []
-        original_start = RuntimeSessionService.start_node_attempt_sync
-        original_bind = RuntimeSessionService.bind_attempt_continuation_checkpoint_sync
-        original_grant = RuntimeSessionService.grant_attempt_lease_sync
         original_clear = RuntimeSessionService.clear_node_diagnostic_codes_sync
-
-        def _record_start(db, runtime_session, **kwargs):
-            observed_db_ids.append(("start", id(db)))
-            return original_start(db, runtime_session, **kwargs)
-
-        def _record_bind(db, runtime_session, **kwargs):
-            observed_db_ids.append(("bind", id(db)))
-            return original_bind(db, runtime_session, **kwargs)
-
-        def _record_grant(db, runtime_session, **kwargs):
-            observed_db_ids.append(("grant", id(db)))
-            return original_grant(db, runtime_session, **kwargs)
 
         def _record_clear(db, runtime_session, **kwargs):
             observed_db_ids.append(("clear", id(db)))
             return original_clear(db, runtime_session, **kwargs)
 
-        monkeypatch.setattr(
-            RuntimeSessionService, "start_node_attempt_sync", staticmethod(_record_start)
-        )
-        monkeypatch.setattr(
-            RuntimeSessionService,
-            "bind_attempt_continuation_checkpoint_sync",
-            staticmethod(_record_bind),
-        )
-        monkeypatch.setattr(
-            RuntimeSessionService, "grant_attempt_lease_sync", staticmethod(_record_grant)
-        )
         monkeypatch.setattr(
             RuntimeSessionService, "clear_node_diagnostic_codes_sync", staticmethod(_record_clear)
         )
@@ -786,6 +763,63 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
         assert observed_db_ids
         assert len({db_id for _name, db_id in observed_db_ids}) == 1
         assert id(sync_db) not in {db_id for _name, db_id in observed_db_ids}
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_runtime_resume_bootstrap_rolls_back_attempt_when_continuation_bind_fails(
+    monkeypatch,
+):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log)
+        facade = OrchestrationRuntimeResumeBootstrapFacade(
+            orchestration_state=agent._orchestration_state,
+            session_factory=SessionLocal,
+        )
+        task = _create_task(sync_db)
+        session = RuntimeSessionService.get_or_create_session_for_task_sync(
+            sync_db, task, mode="quick"
+        )
+
+        def _fail_bind(self, **kwargs):
+            raise RuntimeStoreError(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation="bind_attempt_continuation",
+                message="injected continuation conflict",
+            )
+
+        monkeypatch.setattr(RuntimeAttemptControlPlane, "bind_continuation", _fail_bind)
+
+        with pytest.raises(RuntimeStoreError, match="injected continuation conflict"):
+            facade.start_runtime_attempt(
+                runtime_session_id=session.id,
+                task=_orchestrator_request(task, {"user_prompt": "test prompt"}).task,
+                current_agent_type=AgentType.CONCEPT_PLANNER,
+                workflow_state_id=str(task.task_id),
+                task_specs={
+                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                },
+                conditional_task_specs={},
+                candidate_agents=[AgentType.CONCEPT_PLANNER],
+                script_trigger_reason="initial",
+                script_requested_by="system",
+                resume_anchor_agent=None,
+            )
+
+        sync_db.expire_all()
+        persisted_session = RuntimeSessionService.get_session_by_id_sync(sync_db, session.id)
+        persisted_node = RuntimeSessionService.get_node_by_key_sync(sync_db, session.id, "concept")
+        persisted_task = sync_db.get(Task, task.id)
+        assert sync_db.query(WorkflowNodeAttempt).count() == 0
+        assert persisted_session.status == WorkflowSessionStatus.QUEUED.value
+        assert persisted_session.current_attempt_id is None
+        assert persisted_node.status == WorkflowNodeStatus.QUEUED.value
+        assert persisted_task.status == TaskStatus.PENDING.value
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

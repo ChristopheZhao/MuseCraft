@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from ..core.config import settings
+from ..domain import RuntimeStoreError, RuntimeStoreReason
 
 
 class ExecutionHostKeepaliveLostError(RuntimeError):
@@ -359,6 +360,30 @@ class AttemptLeaseKeepaliveController:
                     last_heartbeat_at=last_heartbeat_at,
                     lease_expires_at=lease_expires_at,
                 )
+            except RuntimeStoreError as exc:
+                message = str(exc)
+                is_validation_conflict = exc.reason_code in {
+                    RuntimeStoreReason.RECORD_NOT_FOUND,
+                    RuntimeStoreReason.STATE_CONFLICT,
+                    RuntimeStoreReason.LEASE_CONFLICT,
+                }
+                state = "stopped" if is_validation_conflict else "failed"
+                self._logger.warning(
+                    "Attempt lease keepalive %s for session=%s attempt=%s reason=%s: %s",
+                    state,
+                    target.runtime_session_id,
+                    target.attempt_id,
+                    exc.reason_code.value,
+                    message,
+                )
+                diagnostic = self._publish_target_diagnostic(
+                    target,
+                    state=state,
+                    reason_code=exc.reason_code.value,
+                    message=message,
+                )
+                self._remember_unhealthy_diagnostic(target, diagnostic)
+                self._clear_target_if_matches(target)
             except ValueError as exc:
                 message = str(exc)
                 self._logger.warning(

@@ -100,7 +100,8 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         "complete_attempt",
         "fail_attempt",
         "open_gate",
-        "submit_gate_decision",
+        "create_gate_decision",
+        "apply_gate_decision",
         "transition_session",
         "publish_deliverable",
         "approve_deliverable",
@@ -119,3 +120,48 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert query_methods == {"load_for_task"}
+
+    attempt_protocol = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeAttemptStore"
+    )
+    attempt_methods = {
+        node.name
+        for node in attempt_protocol.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert attempt_methods == {
+        "load_session",
+        "load_node",
+        "load_attempt",
+        "start_attempt",
+        "grant_attempt_lease",
+        "heartbeat_attempt_lease",
+        "release_attempt_lease",
+        "bind_attempt_continuation",
+        "complete_attempt",
+        "fail_attempt",
+        "upsert_node_diagnostic",
+    }
+
+    gate_protocol = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeGateStore"
+    )
+    gate_methods = {
+        node.name
+        for node in gate_protocol.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert gate_methods == {
+        "load_session",
+        "load_node",
+        "load_attempt",
+        "load_latest_gate",
+        "load_published_deliverable",
+        "open_gate",
+        "create_gate_decision",
+        "apply_gate_decision",
+    }

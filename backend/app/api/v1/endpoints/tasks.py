@@ -11,10 +11,18 @@ from sqlalchemy import select, desc
 from pydantic import BaseModel, Field
 
 from ....core.database import get_db
-from ....domain import TaskStatus, TaskType, WorkflowSessionStatus
+from ....domain import (
+    JsonObjectPayload,
+    RuntimeStoreError,
+    TaskStatus,
+    TaskType,
+    WorkflowSessionStatus,
+)
+from ....infrastructure import SqlAlchemyRuntimeAttemptStore
 from ....models import Resource, Scene, Task, WorkflowSession
 from ....services.task_queue import TaskQueueService, cancel_celery_task
 from ....services.runtime_session_service import RuntimeSessionService
+from ....services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 from ....services.task_execution_policy import (
     is_terminal_task_status,
     is_terminal_runtime_status,
@@ -266,10 +274,10 @@ async def create_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new video generation task"""
-    
+
     logger = logging.getLogger("tasks_api")
     logger.info(f"Creating task with request: {request}")
-    
+
     try:
         if request.session_id:
             existing_task, _existing_runtime = await _find_current_quick_run_for_session(db, request.session_id)
@@ -303,7 +311,7 @@ async def create_task(
             },
             estimated_duration=request.duration * 10  # Rough estimate: 10 seconds processing per 1 second video
         )
-        
+
         db.add(task)
         await db.commit()
         await db.refresh(task)
@@ -315,10 +323,10 @@ async def create_task(
             mode="quick",
         )
         logger.info(f"Runtime session created with ID: {runtime_session.id} for task {task.id}")
-        
+
         logger.info("Dispatching task execution for task %s", task.id)
         _schedule_task_execution(background_tasks, str(task.task_id))
-        
+
         response = TaskResponse(
             id=task.id,
             task_id=str(task.task_id),
@@ -378,20 +386,20 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db)
 ):
     """List tasks with optional filtering"""
-    
+
     query = select(Task).order_by(desc(Task.created_at))
-    
+
     if status:
         query = query.where(Task.status == status)
-    
+
     if session_id:
         query = query.where(Task.session_id == session_id)
-    
+
     query = query.offset(skip).limit(limit)
-    
+
     result = await db.execute(query)
     tasks = result.scalars().all()
-    
+
     return [
         TaskResponse(
             id=task.id,
@@ -415,25 +423,25 @@ async def get_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Get detailed information about a specific task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Count related records
     from sqlalchemy import func
     scenes_count = await db.scalar(
         select(func.count(Scene.id)).where(Scene.task_id == task.id)
     ) or 0
-    
+
     resources_count = await db.scalar(
         select(func.count(Resource.id)).where(Resource.task_id == task.id)
     ) or 0
-    
+
     return TaskDetailResponse(
         id=task.id,
         task_id=str(task.task_id),
@@ -460,20 +468,20 @@ async def get_task_scenes(
     db: AsyncSession = Depends(get_db)
 ):
     """Get all scenes for a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Get scenes
     scenes_query = select(Scene).where(Scene.task_id == task.id).order_by(Scene.scene_number)
     scenes_result = await db.execute(scenes_query)
     scenes = scenes_result.scalars().all()
-    
+
     return [
         SceneResponse(
             id=scene.id,
@@ -496,25 +504,25 @@ async def get_task_resources(
     db: AsyncSession = Depends(get_db)
 ):
     """Get all resources for a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Get resources
     resources_query = select(Resource).where(Resource.task_id == task.id)
-    
+
     if resource_type:
         resources_query = resources_query.where(Resource.resource_type == resource_type)
-    
+
     resources_query = resources_query.order_by(desc(Resource.created_at))
     resources_result = await db.execute(resources_query)
     resources = resources_result.scalars().all()
-    
+
     return [
         ResourceResponse(
             id=resource.id,
@@ -568,7 +576,7 @@ async def resume_task_runtime(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
+    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, int(task.id))
     if runtime_session is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
     if runtime_session.mode != "quick":
@@ -636,21 +644,21 @@ async def retry_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Retry a failed task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     if task.status != TaskStatus.FAILED.value:
         raise HTTPException(status_code=400, detail="Task is not in failed state")
-    
+
     if not task.can_retry:
         raise HTTPException(status_code=400, detail="Task has exceeded maximum retry attempts")
-    
+
     # Reset task for retry
     task.reset_for_retry()
     await RuntimeSessionService.create_session_for_task(
@@ -661,7 +669,7 @@ async def retry_task(
 
     # Queue task for processing
     _schedule_task_execution(background_tasks, str(task.task_id))
-    
+
     return {"message": "Task queued for retry", "task_id": str(task.task_id)}
 
 
@@ -671,20 +679,20 @@ async def cancel_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Cancel a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     if task.is_completed:
         raise HTTPException(status_code=400, detail="Cannot cancel completed task")
 
     await _cancel_task_for_replacement(db, task, reason="cancelled_by_user")
-    
+
     return {"message": "Task cancelled", "task_id": str(task.task_id)}
 
 
@@ -703,24 +711,35 @@ async def submit_script_gate_decision(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
+    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, int(task.id))
     if runtime_session is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
 
     try:
-        await db.run_sync(
-            lambda sync_db: RuntimeSessionService.submit_gate_decision_sync(
-                sync_db,
-                runtime_session.id,
+        expected_task_status = TaskStatus(str(task.status))
+
+        def _submit_decision(sync_db):
+            decision = ScriptGateDecisionControlPlane(
+                SqlAlchemyRuntimeAttemptStore(sync_db)
+            ).submit(
+                session_id=int(runtime_session.id),
                 node_key="script",
                 action=request.action,
                 feedback_text=request.feedback_text,
-                structured_constraints=request.structured_constraints,
+                structured_constraints=JsonObjectPayload.from_mapping(
+                    request.structured_constraints or {},
+                    field_path="script_gate_decision.structured_constraints",
+                ),
                 actor_type="human",
                 actor_id=request.actor_id,
+                task_id=str(task.task_id),
+                expected_task_status=expected_task_status,
             )
-        )
-    except ValueError as exc:
+            sync_db.commit()
+            return decision
+
+        await db.run_sync(_submit_decision)
+    except (RuntimeStoreError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _schedule_task_execution(background_tasks, str(task.task_id))

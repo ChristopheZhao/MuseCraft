@@ -4,25 +4,35 @@ Orchestration-facing facade for pre-execution runtime resume/load/bootstrap chor
 SQL/session boundary:
 - this facade owns short-lived sync SQLAlchemy sessions
 - Agents pass only database-independent task/runtime identifiers
-- RuntimeSessionService remains the sole owner of runtime persistence semantics
+- RuntimeAttemptControlPlane owns attempt/lease semantics behind a typed store
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from ..core.config import settings
 from ..core.database import SessionLocal as SyncSessionLocal
-from ..domain import AgentTaskReference, AgentType, WorkflowSessionStatus
+from ..domain import (
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+    RuntimeTaskTransition,
+    TaskStatus,
+    WorkflowSessionStatus,
+)
+from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from ..models import Task
 from .orchestration_state_adapter import OrchestrationStateAdapter
 from .published_deliverable_service import (
-    PublishedDeliverableService,
     PublishedDeliverablePayloadError,
+    PublishedDeliverableService,
     load_published_payload,
 )
+from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from .runtime_session_service import RuntimeSessionService
 
 
@@ -242,14 +252,14 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             )
             script_gate = RuntimeSessionService.get_latest_gate_for_node_sync(
                 db,
-                runtime_session.id,
+                int(runtime_session.id),
                 "script",
             )
             latest_decision = None
             if script_gate is not None:
                 latest_decision = RuntimeSessionService.get_latest_decision_for_gate_sync(
                     db,
-                    script_gate.id,
+                    int(script_gate.id),
                 )
 
             script_resume_action = ""
@@ -296,9 +306,7 @@ class OrchestrationRuntimeResumeBootstrapFacade:
                 script_gate_id=(int(script_gate.id) if script_gate is not None else None),
                 latest_script_decision_exists=latest_decision is not None,
                 latest_script_decision_actor_type=(
-                    str(latest_decision.actor_type or "")
-                    if latest_decision is not None
-                    else ""
+                    str(latest_decision.actor_type or "") if latest_decision is not None else ""
                 ),
                 script_resume_action=script_resume_action,
                 runtime_resume_checkpoint=runtime_resume_checkpoint,
@@ -457,16 +465,30 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             "Generating script" if current_agent_type == AgentType.SCRIPT_WRITER else None
         )
         progress_percentage = 15 if current_agent_type == AgentType.SCRIPT_WRITER else None
-        attempt = RuntimeSessionService.start_node_attempt_sync(
-            db,
-            runtime_session,
+        try:
+            current_task_status = TaskStatus(str(task.status))
+        except ValueError as exc:
+            raise OrchestrationRuntimeResumeBootstrapError(
+                f"Runtime task {task.task_id} has unsupported status {task.status!r}"
+            ) from exc
+        control_plane = RuntimeAttemptControlPlane(SqlAlchemyRuntimeAttemptStore(db))
+        attempt = control_plane.start_attempt(
+            session_id=int(runtime_session.id),
             node_key=runtime_node_key,
             trigger_reason=effective_trigger_reason,
             requested_by=requested_by,
-            input_contract={"stage": runtime_node_key, "workflow_state_id": workflow_state_id},
-            task=task,
-            progress_step=progress_step,
-            progress_percentage=progress_percentage,
+            input_contract=JsonObjectPayload.from_mapping(
+                {"stage": runtime_node_key, "workflow_state_id": workflow_state_id},
+                field_path="runtime_attempt.input_contract",
+            ),
+            task_transition=RuntimeTaskTransition(
+                task_id=str(task.task_id),
+                expected_status=current_task_status,
+                target_status=TaskStatus.IN_PROGRESS,
+                progress_step=progress_step,
+                progress_percentage=progress_percentage,
+                requires_human_review=False,
+            ),
         )
         continuation_checkpoint = self._orchestration_state.build_continuation_checkpoint(
             task_specs=task_specs,
@@ -474,21 +496,27 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             candidate_agents=list(candidate_agents),
             anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
             node_key=runtime_node_key,
-            attempt_id=attempt.id,
+            attempt_id=attempt.attempt_id,
             decision_id=None,
         )
-        RuntimeSessionService.bind_attempt_continuation_checkpoint_sync(
-            db,
-            runtime_session,
-            attempt_id=attempt.id,
-            continuation_checkpoint=continuation_checkpoint,
+        control_plane.bind_continuation(
+            session_id=int(runtime_session.id),
+            attempt_id=attempt.attempt_id,
+            continuation_checkpoint=JsonObjectPayload.from_mapping(
+                continuation_checkpoint,
+                field_path="runtime_attempt.continuation_checkpoint",
+            ),
         )
-        leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
-            db,
-            runtime_session,
-            attempt_id=attempt.id,
+        leased_attempt = control_plane.grant_lease(
+            session_id=int(runtime_session.id),
+            attempt_id=attempt.attempt_id,
             lease_owner=f"orchestrator:{workflow_state_id}:{runtime_node_key}",
+            lease_timeout_seconds=max(
+                1,
+                int(getattr(settings, "RUNTIME_ATTEMPT_LEASE_SECONDS", 300)),
+            ),
         )
+        db.commit()
         try:
             RuntimeSessionService.clear_node_diagnostic_codes_sync(
                 db,
@@ -513,7 +541,7 @@ class OrchestrationRuntimeResumeBootstrapFacade:
             )
         return RuntimeAttemptBootstrapResult(
             node_key=runtime_node_key,
-            attempt_id=attempt.id,
+            attempt_id=attempt.attempt_id,
             trigger_reason=effective_trigger_reason,
             lease_token=str(leased_attempt.lease_token or "").strip() or None,
         )
