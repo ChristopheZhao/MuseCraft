@@ -32,6 +32,7 @@ from ..domain import (
     RuntimePublishedDeliverableApprovalCommand,
     RuntimePublishedDeliverableRecord,
     RuntimePublishedDeliverableWrite,
+    RuntimeSessionCreateCommand,
     RuntimeSessionRecord,
     RuntimeSessionTransitionCommand,
     RuntimeStoreError,
@@ -602,6 +603,115 @@ class SqlAlchemyRuntimeAttemptStore:
         )
         if session is None:
             return None
+        return self._session_record(session, operation=operation)
+
+    def create_session(self, command: RuntimeSessionCreateCommand) -> RuntimeSessionRecord:
+        operation = "create_runtime_session"
+        task = self._db.execute(
+            select(Task)
+            .where(Task.task_id == command.task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if task is None:
+            raise _error(
+                reason_code=RuntimeStoreReason.RECORD_NOT_FOUND,
+                operation=operation,
+                message=f"task {command.task_id} was not found",
+            )
+        if task.status != command.expected_task_status.value:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message=(
+                    f"task {command.task_id} status conflict: "
+                    f"expected={command.expected_task_status.value} actual={task.status}"
+                ),
+            )
+
+        latest_session_id = self._db.execute(
+            select(WorkflowSession.id)
+            .where(WorkflowSession.task_db_id == task.id)
+            .order_by(WorkflowSession.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest_session_id != command.expected_latest_session_id:
+            raise _error(
+                reason_code=RuntimeStoreReason.STATE_CONFLICT,
+                operation=operation,
+                message=(
+                    f"task {command.task_id} latest runtime session changed: "
+                    f"expected={command.expected_latest_session_id} actual={latest_session_id}"
+                ),
+            )
+
+        normalized_mode = str(command.mode or "").strip().lower()
+        node_keys = [node.node_key.strip().lower() for node in command.nodes]
+        order_indices = [node.order_index for node in command.nodes]
+        if (
+            not normalized_mode
+            or not command.nodes
+            or any(not key for key in node_keys)
+            or len(node_keys) != len(set(node_keys))
+            or len(order_indices) != len(set(order_indices))
+        ):
+            raise _error(
+                reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                operation=operation,
+                message="runtime session creation requires a mode and unique node keys/order indices",
+            )
+
+        session = WorkflowSession()
+        setattr(session, "task_db_id", task.id)
+        setattr(session, "mode", normalized_mode)
+        setattr(session, "project_id", command.project_id)
+        setattr(session, "episode_id", command.episode_id)
+        setattr(session, "shared_memory_id", command.shared_memory_id)
+        setattr(session, "status", command.target_status.value)
+        setattr(session, "input_payload", command.input_payload.to_dict())
+        setattr(session, "gate_policy", command.gate_policy.to_dict())
+        setattr(session, "summary_output", {})
+        self._db.add(session)
+        self._db.flush()
+        session_id = cast(int, session.id)
+        for node in command.nodes:
+            node_row = WorkflowNodeState()
+            setattr(node_row, "session_id", session_id)
+            setattr(node_row, "node_key", node.node_key.strip().lower())
+            setattr(node_row, "node_type", node.node_type.strip().lower())
+            setattr(node_row, "order_index", node.order_index)
+            setattr(node_row, "scope_type", node.scope_type.strip().lower())
+            setattr(node_row, "scope_ref", node.scope_ref)
+            setattr(node_row, "status", node.target_status.value)
+            setattr(node_row, "revision_index", node.revision_index)
+            setattr(node_row, "gate_required", node.gate_required)
+            setattr(node_row, "artifact_refs", [])
+            setattr(node_row, "diagnostics", [])
+            self._db.add(node_row)
+
+        raw_metadata = cast(object, task.output_metadata)
+        if raw_metadata is None:
+            raw_metadata = {}
+        if not isinstance(raw_metadata, Mapping):
+            raise _error(
+                reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                operation=operation,
+                message=f"task {command.task_id} output metadata must be a JSON object",
+            )
+        try:
+            output_metadata = JsonObjectPayload.from_mapping(
+                cast(Mapping[str, object], raw_metadata),
+                field_path="tasks.output_metadata",
+            ).to_dict()
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                operation=operation,
+                message=f"task {command.task_id} output metadata is invalid: {exc}",
+            ) from exc
+        output_metadata["workflow_session_id"] = session_id
+        setattr(task, "output_metadata", output_metadata)
+        self._db.flush()
         return self._session_record(session, operation=operation)
 
     def load_reconcilable_sessions(

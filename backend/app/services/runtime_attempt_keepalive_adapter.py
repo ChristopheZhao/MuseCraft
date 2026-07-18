@@ -6,13 +6,13 @@ import logging
 from typing import Any
 
 from ..core.config import settings
+from ..domain import JsonObjectPayload
 from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from .execution_host_lease import (
     AttemptLeaseKeepaliveController,
     execution_host_lease_heartbeat_interval_seconds,
 )
 from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
-from .runtime_session_service import RuntimeSessionService
 
 
 def create_runtime_attempt_keepalive_controller(
@@ -59,23 +59,18 @@ def create_runtime_attempt_keepalive_controller(
     ) -> None:
         db = session_factory()
         try:
-            runtime_session = RuntimeSessionService.get_session_by_id_sync(
-                db,
-                runtime_session_id,
-            )
-            if runtime_session is None:
-                logger.warning(
-                    "Cannot persist keepalive diagnostic for missing session=%s attempt=%s",
-                    runtime_session_id,
-                    attempt_id,
-                )
-                return
-            RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
-                db,
-                runtime_session,
+            SqlAlchemyRuntimeAttemptStore(db).upsert_node_diagnostic(
+                session_id=runtime_session_id,
                 attempt_id=attempt_id,
-                diagnostic=diagnostic,
+                diagnostic=JsonObjectPayload.from_mapping(
+                    diagnostic,
+                    field_path="execution_host_keepalive.diagnostic",
+                ),
             )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 

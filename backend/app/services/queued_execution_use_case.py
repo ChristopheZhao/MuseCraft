@@ -19,6 +19,8 @@ from ..domain import (
     AgentType,
     QueuedExecutionCommand,
     QueuedExecutionKind,
+    RuntimeStoreError,
+    RuntimeStoreReason,
     TaskStatus,
 )
 from ..infrastructure import SqlAlchemyRuntimeAttemptStore
@@ -27,7 +29,7 @@ from .agent_execution_boundary import build_agent_execution_request
 from .project_job_contract import resolve_project_job_contract
 from .queued_task_execution_host import run_agent_execution_in_host
 from .runtime_attempt_keepalive_adapter import create_runtime_attempt_keepalive_controller
-from .runtime_session_service import RuntimeSessionService
+from .runtime_session_control_plane import RuntimeSessionControlPlane
 from .task_execution_policy import get_queue_execution_block_reason
 
 
@@ -100,6 +102,12 @@ class QueuedExecutionUseCase:
                     ).load_latest_session_for_task(
                         command.task_id,
                     )
+                    if runtime_session is None:
+                        self._logger.error(
+                            "Dispatch denied for quick task %s (runtime_missing)",
+                            command.task_id,
+                        )
+                        return None
             else:
                 project_contract = resolve_project_job_contract(task_payload)
 
@@ -230,17 +238,21 @@ class QueuedExecutionUseCase:
                     ).load_latest_session_for_task(
                         command.task_id,
                     )
+                    if runtime_session is None:
+                        return _SkippedExecution(
+                            reason_code="runtime_missing",
+                            result_metadata={"route": route, "mode": mode.value},
+                        )
                 block_reason = get_queue_execution_block_reason(task, runtime_session)
                 if block_reason:
                     return _SkippedExecution(
                         reason_code=block_reason,
                         result_metadata={"route": route, "mode": mode.value},
                     )
-                _, input_data = RuntimeSessionService.prepare_dispatch_payload_for_task_sync(
-                    db,
-                    task,
-                    mode=mode,
-                )
+                if runtime_session is not None:
+                    runtime_payload = runtime_session.input_payload.to_dict()
+                    if runtime_payload:
+                        input_data = runtime_payload
                 agent_type = (
                     AgentType.ORCHESTRATOR
                     if mode == GenerationMode.QUICK
@@ -393,11 +405,28 @@ class QueuedExecutionUseCase:
             if task is None:
                 return
             if command.execution_kind == QueuedExecutionKind.VIDEO_GENERATION:
-                RuntimeSessionService.mark_task_execution_failed_sync(
-                    db,
-                    task,
-                    error_message=str(error),
-                )
+                mode = resolve_generation_mode((task.input_parameters or {}).get("mode"))
+                if mode == GenerationMode.QUICK:
+                    store = SqlAlchemyRuntimeAttemptStore(db)
+                    runtime_session = store.load_latest_session_for_task(command.task_id)
+                    if runtime_session is None:
+                        raise RuntimeStoreError(
+                            reason_code=RuntimeStoreReason.RECORD_NOT_FOUND,
+                            operation="mark_queued_execution_failed",
+                            message=(
+                                f"Authoritative runtime session for task {command.task_id} "
+                                "is missing"
+                            ),
+                        )
+                    RuntimeSessionControlPlane(store).mark_failed(
+                        runtime_session.session_id,
+                        error_message=str(error),
+                    )
+                    db.commit()
+                    return
+                task.status = TaskStatus.FAILED.value
+                task.error_message = str(error)
+                db.commit()
                 return
 
             task.status = TaskStatus.FAILED.value

@@ -21,6 +21,9 @@ RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE = (
     BACKEND_ROOT / "app" / "services" / "runtime_published_deliverable_control_plane.py"
 )
 RUNTIME_RESUME_CONTROL_PLANE = BACKEND_ROOT / "app" / "services" / "runtime_resume_control_plane.py"
+RUNTIME_SESSION_BOOTSTRAP_CONTROL_PLANE = (
+    BACKEND_ROOT / "app" / "services" / "runtime_session_bootstrap_control_plane.py"
+)
 
 EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT = {
     "runtime_session_service.py",
@@ -79,6 +82,7 @@ def test_runtime_projection_and_session_policy_are_database_independent():
         PUBLISHED_DELIVERABLE_SERVICE,
         RUNTIME_PUBLISHED_DELIVERABLE_CONTROL_PLANE,
         RUNTIME_RESUME_CONTROL_PLANE,
+        RUNTIME_SESSION_BOOTSTRAP_CONTROL_PLANE,
     }:
         imports = _imports(path)
         source = _source(path)
@@ -105,6 +109,23 @@ def test_runtime_control_plane_sql_debt_matches_exact_slice_d_ratchet():
             observed.add(path.name)
 
     assert observed == EXPECTED_TRANSITIONAL_RUNTIME_PERSISTENCE_DEBT
+
+
+def test_production_runtime_callers_do_not_reference_legacy_session_service():
+    violations: list[str] = []
+    for root in (BACKEND_ROOT / "app" / "api", BACKEND_ROOT / "app" / "services"):
+        for path in root.rglob("*.py"):
+            if path.name == "runtime_session_service.py":
+                continue
+            imports = _imports(path)
+            imports_legacy_service = any(
+                module == "runtime_session_service" or module.endswith(".runtime_session_service")
+                for module in imports
+            )
+            if imports_legacy_service or "RuntimeSessionService" in _source(path):
+                violations.append(str(path.relative_to(BACKEND_ROOT)))
+
+    assert violations == []
 
 
 def test_runtime_store_exposes_required_atomic_capabilities():
@@ -190,6 +211,18 @@ def test_runtime_store_exposes_required_atomic_capabilities():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert session_store_methods == {"transition_session"}
+
+    bootstrap_store = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeSessionBootstrapStore"
+    )
+    bootstrap_store_methods = {
+        node.name
+        for node in bootstrap_store.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert bootstrap_store_methods == {"create_session"}
 
     resume_store = next(
         node

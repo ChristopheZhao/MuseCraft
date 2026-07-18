@@ -22,6 +22,7 @@ from app.domain import (
     RuntimeReadModelQuery,
     RuntimeReadStore,
     RuntimeResumeStore,
+    RuntimeSessionBootstrapStore,
     RuntimeStoreError,
     RuntimeStoreReason,
     RuntimeTaskTransition,
@@ -50,6 +51,7 @@ from app.services.runtime_read_model_service import (
 )
 from app.services.runtime_reconciler import RuntimeReconciler
 from app.services.runtime_resume_control_plane import RuntimeResumeControlPlane
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
 from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
@@ -145,6 +147,60 @@ def test_attempt_store_maps_stable_task_identity_and_strict_records(runtime_db):
     assert record.task_status is TaskStatus.PENDING
     assert isinstance(store, RuntimeAttemptStore)
     assert isinstance(store, RuntimeReadStore)
+
+
+def test_session_bootstrap_creates_default_graph_and_rejects_stale_latest_session(runtime_db):
+    db, _ = runtime_db
+    task = Task(
+        task_id="public-bootstrap-task",
+        title="Runtime bootstrap test",
+        description="runtime bootstrap test",
+        task_type=TaskType.VIDEO_GENERATION,
+        status=TaskStatus.PENDING.value,
+        input_parameters={"user_prompt": "bootstrap"},
+    )
+    db.add(task)
+    db.flush()
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    control_plane = RuntimeSessionBootstrapControlPlane(store)
+
+    record = control_plane.create_quick_session(
+        task_id="public-bootstrap-task",
+        expected_task_status=TaskStatus.PENDING,
+        expected_latest_session_id=None,
+        input_payload=JsonObjectPayload.from_mapping(
+            {"user_prompt": "bootstrap"},
+            field_path="test.bootstrap_input",
+        ),
+    )
+    db.commit()
+    db.refresh(task)
+
+    assert isinstance(store, RuntimeSessionBootstrapStore)
+    assert record.status is WorkflowSessionStatus.QUEUED
+    assert record.shared_memory_id == "public-bootstrap-task"
+    assert task.output_metadata["workflow_session_id"] == record.session_id
+    assert [node.node_key for node in store.load_nodes(record.session_id)] == [
+        "concept",
+        "script",
+        "image",
+        "video",
+        "voice",
+        "compose",
+        "audio",
+        "quality",
+    ]
+
+    with pytest.raises(RuntimeStoreError) as caught:
+        control_plane.create_quick_session(
+            task_id="public-bootstrap-task",
+            expected_task_status=TaskStatus.PENDING,
+            expected_latest_session_id=None,
+            input_payload=JsonObjectPayload.empty(),
+        )
+
+    assert caught.value.reason_code is RuntimeStoreReason.STATE_CONFLICT
+    assert caught.value.operation == "create_runtime_session"
 
 
 def test_attempt_store_rejects_corrupt_persisted_status(runtime_db):

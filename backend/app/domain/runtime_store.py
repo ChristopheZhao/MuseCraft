@@ -201,6 +201,8 @@ class RuntimeNodeCreate:
 @dataclass(frozen=True, slots=True)
 class RuntimeSessionCreateCommand:
     task_id: str
+    expected_task_status: TaskStatus
+    expected_latest_session_id: int | None
     mode: str
     input_payload: JsonObjectPayload
     target_status: WorkflowSessionStatus
@@ -498,6 +500,14 @@ class RuntimeSessionStore(RuntimeReadStore, Protocol):
     """Atomic session-terminal transition capabilities."""
 
     def transition_session(self, command: RuntimeSessionTransitionCommand) -> RuntimeSessionRecord:
+        ...
+
+
+@runtime_checkable
+class RuntimeSessionBootstrapStore(Protocol):
+    """Atomic creation of a runtime session and its initial node graph."""
+
+    def create_session(self, command: RuntimeSessionCreateCommand) -> RuntimeSessionRecord:
         ...
 
 

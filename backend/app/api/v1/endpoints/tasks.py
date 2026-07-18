@@ -5,36 +5,33 @@ import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
-from pydantic import BaseModel, Field
 
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ....core.config import settings
 from ....core.database import get_db
 from ....domain import (
     JsonObjectPayload,
+    RuntimeSessionRecord,
     RuntimeStoreError,
     RuntimeStoreReason,
     TaskStatus,
     TaskType,
-    WorkflowSessionStatus,
 )
 from ....infrastructure import SqlAlchemyRuntimeAttemptStore
-from ....models import Resource, Scene, Task, WorkflowSession
-from ....services.task_queue import TaskQueueService, cancel_celery_task
-from ....services.runtime_session_service import RuntimeSessionService
+from ....models import Resource, Scene, Task
 from ....services.runtime_read_model_service import (
     RuntimeReadModelPresenter,
     RuntimeReadModelService,
 )
+from ....services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
 from ....services.runtime_session_control_plane import RuntimeSessionControlPlane
 from ....services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
-from ....services.task_execution_policy import (
-    is_terminal_task_status,
-    is_terminal_runtime_status,
-)
-from ....core.config import settings
-
+from ....services.task_execution_policy import is_terminal_runtime_status, is_terminal_task_status
+from ....services.task_queue import TaskQueueService, cancel_celery_task
 
 router = APIRouter()
 
@@ -71,6 +68,43 @@ def _schedule_task_execution(background_tasks: BackgroundTasks, task_id: str) ->
 
     threading.Thread(target=run_task, daemon=True).start()
     logger.info("Task %s started in background thread (debug in-process runner enabled)", task_id)
+
+
+async def _load_latest_runtime_session_id(
+    db: AsyncSession,
+    task_id: str,
+) -> Optional[int]:
+    def _load(sync_db):
+        record = SqlAlchemyRuntimeAttemptStore(sync_db).load_latest_session_for_task(
+            task_id
+        )
+        return record.session_id if record is not None else None
+
+    return await db.run_sync(_load)
+
+
+async def _create_quick_runtime_session(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    expected_task_status: TaskStatus,
+    expected_latest_session_id: Optional[int],
+    input_payload: Dict[str, Any],
+) -> RuntimeSessionRecord:
+    def _create(sync_db):
+        return RuntimeSessionBootstrapControlPlane(
+            SqlAlchemyRuntimeAttemptStore(sync_db)
+        ).create_quick_session(
+            task_id=task_id,
+            expected_task_status=expected_task_status,
+            expected_latest_session_id=expected_latest_session_id,
+            input_payload=JsonObjectPayload.from_mapping(
+                input_payload,
+                field_path="tasks_api.runtime_input_payload",
+            ),
+        )
+
+    return await db.run_sync(_create)
 
 
 # Pydantic models for request/response
@@ -352,16 +386,24 @@ async def create_task(
         )
 
         db.add(task)
-        await db.commit()
+        await db.flush()
         await db.refresh(task)
         logger.info(f"Task created with ID: {task.id}")
 
-        runtime_session = await RuntimeSessionService.create_session_for_task(
+        runtime_session = await _create_quick_runtime_session(
             db,
-            task,
-            mode="quick",
+            task_id=str(task.task_id),
+            expected_task_status=TaskStatus.PENDING,
+            expected_latest_session_id=None,
+            input_payload=dict(task.input_parameters or {}),
         )
-        logger.info(f"Runtime session created with ID: {runtime_session.id} for task {task.id}")
+        await db.commit()
+        await db.refresh(task)
+        logger.info(
+            "Runtime session created with ID: %s for task %s",
+            runtime_session.session_id,
+            task.id,
+        )
 
         logger.info("Dispatching task execution for task %s", task.id)
         _schedule_task_execution(background_tasks, str(task.task_id))
@@ -381,11 +423,13 @@ async def create_task(
         logger.info("Returning response")
         return response
     except ValueError as e:
+        await db.rollback()
         logger.error(f"Error creating task: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
+        await db.rollback()
         logger.error(f"Error creating task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}") from e
 
 
 @router.get("/quick/current", response_model=Optional[QuickCurrentRunResponse])
@@ -684,13 +728,30 @@ async def retry_task(
     if not task.can_retry:
         raise HTTPException(status_code=400, detail="Task has exceeded maximum retry attempts")
 
-    # Reset task for retry
-    task.reset_for_retry()
-    await RuntimeSessionService.create_session_for_task(
-        db,
-        task,
-        mode="quick",
-    )
+    latest_session_id = await _load_latest_runtime_session_id(db, str(task.task_id))
+    if latest_session_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative runtime session is missing for failed task",
+        )
+
+    try:
+        task.reset_for_retry()
+        await _create_quick_runtime_session(
+            db,
+            task_id=str(task.task_id),
+            expected_task_status=TaskStatus.PENDING,
+            expected_latest_session_id=latest_session_id,
+            input_payload=dict(task.input_parameters or {}),
+        )
+        await db.commit()
+        await db.refresh(task)
+    except RuntimeStoreError as exc:
+        await db.rollback()
+        status_code = (
+            409 if exc.reason_code is RuntimeStoreReason.STATE_CONFLICT else 500
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     # Queue task for processing
     _schedule_task_execution(background_tasks, str(task.task_id))

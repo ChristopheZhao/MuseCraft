@@ -7,8 +7,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
 from app.domain import TaskStatus, TaskType
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task
 from app.services import execution_host_lease
+from app.services.runtime_attempt_keepalive_adapter import (
+    create_runtime_attempt_keepalive_controller,
+)
 from app.services.runtime_session_service import RuntimeSessionService
 
 
@@ -21,7 +25,9 @@ def _build_threaded_sqlite_session_factory(tmp_path, name: str):
     return engine, sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
-def _create_runtime_attempt(session_factory, *, node_key: str = "video", lease_timeout_seconds: int = 2):
+def _create_runtime_attempt(
+    session_factory, *, node_key: str = "video", lease_timeout_seconds: int = 2
+):
     db = session_factory()
     try:
         task = Task(
@@ -35,7 +41,9 @@ def _create_runtime_attempt(session_factory, *, node_key: str = "video", lease_t
         db.commit()
         db.refresh(task)
 
-        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(db, task, mode="quick")
+        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
+            db, task, mode="quick"
+        )
         attempt = RuntimeSessionService.start_node_attempt_sync(
             db,
             runtime_session,
@@ -131,7 +139,45 @@ def test_attempt_lease_keepalive_controller_renews_real_runtime_lease_on_threade
         engine.dispose()
 
 
-def test_attempt_lease_keepalive_controller_can_leave_silent_expired_window_when_heartbeat_blocks(tmp_path):
+def test_keepalive_adapter_persists_receipts_through_runtime_store(tmp_path):
+    engine, session_factory = _build_threaded_sqlite_session_factory(
+        tmp_path,
+        "lease_adapter_receipts.sqlite",
+    )
+    setup = _create_runtime_attempt(session_factory, lease_timeout_seconds=2)
+    controller = create_runtime_attempt_keepalive_controller(
+        session_factory=session_factory,
+        interval_seconds=10,
+    )
+
+    try:
+        controller.activate(
+            runtime_session_id=setup["runtime_session_id"],
+            attempt_id=setup["attempt_id"],
+            lease_token=setup["lease_token"],
+        )
+        controller.deactivate(reason="test_complete")
+
+        db = session_factory()
+        try:
+            node = SqlAlchemyRuntimeAttemptStore(db).load_node(
+                setup["runtime_session_id"],
+                setup["node_key"],
+            )
+            assert node is not None
+            codes = {diagnostic.to_dict().get("code") for diagnostic in node.diagnostics}
+            assert "execution_host_keepalive_activation_requested" in codes
+            assert "execution_host_keepalive_deactivated" in codes
+        finally:
+            db.close()
+    finally:
+        controller.close()
+        engine.dispose()
+
+
+def test_attempt_lease_keepalive_controller_can_leave_silent_expired_window_when_heartbeat_blocks(
+    tmp_path,
+):
     engine, session_factory = _build_threaded_sqlite_session_factory(
         tmp_path,
         "lease_rca_blocked.sqlite",
@@ -190,7 +236,9 @@ def test_attempt_lease_keepalive_controller_can_leave_silent_expired_window_when
             attempt_id=setup["attempt_id"],
             lease_token=setup["lease_token"],
         )
-        assert entered_heartbeat.wait(timeout=1.0), "expected keepalive loop to enter heartbeat call"
+        assert entered_heartbeat.wait(
+            timeout=1.0
+        ), "expected keepalive loop to enter heartbeat call"
 
         sleep_seconds = max(
             0.0,

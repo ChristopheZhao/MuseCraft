@@ -6,7 +6,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from app.api.v1.endpoints import tasks as tasks_endpoint
-from app.domain import JsonObjectPayload, RuntimeStoreError, RuntimeStoreReason
+from app.domain import JsonObjectPayload, RuntimeStoreError, RuntimeStoreReason, TaskStatus
 
 
 def test_schedule_task_execution_queues_task_by_default(monkeypatch):
@@ -46,7 +46,9 @@ def test_schedule_task_execution_uses_in_process_runner_only_when_enabled(monkey
 
     class _ForbiddenQueueService:
         def __init__(self):
-            raise AssertionError("queue service should not be used when in-process runner is explicitly enabled")
+            raise AssertionError(
+                "queue service should not be used when in-process runner is explicitly enabled"
+            )
 
     class _FakeThread:
         def __init__(self, *, target, daemon):
@@ -60,7 +62,9 @@ def test_schedule_task_execution_uses_in_process_runner_only_when_enabled(monkey
     monkeypatch.setattr(tasks_endpoint.settings, "TASKS_API_ENABLE_IN_PROCESS_RUNNER", True)
     monkeypatch.setattr(tasks_endpoint, "TaskQueueService", _ForbiddenQueueService)
     monkeypatch.setattr(tasks_endpoint.threading, "Thread", _FakeThread)
-    monkeypatch.setattr("app.services.task_queue.sync_process_video_task", _fake_sync_process_video_task)
+    monkeypatch.setattr(
+        "app.services.task_queue.sync_process_video_task", _fake_sync_process_video_task
+    )
 
     tasks_endpoint._schedule_task_execution(background_tasks, "task-7")
 
@@ -256,7 +260,9 @@ def test_find_current_quick_run_surfaces_projection_integrity_error(monkeypatch)
     monkeypatch.setattr(tasks_endpoint, "_load_runtime_view", _broken_runtime_view)
 
     with pytest.raises(RuntimeStoreError, match="missing current attempt anchor"):
-        asyncio.run(tasks_endpoint._find_current_quick_run_for_session(_FakeDb(), "quick-session-3"))
+        asyncio.run(
+            tasks_endpoint._find_current_quick_run_for_session(_FakeDb(), "quick-session-3")
+        )
 
 
 def test_get_current_quick_run_surfaces_selector_runtime_integrity_error(monkeypatch):
@@ -279,7 +285,7 @@ def test_get_current_quick_run_surfaces_selector_runtime_integrity_error(monkeyp
 
 def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
     existing_task = SimpleNamespace(id=7, task_id="task-old")
-    created_runtime_session = SimpleNamespace(id=55)
+    created_runtime_session = SimpleNamespace(session_id=55)
     queue_calls = {}
 
     class _FakeDb:
@@ -288,6 +294,9 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
 
         def add(self, obj):
             self.added.append(obj)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             return None
@@ -316,10 +325,21 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
         queue_calls["cancelled_task_id"] = task.id
         queue_calls["cancel_reason"] = reason
 
-    async def _fake_create_session(db, task, mode="quick"):
+    async def _fake_create_session(
+        db,
+        *,
+        task_id,
+        expected_task_status,
+        expected_latest_session_id,
+        input_payload,
+    ):
+        task = db.added[-1]
         queue_calls["created_task_id"] = task.id
         queue_calls["created_task_session_id"] = task.session_id
-        queue_calls["created_mode"] = mode
+        queue_calls["created_task_public_id"] = task_id
+        queue_calls["expected_task_status"] = expected_task_status
+        queue_calls["expected_latest_session_id"] = expected_latest_session_id
+        queue_calls["runtime_input_payload"] = dict(input_payload)
         return created_runtime_session
 
     def _fake_schedule(background_tasks, task_db_id):
@@ -327,7 +347,7 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
 
     monkeypatch.setattr(tasks_endpoint, "_find_current_quick_run_for_session", _fake_find)
     monkeypatch.setattr(tasks_endpoint, "_cancel_task_for_replacement", _fake_cancel)
-    monkeypatch.setattr(tasks_endpoint.RuntimeSessionService, "create_session_for_task", _fake_create_session)
+    monkeypatch.setattr(tasks_endpoint, "_create_quick_runtime_session", _fake_create_session)
     monkeypatch.setattr(tasks_endpoint, "_schedule_task_execution", _fake_schedule)
 
     request = tasks_endpoint.TaskCreateRequest(
@@ -348,7 +368,8 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
 
     assert queue_calls["cancelled_task_id"] == 7
     assert queue_calls["cancel_reason"] == "superseded_by_new_run"
-    assert queue_calls["created_mode"] == "quick"
+    assert queue_calls["expected_task_status"] is TaskStatus.PENDING
+    assert queue_calls["expected_latest_session_id"] is None
     assert queue_calls["created_task_session_id"] == "quick-session-2"
     assert queue_calls["scheduled_task_id"] == "task-new"
     assert response.task_id == "task-new"
@@ -551,7 +572,7 @@ def test_resume_task_runtime_rejects_when_checkpoint_validation_fails(monkeypatc
                 background_tasks=BackgroundTasks(),
                 db=_FakeDb(),
             )
-    )
+        )
 
     assert exc_info.value.status_code == 409
     assert "missing current attempt anchor" in str(exc_info.value.detail)

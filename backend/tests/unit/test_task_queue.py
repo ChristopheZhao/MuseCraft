@@ -17,6 +17,7 @@ from app.domain import (
     TaskType,
     WorkflowSessionStatus,
 )
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task
 from app.services import execution_host_lease, queued_task_execution_host, task_queue
 from app.services.agent_execution_boundary import build_agent_execution_request
@@ -24,7 +25,8 @@ from app.services.queued_execution_use_case import (
     QueuedExecutionApplicationError,
     QueuedExecutionUseCase,
 )
-from app.services.runtime_session_service import RuntimeSessionService
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
+from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
 
 
 @pytest.fixture
@@ -39,7 +41,14 @@ def session_factory():
         engine.dispose()
 
 
-def _create_task(session_factory, *, input_parameters, status=TaskStatus.PENDING.value):
+def _create_task(
+    session_factory,
+    *,
+    input_parameters,
+    status=TaskStatus.PENDING.value,
+    runtime_input_payload=None,
+    create_runtime=True,
+):
     db = session_factory()
     try:
         task = Task(
@@ -50,8 +59,21 @@ def _create_task(session_factory, *, input_parameters, status=TaskStatus.PENDING
             input_parameters=input_parameters,
         )
         db.add(task)
-        db.commit()
+        db.flush()
         db.refresh(task)
+        if create_runtime:
+            RuntimeSessionBootstrapControlPlane(
+                SqlAlchemyRuntimeAttemptStore(db)
+            ).create_quick_session(
+                task_id=str(task.task_id),
+                expected_task_status=TaskStatus(status),
+                expected_latest_session_id=None,
+                input_payload=JsonObjectPayload.from_mapping(
+                    runtime_input_payload or input_parameters,
+                    field_path="test.runtime_input_payload",
+                ),
+            )
+        db.commit()
         return str(task.task_id)
     finally:
         db.close()
@@ -273,27 +295,44 @@ def test_use_case_rejects_non_string_transport_receipt(session_factory):
         db.close()
 
 
+def test_use_case_fails_closed_when_quick_runtime_is_missing(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        create_runtime=False,
+    )
+    dispatched = []
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: pytest.fail("host must not run"),
+    )
+
+    receipt = use_case.enqueue(
+        QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION),
+        dispatch=lambda stable_id: dispatched.append(stable_id) or "transport-1",
+    )
+    result = use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
+
+    assert receipt is None
+    assert dispatched == []
+    assert result == {
+        "status": "skipped",
+        "skip_reason": "runtime_missing",
+        "route": "orchestrator_mainline",
+        "mode": "quick",
+    }
+
+
 def test_use_case_prefers_runtime_payload_and_builds_persistence_free_request(session_factory):
     task_id = _create_task(
         session_factory,
         input_parameters={"user_prompt": "task payload"},
         status=TaskStatus.QUEUED.value,
-    )
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            db,
-            task,
-            mode="quick",
-        )
-        runtime_session.input_payload = {
+        runtime_input_payload={
             "user_prompt": "runtime payload",
             "runtime_contracts": {"script_review": {"action": "approve"}},
-        }
-        db.commit()
-    finally:
-        db.close()
+        },
+    )
 
     calls = {}
 
@@ -327,18 +366,14 @@ def test_use_case_terminal_runtime_fails_closed_before_host(session_factory):
     )
     db = session_factory()
     try:
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
-            db,
-            task,
-            mode="quick",
-        )
-        RuntimeSessionService.mark_session_failed_sync(
-            db,
-            runtime_session,
+        store = SqlAlchemyRuntimeAttemptStore(db)
+        runtime_session = store.load_latest_session_for_task(task_id)
+        assert runtime_session is not None
+        RuntimeSessionControlPlane(store).mark_failed(
+            runtime_session.session_id,
             error_message="already failed",
-            task=task,
         )
+        db.commit()
     finally:
         db.close()
 
@@ -379,10 +414,11 @@ def test_use_case_persists_runtime_failure_and_re_raises_host_error(session_fact
     db = session_factory()
     try:
         task = db.query(Task).filter(Task.task_id == task_id).first()
-        runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(db, task.id)
+        runtime_session = SqlAlchemyRuntimeAttemptStore(db).load_latest_session_for_task(task_id)
+        assert runtime_session is not None
         assert task.status == TaskStatus.FAILED.value
         assert task.error_message == "host failed"
-        assert runtime_session.status == WorkflowSessionStatus.FAILED.value
+        assert runtime_session.status is WorkflowSessionStatus.FAILED
     finally:
         db.close()
 
@@ -394,11 +430,9 @@ def test_use_case_surfaces_failed_failure_transition(session_factory, monkeypatc
         status=TaskStatus.QUEUED.value,
     )
     monkeypatch.setattr(
-        RuntimeSessionService,
-        "mark_task_execution_failed_sync",
-        staticmethod(
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("transition failed"))
-        ),
+        RuntimeSessionControlPlane,
+        "mark_failed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("transition failed")),
     )
     use_case = QueuedExecutionUseCase(
         session_factory=session_factory,
