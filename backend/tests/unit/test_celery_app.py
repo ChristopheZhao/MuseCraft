@@ -18,9 +18,9 @@ def test_process_video_task_reports_progress_and_returns_success(monkeypatch):
         lambda: (lambda task_id: {"status": "skipped", "task_id": task_id}),
     )
 
-    result = real_task.run(42)
+    result = real_task.run("task-42")
 
-    assert result == {"status": "skipped", "task_id": 42}
+    assert result == {"status": "skipped", "task_id": "task-42"}
     assert state_updates == [
         {
             "state": "PROGRESS",
@@ -49,7 +49,7 @@ def test_process_video_task_raises_standard_exception_for_business_error(monkeyp
     )
 
     with pytest.raises(celery_module.ProcessVideoTaskError, match="boom"):
-        real_task.run(42)
+        real_task.run("task-42")
 
     assert state_updates == [
         {
@@ -82,7 +82,7 @@ def test_process_video_task_wraps_import_error_without_manual_failure_meta(monke
         celery_module.ProcessVideoTaskError,
         match="Failed to import sync_process_video_task: missing task runner",
     ):
-        real_task.run(42)
+        real_task.run("task-42")
 
     assert state_updates == [
         {

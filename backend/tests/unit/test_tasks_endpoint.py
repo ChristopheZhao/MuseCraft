@@ -27,12 +27,12 @@ def test_schedule_task_execution_queues_task_by_default(monkeypatch):
     monkeypatch.setattr(tasks_endpoint, "TaskQueueService", _FakeQueueService)
     monkeypatch.setattr(tasks_endpoint.threading, "Thread", _ForbiddenThread)
 
-    tasks_endpoint._schedule_task_execution(background_tasks, 42)
+    tasks_endpoint._schedule_task_execution(background_tasks, "task-42")
 
     assert queue_events["created"] == 1
     assert len(background_tasks.tasks) == 1
     scheduled = background_tasks.tasks[0]
-    assert scheduled.args == (42,)
+    assert scheduled.args == ("task-42",)
 
 
 def test_schedule_task_execution_uses_in_process_runner_only_when_enabled(monkeypatch):
@@ -61,12 +61,12 @@ def test_schedule_task_execution_uses_in_process_runner_only_when_enabled(monkey
     monkeypatch.setattr(tasks_endpoint.threading, "Thread", _FakeThread)
     monkeypatch.setattr("app.services.task_queue.sync_process_video_task", _fake_sync_process_video_task)
 
-    tasks_endpoint._schedule_task_execution(background_tasks, 7)
+    tasks_endpoint._schedule_task_execution(background_tasks, "task-7")
 
     assert len(background_tasks.tasks) == 0
     assert thread_events["daemon"] is True
     assert thread_events["started"] is True
-    assert thread_events["task_id"] == 7
+    assert thread_events["task_id"] == "task-7"
 
 
 def test_task_runtime_is_the_authoritative_projection(monkeypatch):
@@ -341,7 +341,7 @@ def test_create_task_replaces_existing_unfinished_quick_run(monkeypatch):
     assert queue_calls["cancel_reason"] == "superseded_by_new_run"
     assert queue_calls["created_mode"] == "quick"
     assert queue_calls["created_task_session_id"] == "quick-session-2"
-    assert queue_calls["scheduled_task_id"] == 101
+    assert queue_calls["scheduled_task_id"] == "task-new"
     assert response.task_id == "task-new"
 
 
@@ -452,7 +452,7 @@ def test_resume_task_runtime_marks_session_resuming_and_requeues(monkeypatch):
     assert events["loaded_anchor_type"] == "runtime_checkpoint"
     assert events["loaded_require_decision_id"] is False
     assert events["loaded_require_resuming"] is False
-    assert events["scheduled_task_id"] == 21
+    assert events["scheduled_task_id"] == "task-21"
     assert events["refreshed"] is task
     assert response.message == "Runtime resume accepted"
     assert response.task_id == "task-21"

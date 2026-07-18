@@ -9,10 +9,6 @@ from .agent_execution import (
     AgentTaskReference,
     JsonObjectPayload,
 )
-from .episode_execution import (
-    EpisodeWorkflowExecutionPort,
-    EpisodeWorkflowExecutionReceipt,
-)
 from .enums import (
     AgentStatus,
     AgentType,
@@ -24,6 +20,13 @@ from .enums import (
     WorkflowGateStatus,
     WorkflowNodeStatus,
     WorkflowSessionStatus,
+)
+from .episode_execution import EpisodeWorkflowExecutionPort, EpisodeWorkflowExecutionReceipt
+from .queued_execution import (
+    QueuedExecutionCommand,
+    QueuedExecutionContractError,
+    QueuedExecutionContractReason,
+    QueuedExecutionKind,
 )
 
 __all__ = [
@@ -38,6 +41,10 @@ __all__ = [
     "JsonObjectPayload",
     "EpisodeWorkflowExecutionPort",
     "EpisodeWorkflowExecutionReceipt",
+    "QueuedExecutionCommand",
+    "QueuedExecutionContractError",
+    "QueuedExecutionContractReason",
+    "QueuedExecutionKind",
     "ResourceType",
     "SceneType",
     "TaskStatus",

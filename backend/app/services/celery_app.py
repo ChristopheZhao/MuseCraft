@@ -78,7 +78,7 @@ def _load_sync_process_project_job():
 
 
 @celery_app.task(bind=True, name="process_video_task")
-def process_video_task(self, task_id: int):
+def process_video_task(self, task_id: str):
     """Celery task for processing video generation"""
     
     logger = logging.getLogger("celery_task")
@@ -121,7 +121,7 @@ def process_video_task(self, task_id: int):
 
 
 @celery_app.task(bind=True, name="process_project_job")
-def process_project_job(self, task_id: int):
+def process_project_job(self, task_id: str):
     """Celery task for processing project workflow jobs."""
 
     logger = logging.getLogger("project_job")

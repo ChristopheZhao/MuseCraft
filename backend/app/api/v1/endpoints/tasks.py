@@ -31,32 +31,32 @@ def _val(x):
     return getattr(x, "value", x)
 
 
-def _schedule_task_execution(background_tasks: BackgroundTasks, task_db_id: int) -> None:
+def _schedule_task_execution(background_tasks: BackgroundTasks, task_id: str) -> None:
     """Queue tasks by default; allow local in-process execution only via explicit debug switch."""
     logger = logging.getLogger("tasks_api")
     if not bool(getattr(settings, "TASKS_API_ENABLE_IN_PROCESS_RUNNER", False)):
         task_queue = TaskQueueService()
-        background_tasks.add_task(task_queue.queue_task, task_db_id)
-        logger.info("Task %s queued through background worker", task_db_id)
+        background_tasks.add_task(task_queue.queue_task, task_id)
+        logger.info("Task %s queued through background worker", task_id)
         return
 
     try:
         from ....services.task_queue import sync_process_video_task
     except Exception as exc:
-        logger.warning("Debug in-process runner unavailable for task %s: %s", task_db_id, exc, exc_info=True)
+        logger.warning("Debug in-process runner unavailable for task %s: %s", task_id, exc, exc_info=True)
         task_queue = TaskQueueService()
-        background_tasks.add_task(task_queue.queue_task, task_db_id)
+        background_tasks.add_task(task_queue.queue_task, task_id)
         return
 
     def run_task() -> None:
         try:
-            result = sync_process_video_task(task_db_id)
-            logger.info("Direct runtime execution result for task %s: %s", task_db_id, result)
+            result = sync_process_video_task(task_id)
+            logger.info("Direct runtime execution result for task %s: %s", task_id, result)
         except Exception as exc:
-            logger.error("Direct runtime execution failed for task %s: %s", task_db_id, exc, exc_info=True)
+            logger.error("Direct runtime execution failed for task %s: %s", task_id, exc, exc_info=True)
 
     threading.Thread(target=run_task, daemon=True).start()
-    logger.info("Task %s started in background thread (debug in-process runner enabled)", task_db_id)
+    logger.info("Task %s started in background thread (debug in-process runner enabled)", task_id)
 
 
 # Pydantic models for request/response
@@ -317,7 +317,7 @@ async def create_task(
         logger.info(f"Runtime session created with ID: {runtime_session.id} for task {task.id}")
         
         logger.info("Dispatching task execution for task %s", task.id)
-        _schedule_task_execution(background_tasks, task.id)
+        _schedule_task_execution(background_tasks, str(task.task_id))
         
         response = TaskResponse(
             id=task.id,
@@ -614,7 +614,7 @@ async def resume_task_runtime(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     await db.refresh(task)
-    _schedule_task_execution(background_tasks, task.id)
+    _schedule_task_execution(background_tasks, str(task.task_id))
     runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
     if runtime_view is None:
         raise HTTPException(
@@ -660,7 +660,7 @@ async def retry_task(
     )
 
     # Queue task for processing
-    _schedule_task_execution(background_tasks, task.id)
+    _schedule_task_execution(background_tasks, str(task.task_id))
     
     return {"message": "Task queued for retry", "task_id": str(task.task_id)}
 
@@ -723,7 +723,7 @@ async def submit_script_gate_decision(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _schedule_task_execution(background_tasks, task.id)
+    _schedule_task_execution(background_tasks, str(task.task_id))
     runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
     if runtime_view is None:
         raise HTTPException(

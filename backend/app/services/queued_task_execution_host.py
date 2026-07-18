@@ -1,157 +1,68 @@
-"""
-Execution host for queued task runs.
+"""Process host for persistence-free Agent execution."""
 
-Owns worker-side bootstrap concerns that should not live in the queue adapter:
-- tool registry initialization
-- worker event-bus reset
-- event-loop lifecycle for sync Celery entrypoints
-- MAS mainline invocation
-"""
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Protocol
 
-from ..core.constants import GenerationMode
-from ..domain import AgentType
+from ..domain import AgentExecutionRequest, AgentExecutionResult
 from ..events.provider import reset_event_bus
 from .execution_host_lease import (
     AttemptLeaseKeepaliveController,
     ExecutionHostLeaseContext,
-    execution_host_lease_heartbeat_interval_seconds,
     reset_current_execution_host_lease_context,
     set_current_execution_host_lease_context,
 )
-from .agent_execution_boundary import build_agent_execution_request
+
+
+class AgentExecutor(Protocol):
+    async def execute(self, request: AgentExecutionRequest) -> AgentExecutionResult:
+        ...
 
 
 def prepare_queued_execution_host(*, logger: logging.Logger | None = None) -> None:
-    """Prepare worker-local bootstrap state before entering the MAS mainline."""
+    """Prepare process-local tools and events before Agent execution."""
 
-    logger = logger or logging.getLogger("celery_task")
-
-    logger.info("Initializing tool registry for queued execution host...")
+    logger = logger or logging.getLogger("queued_execution_host")
     from ..agents.tools import register_default_tools
 
     register_default_tools()
-    logger.info("Queued execution host tool registry initialized")
-
     reset_event_bus()
-    logger.info("Queued execution host event bus reset")
+    logger.info("Queued execution host process state initialized")
 
 
-def run_generation_in_host(
-    mode: GenerationMode,
+def run_agent_execution_in_host(
     *,
-    task: Any,
-    input_data: Dict[str, Any],
-    db: Any,
-    route: str,
-    execution_order: int = 1,
-) -> Dict[str, Any]:
-    """Run the MAS mainline inside a worker-owned execution host."""
+    request: AgentExecutionRequest,
+    executor: AgentExecutor,
+    attempt_lease_keepalive: AttemptLeaseKeepaliveController | None = None,
+) -> AgentExecutionResult:
+    """Run one typed Agent request while owning process lifecycle only."""
 
-    logger = logging.getLogger("celery_task")
-    prepare_queued_execution_host(logger=logger)
+    if not isinstance(request, AgentExecutionRequest):
+        raise TypeError("queued execution host requires AgentExecutionRequest")
 
-    logger.info("Setting up queued execution host event loop...")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    logger = logging.getLogger("queued_execution_host")
+    loop: asyncio.AbstractEventLoop | None = None
     host_context_token = None
-    attempt_lease_keepalive = None
 
     try:
-        if mode == GenerationMode.QUICK:
-            from ..core.database import SessionLocal
-            from .runtime_session_service import RuntimeSessionService
-
-            def _publish_keepalive_diagnostic(*, runtime_session_id: int, attempt_id: int, diagnostic: Dict[str, Any]) -> None:
-                runtime_db = SessionLocal()
-                try:
-                    runtime_session = RuntimeSessionService.get_session_by_id_sync(runtime_db, runtime_session_id)
-                    if runtime_session is None:
-                        logger.warning(
-                            "Dropping execution host keepalive diagnostic for missing session=%s attempt=%s",
-                            runtime_session_id,
-                            attempt_id,
-                        )
-                        return
-                    RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
-                        runtime_db,
-                        runtime_session,
-                        attempt_id=attempt_id,
-                        diagnostic=diagnostic,
-                    )
-                finally:
-                    runtime_db.close()
-
-            attempt_lease_keepalive = AttemptLeaseKeepaliveController(
-                session_factory=SessionLocal,
-                load_session=RuntimeSessionService.get_session_by_id_sync,
-                heartbeat_attempt=RuntimeSessionService.heartbeat_attempt_lease_sync,
-                interval_seconds=execution_host_lease_heartbeat_interval_seconds(),
-                publish_diagnostic=_publish_keepalive_diagnostic,
-                logger=logger,
-            )
+        prepare_queued_execution_host(logger=logger)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         host_context_token = set_current_execution_host_lease_context(
             ExecutionHostLeaseContext(attempt_lease_keepalive=attempt_lease_keepalive)
         )
-
-        if mode == GenerationMode.QUICK:
-            from ..agents.orchestrator import OrchestratorAgent
-
-            logger.info(
-                "Routing task %s directly through quick orchestrator mainline (reason=%s, mode=%s)",
-                getattr(task, "id", None),
-                route,
-                mode.value,
-            )
-            orchestrator = OrchestratorAgent.create_default()
-            result = loop.run_until_complete(
-                orchestrator.execute(
-                    build_agent_execution_request(
-                        task=task,
-                        agent_type=AgentType.ORCHESTRATOR,
-                        input_data=input_data,
-                        execution_order=execution_order,
-                    )
-                )
-            ).output_data.to_dict()
-        elif mode == GenerationMode.PROJECT:
-            from ..agents.episode_orchestrator import EpisodeOrchestratorAgent
-
-            logger.info(
-                "Routing task %s directly through project orchestrator mainline (reason=%s, mode=%s)",
-                getattr(task, "id", None),
-                route,
-                mode.value,
-            )
-            orchestrator = EpisodeOrchestratorAgent.create_default()
-            result = loop.run_until_complete(
-                orchestrator.execute(
-                    build_agent_execution_request(
-                        task=task,
-                        agent_type=AgentType.EPISODE_ORCHESTRATOR,
-                        input_data=input_data,
-                        execution_order=execution_order,
-                    )
-                )
-            ).output_data.to_dict()
-        else:
-            raise ValueError(f"Unsupported generation mode for queued execution host: {mode.value}")
-        logger.info("Queued execution host completed with result: %s", result)
-        return {
-            "status": result.get("status") or "completed",
-            "result": result,
-            "route": route,
-            "mode": mode.value,
-        }
+        result = loop.run_until_complete(executor.execute(request))
+        if not isinstance(result, AgentExecutionResult):
+            raise TypeError("Agent executor returned a non-AgentExecutionResult value")
+        return result
     finally:
         if host_context_token is not None:
             reset_current_execution_host_lease_context(host_context_token)
         if attempt_lease_keepalive is not None:
             attempt_lease_keepalive.close()
-        logger.info("Closing queued execution host event loop...")
-        loop.close()
-        asyncio.set_event_loop(None)
+        if loop is not None:
+            loop.close()
+            asyncio.set_event_loop(None)

@@ -306,7 +306,7 @@ def test_orchestrate_project_queues_episode_generation_through_task_queue(monkey
     assert queue_events["created"] == 1
     assert len(background_tasks.tasks) == 1
     scheduled = background_tasks.tasks[0]
-    assert scheduled.args == (fake_task.id,)
+    assert scheduled.args == (fake_task.task_id,)
     assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.GENERATING.value
     project_state_repository.remove(project_state.project_id)
 

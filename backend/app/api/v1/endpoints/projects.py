@@ -144,12 +144,12 @@ class EpisodeGenerationRequest(BaseModel):
     project_character_reference_images_enabled: Optional[bool] = None
 
 
-def _schedule_project_plan(task_db_id: Optional[int]) -> Optional[str]:
-    if task_db_id is None:
+def _schedule_project_plan(task_id: Optional[str]) -> Optional[str]:
+    if task_id is None:
         return None
 
     task_queue = ProjectJobQueueService()
-    return task_queue.queue_task(task_db_id)
+    return task_queue.queue_task(task_id)
 
 
 class EpisodeGenerationResponse(BaseModel):
@@ -296,7 +296,7 @@ async def create_project(request: ProjectCreateRequest) -> ProjectCreateResponse
         project_state.progress.planning.task_id = str(task.task_id)
         project_state_repository.save(project_state)
 
-        celery_task_id = _schedule_project_plan(task.id)
+        celery_task_id = _schedule_project_plan(str(task.task_id))
         if not celery_task_id:
             raise RuntimeError("Failed to queue project planning job")
 
@@ -447,7 +447,7 @@ async def orchestrate_project(
 
     if task is not None:
         task_queue = TaskQueueService()
-        background_tasks.add_task(task_queue.queue_task, task.id)
+        background_tasks.add_task(task_queue.queue_task, str(task.task_id))
 
     status_value = task_status_value or TaskStatus.FAILED.value
     return EpisodeGenerationResponse(
