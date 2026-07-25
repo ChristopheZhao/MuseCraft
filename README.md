@@ -61,6 +61,14 @@ uv run --project backend --frozen python backend/scripts/start_dev_uv.py
 
 `--project backend` 以 `backend/pyproject.toml` 为项目入口，uv 默认在 `backend/.venv` 创建和使用虚拟环境。仓库根目录 `.venv` 不属于当前后端运行合同，也不应与 `backend/.venv` 混用。
 
+只验证 uv、Python 版本和 canonical `backend/.venv` 时使用：
+
+```bash
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py --environment-check
+```
+
+该模式不连接 PostgreSQL/Redis、不执行 Alembic migration，也不检查或启动后台进程。它只回答 uv 后端环境是否正确。
+
 launcher 会渲染统一 database composition preflight 的 typed diagnostic，随后检查 Redis 并执行 Alembic migration；成功后才启动 API、Celery worker 和 beat。任一服务启动失败都会整体失败并清理已启动进程。API 默认监听 `http://localhost:8000`，按 `Ctrl+C` 可停止这组本地进程。
 
 ### 3. 启动前端
@@ -94,7 +102,7 @@ uv run --project backend alembic -c backend/alembic.ini upgrade head
 uv run --project backend uvicorn app.main:app --app-dir backend --reload
 ```
 
-完整生成流程必须同时运行 worker；请使用快速启动中的 uv launcher。可用 `--check` 只检查 PostgreSQL、Redis 和 migration，而不启动长期服务：
+完整生成流程必须同时运行 worker；请使用快速启动中的 uv launcher。可用 `--check` 检查 PostgreSQL、Redis 和 migration，而不启动长期服务；数据库失败不表示 uv 环境失败：
 
 ```bash
 uv run --project backend --frozen python backend/scripts/start_dev_uv.py --check
@@ -126,7 +134,7 @@ uv run --project backend pytest -q \
   backend/tests/unit/test_release_migration_contract.py
 ```
 
-GitHub Actions 还运行 PLAN-066 对应的 MAS control-plane/runtime 边界回归。测试分层与当前非门禁 legacy suite 见 [测试策略](docs/testing.md)。
+GitHub Actions 还运行 PLAN-066 对应的 MAS control-plane/runtime 回归、Agent/transport/persistence architecture guards，以及真实 PostgreSQL runtime 事务合同。测试分层与当前非门禁 legacy suite 见 [测试策略](docs/testing.md)。
 
 ## 配置原则
 

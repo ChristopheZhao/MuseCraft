@@ -334,7 +334,7 @@
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260310-004.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-10T14:30:00Z",
       "updated_at": "2026-03-11T03:33:36Z",
       "archived_at": null,
@@ -357,7 +357,7 @@
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260311-005.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-11T03:33:36Z",
       "updated_at": "2026-03-11T12:32:49Z",
       "archived_at": null,
@@ -3094,9 +3094,9 @@
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260718-068.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-07-18T06:47:35Z",
-      "updated_at": "2026-07-18T07:32:27Z",
+      "updated_at": "2026-07-24T00:44:09+08:00",
       "archived_at": null,
       "notes": [
         {
@@ -3110,6 +3110,38 @@
         {
           "at": "2026-07-18T07:32:27Z",
           "text": "Gate A boundary freeze verified; 122 focused tests passed and Slice B is next."
+        },
+        {
+          "at": "2026-07-19T08:58:53+08:00",
+          "text": "User approved Amendment A1 after review found transitive Agent-to-SQL composition and SQL-backed global project repository coupling. P0-D/P0-F and Gate B/Gate D are narrowly reopened; P0-I/Gate A1 now govern operational Agent/SQL closure before Gate E/F release completion."
+        },
+        {
+          "at": "2026-07-19T12:36:08+08:00",
+          "text": "Amendment A2 drafted after architecture review corrected A1's mixed ProjectStateStore, unresolved transition caller, deterministic episode-Agent escape clause, and missing project CAS/UoW. Gate A2 now freezes authority/identity/transparency contracts; implementation awaits user confirmation."
+        },
+        {
+          "at": "2026-07-19T12:48:48+08:00",
+          "text": "User confirmed Amendment A2 and requested execution. Begin A2.0 authority/identity/guard freeze before production implementation."
+        },
+        {
+          "at": "2026-07-21T10:14:29+08:00",
+          "text": "Gate A2 completed: project authority is versioned and runtime-free, reads use an immutable projection, episode coordination is application-owned, MAS runtime ports are injected, context/contract/tool/memory boundaries are explicit, and music allocation is supplier-neutral. Full unit suite passed 549 tests."
+        },
+        {
+          "at": "2026-07-21T10:14:29+08:00",
+          "text": "PLAN-068 remains in_progress because Gate E/F still require a clean PostgreSQL fixture, fresh migration/preflight and uv smoke, plus PostgreSQL lease/gate/continuation transaction evidence."
+        },
+        {
+          "at": "2026-07-22T00:05:53+08:00",
+          "text": "User corrected Gate E scope: Docker is optional and not a blocker. Canonical backend/.venv and frozen uv checks pass; the remaining local blocker is PostgreSQL credentials/database configuration, while legacy MySQL data stays untouched."
+        },
+        {
+          "at": "2026-07-23T23:45:40+08:00",
+          "text": "Gate E passed without Docker: isolated local PostgreSQL 16 plus Redis completed fresh release migration, uv --check, and Alembic schema check. A bounded JSON/JSONB defect in revision 0002 was repaired at the migration boundary; no Agent or control-plane database responsibility changed."
+        },
+        {
+          "at": "2026-07-24T00:44:09+08:00",
+          "text": "Gate F is locally green: PostgreSQL runtime transaction tests, full unit/architecture regressions, PLAN-066, backend boundary CI files, and uv API/worker/beat health/shutdown smoke passed. PLAN-050 and release/CI claims are corrected, but PLAN-068 remains in_progress until an approved push produces green hosted CI results."
         }
       ]
     }
