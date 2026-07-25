@@ -18,9 +18,13 @@ from ..domain import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from ..services.memory_provider import build_memory_services, MemoryServices
+from ..services.memory_provider import MemoryServices
 from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from ..services.context_assembler import ContextContractAssembler
+from ..services.context_reference_ports import (
+    SceneInfoReferencePreparationError,
+    SceneInfoReferencePreparationPort,
+)
 from ..services.orchestration_observation_adapter import OrchestrationObservationAdapter
 from ..services.orchestration_control_plane import (
     OrchestrationControlPlane,
@@ -32,12 +36,10 @@ from ..services.orchestration_runtime_controller import (
     OrchestrationRuntimeController,
     OrchestrationRuntimeControllerError,
 )
-from ..services.orchestration_runtime_resume_bootstrap_facade import (
+from ..services.orchestration_runtime_ports import (
     OrchestrationRuntimeResumeBootstrapError,
-    OrchestrationRuntimeResumeBootstrapFacade,
-)
-from ..services.orchestration_runtime_transition_facade import (
-    OrchestrationRuntimeTransitionFacade,
+    OrchestrationRuntimeResumePort,
+    OrchestrationRuntimeTransitionPort,
 )
 from ..services.orchestration_state_adapter import OrchestrationStateAdapter
 from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
@@ -103,11 +105,16 @@ class OrchestratorAgent(BaseAgent):
         "lease_token",
     }
 
-    @classmethod
-    def create_default(cls) -> "OrchestratorAgent":
-        return cls(memory_services=build_memory_services())
+    AGENT_EXECUTION_MODE = "mas_control_plane"
 
-    def __init__(self, memory_services: Optional[MemoryServices] = None):
+    def __init__(
+        self,
+        memory_services: Optional[MemoryServices] = None,
+        *,
+        runtime_transition_port: OrchestrationRuntimeTransitionPort,
+        runtime_resume_port: OrchestrationRuntimeResumePort,
+        scene_info_reference_port: SceneInfoReferencePreparationPort,
+    ):
         import os
         from .utils.llm_policy import LLMPolicyManager
 
@@ -118,6 +125,9 @@ class OrchestratorAgent(BaseAgent):
         if memory_services is None:
             raise ValueError("memory_services is required for OrchestratorAgent")
         self._memory_services = memory_services
+        self._runtime_transition_port = runtime_transition_port
+        self._runtime_resume_port = runtime_resume_port
+        self._scene_info_reference_port = scene_info_reference_port
         self._audio_delivery_gate = AudioDeliveryGateEvaluator(
             memory_services=self._memory_services
         )
@@ -400,26 +410,29 @@ class OrchestratorAgent(BaseAgent):
             self._context_contract_assembler = assembler
         return assembler
 
-    def _get_orchestration_runtime_transition_facade(self) -> OrchestrationRuntimeTransitionFacade:
-        facade = getattr(self, "_orchestration_runtime_transition_facade", None)
-        if facade is None:
-            facade = OrchestrationRuntimeTransitionFacade(
-                context_contract_assembler=self._get_context_contract_assembler(),
-                orchestration_state=self._get_orchestration_state_adapter(),
-            )
-            self._orchestration_runtime_transition_facade = facade
-        return facade
+    def _get_orchestration_runtime_transition_facade(
+        self,
+    ) -> OrchestrationRuntimeTransitionPort:
+        port = getattr(self, "_runtime_transition_port", None) or getattr(
+            self,
+            "_orchestration_runtime_transition_facade",
+            None,
+        )
+        if port is None:
+            raise AgentError("runtime_transition_port is required")
+        return port
 
     def _get_orchestration_runtime_resume_bootstrap_facade(
         self,
-    ) -> OrchestrationRuntimeResumeBootstrapFacade:
-        facade = getattr(self, "_orchestration_runtime_resume_bootstrap_facade", None)
-        if facade is None:
-            facade = OrchestrationRuntimeResumeBootstrapFacade(
-                orchestration_state=self._get_orchestration_state_adapter(),
-            )
-            self._orchestration_runtime_resume_bootstrap_facade = facade
-        return facade
+    ) -> OrchestrationRuntimeResumePort:
+        port = getattr(self, "_runtime_resume_port", None) or getattr(
+            self,
+            "_orchestration_runtime_resume_bootstrap_facade",
+            None,
+        )
+        if port is None:
+            raise AgentError("runtime_resume_port is required")
+        return port
 
     def _get_orchestration_observation_adapter(self) -> OrchestrationObservationAdapter:
         adapter = getattr(self, "_orchestration_observation", None)
@@ -2104,12 +2117,28 @@ class OrchestratorAgent(BaseAgent):
                         )
                     except Exception:
                         pass
+            scene_info_refs: Dict[str, str] = {}
+            if agent_type in {AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR}:
+                try:
+                    scene_info_refs[agent_type.value] = (
+                        self._scene_info_reference_port.prepare(
+                            workflow_state_id=workflow_id,
+                            agent_type=agent_type,
+                            runtime_input_payload=dict(runtime_input_payload or {}),
+                        )
+                    )
+                except SceneInfoReferencePreparationError as exc:
+                    raise AgentError(
+                        "Scene info reference preparation failed: "
+                        f"reason_code={exc.reason_code} detail={exc}"
+                    ) from exc
             boundary_context = self._get_context_contract_assembler().assemble_agent_context(
                 agent_type=agent_type,
                 workflow_state_id=workflow_id,
                 workflow_data=workflow_data,
                 runtime_input_payload=runtime_input_payload,
                 execution_contract=execution_contract,
+                scene_info_refs=scene_info_refs,
             )
             if isinstance(boundary_context, dict):
                 assembler_diagnostics = boundary_context.pop("_assembler_diagnostics", None)

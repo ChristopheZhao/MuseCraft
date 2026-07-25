@@ -6,7 +6,22 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 AGENT_ROOT = BACKEND_ROOT / "app" / "agents"
+APP_ROOT = BACKEND_ROOT / "app"
 EXCLUDED_TREE_PARTS = {"archive", "examples", "__pycache__"}
+
+PRODUCTION_AGENT_AND_CONTROL_PLANE_ROOTS = {
+    "app.agents.audio_generator",
+    "app.agents.concept_planner",
+    "app.agents.episode_script_planner",
+    "app.agents.image_generator",
+    "app.agents.orchestrator",
+    "app.agents.quality_checker",
+    "app.agents.script_writer",
+    "app.agents.series_planner",
+    "app.agents.video_composer",
+    "app.agents.video_generator",
+    "app.agents.voice_synthesizer",
+}
 
 ORM_MAPPING_NAMES = {
     "BaseModel",
@@ -175,6 +190,83 @@ def scan_python_tree(root: Path, *, backend_root: Path) -> set[BoundaryViolation
     return violations
 
 
+def _internal_imports(path: Path, *, backend_root: Path) -> set[str]:
+    current_module = _module_name(path, backend_root=backend_root)
+    is_package = path.name == "__init__.py"
+    imported: set[str] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(
+                _resolve_from_module(
+                    node,
+                    current_module=current_module,
+                    is_package=is_package,
+                )
+            )
+        elif isinstance(node, ast.Call):
+            dynamic_module = None
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "importlib"
+                and node.func.attr == "import_module"
+            ):
+                dynamic_module = _ImportBoundaryVisitor._constant_first_argument(node)
+            elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                dynamic_module = _ImportBoundaryVisitor._constant_first_argument(node)
+            if dynamic_module:
+                imported.add(dynamic_module)
+    return {module for module in imported if module}
+
+
+def _module_index(app_root: Path, *, backend_root: Path) -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    for path in app_root.rglob("*.py"):
+        relative = path.relative_to(app_root)
+        if EXCLUDED_TREE_PARTS.intersection(relative.parts):
+            continue
+        index[_module_name(path, backend_root=backend_root)] = path
+    return index
+
+
+def scan_transitive_persistence_paths(
+    roots: set[str],
+    *,
+    app_root: Path,
+    backend_root: Path,
+) -> set[str]:
+    module_paths = _module_index(app_root, backend_root=backend_root)
+    violations: set[str] = set()
+
+    for root in sorted(roots):
+        pending: list[tuple[str, tuple[str, ...]]] = [(root, (root,))]
+        visited: set[str] = set()
+        while pending:
+            module, route = pending.pop()
+            if module in visited:
+                continue
+            visited.add(module)
+
+            category = _classify_import(module, "*")
+            if category is not None:
+                violations.add(f"{root}: {' -> '.join(route)} [{category}]")
+                continue
+
+            path = module_paths.get(module)
+            if path is None:
+                continue
+            for imported in sorted(_internal_imports(path, backend_root=backend_root)):
+                if imported in route:
+                    continue
+                if imported.startswith("app.") or _classify_import(imported, "*") is not None:
+                    pending.append((imported, (*route, imported)))
+
+    return violations
+
+
 EXPECTED_TRANSITIONAL_DEBT: set[BoundaryViolation] = set()
 
 
@@ -202,6 +294,40 @@ def test_production_agent_persistence_debt_is_explicit_and_cannot_expand():
         observed,
         EXPECTED_TRANSITIONAL_DEBT,
     )
+
+
+def test_production_agent_transitive_dependency_graph_is_persistence_free():
+    observed = scan_transitive_persistence_paths(
+        PRODUCTION_AGENT_AND_CONTROL_PLANE_ROOTS,
+        app_root=APP_ROOT,
+        backend_root=BACKEND_ROOT,
+    )
+
+    assert observed == set(), "transitive Agent/control-plane persistence paths:\n" + "\n".join(
+        sorted(observed)
+    )
+
+
+def test_transitive_guard_detects_persistence_hidden_behind_service(tmp_path):
+    backend_root = tmp_path / "backend"
+    app_root = backend_root / "app"
+    agent = app_root / "agents" / "sample.py"
+    service = app_root / "services" / "hidden_store.py"
+    agent.parent.mkdir(parents=True)
+    service.parent.mkdir(parents=True)
+    agent.write_text("from app.services.hidden_store import load\n", encoding="utf-8")
+    service.write_text("from app.core.database import SessionLocal\n", encoding="utf-8")
+
+    observed = scan_transitive_persistence_paths(
+        {"app.agents.sample"},
+        app_root=app_root,
+        backend_root=backend_root,
+    )
+
+    assert observed == {
+        "app.agents.sample: app.agents.sample -> app.services.hidden_store -> "
+        "app.core.database [database_composition]"
+    }
 
 
 def test_production_agent_callables_do_not_accept_persistence_shaped_parameters():

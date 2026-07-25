@@ -9,7 +9,6 @@ SQL/session boundary:
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -37,36 +36,12 @@ from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
 from .runtime_resume_control_plane import RuntimeResumeControlPlane
 
 
-class OrchestrationRuntimeResumeBootstrapError(RuntimeError):
-    """Raised when orchestration-facing runtime resume/bootstrap contracts fail."""
-
-
-@dataclass(frozen=True)
-class RuntimeResumeContext:
-    runtime_session_id: int
-    runtime_session_status: str
-    runtime_input_payload: Dict[str, Any]
-    script_gate_id: Optional[int]
-    latest_script_decision_exists: bool
-    latest_script_decision_actor_type: str
-    script_resume_action: str
-    runtime_resume_checkpoint: Optional[Dict[str, Any]]
-    resume_anchor_agent: Optional[AgentType]
-
-
-@dataclass(frozen=True)
-class RuntimeResumeTaskSpecBundle:
-    task_specs: Dict[AgentType, Dict[str, Any]]
-    conditional_task_specs: Dict[str, Dict[str, Any]]
-    candidate_agents: List[AgentType]
-
-
-@dataclass(frozen=True)
-class RuntimeAttemptBootstrapResult:
-    node_key: str
-    attempt_id: int
-    trigger_reason: str
-    lease_token: str
+from .orchestration_runtime_ports import (
+    OrchestrationRuntimeResumeBootstrapError,
+    RuntimeAttemptBootstrapResult,
+    RuntimeResumeContext,
+    RuntimeResumeTaskSpecBundle,
+)
 
 
 class OrchestrationRuntimeResumeBootstrapFacade:

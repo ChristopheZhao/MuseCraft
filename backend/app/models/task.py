@@ -27,6 +27,8 @@ class Task(BaseModel):
     # User and session information
     user_id = Column(String(100))  # For future user authentication
     session_id = Column(String(100))
+    project_id = Column(String(100), nullable=True, index=True)
+    episode_id = Column(String(100), nullable=True, index=True)
     
     # Task configuration and parameters
     input_parameters = Column(JSON, default=dict)  # User input parameters

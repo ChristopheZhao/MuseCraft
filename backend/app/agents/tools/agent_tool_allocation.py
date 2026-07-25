@@ -64,7 +64,7 @@ class AgentToolAllocator:
             
             # 音频生成Agent - 音频创作和处理
             AgentType.AUDIO_GENERATOR: [
-                "suno_client",                 # 背景音乐生成（已注册工具名）
+                "music_generation",
                 "audio_analysis_tool",        # 音频分析（静音/截断点/能量）
                 "audio_processor",             # 音频后处理（时长/淡入淡出/循环）
                 "ffmpeg_tool",                 # 媒体组合（视频加音频）
@@ -103,8 +103,6 @@ class AgentToolAllocator:
             ],
 
             # Episode Orchestrator 复用已有工作流，不额外暴露工具
-            AgentType.EPISODE_ORCHESTRATOR: [],
-
             # Episode Script Planner - 纯文本草稿生成
             AgentType.EPISODE_SCRIPT_PLANNER: [],
         }

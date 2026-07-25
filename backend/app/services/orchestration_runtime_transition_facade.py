@@ -33,10 +33,7 @@ from .runtime_gate_control_plane import RuntimeGateControlPlane
 from .runtime_published_deliverable_control_plane import RuntimePublishedDeliverableControlPlane
 from .runtime_session_control_plane import RuntimeSessionControlPlane
 from .script_review_contract import get_script_review_contract, set_script_review_contract
-
-
-class OrchestrationRuntimeTransitionError(RuntimeError):
-    """Raised when orchestration-facing runtime transition contracts fail."""
+from .orchestration_runtime_ports import OrchestrationRuntimeTransitionError
 
 
 TransitionResult = TypeVar("TransitionResult")

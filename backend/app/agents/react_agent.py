@@ -11,6 +11,12 @@ from typing import Dict, Any, List, Optional, Callable, Set
 from .base import BaseAgent, AgentError
 from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
 from .utils.obs_builder import derive_action_facts
+
+
+class ReActContractBoundaryError(AgentError):
+    def __init__(self, *, reason_code: str, message: str) -> None:
+        self.reason_code = str(reason_code or "react_contract_boundary_error")
+        super().__init__(message)
 # LLM 服务通过依赖注入提供（BaseAgent._llms）
 
 
@@ -144,8 +150,14 @@ class ReActAgent(BaseAgent, ABC):
                         from .utils.tool_contracts import plan_contract_conflicts_with_actions
 
                         conflict = plan_contract_conflicts_with_actions(plan_contract, tool_calls_requested)
-                    except Exception:
-                        conflict = False
+                    except Exception as exc:
+                        raise ReActContractBoundaryError(
+                            reason_code="plan_contract_evaluation_failed",
+                            message=(
+                                "Plan contract conflict evaluation failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        ) from exc
                     if conflict:
                         completed_reason = plan_contract.get("completed_reason")
                         completed_reason_str = (
@@ -456,8 +468,14 @@ class ReActAgent(BaseAgent, ABC):
                         obs_record=obs_record,
                         service=self.short_term_service,
                     )
-                except Exception:
-                    pass
+                except Exception as obs_err:
+                    self.logger.warning(
+                        "OBSERVATION_WRITE_FAILED agent=%s iter=%d error=%s",
+                        self.agent_name,
+                        iteration + 1,
+                        obs_err,
+                        exc_info=True,
+                    )
                 pending_action_facts = action_facts
                 await self._log_react_iteration_event(
                     iteration=iteration,
@@ -488,8 +506,14 @@ class ReActAgent(BaseAgent, ABC):
                         except Exception:
                             has_actions = False
                         reflection = overlay_contract_on_reflection(reflection, contract, ignore_complete=has_actions)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise ReActContractBoundaryError(
+                        reason_code="reflection_contract_overlay_failed",
+                        message=(
+                            "Reflection contract overlay failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    ) from exc
                 
                 # 仅日志（不累积状态）：保留执行结果与计划摘要打印，避免维护重复的“迭代记录”结构
                 try:
@@ -571,6 +595,28 @@ class ReActAgent(BaseAgent, ABC):
                     await self._update_progress(95, "completed")
                     return final_result
                     
+            except ReActContractBoundaryError as exc:
+                self.logger.error(
+                    "ReAct contract boundary halted: agent=%s iteration=%d reason_code=%s error=%s",
+                    self.agent_name,
+                    iteration + 1,
+                    exc.reason_code,
+                    exc,
+                )
+                final_result = await self._finalize_incomplete_results(
+                    {
+                        "total_iterations": iteration + 1,
+                        "workflow_state_id": input_data.get("workflow_state_id")
+                        or self.workflow_state_id,
+                        "subtask_state": "error",
+                        "loop_end_reason": exc.reason_code,
+                        "reason_code": exc.reason_code,
+                        "diagnostic": str(exc),
+                    },
+                    task,
+                )
+                await self._update_progress(90, "processing")
+                return final_result
             except Exception as e:
                 self.logger.error(f"❌ Iteration {iteration + 1} failed: {e}")
                 
@@ -821,6 +867,8 @@ class ReActAgent(BaseAgent, ABC):
         loop_end_reason = context.get("loop_end_reason") or "max_iterations"
         completed_reason = context.get("completed_reason")
         plan_summary = context.get("plan_summary")
+        reason_code = context.get("reason_code")
+        diagnostic = context.get("diagnostic")
         result: Dict[str, Any] = {
             "success": False,
             "subtask_state": str(subtask_state),
@@ -831,6 +879,10 @@ class ReActAgent(BaseAgent, ABC):
             result["completed_reason"] = completed_reason
         if plan_summary:
             result["plan_summary"] = plan_summary
+        if isinstance(reason_code, str) and reason_code.strip():
+            result["reason_code"] = reason_code.strip()
+        if isinstance(diagnostic, str) and diagnostic.strip():
+            result["diagnostic"] = diagnostic.strip()
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
         if wf_id:
             result["workflow_state_id"] = wf_id

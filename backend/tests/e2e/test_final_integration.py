@@ -30,7 +30,7 @@ async def test_complete_system_integration():
         # Import core components
         from app.agents.audio_generator import AudioGeneratorAgent
         from app.agents.video_composer import VideoComposerAgent  
-        from app.agents.orchestrator import OrchestratorAgent
+        from app.infrastructure.orchestrator_composition import build_orchestrator_agent
         from app.agents.tools.ai_services.suno_client import SunoClientTool
         from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         from types import SimpleNamespace
@@ -51,7 +51,7 @@ async def test_complete_system_integration():
         print("   ✅ VideoComposerAgent initialized")
         
         # Test Orchestrator
-        orchestrator = OrchestratorAgent()
+        orchestrator = build_orchestrator_agent(memory_services=memory_services)
         print(f"   ✅ OrchestratorAgent initialized")
         registered_agents = {agent_type.value for agent_type in orchestrator.agents.keys()}
         print(f"      Registered agents: {', '.join(sorted(registered_agents))}")

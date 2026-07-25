@@ -5,7 +5,6 @@ from enum import Enum
 
 class AgentType(str, Enum):
     ORCHESTRATOR = "orchestrator"
-    EPISODE_ORCHESTRATOR = "episode_orchestrator"
     EPISODE_SCRIPT_PLANNER = "episode_script_planner"
     CONCEPT_PLANNER = "concept_planner"
     SERIES_PLANNER = "series_planner"

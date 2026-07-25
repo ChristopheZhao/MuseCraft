@@ -10,12 +10,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..core.config import settings
-from ..core.story_plan import (
-    CharacterProfile,
-    ProjectOperationState,
-    project_state_repository,
-)
+from ..core.story_plan import CharacterProfile
 from ..agents.tools.tool_registry import get_tool_registry
+from .project_service import ProjectDefinitionApplicationService
 
 
 def _flatten_keywords(value: Any) -> List[str]:
@@ -88,10 +85,11 @@ def _build_prompt(profile: CharacterProfile, kind: str, style_profile: Dict[str,
 async def ensure_project_character_reference_images(
     project_id: str,
     *,
+    project_definitions: ProjectDefinitionApplicationService,
     enabled: Optional[bool] = None,
     logger=None,
 ) -> bool:
-    """Ensure avatar/full-body refs exist in `ProjectState.character_bible`.
+    """Ensure avatar/full-body refs exist in the project character bible.
 
     Returns True if the function ran (enabled + project exists), regardless of whether
     all images succeeded; returns False when disabled or project missing.
@@ -99,34 +97,27 @@ async def ensure_project_character_reference_images(
 
     if enabled is None:
         enabled = bool(getattr(settings, "PROJECT_CHARACTER_REFERENCE_IMAGES_ENABLED", False))
-    project_state = project_state_repository.get(project_id)
-    if not project_state:
+    snapshot = project_definitions.load_optional(project_id)
+    if snapshot is None:
         return False
+    project_definition = snapshot.definition
 
     if not enabled:
-        project_state.progress.character_references.status = ProjectOperationState.SKIPPED
-        project_state.progress.character_references.error = None
-        project_state_repository.save(project_state)
         return False
 
-    project_state.progress.character_references.status = ProjectOperationState.IN_PROGRESS
-    project_state.progress.character_references.error = None
-    project_state_repository.save(project_state)
-
-    if not project_state.character_bible:
-        project_state.progress.character_references.status = ProjectOperationState.COMPLETED
-        project_state_repository.save(project_state)
+    if not project_definition.character_bible:
         return True
 
     avatar_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_AVATAR_SIZE", "1024x1024")
     full_body_size = getattr(settings, "PROJECT_CHARACTER_REFERENCE_FULL_BODY_SIZE", "1024x1792")
-    style_profile = project_state.style_profile or {}
+    style_profile = project_definition.style_profile or {}
 
     registry = get_tool_registry()
     image_tool = registry.get_tool("image_generation")
     file_key_prefix = f"projects/{project_id}/characters"
 
-    for canonical_id, profile in (project_state.character_bible or {}).items():
+    changed = False
+    for canonical_id, profile in (project_definition.character_bible or {}).items():
         if not isinstance(profile, CharacterProfile):
             continue
 
@@ -174,7 +165,7 @@ async def ensure_project_character_reference_images(
                     "size": size,
                     "generated_prompt": payload.get("generated_prompt") or prompt,
                 }
-                project_state_repository.save(project_state)
+                changed = True
             except Exception as exc:  # noqa: BLE001
                 if logger is not None:
                     logger.warning(
@@ -185,10 +176,10 @@ async def ensure_project_character_reference_images(
                         exc,
                     )
 
-    try:
-        project_state.story_plan.character_bible = project_state.character_bible
-    except Exception:
-        pass
-    project_state.progress.character_references.status = ProjectOperationState.COMPLETED
-    project_state_repository.save(project_state)
+    project_definition.story_plan.character_bible = project_definition.character_bible
+    if changed:
+        project_definitions.replace(
+            project_definition,
+            expected_version=snapshot.version,
+        )
     return True

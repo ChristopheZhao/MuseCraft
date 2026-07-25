@@ -1194,7 +1194,7 @@ class ScriptWriterAgent(BaseAgent):
                         from ..services.memory_writer import MemoryWriter
                         from ..domain import TaskType
                         writer = MemoryWriter(self._memory_services)
-                        await writer.write(
+                        receipt = await writer.write(
                             TaskType.SCRIPT_WRITING,
                             workflow_id=str(wf_id),
                             scene_number=None,
@@ -1203,7 +1203,19 @@ class ScriptWriterAgent(BaseAgent):
                                 "per_scene_roles": per_scene
                             }
                         )
-                        self.logger.info("🧠 角色一致性快照已存入EPISODIC记忆（roles_snapshot）")
+                        if receipt.status.value == "written":
+                            self.logger.info(
+                                "Role consistency snapshot stored: memory_id=%s",
+                                receipt.memory_id,
+                            )
+                        else:
+                            self.logger.warning(
+                                "Role consistency memory write did not persist: "
+                                "status=%s reason_code=%s diagnostic=%s",
+                                receipt.status.value,
+                                receipt.reason_code.value,
+                                receipt.diagnostic,
+                            )
                 except Exception as _mw:
                     self.logger.warning(f"角色一致性快照写入记忆失败（跳过）：{_mw}")
             except Exception as re:

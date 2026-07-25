@@ -10,8 +10,8 @@ import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from app.agents.orchestrator import OrchestratorAgent
 from app.agents.tools import register_default_tools
+from app.infrastructure.orchestrator_composition import build_orchestrator_agent
 
 
 DEFAULT_PROMPT = "凡人修仙传预告\n\n生成一个凡人修仙传的预告动漫视频"
@@ -79,7 +79,7 @@ def _llm_descriptor(llm: Any) -> Dict[str, Any]:
 async def _run_once(args: argparse.Namespace) -> Dict[str, Any]:
     workflow_id = str(uuid.uuid4())
     register_default_tools()
-    orchestrator = OrchestratorAgent()
+    orchestrator = build_orchestrator_agent()
     llm = orchestrator.get_llm("plan")
     llm_meta = _llm_descriptor(llm)
 

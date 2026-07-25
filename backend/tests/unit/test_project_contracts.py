@@ -1,371 +1,276 @@
-import asyncio
-from types import SimpleNamespace
-
 import pytest
-from fastapi import BackgroundTasks
 from pydantic import ValidationError
 
-from app.agents.episode_orchestrator import EpisodeOrchestratorAgent
-from app.api.v1.endpoints import projects as projects_endpoint
-from app.core.constants import GenerationMode
-from app.core.story_plan import (
-    EpisodeEditorialStatus,
-    EpisodeExecutionStatus,
-    ProjectOperationState,
-    ProjectState,
-    StoryPlan,
-    EpisodePlan,
-    project_state_repository,
+from app.api.v1.endpoints.projects import (
+    EpisodeGenerationRequest,
+    EpisodeScriptRequest,
+    _serialize_project_read_model,
 )
-from app.domain import (
-    AgentExecutionRequest,
-    AgentTaskReference,
-    JsonObjectPayload,
-    TaskStatus,
-    TaskType,
+from app.core.story_plan import EpisodeEditorialStatus, EpisodePlan, ProjectDefinition, StoryPlan
+from app.domain import ProjectDefinitionError, ProjectDefinitionReason, TaskStatus, TaskType
+from app.infrastructure.project_command_uow_sqlalchemy import SqlAlchemyProjectCommandUnitOfWork
+from app.infrastructure.project_definition_store_sqlalchemy import (
+    SqlAlchemyProjectDefinitionUnitOfWork,
 )
-from app.models import Task
-from app.api.v1.endpoints.projects import _serialize_project_state
-from app.services.project_job_contract import (
-    PROJECT_JOB_HANDLER_PLAN_PROJECT,
-    PROJECT_JOB_KIND_WORKFLOW,
+from app.infrastructure.project_execution_read_model_sqlalchemy import (
+    SqlAlchemyProjectExecutionReadModelQuery,
 )
-from app.services.project_service import update_episode_script
+from app.models import Task, WorkflowNodeAttempt, WorkflowNodeState, WorkflowSession
+from app.services.project_service import ProjectDefinitionApplicationService
+from app.services.project_workflow_service import ProjectWorkflowApplicationService
 
 
-pytestmark = pytest.mark.usefixtures("project_state_store")
-
-
-def _build_project_state(project_id: str = "project-contracts") -> tuple[ProjectState, EpisodePlan]:
-    story_plan = StoryPlan(
+def _definition(project_id="project-contract"):
+    story = StoryPlan(
         project_id=project_id,
         user_prompt="Test project",
-        target_duration_seconds=180,
+        target_duration_seconds=60,
         aspect_ratio="16:9",
     )
-    episode = EpisodePlan.create(
-        sequence_index=0,
-        title="Episode 1",
-        target_duration_seconds=60,
-        summary="Summary",
-    )
-    story_plan.add_episode(episode)
-
-    project_state = ProjectState(
-        project_id=project_id,
-        mode="project",
-        story_plan=story_plan,
-        global_settings={},
-    )
-    project_state_repository.save(project_state)
-    return project_state, episode
+    episode = EpisodePlan.create(0, "Episode 1", 60, summary="Summary")
+    story.add_episode(episode)
+    return ProjectDefinition(project_id=project_id, mode="project", story_plan=story), episode
 
 
-def test_mark_episode_runtime_status_does_not_mutate_editorial_status():
-    project_state, episode = _build_project_state("project-contracts-separate")
-    episode.status = EpisodeEditorialStatus.APPROVED
-
-    project_state.mark_episode_runtime_status(
-        episode.episode_id,
-        EpisodeExecutionStatus.FAILED,
-        error="runtime failed",
+def _service(session_factory):
+    return ProjectDefinitionApplicationService(
+        lambda: SqlAlchemyProjectDefinitionUnitOfWork(session_factory)
     )
 
-    assert project_state.story_plan.episodes[0].status == EpisodeEditorialStatus.APPROVED
-    assert project_state.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.FAILED
-    assert project_state.episodes_runtime[episode.episode_id].error == "runtime failed"
-    project_state_repository.remove(project_state.project_id)
+
+def test_project_definition_rejects_runtime_authority_fields():
+    definition, _ = _definition()
+    payload = definition.to_dict()
+    payload["episodes_runtime"] = {}
+
+    with pytest.raises(ValueError, match="runtime/read-model fields"):
+        ProjectDefinition.from_dict(payload)
 
 
-def test_project_state_to_dict_exposes_typed_progress_projection():
-    project_state, episode = _build_project_state("project-contracts-progress")
-    project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
-    project_state.progress.planning.task_id = "task-plan-1"
-    project_state.progress.character_references.status = ProjectOperationState.SKIPPED
-    project_state.mark_episode_runtime_status(episode.episode_id, EpisodeExecutionStatus.COMPLETED)
+def test_project_definition_rejects_unknown_root_fields():
+    definition, _ = _definition("project-strict-definition")
+    payload = definition.to_dict()
+    payload["workflow_session_id"] = 42
 
-    payload = project_state.to_dict()
-
-    assert payload["progress"]["planning"]["status"] == ProjectOperationState.IN_PROGRESS.value
-    assert payload["progress"]["planning"]["task_id"] == "task-plan-1"
-    assert payload["progress"]["character_references"]["status"] == ProjectOperationState.SKIPPED.value
-    assert payload["episodes_runtime"][episode.episode_id]["status"] == EpisodeExecutionStatus.COMPLETED.value
-    assert payload["completed_episodes"] == 1
-
-    project_state_repository.remove(project_state.project_id)
+    with pytest.raises(ValueError, match="unsupported fields: workflow_session_id"):
+        ProjectDefinition.from_dict(payload)
 
 
-def test_update_episode_script_keeps_approved_script_until_reapproved():
-    project_state, episode = _build_project_state("project-contracts-approved-script")
-    episode.status = EpisodeEditorialStatus.APPROVED
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeExecutionStatus.COMPLETED
-    runtime.approved_script = "approved v1"
-    project_state_repository.save(project_state)
+def test_same_version_commands_yield_one_commit_and_one_typed_conflict(
+    project_state_store,
+):
+    service = _service(project_state_store)
+    definition, episode = _definition("project-cas")
+    created = service.create(definition)
+    stale_copy = service.get(definition.project_id)
 
-    updated = update_episode_script(
-        project_id=project_state.project_id,
+    updated = service.update_episode_script(
+        project_id=definition.project_id,
         episode_id=episode.episode_id,
-        script_text="draft v2",
-        approve=False,
-    )
-
-    refreshed_runtime = updated.episodes_runtime[episode.episode_id]
-    assert updated.story_plan.episodes[0].script_draft == "draft v2"
-    assert updated.story_plan.episodes[0].status == EpisodeEditorialStatus.NEEDS_REVISION
-    assert refreshed_runtime.approved_script == "approved v1"
-    assert refreshed_runtime.status == EpisodeExecutionStatus.STALE
-
-    updated = update_episode_script(
-        project_id=project_state.project_id,
-        episode_id=episode.episode_id,
-        script_text="draft v2",
+        script_text="Approved v1",
         approve=True,
+        expected_version=created.version,
+    )
+    stale_copy.definition.story_plan.episodes[0].script_draft = "Lost update"
+    with pytest.raises(ProjectDefinitionError) as exc_info:
+        service.replace(stale_copy.definition, expected_version=stale_copy.version)
+
+    assert exc_info.value.reason_code is ProjectDefinitionReason.VERSION_CONFLICT
+    observed = service.get(definition.project_id)
+    assert observed.version == updated.version == 2
+    assert observed.definition.story_plan.episodes[0].approved_script == "Approved v1"
+
+
+def test_project_creation_persists_definition_and_task_in_one_uow(project_state_store):
+    definition, _ = _definition("project-command-uow")
+    service = ProjectWorkflowApplicationService(
+        lambda: SqlAlchemyProjectCommandUnitOfWork(project_state_store)
     )
 
-    refreshed_runtime = updated.episodes_runtime[episode.episode_id]
-    assert updated.story_plan.episodes[0].status == EpisodeEditorialStatus.APPROVED
-    assert refreshed_runtime.approved_script == "draft v2"
-    project_state_repository.remove(project_state.project_id)
-
-
-def test_project_response_serialization_materializes_runtime_for_each_episode():
-    project_state, episode = _build_project_state("project-contracts-runtime-projection")
-
-    payload = _serialize_project_state(project_state)
-
-    assert episode.episode_id in payload.episodes_runtime
-    assert payload.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.IDLE.value
-    project_state_repository.remove(project_state.project_id)
-
-
-def test_project_state_repository_round_trips_through_shared_backing():
-    project_state, episode = _build_project_state("project-contracts-persistent-roundtrip")
-    project_state.progress.planning.status = ProjectOperationState.IN_PROGRESS
-    project_state.progress.planning.task_id = "task-plan-persistent"
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeExecutionStatus.STALE
-    runtime.approved_script = "approved script"
-    project_state_repository.save(project_state)
-
-    loaded = project_state_repository.get(project_state.project_id)
-
-    assert loaded is not None
-    assert loaded.project_id == project_state.project_id
-    assert loaded.progress.planning.status == ProjectOperationState.IN_PROGRESS
-    assert loaded.progress.planning.task_id == "task-plan-persistent"
-    assert loaded.story_plan.episodes[0].episode_id == episode.episode_id
-    assert loaded.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.STALE
-    assert loaded.episodes_runtime[episode.episode_id].approved_script == "approved script"
-
-    project_state_repository.remove(project_state.project_id)
-
-
-def test_create_project_bootstraps_placeholder_from_shared_backing(monkeypatch, project_state_store):
-    monkeypatch.setattr(projects_endpoint, "SessionLocal", project_state_store)
-    monkeypatch.setattr(projects_endpoint, "_schedule_project_plan", lambda *args, **kwargs: "project-celery-1")
-
-    response = asyncio.run(
-        projects_endpoint.create_project(
-            projects_endpoint.ProjectCreateRequest(
-                user_prompt="A rabbit hero project",
-                target_duration_seconds=120,
-            )
-        )
-    )
-    fetched = asyncio.run(projects_endpoint.get_project(response.project.project_id))
-
-    assert fetched.project_id == response.project.project_id
-    assert fetched.progress.planning.status == ProjectOperationState.QUEUED.value
-    assert len(fetched.story_plan.episodes) >= 1
-    assert fetched.story_plan.project_id == response.project.project_id
-
-    project_state_repository.remove(response.project.project_id)
-
-
-def test_create_project_attaches_explicit_project_job_contract(monkeypatch, project_state_store):
-    monkeypatch.setattr(projects_endpoint, "SessionLocal", project_state_store)
-    monkeypatch.setattr(projects_endpoint, "_schedule_project_plan", lambda *args, **kwargs: "project-celery-2")
-
-    response = asyncio.run(
-        projects_endpoint.create_project(
-            projects_endpoint.ProjectCreateRequest(
-                user_prompt="A fox detective project",
-                target_duration_seconds=120,
-            )
-        )
+    receipt = service.create_project(
+        definition=definition,
+        planning_input={
+            "project_id": definition.project_id,
+            "job_kind": "project_workflow",
+            "handler_key": "plan_project",
+        },
+        title="Plan project",
+        description="Test project",
     )
 
     db = project_state_store()
     try:
-        task = db.query(Task).filter(Task.task_id == response.task_id).first()
-        assert task is not None
-        assert task.task_type == TaskType.SCRIPT_WRITING
-        assert (task.input_parameters or {}).get("job_kind") == PROJECT_JOB_KIND_WORKFLOW
-        assert (task.input_parameters or {}).get("handler_key") == PROJECT_JOB_HANDLER_PLAN_PROJECT
+        task = db.query(Task).filter(Task.task_id == receipt.task.task_id).one()
+        assert task.project_id == definition.project_id
+        assert task.status == TaskStatus.PENDING.value
+        assert task.input_parameters["project_definition_version"] == 1
+    finally:
+        db.close()
+    assert _service(project_state_store).get(definition.project_id).version == 1
+
+
+def test_planning_result_rolls_back_definition_when_task_completion_fails(
+    project_state_store,
+):
+    definition, _ = _definition("project-planning-rollback")
+    workflow = ProjectWorkflowApplicationService(
+        lambda: SqlAlchemyProjectCommandUnitOfWork(project_state_store)
+    )
+    created = workflow.create_project(
+        definition=definition,
+        planning_input={
+            "project_id": definition.project_id,
+            "job_kind": "project_workflow",
+            "handler_key": "plan_project",
+        },
+        title="Plan project",
+        description="Test project",
+    )
+    planned = ProjectDefinition.from_dict(definition.to_dict())
+    planned.story_plan.global_theme = "Must roll back"
+
+    class _FailingTaskCompletionUnitOfWork(SqlAlchemyProjectCommandUnitOfWork):
+        def complete_task(self, command):
+            raise RuntimeError("task completion failed")
+
+    failing_workflow = ProjectWorkflowApplicationService(
+        lambda: _FailingTaskCompletionUnitOfWork(project_state_store)
+    )
+
+    with pytest.raises(RuntimeError, match="task completion failed"):
+        failing_workflow.apply_planning_result(
+            definition=planned,
+            expected_version=created.project.version,
+            task_id=created.task.task_id,
+            character_references_requested=False,
+        )
+
+    observed = _service(project_state_store).get(definition.project_id)
+    assert observed.version == 1
+    assert observed.definition.story_plan.global_theme == ""
+    db = project_state_store()
+    try:
+        task = db.query(Task).filter(Task.task_id == created.task.task_id).one()
+        assert task.status == TaskStatus.PENDING.value
     finally:
         db.close()
 
-    project_state_repository.remove(response.project.project_id)
 
-
-def test_orchestrate_project_force_rerun_does_not_pre_mark_unapproved_episode(monkeypatch):
-    project_state, episode = _build_project_state("project-contracts-force-rerun-endpoint")
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeExecutionStatus.IDLE
-    episode.status = EpisodeEditorialStatus.DRAFT
-    project_state_repository.save(project_state)
-
-    fake_task = SimpleNamespace(id=101, task_id="task-force-rerun-endpoint", status="pending")
-
-    class _FakeSession:
-        def commit(self):
-            return None
-
-        def rollback(self):
-            return None
-
-        def add(self, _obj):
-            return None
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(projects_endpoint, "SessionLocal", lambda: _FakeSession())
-    monkeypatch.setattr(
-        projects_endpoint,
-        "_create_task",
-        lambda *args, **kwargs: fake_task,
+def test_episode_execution_command_rejects_unapproved_selection_before_task_write(
+    project_state_store,
+):
+    definition, episode = _definition("project-unapproved-command")
+    workflow = ProjectWorkflowApplicationService(
+        lambda: SqlAlchemyProjectCommandUnitOfWork(project_state_store)
+    )
+    created = workflow.create_project(
+        definition=definition,
+        planning_input={
+            "project_id": definition.project_id,
+            "job_kind": "project_workflow",
+            "handler_key": "plan_project",
+        },
+        title="Plan project",
+        description="Test project",
     )
 
-    response = asyncio.run(
-        projects_endpoint.orchestrate_project(
-            project_state.project_id,
-            projects_endpoint.EpisodeGenerationRequest(
-                episode_ids=[episode.episode_id],
-                force_rerun=True,
-            ),
-            BackgroundTasks(),
+    with pytest.raises(ProjectDefinitionError) as caught:
+        workflow.enqueue_episode_execution(
+            project_id=definition.project_id,
+            expected_version=created.project.version,
+            episode_ids=[episode.episode_id],
+            episode_indices=[],
+            auto_approve=False,
+            execution_input={"project_id": definition.project_id},
+            title="Execute episode",
+            description="Test episode",
         )
-    )
 
-    assert response.project.story_plan.episodes[0].status == EpisodeEditorialStatus.DRAFT.value
-    assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.IDLE.value
-    project_state_repository.remove(project_state.project_id)
+    assert caught.value.reason_code is ProjectDefinitionReason.INVALID_PAYLOAD
+    db = project_state_store()
+    try:
+        assert db.query(Task).filter(Task.project_id == definition.project_id).count() == 1
+    finally:
+        db.close()
 
 
-def test_orchestrate_project_queues_episode_generation_through_task_queue(monkeypatch):
-    project_state, episode = _build_project_state("project-contracts-queue-host")
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeExecutionStatus.IDLE
-    episode.status = EpisodeEditorialStatus.APPROVED
-    project_state_repository.save(project_state)
-
-    fake_task = SimpleNamespace(id=202, task_id="task-project-queue", status=TaskStatus.QUEUED.value)
-    queue_events = {}
-
-    class _FakeSession:
-        def commit(self):
-            return None
-
-        def rollback(self):
-            return None
-
-        def add(self, _obj):
-            return None
-
-        def close(self):
-            return None
-
-    class _FakeQueueService:
-        def __init__(self):
-            queue_events["created"] = queue_events.get("created", 0) + 1
-
-        async def queue_task(self, task_id):
-            queue_events["task_id"] = task_id
-
-    monkeypatch.setattr(projects_endpoint, "SessionLocal", lambda: _FakeSession())
-    monkeypatch.setattr(projects_endpoint, "TaskQueueService", _FakeQueueService)
-    monkeypatch.setattr(
-        projects_endpoint,
-        "_create_task",
-        lambda *args, **kwargs: fake_task,
-    )
-
-    background_tasks = BackgroundTasks()
-    response = asyncio.run(
-        projects_endpoint.orchestrate_project(
-            project_state.project_id,
-            projects_endpoint.EpisodeGenerationRequest(
-                episode_ids=[episode.episode_id],
-            ),
-            background_tasks,
+def test_project_execution_projection_is_derived_and_serialization_is_read_only(
+    project_state_store,
+):
+    definition, episode = _definition("project-read-model")
+    created = _service(project_state_store).create(definition)
+    db = project_state_store()
+    try:
+        task = Task(
+            title="Episode workflow",
+            description="Episode",
+            task_type=TaskType.VIDEO_GENERATION,
+            status=TaskStatus.COMPLETED.value,
+            project_id=definition.project_id,
+            episode_id=episode.episode_id,
+            input_parameters={
+                "project_id": definition.project_id,
+                "episode_id": episode.episode_id,
+            },
         )
+        db.add(task)
+        db.flush()
+        runtime = WorkflowSession(
+            task_db_id=task.id,
+            mode="quick",
+            project_id=definition.project_id,
+            episode_id=episode.episode_id,
+            status="completed",
+            input_payload={
+                "project_definition_version": created.version,
+                "episode_editorial_revision": episode.editorial_revision,
+            },
+            summary_output={"final_video_url": "https://example.com/final.mp4"},
+        )
+        db.add(runtime)
+        db.flush()
+        node = WorkflowNodeState(
+            session_id=runtime.id,
+            node_key="compose",
+            node_type="compose",
+            order_index=1,
+            scope_type="episode",
+            status="completed",
+        )
+        db.add(node)
+        db.flush()
+        db.add(
+            WorkflowNodeAttempt(
+                session_id=runtime.id,
+                node_id=node.id,
+                attempt_no=1,
+                trigger_reason="initial",
+                requested_by="system",
+                status="succeeded",
+                metrics={"total_cost": 1.25, "total_tokens": 42},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    model = SqlAlchemyProjectExecutionReadModelQuery(project_state_store).get(definition.project_id)
+    response = _serialize_project_read_model(model)
+
+    assert response.version == 1
+    assert response.episodes_runtime[episode.episode_id].status == "completed"
+    assert (
+        response.episodes_runtime[episode.episode_id]
+        .output_assets["final_video_url"]
+        .endswith("final.mp4")
     )
-
-    assert queue_events["created"] == 1
-    assert len(background_tasks.tasks) == 1
-    scheduled = background_tasks.tasks[0]
-    assert scheduled.args == (fake_task.task_id,)
-    assert response.project.episodes_runtime[episode.episode_id].status == EpisodeExecutionStatus.GENERATING.value
-    project_state_repository.remove(project_state.project_id)
+    assert response.total_cost == 1.25
+    assert response.total_tokens == 42
+    assert _service(project_state_store).get(definition.project_id).version == 1
 
 
-def test_episode_generation_request_rejects_legacy_runtime_overrides_bag():
+def test_project_mutation_requests_require_expected_version():
     with pytest.raises(ValidationError):
-        projects_endpoint.EpisodeGenerationRequest(
-            episode_ids=["episode-1"],
-            runtime_overrides={"generate_audio": True},
-        )
-
-
-def test_episode_orchestrator_force_rerun_does_not_bypass_editorial_approval():
-    agent = object.__new__(EpisodeOrchestratorAgent)
-    agent.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
-    agent._validate_input = lambda _input, _required: None
-
-    async def _noop_async(*args, **kwargs):
-        return None
-
-    async def _forbidden_run_single_episode(*args, **kwargs):
-        raise AssertionError("force_rerun must not execute unapproved episodes")
-
-    agent._sync_project_foundation = lambda _project_state: None
-    agent._ensure_project_character_reference_images = _noop_async
-    agent._update_progress = _noop_async
-    agent._run_single_episode = _forbidden_run_single_episode
-
-    project_state, episode = _build_project_state("project-contracts-force-rerun-orchestrator")
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    runtime.status = EpisodeExecutionStatus.COMPLETED
-    episode.status = EpisodeEditorialStatus.DRAFT
-    project_state_repository.save(project_state)
-
-    agent._resolve_episode_selection = lambda _project_state, _input: [_project_state.story_plan.episodes[0]]
-
-    result = asyncio.run(
-        EpisodeOrchestratorAgent._execute_impl(
-            agent,
-            AgentExecutionRequest(
-                task=AgentTaskReference(
-                    task_id="task-force-rerun",
-                    task_type=TaskType.VIDEO_GENERATION.value,
-                    session_id="session-force-rerun",
-                ),
-                agent_type="episode_orchestrator",
-                input_data=JsonObjectPayload.from_mapping(
-                    {
-                        "project_id": project_state.project_id,
-                        "mode": GenerationMode.PROJECT.value,
-                        "force_rerun": True,
-                    },
-                    field_path="input_data",
-                ),
-            ),
-        )
-    )
-
-    assert result["episodes"][0]["skipped"] is True
-    assert result["episodes"][0]["reason"] == "Episode script not approved for generation"
-    assert result["episodes"][0]["status"] == EpisodeExecutionStatus.COMPLETED.value
-    project_state_repository.remove(project_state.project_id)
+        EpisodeScriptRequest(script_text="draft")
+    with pytest.raises(ValidationError):
+        EpisodeGenerationRequest()

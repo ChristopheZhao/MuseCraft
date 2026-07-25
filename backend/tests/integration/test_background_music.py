@@ -176,11 +176,11 @@ async def test_complete_workflow():
     print("\n🎵 测试 4: 完整工作流集成")
     
     try:
-        from app.agents.orchestrator import OrchestratorAgent
+        from app.infrastructure.orchestrator_composition import build_orchestrator_agent
         from app.domain import AgentType
         from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         
-        orchestrator = OrchestratorAgent()
+        orchestrator = build_orchestrator_agent()
         print("✅ OrchestratorAgent 创建成功")
 
         registered_agents = {agent_type.value for agent_type in orchestrator.agents.keys()}

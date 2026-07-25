@@ -98,7 +98,11 @@ class ToolManager:
 
         tools: Dict[str, BaseTool] = {}
         exposure: Dict[str, Exposure] = {}
-        diag: Dict[str, Any] = {"not_registered": [], "schema_missing": []}
+        diag: Dict[str, Any] = {
+            "not_registered": [],
+            "schema_missing": [],
+            "visibility_denied": [],
+        }
 
         # Load agent policy
         pol = self._get_agent_policy(agent_name or agent_type.value)
@@ -111,16 +115,29 @@ class ToolManager:
                 diag["not_registered"].append(f"{tool_name}: {e}")
                 continue
             # Tool self-visibility
+            visibility_failed = False
             try:
-                vis = inst.get_fc_visibility() if hasattr(inst, "get_fc_visibility") else {"expose": True}
-            except Exception:
-                vis = {"expose": True}
-            expose = bool(vis.get("expose", True))
+                if not hasattr(inst, "get_fc_visibility"):
+                    raise AttributeError("get_fc_visibility is not implemented")
+                vis = inst.get_fc_visibility()
+                if not isinstance(vis, dict):
+                    raise TypeError("get_fc_visibility must return a dictionary")
+            except Exception as exc:
+                visibility_failed = True
+                vis = {"expose": False, "allowed_actions": []}
+                diag["visibility_denied"].append(
+                    {
+                        "tool": tool_name,
+                        "reason_code": "tool_visibility_evaluation_failed",
+                        "diagnostic": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            expose = bool(vis.get("expose", False))
             allowed = list(vis.get("allowed_actions", []) or [])
 
             # Merge central policy (per agent)
             pol_t = self._get_tool_policy(pol, tool_name)
-            if pol_t:
+            if pol_t and not visibility_failed:
                 if "expose" in pol_t:
                     expose = bool(pol_t["expose"])
                 if isinstance(pol_t.get("allowed_actions"), list) and pol_t["allowed_actions"]:

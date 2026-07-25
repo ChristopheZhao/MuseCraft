@@ -25,7 +25,7 @@ class AudioGeneratorAgent(ReActAgent):
             timeout_seconds=600,  # 10 minutes for audio generation
             max_retries=2,
             # 明确声明所需工具：生成音乐 + 持久化 + 媒体合成/处理
-            tools=["suno_client", "file_storage_tool", "ffmpeg_tool", "audio_processor", "audio_analysis_tool"],
+            tools=["music_generation", "file_storage_tool", "ffmpeg_tool", "audio_processor", "audio_analysis_tool"],
             llms=llms,
             memory_services=memory_services,
         )
@@ -404,7 +404,9 @@ class AudioGeneratorAgent(ReActAgent):
             "music_mood": music_result.get("mood", ""),
             "file_format": music_result.get("file_format", "mp3"),
             "commercial_license": music_result.get("commercial_license", True),
-            "generation_model": "suno-ai",
+            "generation_provider": music_result.get("provider")
+            or music_result.get("source")
+            or "configured",
             "total_scenes_analyzed": total_scenes,
             "error": music_result.get("error"),
             "generation_time_estimate": "30-120 seconds"

@@ -148,7 +148,7 @@ async def test_episode_executor_closes_persistence_session_before_agent_invocati
     db = session_factory()
     try:
         persisted = db.query(Task).filter(Task.task_id == receipt.task_id).one()
-        assert persisted.status == TaskStatus.COMPLETED.value
+        assert persisted.status == TaskStatus.PENDING.value
         assert persisted.input_parameters == {"user_prompt": "episode one"}
         assert persisted.error_message is None
     finally:
@@ -157,7 +157,9 @@ async def test_episode_executor_closes_persistence_session_before_agent_invocati
 
 
 @pytest.mark.asyncio
-async def test_episode_executor_marks_child_failed_on_invalid_agent_result(tmp_path):
+async def test_episode_executor_does_not_invent_runtime_failure_on_invalid_agent_result(
+    tmp_path,
+):
     engine, session_factory = _episode_session_factory(tmp_path)
 
     class _InvalidOrchestrator:
@@ -188,8 +190,8 @@ async def test_episode_executor_marks_child_failed_on_invalid_agent_result(tmp_p
     db = session_factory()
     try:
         persisted = db.query(Task).one()
-        assert persisted.status == TaskStatus.FAILED.value
-        assert AgentExecutionContractReason.INVALID_CONTRACT_MEMBER.value in persisted.error_message
+        assert persisted.status == TaskStatus.PENDING.value
+        assert persisted.error_message is None
     finally:
         db.close()
         engine.dispose()

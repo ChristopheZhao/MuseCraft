@@ -3,8 +3,8 @@
 本目录只保留当前 canonical MAS agent surface 的简要说明。
 
 ## 当前主线
-- `OrchestratorAgent` 是唯一的 single-episode canonical mainline。
-- `EpisodeOrchestratorAgent` 只是 project / multi-episode wrapper，不是并列 orchestrator engine。
+- `OrchestratorAgent` 是 single-episode MAS control-plane coordinator，不属于 specialist Agent。
+- project / multi-episode sequencing 由 application-layer `EpisodeExecutionCoordinator` 负责，不注册为 Agent。
 - specialist agents 继续作为 leaf execution actors 存在。
 
 ## 已退役语义

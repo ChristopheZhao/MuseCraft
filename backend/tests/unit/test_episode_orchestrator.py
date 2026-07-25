@@ -1,166 +1,153 @@
-import logging
-import types
-
 import pytest
 
-from app.agents.episode_orchestrator import EpisodeOrchestratorAgent
 from app.core.story_plan import (
     CharacterProfile,
-    EpisodePlan,
-    StoryPlan,
-    ProjectState,
-    project_state_repository,
     EpisodeEditorialStatus,
-    normalize_character_bible,
+    EpisodePlan,
+    ProjectDefinition,
+    StoryPlan,
 )
-from app.services import character_reference_images as charref_service
+from app.domain import (
+    AgentExecutionResult,
+    AgentTaskReference,
+    EpisodeExecutionReadModel,
+    EpisodeWorkflowExecutionReceipt,
+    JsonObjectPayload,
+    ProjectExecutionReadModel,
+    ProjectOperationReadModel,
+)
+from app.services.episode_execution_coordinator import (
+    EpisodeExecutionCoordinationError,
+    EpisodeExecutionCoordinator,
+)
+from app.services.project_service import VersionedProjectDefinition
 
 
-pytestmark = pytest.mark.usefixtures("project_state_store")
-
-
-def test_build_episode_payload_uses_episode_context(monkeypatch):
-    agent = object.__new__(EpisodeOrchestratorAgent)
-
-    story_plan = StoryPlan(
-        project_id="pid",
+def _definition(*, approved: bool = True) -> tuple[ProjectDefinition, EpisodePlan]:
+    story = StoryPlan(
+        project_id="project-episode",
         user_prompt="Overall project brief",
-        target_duration_seconds=180,
-        aspect_ratio="16:9",
-    )
-    story_plan.global_theme = "Heroic loyalty"
-    story_plan.merge_character_profiles(
-        normalize_character_bible(
-            {
-                "zhao_zilong": {
-                    "canonical_id": "zhao_zilong",
-                    "display_name": "赵子龙",
-                    "aliases": ["Zhao"],
-                    "key_traits": ["brave"],
-                    "signature_outfit_or_props": ["silver armor"],
-                }
-            }
-        )
-    )
-    story_plan.visual_style = {"palette": "ink"}
-    story_plan.tone_and_mood = "epic"
-    story_plan.additional_notes = {"music": "dramatic"}
-
-    episode = EpisodePlan.create(
-        sequence_index=0,
-        title="Episode 1",
         target_duration_seconds=60,
-        summary="Zhao returns to the battlefield",
-        narrative_purpose="Set up the rescue",
+        aspect_ratio="16:9",
+        global_theme="Courage",
+        character_bible={"hero": CharacterProfile(canonical_id="hero", display_name="Hero")},
     )
-    episode.continuity_notes = {"previous": "retreat"}
-    story_plan.add_episode(episode)
-
-    project_state = ProjectState(
-        project_id="pid",
-        mode="project",
-        story_plan=story_plan,
-        global_settings={},
+    episode = EpisodePlan.create(0, "Episode 1", 60, summary="Mission begins")
+    episode.script_draft = "Draft script"
+    episode.approved_script = "Approved script" if approved else ""
+    episode.status = EpisodeEditorialStatus.APPROVED if approved else EpisodeEditorialStatus.DRAFT
+    story.add_episode(episode)
+    return (
+        ProjectDefinition(
+            project_id=story.project_id,
+            mode="project",
+            story_plan=story,
+            global_settings={"resolution": "1080p"},
+            character_bible=story.character_bible,
+        ),
+        episode,
     )
-    runtime = project_state.ensure_runtime_state(episode.episode_id)
-    episode.status = EpisodeEditorialStatus.APPROVED
-    runtime.approved_script = "00:00-00:10 战况紧急，赵子龙回马。"
 
-    project_state_repository.save(project_state)
 
-    payload = EpisodeOrchestratorAgent._build_episode_payload(agent, episode, project_state)
+class _Definitions:
+    def __init__(self, definition):
+        self.snapshot = VersionedProjectDefinition(definition=definition, version=3)
 
-    prompt_text = payload["user_prompt"]
-    assert "00:00-00:10" not in prompt_text
-    ctx = payload.get("episode_context")
-    assert ctx
-    assert ctx["episode_index"] == 1
-    assert ctx["episode_count"] == 1
-    assert ctx["summary"] == "Zhao returns to the battlefield"
-    assert ctx["approved_script"] == "00:00-00:10 战况紧急，赵子龙回马。"
-    proj_ctx = payload.get("project_context")
-    assert proj_ctx
-    assert proj_ctx["global_theme"] == "Heroic loyalty"
-    assert proj_ctx["project_brief"].startswith("Overall project brief")
-    assert "zhao_zilong" in proj_ctx["character_bible"]
-    assert ctx.get("character_ids") == ["zhao_zilong"]
+    def get(self, project_id):
+        assert project_id == self.snapshot.definition.project_id
+        return self.snapshot
 
-    project_state_repository.remove("pid")
+
+class _ExecutionQuery:
+    def __init__(self, definition, episode_status="idle"):
+        self.definition = definition
+        self.episode_status = episode_status
+
+    def get(self, project_id):
+        episode = self.definition.story_plan.episodes[0]
+        return ProjectExecutionReadModel(
+            project_id=project_id,
+            mode="project",
+            definition_version=3,
+            definition=JsonObjectPayload.from_mapping(
+                self.definition.to_dict(), field_path="test.definition"
+            ),
+            planning=ProjectOperationReadModel(status="completed"),
+            character_references=ProjectOperationReadModel(status="completed"),
+            episodes=(
+                EpisodeExecutionReadModel(
+                    episode_id=episode.episode_id,
+                    status=self.episode_status,
+                    approved_script=episode.approved_script,
+                ),
+            ),
+        )
+
+
+class _Executor:
+    def __init__(self):
+        self.calls = []
+
+    async def execute_episode(self, **kwargs):
+        self.calls.append(kwargs)
+        return EpisodeWorkflowExecutionReceipt(
+            task_id="child-task",
+            result=AgentExecutionResult(
+                output_data=JsonObjectPayload.from_mapping(
+                    {"status": "completed", "workflow_state_id": "child-task"},
+                    field_path="test.output",
+                )
+            ),
+        )
 
 
 @pytest.mark.asyncio
-async def test_project_character_reference_images_generated_and_idempotent():
-    agent = object.__new__(EpisodeOrchestratorAgent)
-    agent.logger = logging.getLogger("test.episode_orchestrator")
+async def test_episode_coordinator_builds_identity_bound_payload_without_runtime_writes():
+    definition, episode = _definition()
+    executor = _Executor()
+    coordinator = EpisodeExecutionCoordinator(
+        project_definitions=_Definitions(definition),
+        execution_query=_ExecutionQuery(definition),
+        episode_executor=executor,
+    )
 
-    calls = {"image": 0}
+    result = await coordinator.execute(
+        parent_task=AgentTaskReference(task_id="parent-task", task_type="video_generation"),
+        input_data={
+            "project_id": definition.project_id,
+            "project_definition_version": 3,
+            "episode_ids": [episode.episode_id],
+        },
+    )
 
-    class _StubTool:
-        async def execute(self, tool_input):
-            params = tool_input.get("parameters") or {}
-            calls["image"] += 1
-            scene_number = str(params.get("scene_number") or "")
-            ref_kind = scene_number.split(":")[-1] if ":" in scene_number else "unknown"
-            return types.SimpleNamespace(
-                success=True,
-                result={
-                    "image_url": f"https://example.com/{ref_kind}.png",
-                    "generated_prompt": params.get("prompt") or "",
-                },
-                error=None,
-            )
+    payload = executor.calls[0]["input_data"].to_dict()
+    assert payload["project_id"] == definition.project_id
+    assert payload["episode_id"] == episode.episode_id
+    assert payload["project_definition_version"] == 3
+    assert payload["episode_editorial_revision"] == episode.editorial_revision
+    assert payload["episode_context"]["approved_script"] == "Approved script"
+    assert result["episodes"][0]["task_id"] == "child-task"
 
-    class _StubRegistry:
-        def get_tool(self, name: str):
-            if name == "image_generation":
-                return _StubTool()
-            raise KeyError(name)
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(charref_service, "get_tool_registry", lambda: _StubRegistry())
+@pytest.mark.asyncio
+async def test_episode_coordinator_fails_explicitly_when_no_episode_is_eligible():
+    definition, episode = _definition(approved=False)
+    executor = _Executor()
+    coordinator = EpisodeExecutionCoordinator(
+        project_definitions=_Definitions(definition),
+        execution_query=_ExecutionQuery(definition),
+        episode_executor=executor,
+    )
 
-    try:
-        story_plan = StoryPlan(
-            project_id="pid-charref",
-            user_prompt="Project",
-            target_duration_seconds=120,
-            aspect_ratio="16:9",
-        )
-        profile = CharacterProfile(
-            canonical_id="little_bunny",
-            display_name="小兔子",
-            description="一只活泼可爱的小兔子",
-            personality_traits=["好奇", "热情"],
-            visual_traits={"identity_tags": ["白色绒毛", "粉色耳朵"], "signature_props": ["红色小领结", "生日帽"]},
-            reference_assets={"items": []},
-        )
-        project_state = ProjectState(
-            project_id="pid-charref",
-            mode="project",
-            story_plan=story_plan,
-            style_profile={"style_name": "森林童话幻想风"},
-            character_bible={"little_bunny": profile},
-        )
-        project_state_repository.save(project_state)
-
-        await EpisodeOrchestratorAgent._ensure_project_character_reference_images(
-            agent,
-            project_state,
-            {"project_character_reference_images_enabled": True},
+    with pytest.raises(EpisodeExecutionCoordinationError) as exc_info:
+        await coordinator.execute(
+            parent_task=AgentTaskReference(task_id="parent-task", task_type="video_generation"),
+            input_data={
+                "project_id": definition.project_id,
+                "project_definition_version": 3,
+                "episode_ids": [episode.episode_id],
+            },
         )
 
-        assets = project_state.character_bible["little_bunny"].reference_assets
-        assert assets["avatar"]["url"].endswith("/avatar.png")
-        assert assets["full_body"]["url"].endswith("/full_body.png")
-        assert project_state.story_plan.character_bible is project_state.character_bible
-
-        call_count = dict(calls)
-        await EpisodeOrchestratorAgent._ensure_project_character_reference_images(
-            agent,
-            project_state,
-            {"project_character_reference_images_enabled": True},
-        )
-        assert calls == call_count
-    finally:
-        monkeypatch.undo()
-        project_state_repository.remove("pid-charref")
+    assert exc_info.value.reason_code == "no_eligible_episodes"
+    assert executor.calls == []

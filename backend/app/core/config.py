@@ -173,6 +173,7 @@ class Settings(BaseSettings):
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
     SUNO_BASE_URL: str = config("SUNO_BASE_URL", default="https://api.sunoapi.org")
+    MUSIC_GENERATION_PROVIDER: str = config("MUSIC_GENERATION_PROVIDER", default="suno")
     AUDIO_SFX_REQUIRED_DEFAULT: bool = config("AUDIO_SFX_REQUIRED_DEFAULT", default=False, cast=bool)
 
     # Voice Synthesis configuration

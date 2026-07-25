@@ -27,7 +27,6 @@ from .published_deliverable_service import (
     get_published_deliverables,
     load_published_payload,
 )
-from .scene_info_reference_service import SceneInfoReferencePersistenceError, persist_scene_info_ref
 from .script_review_contract import build_script_preview_text
 
 
@@ -37,39 +36,16 @@ class ContextContractAssembler:
     def __init__(self, memory_services: MemoryServices):
         self._memory_services = memory_services
 
-    def _persist_scene_info_ref(
-        self,
-        *,
-        workflow_state_id: str,
-        agent_type: AgentType,
-        payload: Dict[str, Any],
-    ) -> str:
-        try:
-            return persist_scene_info_ref(
-                workflow_id=workflow_state_id,
-                agent_type=agent_type,
-                payload=payload,
-            )
-        except SceneInfoReferencePersistenceError as exc:
-            raise AgentError(
-                "Scene info ref persistence failed: "
-                f"workflow_id={workflow_state_id} agent_type={agent_type.value} detail={exc}"
-            ) from exc
-
     def _build_scene_info_context(
         self,
         *,
         workflow_state_id: str,
         agent_type: AgentType,
         context_payload: Dict[str, Any],
-        payload_for_ref: Dict[str, Any],
+        scene_info_ref: str,
         key_illustration_defaults: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        ref_path = self._persist_scene_info_ref(
-            workflow_state_id=workflow_state_id,
-            agent_type=agent_type,
-            payload=payload_for_ref,
-        )
+        ref_path = str(scene_info_ref or "").strip()
         if ref_path:
             context = dict(context_payload or {})
             context["scene_info_ref"] = ref_path
@@ -80,7 +56,7 @@ class ContextContractAssembler:
                 context["key_illustration"] = key_illustration
             return context
         raise AgentError(
-            "Scene info ref persistence returned empty ref unexpectedly: "
+            "Prepared scene info ref is required before context assembly: "
             f"workflow_id={workflow_state_id} agent_type={agent_type.value}"
         )
 
@@ -234,6 +210,7 @@ class ContextContractAssembler:
         workflow_data: Optional[Dict[str, Any]] = None,
         runtime_input_payload: Optional[Dict[str, Any]] = None,
         execution_contract: Optional[Dict[str, Any]] = None,
+        scene_info_refs: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         workflow_payload = dict(workflow_data or {})
         runtime_payload = dict(runtime_input_payload or {})
@@ -241,6 +218,7 @@ class ContextContractAssembler:
         static_context: Dict[str, Any] = {}
         assembler_diagnostics: Dict[str, Any] = {}
         script_stage_resolution: Optional[Dict[str, Any]] = None
+        prepared_scene_refs = dict(scene_info_refs or {})
 
         if agent_type in {
             AgentType.AUDIO_GENERATOR,
@@ -346,13 +324,12 @@ class ContextContractAssembler:
             )
             if isinstance(image_ctx, dict) and image_ctx.get("context"):
                 context_payload = dict(image_ctx.get("context") or {})
-                scene_info_payload = image_ctx.get("scene_info_payload") or {}
                 static_context.update(
                     self._build_scene_info_context(
                         workflow_state_id=workflow_state_id,
                         agent_type=agent_type,
                         context_payload=context_payload,
-                        payload_for_ref=scene_info_payload or context_payload,
+                        scene_info_ref=prepared_scene_refs.get(agent_type.value, ""),
                     )
                 )
 
@@ -364,13 +341,12 @@ class ContextContractAssembler:
             )
             if isinstance(video_ctx, dict) and video_ctx.get("context"):
                 context_payload = dict(video_ctx.get("context") or {})
-                scene_info_payload = video_ctx.get("scene_info_payload") or {}
                 static_context.update(
                     self._build_scene_info_context(
                         workflow_state_id=workflow_state_id,
                         agent_type=agent_type,
                         context_payload=context_payload,
-                        payload_for_ref=scene_info_payload,
+                        scene_info_ref=prepared_scene_refs.get(agent_type.value, ""),
                         key_illustration_defaults={
                             "task_overview": "全局故事与风格/角色概览，仅用于规划",
                             "scene_dependency_graph": "场景依赖关系，表示生成顺序",

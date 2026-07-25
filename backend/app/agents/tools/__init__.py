@@ -30,6 +30,10 @@ _LAZY_IMPORTS = {
     "KimiClientTool": (".ai_services.kimi_client", "KimiClientTool"),
     "ZhipuClientTool": (".ai_services.zhipu_client", "ZhipuClientTool"),
     "SunoClientTool": (".ai_services.suno_client", "SunoClientTool"),
+    "MusicGenerationTool": (
+        ".ai_services.music_generation_tool",
+        "MusicGenerationTool",
+    ),
     "ImageGenerationClientTool": (".ai_services.image_generation_client", "ImageGenerationClientTool"),
     "JimengImageTool": (".ai_services.jimeng_image_tool", "JimengImageTool"),
     "VideoGenerationTool": (".ai_services.video_generation_tool_v2", "VideoGenerationTool"),
@@ -82,7 +86,7 @@ def register_default_tools() -> None:
     from .ai_services.openai_client import OpenAIClientTool
     from .ai_services.kimi_client import KimiClientTool
     from .ai_services.zhipu_client import ZhipuClientTool
-    from .ai_services.suno_client import SunoClientTool
+    from .ai_services.music_generation_tool import MusicGenerationTool
     from .ai_services.voice_synth_tool import VoiceSynthesisTool
     from .ai_services.image_generation_client import ImageGenerationClientTool
     from .ai_services.jimeng_image_tool import JimengImageTool
@@ -117,7 +121,7 @@ def register_default_tools() -> None:
     registry.register_tool(OpenAIClientTool)
     registry.register_tool(KimiClientTool)
     registry.register_tool(ZhipuClientTool)
-    registry.register_tool(SunoClientTool)
+    registry.register_tool(MusicGenerationTool)
     registry.register_tool(VoiceSynthesisTool)
     registry.register_tool(ImageGenerationClientTool)
     registry.register_tool(JimengImageTool)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_ROOT.parent
 ALEMBIC_CONFIG = BACKEND_ROOT / "alembic.ini"
 BASELINE_REVISION = "20260711_0001"
+RELEASE_HEAD_REVISION = "20260719_0002"
 
 
 def _alembic_env(database_url: str) -> dict[str, str]:
@@ -39,11 +41,12 @@ def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[s
     )
 
 
-def test_release_migration_graph_has_one_baseline_head() -> None:
+def test_release_migration_graph_has_one_linear_release_head() -> None:
     config = Config(str(ALEMBIC_CONFIG))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [BASELINE_REVISION]
+    assert script.get_heads() == [RELEASE_HEAD_REVISION]
+    assert script.get_revision(RELEASE_HEAD_REVISION).down_revision == BASELINE_REVISION
     assert script.get_revision(BASELINE_REVISION).down_revision is None
 
 
@@ -51,16 +54,60 @@ def test_release_migration_round_trip_matches_current_metadata(tmp_path: Path) -
     database_path = tmp_path / "release-migration.db"
     database_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
 
+    _run_alembic(database_url, "upgrade", BASELINE_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO project_workspaces (project_id, mode, payload)
+            VALUES (?, ?, ?)
+            """,
+            (
+                "migration-contract-project",
+                "project",
+                json.dumps(
+                    {
+                        "title": "Preserved title",
+                        "episodes_runtime": {"episode-1": {"status": "running"}},
+                        "progress": 50,
+                        "total_cost": 1.25,
+                        "total_tokens": 500,
+                        "completed_episodes": 1,
+                    }
+                ),
+            ),
+        )
+
     _run_alembic(database_url, "upgrade", "head")
     with sqlite3.connect(database_path) as connection:
         actual_tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
+        migrated_payload = json.loads(
+            connection.execute(
+                "SELECT payload FROM project_workspaces WHERE project_id = ?",
+                ("migration-contract-project",),
+            ).fetchone()[0]
+        )
 
     assert set(BaseModel.metadata.tables).issubset(actual_tables)
+    assert migrated_payload == {"title": "Preserved title"}
     _run_alembic(database_url, "check")
     _run_alembic(database_url, "downgrade", "base")
+
+
+def test_project_payload_cleanup_casts_postgresql_json_through_jsonb() -> None:
+    migration_source = (
+        BACKEND_ROOT
+        / "alembic"
+        / "release_versions"
+        / "20260719_0002_project_definition_version.py"
+    ).read_text(encoding="utf-8")
+
+    assert "payload::jsonb" in migration_source
+    assert ")::json" in migration_source
+    assert "json_remove(" in migration_source
+    assert "unsupported project payload migration dialect" in migration_source
 
 
 def test_requirements_is_generated_from_the_locked_project() -> None:

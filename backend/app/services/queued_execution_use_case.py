@@ -12,10 +12,11 @@ from typing import Any
 from ..core.constants import GenerationMode
 from ..core.database import SessionLocal
 from ..core.generation_mode import resolve_generation_mode
-from ..core.story_plan import ProjectOperationState, project_state_repository
+from ..core.story_plan import ProjectDefinition
 from ..domain import (
     AgentExecutionRequest,
     AgentExecutionResult,
+    AgentTaskReference,
     AgentType,
     QueuedExecutionCommand,
     QueuedExecutionKind,
@@ -31,6 +32,12 @@ from .queued_task_execution_host import run_agent_execution_in_host
 from .runtime_attempt_keepalive_adapter import create_runtime_attempt_keepalive_controller
 from .runtime_session_control_plane import RuntimeSessionControlPlane
 from .task_execution_policy import get_queue_execution_block_reason
+from ..infrastructure.project_definition_composition import (
+    build_project_definition_service,
+    build_project_workflow_service,
+)
+from .project_service import ProjectDefinitionApplicationService
+from .project_workflow_service import ProjectWorkflowApplicationService
 
 
 class QueuedExecutionApplicationError(RuntimeError):
@@ -57,6 +64,13 @@ class _SkippedExecution:
     result_metadata: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedEpisodeExecution:
+    parent_task: AgentTaskReference
+    result_metadata: dict[str, str]
+    input_data: dict[str, Any]
+
+
 class QueuedExecutionUseCase:
     """Own application/control-plane decisions outside scheduler transports."""
 
@@ -68,6 +82,9 @@ class QueuedExecutionUseCase:
         agent_factory=None,
         keepalive_factory=None,
         character_reference_runner=None,
+        episode_coordinator_factory=None,
+        project_definitions: ProjectDefinitionApplicationService | None = None,
+        project_workflows: ProjectWorkflowApplicationService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._session_factory = session_factory or SessionLocal
@@ -75,6 +92,15 @@ class QueuedExecutionUseCase:
         self._agent_factory = agent_factory or self._create_default_agent
         self._keepalive_factory = keepalive_factory or create_runtime_attempt_keepalive_controller
         self._character_reference_runner = character_reference_runner
+        self._episode_coordinator_factory = (
+            episode_coordinator_factory or self._create_default_episode_coordinator
+        )
+        self._project_definitions = project_definitions or build_project_definition_service(
+            self._session_factory
+        )
+        self._project_workflows = project_workflows or build_project_workflow_service(
+            self._session_factory
+        )
         self._logger = logger or logging.getLogger("queued_execution_use_case")
 
     def enqueue(
@@ -169,6 +195,20 @@ class QueuedExecutionUseCase:
                     **prepared.result_metadata,
                 }
 
+            if isinstance(prepared, _PreparedEpisodeExecution):
+                result_payload = asyncio.run(
+                    self._episode_coordinator_factory().execute(
+                        parent_task=prepared.parent_task,
+                        input_data=prepared.input_data,
+                    )
+                )
+                self._complete_episode_coordination(command, result_payload)
+                return {
+                    "status": result_payload.get("status") or "completed",
+                    "result": result_payload,
+                    **prepared.result_metadata,
+                }
+
             executor = self._agent_factory(prepared.agent_type)
             keepalive = (
                 self._keepalive_factory(logger=self._logger)
@@ -192,6 +232,7 @@ class QueuedExecutionUseCase:
                 self._complete_project_execution(
                     command,
                     input_data=prepared.input_data,
+                    result_payload=result_payload,
                 )
 
             return {
@@ -216,7 +257,7 @@ class QueuedExecutionUseCase:
     def _prepare_execution(
         self,
         command: QueuedExecutionCommand,
-    ) -> _PreparedExecution | _SkippedExecution:
+    ) -> _PreparedExecution | _PreparedEpisodeExecution | _SkippedExecution:
         db = self._session_factory()
         try:
             task = self._get_task(db, command.task_id)
@@ -253,17 +294,19 @@ class QueuedExecutionUseCase:
                     runtime_payload = runtime_session.input_payload.to_dict()
                     if runtime_payload:
                         input_data = runtime_payload
-                agent_type = (
-                    AgentType.ORCHESTRATOR
-                    if mode == GenerationMode.QUICK
-                    else AgentType.EPISODE_ORCHESTRATOR
-                )
+                agent_type = AgentType.ORCHESTRATOR
                 request = build_agent_execution_request(
                     task=task,
                     agent_type=agent_type,
                     input_data=input_data,
                     execution_order=1,
                 )
+                if mode == GenerationMode.PROJECT:
+                    return _PreparedEpisodeExecution(
+                        parent_task=request.task,
+                        result_metadata={"route": route, "mode": mode.value},
+                        input_data=dict(input_data),
+                    )
                 return _PreparedExecution(
                     request=request,
                     agent_type=agent_type,
@@ -286,12 +329,6 @@ class QueuedExecutionUseCase:
             task.status = TaskStatus.IN_PROGRESS.value
             task.update_progress("Project planning started", 1)
             db.commit()
-            self._mark_project_state(
-                input_data.get("project_id"),
-                task_id=command.task_id,
-                status=ProjectOperationState.IN_PROGRESS,
-                error=None,
-            )
             request = build_agent_execution_request(
                 task=task,
                 agent_type=AgentType.SERIES_PLANNER,
@@ -315,52 +352,63 @@ class QueuedExecutionUseCase:
         command: QueuedExecutionCommand,
         *,
         input_data: dict[str, Any],
+        result_payload: dict[str, Any],
     ) -> None:
         project_id = str(input_data.get("project_id") or "").strip() or None
+        if project_id is None:
+            raise QueuedExecutionApplicationError(
+                reason_code="project_id_missing",
+                task_id=command.task_id,
+                message="Project planning command is missing project_id",
+            )
+        character_reference_result = {
+            "status": "idle",
+            "error": None,
+        }
         if project_id:
-            self._update_task_progress(command.task_id, "Generating character references", 90)
-            self._run_character_reference_generation(project_id, input_data=input_data)
-
-        db = self._session_factory()
-        try:
-            task = self._get_task(db, command.task_id)
-            if task is None:
-                raise self._task_missing(command.task_id)
-            job_kind, handler_key = resolve_project_job_contract(input_data)
-            task.status = TaskStatus.COMPLETED.value
-            task.error_message = None
-            output_metadata = dict(task.output_metadata or {})
-            output_metadata["project_id"] = project_id
-            output_metadata["project_job"] = {
-                "job_kind": job_kind,
-                "handler_key": handler_key,
-            }
-            task.output_metadata = output_metadata
-            task.update_progress("Project planning completed", 100)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-
-        self._mark_project_state(
-            project_id,
-            task_id=command.task_id,
-            status=ProjectOperationState.COMPLETED,
-            error=None,
-        )
+            definition_payload = result_payload.get("project_definition")
+            if not isinstance(definition_payload, dict):
+                raise QueuedExecutionApplicationError(
+                    reason_code="project_definition_result_missing",
+                    task_id=command.task_id,
+                    message="Series planner returned no typed project_definition payload",
+                )
+            expected_version = input_data.get("project_definition_version")
+            if not isinstance(expected_version, int):
+                raise QueuedExecutionApplicationError(
+                    reason_code="project_definition_version_missing",
+                    task_id=command.task_id,
+                    message="Project planning command is missing project_definition_version",
+                )
+            planned_definition = ProjectDefinition.from_dict(definition_payload)
+            self._project_workflows.apply_planning_result(
+                definition=planned_definition,
+                expected_version=expected_version,
+                task_id=command.task_id,
+                character_references_requested=bool(
+                    input_data.get("generate_character_references", True)
+                ),
+            )
+            character_reference_result = self._run_character_reference_generation(
+                project_id,
+                input_data=input_data,
+            )
+            self._record_character_reference_result(
+                command.task_id,
+                character_reference_result,
+            )
 
     def _run_character_reference_generation(
         self,
         project_id: str,
         *,
         input_data: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         async def run() -> bool:
             if self._character_reference_runner is not None:
                 return await self._character_reference_runner(
                     project_id,
+                    project_definitions=self._project_definitions,
                     enabled=bool(input_data.get("generate_character_references", True)),
                     logger=self._logger,
                 )
@@ -368,6 +416,7 @@ class QueuedExecutionUseCase:
 
             return await ensure_project_character_reference_images(
                 project_id,
+                project_definitions=self._project_definitions,
                 enabled=bool(input_data.get("generate_character_references", True)),
                 logger=self._logger,
             )
@@ -375,24 +424,39 @@ class QueuedExecutionUseCase:
         try:
             started = asyncio.run(run())
             if not started:
-                project_state = project_state_repository.get(project_id)
-                if project_state:
-                    project_state.progress.character_references.status = (
-                        ProjectOperationState.SKIPPED
-                    )
-                    project_state.progress.character_references.error = None
-                    project_state_repository.save(project_state)
+                self._logger.info(
+                    "Project character reference generation skipped for %s",
+                    project_id,
+                )
+                return {"status": "skipped", "error": None}
+            return {"status": "completed", "error": None}
         except Exception as exc:  # controlled independent post-processing failure
-            project_state = project_state_repository.get(project_id)
-            if project_state:
-                project_state.progress.character_references.status = ProjectOperationState.FAILED
-                project_state.progress.character_references.error = str(exc)
-                project_state_repository.save(project_state)
             self._logger.warning(
                 "Project character reference generation failed for %s: %s",
                 project_id,
                 exc,
             )
+            return {"status": "failed", "error": str(exc)}
+
+    def _record_character_reference_result(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        db = self._session_factory()
+        try:
+            task = self._get_task(db, task_id)
+            if task is None:
+                raise self._task_missing(task_id)
+            output_metadata = dict(task.output_metadata or {})
+            output_metadata["character_references"] = dict(result)
+            task.output_metadata = output_metadata
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def _mark_execution_failed(
         self,
@@ -436,12 +500,29 @@ class QueuedExecutionUseCase:
                 task.progress_percentage or 1,
             )
             db.commit()
-            self._mark_project_state(
-                (task.input_parameters or {}).get("project_id"),
-                task_id=command.task_id,
-                status=ProjectOperationState.FAILED,
-                error=str(error),
-            )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _complete_episode_coordination(
+        self,
+        command: QueuedExecutionCommand,
+        result_payload: dict[str, Any],
+    ) -> None:
+        db = self._session_factory()
+        try:
+            task = self._get_task(db, command.task_id)
+            if task is None:
+                raise self._task_missing(command.task_id)
+            task.status = TaskStatus.COMPLETED.value
+            task.error_message = None
+            output_metadata = dict(task.output_metadata or {})
+            output_metadata["episode_coordination"] = result_payload
+            task.output_metadata = output_metadata
+            task.update_progress("Episode coordination completed", 100)
+            db.commit()
         except Exception:
             db.rollback()
             raise
@@ -463,25 +544,6 @@ class QueuedExecutionUseCase:
             db.close()
 
     @staticmethod
-    def _mark_project_state(
-        project_id: Any,
-        *,
-        task_id: str,
-        status: ProjectOperationState,
-        error: str | None,
-    ) -> None:
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            return
-        project_state = project_state_repository.get(normalized_project_id)
-        if project_state is None:
-            return
-        project_state.progress.planning.status = status
-        project_state.progress.planning.task_id = task_id
-        project_state.progress.planning.error = error
-        project_state_repository.save(project_state)
-
-    @staticmethod
     def _get_task(db, task_id: str):
         return db.query(Task).filter(Task.task_id == task_id).first()
 
@@ -496,13 +558,9 @@ class QueuedExecutionUseCase:
     @staticmethod
     def _create_default_agent(agent_type: AgentType):
         if agent_type == AgentType.ORCHESTRATOR:
-            from ..agents.orchestrator import OrchestratorAgent
+            from ..infrastructure.orchestrator_composition import build_orchestrator_agent
 
-            return OrchestratorAgent.create_default()
-        if agent_type == AgentType.EPISODE_ORCHESTRATOR:
-            from ..agents.episode_orchestrator import EpisodeOrchestratorAgent
-
-            return EpisodeOrchestratorAgent.create_default()
+            return build_orchestrator_agent()
         if agent_type == AgentType.SERIES_PLANNER:
             from ..agents.series_planner import SeriesPlannerAgent
             from ..agents.utils.llm_policy import LLMPolicyManager
@@ -519,3 +577,20 @@ class QueuedExecutionUseCase:
             planner_llms = LLMPolicyManager(str(policy_path)).build_llms_for_agent("series_planner")
             return SeriesPlannerAgent.create_default(llms=planner_llms)
         raise ValueError(f"Unsupported queued Agent type: {agent_type.value}")
+
+    @staticmethod
+    def _create_default_episode_coordinator():
+        from ..infrastructure.project_definition_composition import (
+            build_project_definition_service,
+            build_project_execution_read_model_query,
+        )
+        from .episode_execution_coordinator import EpisodeExecutionCoordinator
+        from .episode_workflow_execution import PersistentEpisodeWorkflowExecutor
+        from ..infrastructure.orchestrator_composition import build_orchestrator_agent
+
+        orchestrator = build_orchestrator_agent()
+        return EpisodeExecutionCoordinator(
+            project_definitions=build_project_definition_service(),
+            execution_query=build_project_execution_read_model_query(),
+            episode_executor=PersistentEpisodeWorkflowExecutor(orchestrator=orchestrator),
+        )

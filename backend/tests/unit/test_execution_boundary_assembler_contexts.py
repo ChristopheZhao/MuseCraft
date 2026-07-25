@@ -39,7 +39,6 @@ from app.services.runtime_published_deliverable_control_plane import (
     RuntimePublishedDeliverableControlPlane,
 )
 from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
-from app.services.scene_info_reference_service import SceneInfoReferencePersistenceError
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
@@ -624,6 +623,9 @@ def test_assemble_agent_context_requires_no_projection_when_runtime_input_carrie
         agent_type=AgentType.IMAGE_GENERATOR,
         workflow_state_id=workflow_id,
         workflow_data={},
+        scene_info_refs={
+            AgentType.IMAGE_GENERATOR.value: "/tmp/runtime-direct-scene-info.json"
+        },
         runtime_input_payload={
             "published_deliverables": {
                 "script": {
@@ -651,8 +653,8 @@ def test_assemble_agent_context_requires_no_projection_when_runtime_input_carrie
     assert diagnostics["source"] == "runtime_input"
 
 
-def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(
-    tmp_path, monkeypatch
+def test_assemble_agent_context_consumes_prepared_scene_info_ref_without_payload_fallback(
+    tmp_path,
 ):
     service = _build_service()
     workflow_id = "wf-image-scene-info-ref"
@@ -690,15 +692,13 @@ def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        "app.services.context_assembler.persist_scene_info_ref",
-        lambda **kwargs: "/tmp/runtime-direct-scene-info.json",
-    )
-
     boundary = assembler.assemble_agent_context(
         agent_type=AgentType.IMAGE_GENERATOR,
         workflow_state_id=workflow_id,
         workflow_data={},
+        scene_info_refs={
+            AgentType.IMAGE_GENERATOR.value: "/tmp/runtime-direct-scene-info.json"
+        },
         runtime_input_payload={
             "published_deliverables": {
                 "script": {
@@ -723,8 +723,8 @@ def test_assemble_agent_context_emits_scene_info_ref_without_payload_fallback(
     assert "scene_info_payload" not in static_context
 
 
-def test_assemble_agent_context_fails_closed_when_scene_info_ref_persistence_fails(
-    tmp_path, monkeypatch
+def test_assemble_agent_context_fails_closed_when_prepared_scene_info_ref_is_missing(
+    tmp_path,
 ):
     service = _build_service()
     workflow_id = "wf-image-scene-info-persist-fail"
@@ -762,18 +762,7 @@ def test_assemble_agent_context_fails_closed_when_scene_info_ref_persistence_fai
         encoding="utf-8",
     )
 
-    def _raise_persist_error(**kwargs):
-        raise SceneInfoReferencePersistenceError(
-            "Scene info persistence failed: workflow_id=wf-image-scene-info-persist-fail "
-            "agent_type=image_generator detail=disk_full"
-        )
-
-    monkeypatch.setattr(
-        "app.services.context_assembler.persist_scene_info_ref",
-        _raise_persist_error,
-    )
-
-    with pytest.raises(AgentError, match="Scene info ref persistence failed"):
+    with pytest.raises(AgentError, match="Prepared scene info ref is required"):
         assembler.assemble_agent_context(
             agent_type=AgentType.IMAGE_GENERATOR,
             workflow_state_id=workflow_id,

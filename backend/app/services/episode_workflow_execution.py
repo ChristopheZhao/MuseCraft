@@ -16,6 +16,8 @@ from ..domain import (
     TaskType,
 )
 from ..models import Task
+from ..infrastructure import SqlAlchemyRuntimeAttemptStore
+from .runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
 
 
 class EpisodeWorkflowOrchestrator(Protocol):
@@ -24,7 +26,7 @@ class EpisodeWorkflowOrchestrator(Protocol):
 
 
 class PersistentEpisodeWorkflowExecutor:
-    """Own the ORM child-task lifecycle outside EpisodeOrchestratorAgent."""
+    """Create durable child executions for the application episode coordinator."""
 
     def __init__(
         self,
@@ -45,6 +47,7 @@ class PersistentEpisodeWorkflowExecutor:
     ) -> AgentTaskReference:
         db = self._session_factory()
         try:
+            payload = input_data.to_dict()
             task = Task(
                 title=title,
                 description=description,
@@ -52,9 +55,23 @@ class PersistentEpisodeWorkflowExecutor:
                 status=TaskStatus.PENDING.value,
                 session_id=parent_task.session_id,
                 user_id=parent_task.user_id,
-                input_parameters=input_data.to_dict(),
+                project_id=str(payload.get("project_id") or "").strip() or None,
+                episode_id=str(payload.get("episode_id") or "").strip() or None,
+                input_parameters=payload,
             )
             db.add(task)
+            db.flush()
+            db.refresh(task)
+            RuntimeSessionBootstrapControlPlane(
+                SqlAlchemyRuntimeAttemptStore(db)
+            ).create_quick_session(
+                task_id=str(task.task_id),
+                expected_task_status=TaskStatus.PENDING,
+                expected_latest_session_id=None,
+                input_payload=input_data,
+                project_id=str(task.project_id) if task.project_id else None,
+                episode_id=str(task.episode_id) if task.episode_id else None,
+            )
             db.commit()
             db.refresh(task)
             return AgentTaskReference(
@@ -63,24 +80,9 @@ class PersistentEpisodeWorkflowExecutor:
                 user_id=(str(task.user_id) if task.user_id is not None else None),
                 session_id=(str(task.session_id) if task.session_id is not None else None),
             )
-        finally:
-            db.close()
-
-    def _update_task_status(
-        self,
-        *,
-        task_id: str,
-        status: TaskStatus,
-        error_message: str | None = None,
-    ) -> None:
-        db = self._session_factory()
-        try:
-            task = db.query(Task).filter(Task.task_id == task_id).first()
-            if task is None:
-                raise RuntimeError(f"Episode workflow task {task_id} disappeared")
-            task.status = status.value
-            task.error_message = error_message
-            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -99,30 +101,16 @@ class PersistentEpisodeWorkflowExecutor:
             description=description,
             input_data=input_data,
         )
-        try:
-            result = await self._orchestrator.execute(
-                AgentExecutionRequest(
-                    task=child_task,
-                    agent_type=AgentType.ORCHESTRATOR.value,
-                    input_data=input_data,
-                    workflow_state_id=child_task.task_id,
-                    execution_order=execution_order,
-                )
+        result = await self._orchestrator.execute(
+            AgentExecutionRequest(
+                task=child_task,
+                agent_type=AgentType.ORCHESTRATOR.value,
+                input_data=input_data,
+                workflow_state_id=child_task.task_id,
+                execution_order=execution_order,
             )
-            receipt = EpisodeWorkflowExecutionReceipt(
-                task_id=child_task.task_id,
-                result=result,
-            )
-        except Exception as exc:
-            self._update_task_status(
-                task_id=child_task.task_id,
-                status=TaskStatus.FAILED,
-                error_message=str(exc),
-            )
-            raise
-
-        self._update_task_status(
-            task_id=child_task.task_id,
-            status=TaskStatus.COMPLETED,
         )
-        return receipt
+        return EpisodeWorkflowExecutionReceipt(
+            task_id=child_task.task_id,
+            result=result,
+        )
