@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import dev as dev_alias
 from scripts import start_dev as start_dev_alias
 from scripts import start_dev_uv as module
@@ -292,6 +294,57 @@ def test_load_project_environment_uses_root_without_overriding_process_values(mo
 
     assert module._load_project_environment() is True
     assert calls == [(module.PROJECT_ROOT / ".env", False)]
+
+
+def test_virtual_environment_check_requires_canonical_backend_venv(monkeypatch, capsys):
+    monkeypatch.setattr(module.sys, "base_prefix", str(module.BACKEND_ROOT))
+    monkeypatch.setattr(module.sys, "prefix", str(module.CANONICAL_VENV))
+
+    assert module.check_virtual_environment() is True
+    assert str(module.CANONICAL_VENV.resolve()) in capsys.readouterr().out
+
+    monkeypatch.setattr(module.sys, "prefix", str(module.PROJECT_ROOT / ".venv"))
+
+    assert module.check_virtual_environment() is False
+    output = capsys.readouterr().out
+    assert "reason_code=noncanonical_backend_virtual_environment" in output
+    assert str(module.CANONICAL_VENV.resolve()) in output
+
+
+def test_environment_check_rejects_process_cleanup(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        module._parse_args(["--environment-check", "--cleanup-residuals"])
+
+    assert exc_info.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_main_environment_check_does_not_touch_external_services(monkeypatch, capsys):
+    external_calls = []
+
+    monkeypatch.setattr(
+        module,
+        "_parse_args",
+        lambda argv=None: SimpleNamespace(
+            cleanup_residuals=False,
+            check=False,
+            environment_check=True,
+        ),
+    )
+    monkeypatch.setattr(module, "check_uv_available", lambda: True)
+    monkeypatch.setattr(module, "check_virtual_environment", lambda: True)
+    monkeypatch.setattr(module, "show_environment_info", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "_handle_startup_residuals",
+        lambda *args, **kwargs: external_calls.append("processes"),
+    )
+    monkeypatch.setattr(module, "check_dependencies", lambda: external_calls.append("dependencies"))
+    monkeypatch.setattr(module, "run_migrations", lambda: external_calls.append("migrations"))
+
+    assert module.main([]) == 0
+    assert external_calls == []
+    assert "external services were not checked" in capsys.readouterr().out
 
 
 def test_mysql_dependency_check_fails_before_connection(capsys):

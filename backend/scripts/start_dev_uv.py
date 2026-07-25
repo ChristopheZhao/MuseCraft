@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BACKEND_ROOT.parent
 REPO_ROOT = BACKEND_ROOT  # Backward-compatible name used by focused launcher tests.
+CANONICAL_VENV = BACKEND_ROOT / ".venv"
 
 
 def _load_project_environment() -> bool:
@@ -92,7 +93,13 @@ class ManagedProcessGroup:
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Start the local MuseCraft backend dev stack.")
-    parser.add_argument(
+    check_group = parser.add_mutually_exclusive_group()
+    check_group.add_argument(
+        "--environment-check",
+        action="store_true",
+        help="Validate uv and the canonical backend/.venv without accessing external services.",
+    )
+    check_group.add_argument(
         "--check",
         action="store_true",
         help="Validate external dependencies and apply migrations without starting services.",
@@ -102,7 +109,10 @@ def _parse_args(argv=None):
         action="store_true",
         help="Stop repo-local managed uvicorn/celery residuals before starting if they are detected.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.environment_check and args.cleanup_residuals:
+        parser.error("--environment-check cannot be combined with --cleanup-residuals")
+    return args
 
 
 def _detect_managed_label(command: str) -> str | None:
@@ -340,16 +350,26 @@ def check_uv_available():
 
 
 def check_virtual_environment():
-    """Require execution from an activated environment, normally provided by uv run."""
+    """Require the canonical backend uv environment."""
 
     if sys.prefix == sys.base_prefix:
-        print("[error] No active Python virtual environment detected")
+        print("[error] reason_code=backend_virtual_environment_inactive")
         print(
             "Run with: uv run --project backend --frozen " "python backend/scripts/start_dev_uv.py"
         )
         return False
 
-    print(f"[ok] Active Python environment: {sys.prefix}")
+    active_environment = Path(sys.prefix).resolve()
+    canonical_environment = CANONICAL_VENV.resolve()
+    if active_environment != canonical_environment:
+        print(
+            "[error] reason_code=noncanonical_backend_virtual_environment "
+            f"active={active_environment} expected={canonical_environment}"
+        )
+        print("Rebuild with: uv sync --project backend --frozen")
+        return False
+
+    print(f"[ok] Active Python environment: {active_environment}")
     return True
 
 
@@ -815,6 +835,10 @@ def main(argv=None):
 
     # 显示环境信息
     show_environment_info()
+
+    if getattr(args, "environment_check", False):
+        print("[ok] uv backend environment is ready; external services were not checked")
+        return 0
 
     if not _handle_startup_residuals(REPO_ROOT, cleanup_residuals=args.cleanup_residuals):
         return 1

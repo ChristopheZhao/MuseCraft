@@ -23,6 +23,14 @@ uv run --project backend --frozen python backend/scripts/start_dev_uv.py
 
 `--project backend` makes `backend/pyproject.toml` the project entry point and uses `backend/.venv` as the canonical virtual environment. A repository-root `.venv` is not part of the backend runtime contract.
 
+Validate only uv, Python, and the canonical environment with:
+
+```bash
+uv run --project backend --frozen python backend/scripts/start_dev_uv.py --environment-check
+```
+
+This mode does not connect to PostgreSQL or Redis, apply migrations, inspect residual processes, or start services.
+
 PostgreSQL, Redis, and FFmpeg are external system dependencies and must already be available through the root `.env` configuration. The public runtime supports PostgreSQL only; pre-release MySQL databases require the reviewed reconciliation process in [database-migrations.md](../docs/database-migrations.md). The launcher validates the database contract and Redis, applies Alembic migrations, then starts the API, Celery worker, and Celery beat from the active uv environment. It exits non-zero and cleans up already-started processes when a required service cannot start.
 
 Use `--check` to validate dependencies and migrations without starting long-lived processes:
