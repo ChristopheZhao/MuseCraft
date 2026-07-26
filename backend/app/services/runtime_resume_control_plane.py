@@ -18,7 +18,10 @@ from ..domain import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from .orchestration_state_adapter import OrchestrationStateAdapter
+from .orchestration_state_adapter import (
+    ContinuationCheckpointContractError,
+    OrchestrationStateAdapter,
+)
 
 
 class RuntimeResumeControlPlane:
@@ -60,11 +63,14 @@ class RuntimeResumeControlPlane:
                 attempt.continuation_checkpoint.to_dict(),
                 require_decision_id=require_decision_id,
             )
-        except (TypeError, ValueError) as exc:
+        except ContinuationCheckpointContractError as exc:
             raise RuntimeStoreError(
                 reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
                 operation=operation,
-                message=f"runtime continuation checkpoint is invalid: {exc}",
+                message=(
+                    "runtime continuation checkpoint is invalid "
+                    f"reason_code={exc.reason_code.value}: {exc.message}"
+                ),
             ) from exc
         anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
         if expected_anchor_type is not None and anchor_type != expected_anchor_type.strip().lower():

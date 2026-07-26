@@ -3,11 +3,48 @@ Control-plane state adapter for orchestration context and runtime traces.
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.utils.memory_helpers import read_shared_fact, write_shared_fact
-from ..domain import AgentType
+from ..domain import AgentExecutionContractError, AgentType, JsonObjectPayload
 from .memory_provider import MemoryServices
+
+
+class ContinuationCheckpointContractReason(str, Enum):
+    SPEC_NOT_OBJECT = "continuation_spec_not_object"
+    SPEC_UNKNOWN_KEYS = "continuation_spec_unknown_keys"
+    SPEC_BOOLEAN_INVALID = "continuation_spec_boolean_invalid"
+    SPEC_FIELD_TYPE_INVALID = "continuation_spec_field_type_invalid"
+    SPEC_AGENT_INVALID = "continuation_spec_agent_invalid"
+    SPEC_AGENT_MISMATCH = "continuation_spec_agent_mismatch"
+    CHECKPOINT_NOT_OBJECT = "continuation_checkpoint_not_object"
+    CHECKPOINT_UNKNOWN_KEYS = "continuation_checkpoint_unknown_keys"
+    CHECKPOINT_VERSION_UNSUPPORTED = "continuation_checkpoint_version_unsupported"
+    CHECKPOINT_ANCHOR_INVALID = "continuation_checkpoint_anchor_invalid"
+    CHECKPOINT_NODE_INVALID = "continuation_checkpoint_node_invalid"
+    CHECKPOINT_ATTEMPT_INVALID = "continuation_checkpoint_attempt_invalid"
+    CHECKPOINT_DECISION_INVALID = "continuation_checkpoint_decision_invalid"
+    CHECKPOINT_CANDIDATES_INVALID = "continuation_checkpoint_candidates_invalid"
+    CHECKPOINT_TASK_SPECS_INVALID = "continuation_checkpoint_task_specs_invalid"
+    CHECKPOINT_CONDITIONAL_SPECS_INVALID = "continuation_checkpoint_conditional_specs_invalid"
+    CHECKPOINT_AGENT_INVALID = "continuation_checkpoint_agent_invalid"
+
+
+class ContinuationCheckpointContractError(ValueError):
+    """Typed failure raised when a continuation contract is not canonical."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: ContinuationCheckpointContractReason,
+        message: str,
+        field_path: str,
+    ) -> None:
+        self.reason_code = reason_code
+        self.field_path = str(field_path or "continuation_checkpoint")
+        self.message = str(message)
+        super().__init__(f"{reason_code.value}: {self.message}")
 
 
 class OrchestrationStateAdapter:
@@ -138,79 +175,160 @@ class OrchestrationStateAdapter:
         return alias_map.get(raw, "adaptive")
 
     @classmethod
-    def _normalize_spec_payload(
+    def parse_task_spec_payload(
         cls,
         *,
         spec: Dict[str, Any],
         default_agent: Optional[str] = None,
+        require_explicit_agent: bool = False,
+        field_path: str = "continuation_checkpoint.task_specs",
     ) -> Dict[str, Any]:
         if not isinstance(spec, dict):
-            raise ValueError("Continuation spec must be a dict")
-
-        normalized: Dict[str, Any] = {}
-        agent_value = spec.get("agent")
-        if agent_value is None:
-            agent_value = default_agent
-        if agent_value is not None:
-            normalized["agent"] = str(agent_value)
-
-        if spec.get("mission") is not None:
-            normalized["mission"] = str(spec.get("mission"))
-        if spec.get("deliverable") is not None:
-            normalized["deliverable"] = str(spec.get("deliverable"))
-        if "constraints" in spec:
-            raw_constraints = spec.get("constraints")
-            if raw_constraints is None:
-                normalized["constraints"] = []
-            elif isinstance(raw_constraints, list):
-                normalized["constraints"] = [
-                    str(item) for item in raw_constraints if str(item or "").strip()
-                ]
-            else:
-                raise ValueError("Continuation spec constraints must be a list")
-        raw_order = spec.get("order")
-        if raw_order is not None:
-            if type(raw_order) is int:
-                normalized["order"] = raw_order
-            elif isinstance(raw_order, str):
-                normalized_order = raw_order.strip()
-                if not normalized_order or not normalized_order.lstrip("-").isdigit():
-                    raise ValueError("Continuation spec order must be an integer")
-                normalized["order"] = int(normalized_order)
-            else:
-                raise ValueError("Continuation spec order must be an integer")
-        if "runtime_hints" in spec:
-            raw_runtime_hints = spec.get("runtime_hints")
-            if raw_runtime_hints is None:
-                normalized["runtime_hints"] = {}
-            elif isinstance(raw_runtime_hints, dict):
-                normalized["runtime_hints"] = dict(raw_runtime_hints)
-            else:
-                raise ValueError("Continuation spec runtime_hints must be a dict")
-        if "run" in spec:
-            normalized["run"] = bool(spec.get("run"))
-        if spec.get("conditional_task_id") is not None:
-            normalized["conditional_task_id"] = str(spec.get("conditional_task_id"))
-        if spec.get("trigger") is not None:
-            normalized["trigger"] = str(spec.get("trigger"))
-        if "scope" in spec:
-            raw_scope = spec.get("scope")
-            if raw_scope is None:
-                normalized["scope"] = {}
-            elif isinstance(raw_scope, dict):
-                normalized["scope"] = dict(raw_scope)
-            else:
-                raise ValueError("Continuation spec scope must be a dict")
-        if "fallback_used" in spec:
-            normalized["fallback_used"] = bool(spec.get("fallback_used"))
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.SPEC_NOT_OBJECT,
+                message="Continuation spec must be a dict",
+                field_path=field_path,
+            )
 
         unknown_keys = set(spec.keys()) - set(cls._CONTINUATION_ALLOWED_SPEC_FIELDS)
         if unknown_keys:
-            raise ValueError(
-                "continuation_spec_unknown_keys: "
-                + ",".join(sorted(str(key) for key in unknown_keys))
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.SPEC_UNKNOWN_KEYS,
+                message=",".join(sorted(str(key) for key in unknown_keys)),
+                field_path=field_path,
             )
-        return normalized
+
+        parsed: Dict[str, Any] = {}
+        expected_agent: Optional[AgentType] = None
+        if default_agent is not None:
+            try:
+                expected_agent = AgentType(default_agent)
+            except (TypeError, ValueError) as exc:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_AGENT_INVALID,
+                    message=f"Unsupported continuation spec owner agent: {default_agent!r}",
+                    field_path=f"{field_path}.agent",
+                ) from exc
+        if "agent" not in spec:
+            if require_explicit_agent:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_AGENT_INVALID,
+                    message="Continuation spec agent is required",
+                    field_path=f"{field_path}.agent",
+                )
+            agent_type = expected_agent
+        else:
+            agent_value = spec.get("agent")
+            if (
+                type(agent_value) is not str
+                or not agent_value
+                or agent_value != agent_value.strip()
+            ):
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_AGENT_INVALID,
+                    message="Continuation spec agent must be a canonical AgentType value",
+                    field_path=f"{field_path}.agent",
+                )
+            try:
+                agent_type = AgentType(agent_value)
+            except ValueError as exc:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_AGENT_INVALID,
+                    message=f"Unsupported continuation spec agent: {agent_value!r}",
+                    field_path=f"{field_path}.agent",
+                ) from exc
+        if expected_agent is not None and agent_type is not expected_agent:
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.SPEC_AGENT_MISMATCH,
+                message=(
+                    f"Continuation spec agent {agent_type.value if agent_type else None!r} "
+                    f"does not match owner {expected_agent.value!r}"
+                ),
+                field_path=f"{field_path}.agent",
+            )
+        if agent_type is not None:
+            parsed["agent"] = agent_type.value
+
+        for field_name in (
+            "mission",
+            "deliverable",
+            "conditional_task_id",
+            "trigger",
+        ):
+            if field_name not in spec:
+                continue
+            field_value = spec.get(field_name)
+            if type(field_value) is not str:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_FIELD_TYPE_INVALID,
+                    message=f"Task spec {field_name} must be a string",
+                    field_path=f"{field_path}.{field_name}",
+                )
+            parsed[field_name] = field_value
+        if "constraints" in spec:
+            raw_constraints = spec.get("constraints")
+            if not isinstance(raw_constraints, list) or any(
+                type(item) is not str for item in raw_constraints
+            ):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.SPEC_FIELD_TYPE_INVALID),
+                    message="Task spec constraints must be list[str]",
+                    field_path=f"{field_path}.constraints",
+                )
+            parsed["constraints"] = list(raw_constraints)
+        if "order" in spec:
+            raw_order = spec.get("order")
+            if type(raw_order) is not int:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.SPEC_FIELD_TYPE_INVALID),
+                    message="Task spec order must be an integer",
+                    field_path=f"{field_path}.order",
+                )
+            parsed["order"] = raw_order
+        for field_name in ("runtime_hints", "scope"):
+            if field_name not in spec:
+                continue
+            raw_object = spec.get(field_name)
+            if not isinstance(raw_object, dict):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.SPEC_FIELD_TYPE_INVALID),
+                    message=f"Task spec {field_name} must be a JSON object",
+                    field_path=f"{field_path}.{field_name}",
+                )
+            try:
+                parsed[field_name] = JsonObjectPayload.from_mapping(
+                    raw_object,
+                    field_path=f"{field_path}.{field_name}",
+                ).to_dict()
+            except AgentExecutionContractError as exc:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_FIELD_TYPE_INVALID,
+                    message=str(exc),
+                    field_path=f"{field_path}.{field_name}",
+                ) from exc
+        if "run" in spec:
+            parsed["run"] = cls._parse_spec_boolean(
+                spec.get("run"),
+                field_name="run",
+                field_path=field_path,
+            )
+        if "fallback_used" in spec:
+            parsed["fallback_used"] = cls._parse_spec_boolean(
+                spec.get("fallback_used"),
+                field_name="fallback_used",
+                field_path=field_path,
+            )
+        return parsed
+
+    @staticmethod
+    def _parse_spec_boolean(value: Any, *, field_name: str, field_path: str) -> bool:
+        if type(value) is not bool:
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.SPEC_BOOLEAN_INVALID,
+                message=f"Task spec {field_name} must be a boolean",
+                field_path=f"{field_path}.{field_name}",
+            )
+        return value
 
     @classmethod
     def build_continuation_checkpoint(
@@ -224,41 +342,92 @@ class OrchestrationStateAdapter:
         attempt_id: int,
         decision_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        normalized_anchor_type = str(anchor_type or "").strip().lower()
-        if normalized_anchor_type not in {
+        if not isinstance(anchor_type, str) or anchor_type not in {
             cls.CONTINUATION_ANCHOR_GATE_DECISION,
             cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
         }:
-            raise ValueError(f"Unsupported continuation anchor_type: {anchor_type!r}")
-        normalized_node_key = str(node_key or "").strip().lower()
-        if not normalized_node_key:
-            raise ValueError("Continuation checkpoint node_key cannot be empty")
-        normalized_attempt_id = int(attempt_id)
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ANCHOR_INVALID,
+                message=f"Unsupported continuation anchor_type: {anchor_type!r}",
+                field_path="continuation_checkpoint.anchor_type",
+            )
+        normalized_anchor_type = anchor_type
+        if (
+            not isinstance(node_key, str)
+            or not node_key
+            or node_key != node_key.strip()
+            or node_key != node_key.lower()
+        ):
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_NODE_INVALID,
+                message="Continuation checkpoint node_key must be a canonical string",
+                field_path="continuation_checkpoint.node_key",
+            )
+        normalized_node_key = node_key
+        if type(attempt_id) is not int:
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ATTEMPT_INVALID,
+                message="Continuation checkpoint attempt_id must be an integer",
+                field_path="continuation_checkpoint.attempt_id",
+            )
+        normalized_attempt_id = attempt_id
         if normalized_attempt_id <= 0:
-            raise ValueError("Continuation checkpoint attempt_id must be positive")
-        normalized_decision_id = int(decision_id) if decision_id is not None else None
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ATTEMPT_INVALID,
+                message="Continuation checkpoint attempt_id must be positive",
+                field_path="continuation_checkpoint.attempt_id",
+            )
+        if decision_id is None:
+            normalized_decision_id = None
+        else:
+            if type(decision_id) is not int:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_DECISION_INVALID),
+                    message="Continuation checkpoint decision_id must be an integer",
+                    field_path="continuation_checkpoint.decision_id",
+                )
+            normalized_decision_id = decision_id
         if (
             normalized_anchor_type == cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT
             and normalized_decision_id is not None
         ):
-            raise ValueError("Runtime continuation checkpoints cannot bind a decision_id")
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_DECISION_INVALID,
+                message="Runtime continuation checkpoints cannot bind a decision_id",
+                field_path="continuation_checkpoint.decision_id",
+            )
 
         ordered_candidates: List[AgentType] = []
         seen_agents = set()
-        for raw_agent in candidate_agents or list((task_specs or {}).keys()):
-            if isinstance(raw_agent, AgentType) and raw_agent not in seen_agents:
+        for index, raw_agent in enumerate(candidate_agents or list((task_specs or {}).keys())):
+            if not isinstance(raw_agent, AgentType):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
+                    message=f"Unsupported continuation candidate agent: {raw_agent!r}",
+                    field_path=f"continuation_checkpoint.candidate_agents[{index}]",
+                )
+            if raw_agent not in seen_agents:
                 ordered_candidates.append(raw_agent)
                 seen_agents.add(raw_agent)
 
         serialized_task_specs: Dict[str, Dict[str, Any]] = {}
         for agent_type, spec in (task_specs or {}).items():
             if not isinstance(agent_type, AgentType):
-                raise ValueError(f"Unsupported continuation agent key: {agent_type!r}")
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
+                    message=f"Unsupported continuation agent key: {agent_type!r}",
+                    field_path="continuation_checkpoint.task_specs",
+                )
             if not isinstance(spec, dict):
-                raise ValueError(f"Continuation task spec for {agent_type.value} must be a dict")
-            serialized_task_specs[agent_type.value] = cls._normalize_spec_payload(
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_NOT_OBJECT,
+                    message=f"Continuation task spec for {agent_type.value} must be a dict",
+                    field_path=(f"continuation_checkpoint.task_specs.{agent_type.value}"),
+                )
+            serialized_task_specs[agent_type.value] = cls.parse_task_spec_payload(
                 spec=dict(spec),
                 default_agent=agent_type.value,
+                field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
             )
             if agent_type not in seen_agents:
                 ordered_candidates.append(agent_type)
@@ -266,12 +435,30 @@ class OrchestrationStateAdapter:
 
         serialized_conditional_specs: Dict[str, Dict[str, Any]] = {}
         for raw_task_id, spec in (conditional_task_specs or {}).items():
-            task_id = str(raw_task_id or "").strip()
-            if not task_id:
-                raise ValueError("Continuation conditional task id cannot be empty")
+            if (
+                not isinstance(raw_task_id, str)
+                or not raw_task_id
+                or raw_task_id != raw_task_id.strip()
+            ):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(
+                        ContinuationCheckpointContractReason.CHECKPOINT_CONDITIONAL_SPECS_INVALID
+                    ),
+                    message="Continuation conditional task id cannot be empty",
+                    field_path="continuation_checkpoint.conditional_task_specs",
+                )
+            task_id = raw_task_id
             if not isinstance(spec, dict):
-                raise ValueError(f"Continuation conditional task spec for {task_id} must be a dict")
-            serialized_conditional_specs[task_id] = cls._normalize_spec_payload(spec=dict(spec))
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_NOT_OBJECT,
+                    message=(f"Continuation conditional task spec for {task_id} must be a dict"),
+                    field_path=(f"continuation_checkpoint.conditional_task_specs.{task_id}"),
+                )
+            serialized_conditional_specs[task_id] = cls.parse_task_spec_payload(
+                spec=dict(spec),
+                require_explicit_agent=True,
+                field_path=f"continuation_checkpoint.conditional_task_specs.{task_id}",
+            )
 
         return {
             "version": cls.CONTINUATION_CHECKPOINT_VERSION,
@@ -292,40 +479,73 @@ class OrchestrationStateAdapter:
         require_decision_id: bool,
     ) -> Dict[str, Any]:
         if not isinstance(checkpoint, dict):
-            raise ValueError("Continuation checkpoint must be a dict")
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_NOT_OBJECT,
+                message="Continuation checkpoint must be a dict",
+                field_path="continuation_checkpoint",
+            )
 
         unknown_checkpoint_keys = set(checkpoint.keys()) - set(
             cls._CONTINUATION_ALLOWED_CHECKPOINT_FIELDS
         )
         if unknown_checkpoint_keys:
-            raise ValueError(
-                "continuation_checkpoint_unknown_keys: "
-                + ",".join(sorted(str(key) for key in unknown_checkpoint_keys))
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_UNKNOWN_KEYS),
+                message=",".join(sorted(str(key) for key in unknown_checkpoint_keys)),
+                field_path="continuation_checkpoint",
             )
 
         raw_version = checkpoint.get("version")
         if raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:
-            raise ValueError(f"Unsupported continuation checkpoint version: {raw_version!r}")
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_VERSION_UNSUPPORTED),
+                message=f"Unsupported continuation checkpoint version: {raw_version!r}",
+                field_path="continuation_checkpoint.version",
+            )
 
-        normalized_anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
-        if normalized_anchor_type not in {
+        raw_anchor_type = checkpoint.get("anchor_type")
+        if not isinstance(raw_anchor_type, str) or raw_anchor_type not in {
             cls.CONTINUATION_ANCHOR_GATE_DECISION,
             cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
         }:
-            raise ValueError(
-                f"Unsupported continuation checkpoint anchor_type: {checkpoint.get('anchor_type')!r}"
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ANCHOR_INVALID,
+                message=(
+                    "Unsupported continuation checkpoint anchor_type: "
+                    f"{checkpoint.get('anchor_type')!r}"
+                ),
+                field_path="continuation_checkpoint.anchor_type",
             )
+        normalized_anchor_type = raw_anchor_type
 
-        normalized_node_key = str(checkpoint.get("node_key") or "").strip().lower()
-        if not normalized_node_key:
-            raise ValueError("Continuation checkpoint node_key is required")
+        raw_node_key = checkpoint.get("node_key")
+        if (
+            not isinstance(raw_node_key, str)
+            or not raw_node_key
+            or raw_node_key != raw_node_key.strip()
+            or raw_node_key != raw_node_key.lower()
+        ):
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_NODE_INVALID,
+                message="Continuation checkpoint node_key must be a canonical string",
+                field_path="continuation_checkpoint.node_key",
+            )
+        normalized_node_key = raw_node_key
 
         raw_attempt_id = checkpoint.get("attempt_id")
-        if raw_attempt_id is None:
-            raise ValueError("Continuation checkpoint attempt_id is required")
-        normalized_attempt_id = int(raw_attempt_id)
+        if type(raw_attempt_id) is not int:
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ATTEMPT_INVALID,
+                message="Continuation checkpoint attempt_id must be an integer",
+                field_path="continuation_checkpoint.attempt_id",
+            )
+        normalized_attempt_id = raw_attempt_id
         if normalized_attempt_id <= 0:
-            raise ValueError("Continuation checkpoint attempt_id must be positive")
+            raise ContinuationCheckpointContractError(
+                reason_code=ContinuationCheckpointContractReason.CHECKPOINT_ATTEMPT_INVALID,
+                message="Continuation checkpoint attempt_id must be positive",
+                field_path="continuation_checkpoint.attempt_id",
+            )
 
         raw_decision_id = checkpoint.get("decision_id")
         if raw_decision_id is None:
@@ -333,44 +553,124 @@ class OrchestrationStateAdapter:
                 normalized_anchor_type == cls.CONTINUATION_ANCHOR_GATE_DECISION
                 and require_decision_id
             ):
-                raise ValueError("Continuation checkpoint decision_id is not bound")
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_DECISION_INVALID),
+                    message="Continuation checkpoint decision_id is not bound",
+                    field_path="continuation_checkpoint.decision_id",
+                )
             normalized_decision_id = None
         else:
-            normalized_decision_id = int(raw_decision_id)
+            if type(raw_decision_id) is not int:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_DECISION_INVALID),
+                    message="Continuation checkpoint decision_id must be an integer",
+                    field_path="continuation_checkpoint.decision_id",
+                )
+            normalized_decision_id = raw_decision_id
             if normalized_anchor_type == cls.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT:
-                raise ValueError("Runtime continuation checkpoint decision_id must be null")
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_DECISION_INVALID),
+                    message="Runtime continuation checkpoint decision_id must be null",
+                    field_path="continuation_checkpoint.decision_id",
+                )
 
         raw_candidate_agents = checkpoint.get("candidate_agents")
         if not isinstance(raw_candidate_agents, list) or not raw_candidate_agents:
-            raise ValueError("Continuation checkpoint candidate_agents must be a non-empty list")
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_CANDIDATES_INVALID),
+                message="Continuation checkpoint candidate_agents must be a non-empty list",
+                field_path="continuation_checkpoint.candidate_agents",
+            )
         normalized_candidate_agents: List[str] = []
-        for item in raw_candidate_agents:
-            normalized_candidate_agents.append(AgentType(str(item)).value)
+        for index, item in enumerate(raw_candidate_agents):
+            if type(item) is not str:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID,
+                    message=f"Unsupported continuation candidate agent: {item!r}",
+                    field_path=f"continuation_checkpoint.candidate_agents[{index}]",
+                )
+            try:
+                normalized_candidate_agents.append(AgentType(item).value)
+            except ValueError as exc:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
+                    message=f"Unsupported continuation candidate agent: {item!r}",
+                    field_path=f"continuation_checkpoint.candidate_agents[{index}]",
+                ) from exc
 
         raw_task_specs = checkpoint.get("task_specs")
         if not isinstance(raw_task_specs, dict) or not raw_task_specs:
-            raise ValueError("Continuation checkpoint task_specs must be a non-empty dict")
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_TASK_SPECS_INVALID),
+                message="Continuation checkpoint task_specs must be a non-empty dict",
+                field_path="continuation_checkpoint.task_specs",
+            )
         normalized_task_specs: Dict[str, Dict[str, Any]] = {}
         for raw_agent, spec in raw_task_specs.items():
-            agent_type = AgentType(str(raw_agent))
-            normalized_task_specs[agent_type.value] = cls._normalize_spec_payload(
+            if type(raw_agent) is not str:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID,
+                    message=f"Unsupported continuation task-spec agent: {raw_agent!r}",
+                    field_path="continuation_checkpoint.task_specs",
+                )
+            try:
+                agent_type = AgentType(raw_agent)
+            except ValueError as exc:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
+                    message=f"Unsupported continuation task-spec agent: {raw_agent!r}",
+                    field_path="continuation_checkpoint.task_specs",
+                ) from exc
+            if not isinstance(spec, dict):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(ContinuationCheckpointContractReason.SPEC_NOT_OBJECT),
+                    message=(f"Continuation task spec for {agent_type.value} must be a dict"),
+                    field_path=(f"continuation_checkpoint.task_specs.{agent_type.value}"),
+                )
+            normalized_task_specs[agent_type.value] = cls.parse_task_spec_payload(
                 spec=dict(spec),
                 default_agent=agent_type.value,
+                require_explicit_agent=True,
+                field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
             )
 
         raw_conditional_specs = checkpoint.get("conditional_task_specs")
         if raw_conditional_specs is None:
             raw_conditional_specs = {}
         if not isinstance(raw_conditional_specs, dict):
-            raise ValueError("Continuation checkpoint conditional_task_specs must be a dict")
+            raise ContinuationCheckpointContractError(
+                reason_code=(
+                    ContinuationCheckpointContractReason.CHECKPOINT_CONDITIONAL_SPECS_INVALID
+                ),
+                message="Continuation checkpoint conditional_task_specs must be a dict",
+                field_path="continuation_checkpoint.conditional_task_specs",
+            )
         normalized_conditional_specs: Dict[str, Dict[str, Any]] = {}
         for raw_task_id, spec in raw_conditional_specs.items():
-            task_id = str(raw_task_id or "").strip()
-            if not task_id:
-                raise ValueError("Continuation checkpoint conditional task id cannot be empty")
+            if (
+                not isinstance(raw_task_id, str)
+                or not raw_task_id
+                or raw_task_id != raw_task_id.strip()
+            ):
+                raise ContinuationCheckpointContractError(
+                    reason_code=(
+                        ContinuationCheckpointContractReason.CHECKPOINT_CONDITIONAL_SPECS_INVALID
+                    ),
+                    message="Continuation checkpoint conditional task id cannot be empty",
+                    field_path="continuation_checkpoint.conditional_task_specs",
+                )
+            task_id = raw_task_id
             if not isinstance(spec, dict):
-                raise ValueError(f"Continuation conditional task spec for {task_id} must be a dict")
-            normalized_conditional_specs[task_id] = cls._normalize_spec_payload(spec=dict(spec))
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_NOT_OBJECT,
+                    message=(f"Continuation conditional task spec for {task_id} must be a dict"),
+                    field_path=(f"continuation_checkpoint.conditional_task_specs.{task_id}"),
+                )
+            normalized_conditional_specs[task_id] = cls.parse_task_spec_payload(
+                spec=dict(spec),
+                require_explicit_agent=True,
+                field_path=f"continuation_checkpoint.conditional_task_specs.{task_id}",
+            )
 
         return {
             "version": cls.CONTINUATION_CHECKPOINT_VERSION,

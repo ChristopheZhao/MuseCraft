@@ -2,13 +2,17 @@
 Orchestrator Agent - Coordinates the entire video generation workflow.
 """
 import asyncio
-import os
-import logging
 import json
+import logging
+import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
-from .base import BaseAgent, AgentError
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..core.config import settings
+from ..core.prompt_manager import get_prompt_manager
+from ..core.video_config_manager import get_video_config
 from ..domain import (
     AgentExecutionRequest,
     AgentExecutionResult,
@@ -18,18 +22,23 @@ from ..domain import (
     WorkflowNodeStatus,
     WorkflowSessionStatus,
 )
-from ..services.memory_provider import MemoryServices
+from ..events.execution import execution_context_var
 from ..services.audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from ..services.context_assembler import ContextContractAssembler
 from ..services.context_reference_ports import (
     SceneInfoReferencePreparationError,
     SceneInfoReferencePreparationPort,
 )
-from ..services.orchestration_observation_adapter import OrchestrationObservationAdapter
+from ..services.execution_host_lease import (
+    activate_current_attempt_keepalive,
+    deactivate_current_attempt_keepalive,
+)
+from ..services.memory_provider import MemoryServices
 from ..services.orchestration_control_plane import (
     OrchestrationControlPlane,
     OrchestrationControlPlaneError,
 )
+from ..services.orchestration_observation_adapter import OrchestrationObservationAdapter
 from ..services.orchestration_protocol import OrchestrationProtocol, OrchestrationProtocolError
 from ..services.orchestration_queue_policy import OrchestrationQueuePolicy
 from ..services.orchestration_runtime_controller import (
@@ -42,51 +51,53 @@ from ..services.orchestration_runtime_ports import (
     OrchestrationRuntimeTransitionPort,
 )
 from ..services.orchestration_state_adapter import OrchestrationStateAdapter
-from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
-from ..services.execution_host_lease import (
-    activate_current_attempt_keepalive,
-    deactivate_current_attempt_keepalive,
-)
 from ..services.published_deliverable_service import get_published_deliverable_ref
-from ..services.script_review_contract import (
-    get_script_review_contract,
-)
+from ..services.script_review_contract import get_script_review_contract
+from ..services.video_composer_execution_contract import build_video_composer_execution_contract
+from ..services.video_execution_contract import build_video_generation_execution_contract
 from ..services.video_metadata_service import (
     merge_video_metadata,
     normalize_video_metadata,
     probe_local_video_metadata_sync,
 )
-from ..services.video_composer_execution_contract import (
-    build_video_composer_execution_contract,
-)
-from ..services.video_execution_contract import (
-    build_video_generation_execution_contract,
-)
+from ..services.workflow_completion_adapter import WorkflowCompletionAdapter
+from .audio_generator import AudioGeneratorAgent
+from .base import AgentError, BaseAgent
+from .concept_planner import ConceptPlannerAgent
+from .image_generator import ImageGeneratorAgent
+from .quality_checker import QualityCheckerAgent
+from .script_writer import ScriptWriterAgent
+from .tools.tool_registry import get_tool_registry
+from .utils.artifacts import evaluate_scene_output_acceptance
+from .utils.media_runtime import build_local_public_url
 
 # legacy WM singleton removed - use injected self._memory_services.short_term
 from .utils.memory_helpers import (
     agent_scope,
-    mas_scope,
     get_mas_working_memory,
-    write_shared_fact,
+    mas_scope,
     read_shared_fact,
+    write_shared_fact,
 )
-from .utils.artifacts import evaluate_scene_output_acceptance
-from .utils.media_runtime import build_local_public_url
-
-from ..events.execution import execution_context_var
-from .concept_planner import ConceptPlannerAgent
-from .script_writer import ScriptWriterAgent
-from .image_generator import ImageGeneratorAgent
-from .video_generator import VideoGeneratorAgent
-from .audio_generator import AudioGeneratorAgent
-from .voice_synthesizer import VoiceSynthesizerAgent
 from .video_composer import VideoComposerAgent
-from .quality_checker import QualityCheckerAgent
-from .tools.tool_registry import get_tool_registry
-from ..core.config import settings
-from ..core.prompt_manager import get_prompt_manager
-from ..core.video_config_manager import get_video_config
+from .video_generator import VideoGeneratorAgent
+from .voice_synthesizer import VoiceSynthesizerAgent
+
+
+@dataclass(frozen=True)
+class _RuntimeSuccessBoundaryOutcome:
+    standby_agents: Tuple[AgentType, ...]
+    replan_count: int
+    gate_response: Optional[Dict[str, Any]] = None
+    attempt_completed: bool = False
+
+
+class _OrchestrationBoundaryError(AgentError):
+    """Typed orchestration failure retained through runtime diagnostics."""
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        self.reason_code = str(reason_code)
+        super().__init__(message)
 
 
 class OrchestratorAgent(BaseAgent):
@@ -116,6 +127,7 @@ class OrchestratorAgent(BaseAgent):
         scene_info_reference_port: SceneInfoReferencePreparationPort,
     ):
         import os
+
         from .utils.llm_policy import LLMPolicyManager
 
         policy_file = os.path.join(
@@ -227,20 +239,11 @@ class OrchestratorAgent(BaseAgent):
     def _parse_agent_type(value: Any) -> Optional[AgentType]:
         if isinstance(value, AgentType):
             return value
-        raw = str(value or "").strip()
-        if not raw:
+        if not isinstance(value, str):
             return None
         try:
-            return AgentType[raw.upper()]
-        except Exception:
-            pass
-        try:
-            return AgentType(raw.lower())
-        except Exception:
-            pass
-        try:
-            return AgentType(raw)
-        except Exception:
+            return AgentType(value)
+        except ValueError:
             return None
 
     def _registered_agents(self) -> List[AgentType]:
@@ -311,18 +314,6 @@ class OrchestratorAgent(BaseAgent):
             for key, item in dict(value).items()
             if key not in cls._PLANNING_RUNTIME_IDENTITY_KEYS
         }
-
-    @staticmethod
-    def _normalize_assignment_constraints(value: Any) -> List[str]:
-        if isinstance(value, list):
-            constraints: List[str] = []
-            for item in value:
-                text = str(item or "").strip()
-                if text:
-                    constraints.append(text)
-            return constraints
-        text = str(value or "").strip()
-        return [text] if text else []
 
     @staticmethod
     def _normalize_runtime_hints(value: Any) -> Dict[str, Any]:
@@ -620,10 +611,7 @@ class OrchestratorAgent(BaseAgent):
         runtime_session_status = runtime_resume_context.runtime_session_status
         script_gate_id = runtime_resume_context.script_gate_id
         script_resume_action = runtime_resume_context.script_resume_action
-        if (
-            script_gate_id is not None
-            and not runtime_resume_context.latest_script_decision_exists
-        ):
+        if script_gate_id is not None and not runtime_resume_context.latest_script_decision_exists:
             return {
                 "status": "waiting_gate",
                 "session_id": runtime_session_id,
@@ -649,9 +637,7 @@ class OrchestratorAgent(BaseAgent):
                     skip_agents.add(AgentType(str(item)))
                 except Exception:
                     continue
-        review_contract = get_script_review_contract(
-            runtime_input_payload
-        )
+        review_contract = get_script_review_contract(runtime_input_payload)
         if (
             script_resume_action in {"revise", "replan"}
             and isinstance(review_contract, dict)
@@ -770,9 +756,7 @@ class OrchestratorAgent(BaseAgent):
         )
         if runtime_resume_checkpoint is not None and resume_anchor_agent == AgentType.SCRIPT_WRITER:
             script_trigger_reason = "resume"
-        script_requested_by = (
-            runtime_resume_context.latest_script_decision_actor_type or "system"
-        )
+        script_requested_by = runtime_resume_context.latest_script_decision_actor_type or "system"
         current_runtime_node_key: Optional[str] = None
         current_attempt_id: Optional[int] = None
         current_attempt_trigger_reason = ""
@@ -989,9 +973,9 @@ class OrchestratorAgent(BaseAgent):
                                 f"Cannot run quality_checker: final_video check failed: {err}"
                             ) from err
 
-                    # Execute the agent (now purely stateless)
-                    agent_result = await agent.execute(
-                        AgentExecutionRequest(
+                    agent_output, success_boundary = await self._execute_agent_success_path(
+                        agent=agent,
+                        request=AgentExecutionRequest(
                             task=task,
                             agent_type=agent_type.value,
                             input_data=JsonObjectPayload.from_mapping(
@@ -1000,112 +984,36 @@ class OrchestratorAgent(BaseAgent):
                             ),
                             workflow_state_id=wf_id,
                             execution_order=step_index + 1,
-                        )
-                    )
-                    agent_output = agent_result.output_data.to_dict()
-
-                    # Store results and commit any authoritative shared facts for downstream gates.
-                    self._record_agent_output(
-                        workflow_id=str(wf_id),
-                        agent_type=agent_type,
+                        ),
+                        workflow_state_id=wf_id,
                         workflow_results=workflow_results,
                         workflow_data=workflow_data,
-                        agent_output=agent_output,
+                        current_agent=agent_type,
+                        audio_contract=dict(audio_contract or {}),
+                        candidate_agents=list(candidate_agents),
+                        standby_agents=standby_agents,
+                        replan_count=replan_count,
+                        max_replans=max_replans,
+                        current_index=step_index,
+                        execution_queue=execution_queue,
+                        task_specs=task_specs,
+                        conditional_task_specs=_conditional_task_specs,
+                        runtime_session_id=runtime_session_id,
+                        runtime_node_key=current_runtime_node_key,
+                        attempt_id=current_attempt_id,
+                        lease_token=current_attempt_lease_token,
+                        attempt_trigger_reason=current_attempt_trigger_reason,
+                        script_trigger_reason=script_trigger_reason,
                     )
-
-                    if (
-                        runtime_session_id is not None
-                        and agent_type != AgentType.SCRIPT_WRITER
-                        and current_runtime_node_key is not None
-                        and current_attempt_id is not None
-                    ):
-                        self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
-                            runtime_session_id=runtime_session_id,
-                            node_key=current_runtime_node_key,
-                            attempt_id=current_attempt_id,
-                            lease_token=current_attempt_lease_token,
-                            node_status=WorkflowNodeStatus.COMPLETED.value,
-                        )
+                    standby_agents = list(success_boundary.standby_agents)
+                    replan_count = success_boundary.replan_count
+                    if success_boundary.attempt_completed:
                         retired_completed_attempt_context = _retire_runtime_attempt_scope(
                             reason="attempt_completed",
                             preserve_completed_attempt=True,
                         )
-
-                    if (
-                        runtime_session_id is not None
-                        and agent_type == AgentType.SCRIPT_WRITER
-                        and current_attempt_id is not None
-                    ):
-                        return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
-                            runtime_session_id=runtime_session_id,
-                            task_id=task.task_id,
-                            workflow_id=wf_id,
-                            script_attempt_id=current_attempt_id,
-                            lease_token=current_attempt_lease_token,
-                            trigger_reason=current_attempt_trigger_reason or script_trigger_reason,
-                            script_output=dict(agent_output),
-                            task_specs=task_specs,
-                            conditional_task_specs=_conditional_task_specs,
-                            candidate_agents=list(candidate_agents),
-                        )
-
-                    # Runtime decisions are driven by subagent reports plus boundary-triggered gate results.
-                    try:
-                        runtime_cycle = await self._evaluate_runtime_boundary_cycle(
-                            workflow_state_id=wf_id,
-                            current_agent=agent_type,
-                            agent_result=agent_result,
-                            audio_contract=dict(audio_contract or {}),
-                            candidate_agents=list(candidate_agents),
-                            standby_agents=standby_agents,
-                            replan_count=replan_count,
-                            max_replans=max_replans,
-                            current_index=step_index,
-                            execution_queue=execution_queue,
-                            task_specs=task_specs,
-                            conditional_task_specs=_conditional_task_specs,
-                        )
-                        runtime_decision = runtime_cycle.get("runtime_decision") or {}
-                        replan_action = str(runtime_decision.get("action") or "continue").strip()
-                        replan_reason = str(runtime_decision.get("reason") or "none").strip()
-                        apply_result = runtime_cycle.get("apply_result") or {}
-                        if apply_result.get("status") == "activated":
-                            target_agent = apply_result.get("target_agent")
-                            updated_queue = apply_result.get("execution_queue")
-                            if isinstance(updated_queue, list):
-                                execution_queue[:] = list(updated_queue)
-                            updated_task_specs = apply_result.get("task_specs")
-                            if isinstance(updated_task_specs, dict):
-                                task_specs.clear()
-                                task_specs.update(updated_task_specs)
-                            standby_agents = list(
-                                apply_result.get("standby_agents") or standby_agents
-                            )
-                            replan_count = int(apply_result.get("replan_count") or replan_count)
-                            self.logger.info(
-                                "ADAPTIVE_REPLAN action=activate_from_standby target=%s reason=%s queue_changed=%s count=%s",
-                                target_agent.value
-                                if isinstance(target_agent, AgentType)
-                                else target_agent,
-                                replan_reason,
-                                bool(apply_result.get("queue_changed")),
-                                replan_count,
-                            )
-                        elif apply_result.get("status") == "abort":
-                            raise AgentError(
-                                f"Workflow halted by runtime decision: {replan_reason}"
-                            )
-                        decision_ack = runtime_cycle.get("decision_ack") or {}
-                        self.logger.debug(
-                            "RUNTIME_DECISION_ACK %s",
-                            json.dumps(decision_ack, ensure_ascii=False),
-                        )
-                    except AgentError:
-                        raise
-                    except Exception as replan_err:
-                        raise AgentError(
-                            f"Runtime decision evaluation failed: {replan_err}"
-                        ) from replan_err
+                    if success_boundary.gate_response is not None:
+                        return success_boundary.gate_response
 
                     # Handoff final results to WF (only when agent reports completion via final_* fields)
                     # 仅写 Shared WM；不再回写 WorkflowState（避免双轨）
@@ -1182,19 +1090,21 @@ class OrchestratorAgent(BaseAgent):
                         and current_runtime_node_key is not None
                         and current_attempt_id is not None
                     ):
+                        stage_diagnostic = {
+                            "code": f"{current_runtime_node_key}_stage_failed",
+                            "stage": current_runtime_node_key,
+                            "message": str(e),
+                        }
+                        failure_reason_code = str(getattr(e, "reason_code", None) or "").strip()
+                        if failure_reason_code:
+                            stage_diagnostic["reason_code"] = failure_reason_code
                         self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
                             runtime_session_id=runtime_session_id,
                             node_key=current_runtime_node_key,
                             attempt_id=current_attempt_id,
                             error_message=str(e),
                             lease_token=current_attempt_lease_token,
-                            diagnostics=[
-                                {
-                                    "code": f"{current_runtime_node_key}_stage_failed",
-                                    "stage": current_runtime_node_key,
-                                    "message": str(e),
-                                }
-                            ],
+                            diagnostics=[stage_diagnostic],
                         )
                         _retire_runtime_attempt_scope(reason="attempt_failed")
                     elif (
@@ -1263,15 +1173,31 @@ class OrchestratorAgent(BaseAgent):
                             current_attempt_keepalive_active = (
                                 _activate_runtime_attempt_keepalive_or_fail()
                             )
-                        agent_input = await self._prepare_scheduled_agent_input(
-                            workflow_data=workflow_data,
-                            agent_type=agent_type,
-                            workflow_id=wf_id,
-                            task_specs=task_specs,
-                            runtime_input_payload=runtime_input_payload,
-                        )
-                        agent_result = await agent.execute(
-                            AgentExecutionRequest(
+                        try:
+                            agent_input = await self._prepare_scheduled_agent_input(
+                                workflow_data=workflow_data,
+                                agent_type=agent_type,
+                                workflow_id=wf_id,
+                                task_specs=task_specs,
+                                runtime_input_payload=runtime_input_payload,
+                            )
+                        except Exception as retry_input_err:
+                            self._fail_retry_runtime_attempt(
+                                runtime_session_id=runtime_session_id,
+                                runtime_node_key=current_runtime_node_key,
+                                attempt_id=current_attempt_id,
+                                lease_token=current_attempt_lease_token,
+                                error=retry_input_err,
+                                diagnostic_code=(
+                                    f"{current_runtime_node_key}_retry_input_failed"
+                                    if current_runtime_node_key
+                                    else "retry_input_failed"
+                                ),
+                            )
+                            raise
+                        agent_output, success_boundary = await self._execute_agent_success_path(
+                            agent=agent,
+                            request=AgentExecutionRequest(
                                 task=task,
                                 agent_type=agent_type.value,
                                 input_data=JsonObjectPayload.from_mapping(
@@ -1280,15 +1206,27 @@ class OrchestratorAgent(BaseAgent):
                                 ),
                                 workflow_state_id=wf_id,
                                 execution_order=step_index + 1,
-                            )
-                        )
-                        agent_output = agent_result.output_data.to_dict()
-                        self._record_agent_output(
-                            workflow_id=str(wf_id),
-                            agent_type=agent_type,
+                            ),
+                            workflow_state_id=wf_id,
                             workflow_results=workflow_results,
                             workflow_data=workflow_data,
-                            agent_output=agent_output,
+                            current_agent=agent_type,
+                            audio_contract=dict(audio_contract or {}),
+                            candidate_agents=list(candidate_agents),
+                            standby_agents=standby_agents,
+                            replan_count=replan_count,
+                            max_replans=max_replans,
+                            current_index=step_index,
+                            execution_queue=execution_queue,
+                            task_specs=task_specs,
+                            conditional_task_specs=_conditional_task_specs,
+                            runtime_session_id=runtime_session_id,
+                            runtime_node_key=current_runtime_node_key,
+                            attempt_id=current_attempt_id,
+                            lease_token=current_attempt_lease_token,
+                            attempt_trigger_reason=current_attempt_trigger_reason,
+                            script_trigger_reason=retry_trigger_reason,
+                            fail_runtime_attempt_on_error=True,
                         )
                         if (
                             agent_type == AgentType.CONCEPT_PLANNER
@@ -1304,37 +1242,15 @@ class OrchestratorAgent(BaseAgent):
                                 self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
                             except Exception:
                                 pass
-                        if (
-                            runtime_session_id is not None
-                            and agent_type != AgentType.SCRIPT_WRITER
-                            and current_runtime_node_key is not None
-                            and current_attempt_id is not None
-                        ):
-                            self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
-                                runtime_session_id=runtime_session_id,
-                                node_key=current_runtime_node_key,
-                                attempt_id=current_attempt_id,
-                                lease_token=current_attempt_lease_token,
-                                node_status=WorkflowNodeStatus.COMPLETED.value,
+                        standby_agents = list(success_boundary.standby_agents)
+                        replan_count = success_boundary.replan_count
+                        if success_boundary.attempt_completed:
+                            retired_completed_attempt_context = _retire_runtime_attempt_scope(
+                                reason="retry_attempt_completed",
+                                preserve_completed_attempt=True,
                             )
-                        if (
-                            runtime_session_id is not None
-                            and agent_type == AgentType.SCRIPT_WRITER
-                            and current_attempt_id is not None
-                        ):
-                            return self._get_orchestration_runtime_transition_facade().open_script_review_gate(
-                                runtime_session_id=runtime_session_id,
-                                task_id=task.task_id,
-                                workflow_id=wf_id,
-                                script_attempt_id=current_attempt_id,
-                                lease_token=current_attempt_lease_token,
-                                trigger_reason=current_attempt_trigger_reason
-                                or retry_trigger_reason,
-                                script_output=dict(agent_output or {}),
-                                task_specs=task_specs,
-                                conditional_task_specs=_conditional_task_specs,
-                                candidate_agents=list(candidate_agents),
-                            )
+                        if success_boundary.gate_response is not None:
+                            return success_boundary.gate_response
                         continue
 
                     # 不重试：标记失败并通知
@@ -1438,10 +1354,10 @@ class OrchestratorAgent(BaseAgent):
         """Use a lightweight LLM + orchestrator_control tool to decide next step.
         Returns: 'proceed_next' | 'repeat_agent' | 'halt_workflow'
         """
+
         def _decision_error(reason_code: str, message: str) -> AgentError:
             return AgentError(
-                "orchestrator_decision_failed "
-                f"reason_code={reason_code}: {message}"
+                "orchestrator_decision_failed " f"reason_code={reason_code}: {message}"
             )
 
         # Build observation (concise, facts-only) from MAS WM (SoT)
@@ -1603,9 +1519,7 @@ class OrchestratorAgent(BaseAgent):
 
     # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
 
-    async def _should_retry_step(
-        self, agent_type: AgentType, error: Exception
-    ) -> bool:
+    async def _should_retry_step(self, agent_type: AgentType, error: Exception) -> bool:
         """Determine if a failed workflow step should be retried"""
         # 简化：按错误类型和策略决定，不依赖 AgentExecution 表
         retry_conditions = {
@@ -1751,6 +1665,252 @@ class OrchestratorAgent(BaseAgent):
         if agent_type == AgentType.VIDEO_COMPOSER:
             self._store_composer_outputs(workflow_id, agent_output)
 
+    async def _execute_agent_success_path(
+        self,
+        *,
+        agent: BaseAgent,
+        request: AgentExecutionRequest,
+        workflow_state_id: str,
+        workflow_results: Dict[str, Any],
+        workflow_data: Dict[str, Any],
+        current_agent: AgentType,
+        audio_contract: Dict[str, Any],
+        candidate_agents: List[AgentType],
+        standby_agents: List[AgentType],
+        replan_count: int,
+        max_replans: int,
+        current_index: int,
+        execution_queue: List[AgentType],
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        conditional_task_specs: Dict[str, Dict[str, Any]],
+        runtime_session_id: Optional[int],
+        runtime_node_key: Optional[str],
+        attempt_id: Optional[int],
+        lease_token: Optional[str],
+        attempt_trigger_reason: str,
+        script_trigger_reason: str,
+        fail_runtime_attempt_on_error: bool = False,
+    ) -> Tuple[Dict[str, Any], _RuntimeSuccessBoundaryOutcome]:
+        try:
+            agent_result = await agent.execute(request)
+            agent_output = agent_result.output_data.to_dict()
+            try:
+                normalized_report = self._orchestration_protocol.build_subagent_report(
+                    workflow_state_id=workflow_state_id,
+                    agent_type=current_agent,
+                    agent_result=agent_result,
+                    execution_id=self._current_execution_id(),
+                )
+            except OrchestrationProtocolError as exc:
+                raise _OrchestrationBoundaryError(
+                    f"Runtime protocol violated: {exc}",
+                    reason_code=exc.reason_code,
+                ) from exc
+            success_boundary = await self._finalize_successful_agent_runtime_boundary(
+                workflow_state_id=workflow_state_id,
+                task_id=request.task.task_id,
+                current_agent=current_agent,
+                agent_result=agent_result,
+                normalized_report=normalized_report,
+                agent_output=agent_output,
+                audio_contract=audio_contract,
+                candidate_agents=candidate_agents,
+                standby_agents=standby_agents,
+                replan_count=replan_count,
+                max_replans=max_replans,
+                current_index=current_index,
+                execution_queue=execution_queue,
+                task_specs=task_specs,
+                conditional_task_specs=conditional_task_specs,
+                runtime_session_id=runtime_session_id,
+                runtime_node_key=runtime_node_key,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                attempt_trigger_reason=attempt_trigger_reason,
+                script_trigger_reason=script_trigger_reason,
+            )
+            self._record_agent_output(
+                workflow_id=workflow_state_id,
+                agent_type=current_agent,
+                workflow_results=workflow_results,
+                workflow_data=workflow_data,
+                agent_output=agent_output,
+            )
+            return agent_output, success_boundary
+        except Exception as exc:
+            if fail_runtime_attempt_on_error:
+                self._fail_retry_runtime_attempt(
+                    runtime_session_id=runtime_session_id,
+                    runtime_node_key=runtime_node_key,
+                    attempt_id=attempt_id,
+                    lease_token=lease_token,
+                    error=exc,
+                    diagnostic_code=(
+                        f"{runtime_node_key}_retry_failed" if runtime_node_key else "retry_failed"
+                    ),
+                )
+            raise
+
+    def _fail_retry_runtime_attempt(
+        self,
+        *,
+        runtime_session_id: Optional[int],
+        runtime_node_key: Optional[str],
+        attempt_id: Optional[int],
+        lease_token: Optional[str],
+        error: Exception,
+        diagnostic_code: str,
+    ) -> None:
+        if runtime_session_id is None or runtime_node_key is None or attempt_id is None:
+            return
+        self._get_orchestration_runtime_transition_facade().fail_runtime_attempt(
+            runtime_session_id=runtime_session_id,
+            node_key=runtime_node_key,
+            attempt_id=attempt_id,
+            error_message=str(error),
+            lease_token=lease_token,
+            diagnostics=[
+                {
+                    "code": diagnostic_code,
+                    "stage": runtime_node_key,
+                    "message": str(error),
+                    **(
+                        {"reason_code": str(error.reason_code)}
+                        if getattr(error, "reason_code", None)
+                        else {}
+                    ),
+                }
+            ],
+        )
+
+    async def _finalize_successful_agent_runtime_boundary(
+        self,
+        *,
+        workflow_state_id: str,
+        task_id: str,
+        current_agent: AgentType,
+        agent_result: AgentExecutionResult,
+        normalized_report: Dict[str, Any],
+        agent_output: Dict[str, Any],
+        audio_contract: Dict[str, Any],
+        candidate_agents: List[AgentType],
+        standby_agents: List[AgentType],
+        replan_count: int,
+        max_replans: int,
+        current_index: int,
+        execution_queue: List[AgentType],
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        conditional_task_specs: Dict[str, Dict[str, Any]],
+        runtime_session_id: Optional[int],
+        runtime_node_key: Optional[str],
+        attempt_id: Optional[int],
+        lease_token: Optional[str],
+        attempt_trigger_reason: str,
+        script_trigger_reason: str,
+    ) -> _RuntimeSuccessBoundaryOutcome:
+        try:
+            runtime_cycle = await self._evaluate_runtime_boundary_cycle(
+                workflow_state_id=workflow_state_id,
+                current_agent=current_agent,
+                agent_result=agent_result,
+                normalized_report=normalized_report,
+                audio_contract=dict(audio_contract or {}),
+                candidate_agents=list(candidate_agents),
+                standby_agents=list(standby_agents),
+                replan_count=replan_count,
+                max_replans=max_replans,
+                current_index=current_index,
+                execution_queue=execution_queue,
+                task_specs=task_specs,
+                conditional_task_specs=conditional_task_specs,
+            )
+            runtime_decision = runtime_cycle.get("runtime_decision") or {}
+            replan_reason = str(runtime_decision.get("reason") or "none").strip()
+            apply_result = runtime_cycle.get("apply_result") or {}
+            updated_standby_agents = list(standby_agents)
+            updated_replan_count = replan_count
+            if apply_result.get("status") == "activated":
+                target_agent = apply_result.get("target_agent")
+                updated_queue = apply_result.get("execution_queue")
+                if isinstance(updated_queue, list):
+                    execution_queue[:] = list(updated_queue)
+                updated_task_specs = apply_result.get("task_specs")
+                if isinstance(updated_task_specs, dict):
+                    task_specs.clear()
+                    task_specs.update(updated_task_specs)
+                if "standby_agents" in apply_result:
+                    raw_standby_agents = apply_result.get("standby_agents")
+                    if not isinstance(raw_standby_agents, list) or any(
+                        not isinstance(candidate, AgentType) for candidate in raw_standby_agents
+                    ):
+                        raise _OrchestrationBoundaryError(
+                            "Runtime apply_result standby_agents must be list[AgentType]",
+                            reason_code="runtime_apply_standby_agents_invalid",
+                        )
+                    updated_standby_agents = list(raw_standby_agents)
+                updated_replan_count = int(apply_result.get("replan_count") or updated_replan_count)
+                self.logger.info(
+                    "ADAPTIVE_REPLAN action=activate_from_standby target=%s reason=%s "
+                    "queue_changed=%s count=%s",
+                    target_agent.value if isinstance(target_agent, AgentType) else target_agent,
+                    replan_reason,
+                    bool(apply_result.get("queue_changed")),
+                    updated_replan_count,
+                )
+            elif apply_result.get("status") == "abort":
+                raise AgentError(f"Workflow halted by runtime decision: {replan_reason}")
+            decision_ack = runtime_cycle.get("decision_ack") or {}
+            self.logger.debug(
+                "RUNTIME_DECISION_ACK %s",
+                json.dumps(decision_ack, ensure_ascii=False),
+            )
+        except AgentError:
+            raise
+        except Exception as replan_err:
+            raise AgentError(f"Runtime decision evaluation failed: {replan_err}") from replan_err
+
+        outcome = _RuntimeSuccessBoundaryOutcome(
+            standby_agents=tuple(updated_standby_agents),
+            replan_count=updated_replan_count,
+        )
+        if runtime_session_id is None:
+            return outcome
+        if runtime_node_key is None or attempt_id is None or not str(lease_token or "").strip():
+            raise AgentError("Runtime success boundary requires an active node, attempt, and lease")
+
+        transition_port = self._get_orchestration_runtime_transition_facade()
+        if current_agent == AgentType.SCRIPT_WRITER:
+            gate_response = transition_port.open_script_review_gate(
+                runtime_session_id=runtime_session_id,
+                task_id=task_id,
+                workflow_id=workflow_state_id,
+                script_attempt_id=attempt_id,
+                lease_token=lease_token,
+                trigger_reason=attempt_trigger_reason or script_trigger_reason,
+                script_output=dict(agent_output),
+                task_specs=task_specs,
+                conditional_task_specs=conditional_task_specs,
+                candidate_agents=list(candidate_agents),
+            )
+            return _RuntimeSuccessBoundaryOutcome(
+                standby_agents=tuple(updated_standby_agents),
+                replan_count=updated_replan_count,
+                gate_response=gate_response,
+            )
+
+        transition_port.complete_runtime_attempt(
+            runtime_session_id=runtime_session_id,
+            node_key=runtime_node_key,
+            attempt_id=attempt_id,
+            lease_token=lease_token,
+            node_status=WorkflowNodeStatus.COMPLETED.value,
+        )
+        return _RuntimeSuccessBoundaryOutcome(
+            standby_agents=tuple(updated_standby_agents),
+            replan_count=updated_replan_count,
+            attempt_completed=True,
+        )
+
     def _build_execution_queue(
         self,
         task_specs: Dict[AgentType, Dict[str, Any]],
@@ -1787,6 +1947,7 @@ class OrchestratorAgent(BaseAgent):
         workflow_state_id: str,
         current_agent: AgentType,
         agent_result: AgentExecutionResult,
+        normalized_report: Optional[Dict[str, Any]] = None,
         audio_contract: Dict[str, Any],
         candidate_agents: List[AgentType],
         standby_agents: List[AgentType],
@@ -1799,11 +1960,15 @@ class OrchestratorAgent(BaseAgent):
     ) -> Dict[str, Any]:
         try:
             execution_id = self._current_execution_id()
-            report = self._orchestration_protocol.build_subagent_report(
-                workflow_state_id=workflow_state_id,
-                agent_type=current_agent,
-                agent_result=agent_result,
-                execution_id=execution_id,
+            report = (
+                dict(normalized_report)
+                if normalized_report is not None
+                else self._orchestration_protocol.build_subagent_report(
+                    workflow_state_id=workflow_state_id,
+                    agent_type=current_agent,
+                    agent_result=agent_result,
+                    execution_id=execution_id,
+                )
             )
             control_plane = self._get_orchestration_control_plane()
             decision_request = control_plane.open_runtime_decision(
@@ -1865,7 +2030,10 @@ class OrchestratorAgent(BaseAgent):
                 "decision_ack": decision_ack,
             }
         except OrchestrationProtocolError as exc:
-            raise AgentError(f"Runtime protocol violated: {exc}") from exc
+            raise _OrchestrationBoundaryError(
+                f"Runtime protocol violated: {exc}",
+                reason_code=exc.reason_code,
+            ) from exc
         except (OrchestrationControlPlaneError, OrchestrationRuntimeControllerError) as exc:
             raise AgentError(f"Runtime control-plane violated: {exc}") from exc
 
@@ -2120,12 +2288,10 @@ class OrchestratorAgent(BaseAgent):
             scene_info_refs: Dict[str, str] = {}
             if agent_type in {AgentType.IMAGE_GENERATOR, AgentType.VIDEO_GENERATOR}:
                 try:
-                    scene_info_refs[agent_type.value] = (
-                        self._scene_info_reference_port.prepare(
-                            workflow_state_id=workflow_id,
-                            agent_type=agent_type,
-                            runtime_input_payload=dict(runtime_input_payload or {}),
-                        )
+                    scene_info_refs[agent_type.value] = self._scene_info_reference_port.prepare(
+                        workflow_state_id=workflow_id,
+                        agent_type=agent_type,
+                        runtime_input_payload=dict(runtime_input_payload or {}),
                     )
                 except SceneInfoReferencePreparationError as exc:
                     raise AgentError(
@@ -2309,38 +2475,44 @@ class OrchestratorAgent(BaseAgent):
             expected_agent_set = set(expected_agents)
             unexpected_agents: List[str] = []
             if isinstance(agents, list):
-                for item in agents:
+                for index, item in enumerate(agents):
                     if not isinstance(item, dict):
-                        continue
-                    atype = self._parse_agent_type(item.get("agent"))
-                    if atype is None:
-                        continue
+                        raise ValueError(
+                            f"LLM task decomposition agents[{index}] must be an object"
+                        )
+                    required_fields = {
+                        "agent",
+                        "run",
+                        "mission",
+                        "deliverable",
+                        "constraints",
+                        "order",
+                        "runtime_hints",
+                    }
+                    missing_fields = sorted(required_fields - set(item))
+                    if missing_fields:
+                        raise ValueError(
+                            f"LLM task decomposition agents[{index}] missing fields: "
+                            + ", ".join(missing_fields)
+                        )
+                    spec = OrchestrationStateAdapter.parse_task_spec_payload(
+                        spec=item,
+                        require_explicit_agent=True,
+                        field_path=f"task_decomposition.agents[{index}]",
+                    )
+                    atype = AgentType(spec["agent"])
                     if atype not in expected_agent_set:
                         unexpected_agents.append(atype.value)
                         continue
-                    run_flag = item.get("run")
-                    mission = str(item.get("mission") or "").strip()
-                    deliverable = str(item.get("deliverable") or "").strip()
-                    if not mission:
+                    if not spec["mission"].strip():
                         raise ValueError(
                             f"LLM task decomposition missing mission for agent: {atype.value}"
                         )
-                    if not deliverable:
+                    if not spec["deliverable"].strip():
                         raise ValueError(
                             f"LLM task decomposition missing deliverable for agent: {atype.value}"
                         )
-                    spec = {
-                        "agent": atype.value,
-                        "mission": mission,
-                        "deliverable": deliverable,
-                        "constraints": self._normalize_assignment_constraints(
-                            item.get("constraints")
-                        ),
-                        "order": item.get("order"),
-                        "runtime_hints": self._normalize_runtime_hints(item.get("runtime_hints")),
-                        "run": bool(run_flag) if run_flag is not None else True,
-                        "fallback_used": False,
-                    }
+                    spec["fallback_used"] = False
                     task_map[atype] = spec
             if unexpected_agents:
                 raise ValueError(
@@ -2362,39 +2534,37 @@ class OrchestratorAgent(BaseAgent):
                 raise ValueError(
                     "LLM task decomposition conditional_tasks must be list when provided"
                 )
-            for item in conditional_tasks or []:
+            for index, item in enumerate(conditional_tasks or []):
                 if not isinstance(item, dict):
-                    continue
-                task_id = str(item.get("task_id") or "").strip()
-                if not task_id:
-                    continue
-                atype = self._parse_agent_type(item.get("agent"))
-                if atype is None:
-                    continue
+                    raise ValueError(
+                        f"LLM task decomposition conditional_tasks[{index}] must be an object"
+                    )
+                task_id = item.get("task_id")
+                if not isinstance(task_id, str) or not task_id or task_id != task_id.strip():
+                    raise ValueError(
+                        f"LLM task decomposition conditional_tasks[{index}].task_id "
+                        "must be a canonical string"
+                    )
+                spec = OrchestrationStateAdapter.parse_task_spec_payload(
+                    spec={key: value for key, value in item.items() if key != "task_id"},
+                    require_explicit_agent=True,
+                    field_path=f"task_decomposition.conditional_tasks[{index}]",
+                )
+                atype = AgentType(spec["agent"])
                 if atype not in expected_agent_set:
                     raise ValueError(
                         "LLM task decomposition returned conditional_task for non-candidate agent: "
                         f"{atype.value}"
                     )
-                mission = str(item.get("mission") or "").strip()
-                deliverable = str(item.get("deliverable") or "").strip()
-                if not mission:
+                if not isinstance(spec.get("mission"), str) or not spec["mission"].strip():
                     raise ValueError(
                         f"LLM task decomposition missing mission for conditional task: {task_id}"
                     )
-                if not deliverable:
+                if not isinstance(spec.get("deliverable"), str) or not spec["deliverable"].strip():
                     raise ValueError(
                         f"LLM task decomposition missing deliverable for conditional task: {task_id}"
                     )
-                spec = {
-                    "agent": atype.value,
-                    "mission": mission,
-                    "deliverable": deliverable,
-                    "constraints": self._normalize_assignment_constraints(item.get("constraints")),
-                    "trigger": item.get("trigger"),
-                    "runtime_hints": self._normalize_runtime_hints(item.get("runtime_hints")),
-                    "fallback_used": False,
-                }
+                spec["fallback_used"] = False
                 conditional_task_specs[task_id] = spec
             try:
                 normalized_task_map = {

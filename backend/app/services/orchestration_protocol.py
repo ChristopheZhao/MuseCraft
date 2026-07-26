@@ -19,6 +19,17 @@ from ..domain import AgentExecutionContractError, AgentExecutionResult, AgentTyp
 class OrchestrationProtocolError(ValueError):
     """Raised when a subagent violates the explicit orchestration protocol."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "orchestration_report_invalid",
+        field_path: str = "orchestration_report",
+    ) -> None:
+        self.reason_code = str(reason_code)
+        self.field_path = str(field_path)
+        super().__init__(message)
+
 
 class OrchestrationProtocol:
     """Owns protocol envelopes, not orchestration policy or gate execution."""
@@ -35,73 +46,6 @@ class OrchestrationProtocol:
                 f"Subagent {agent_type.value} orchestration_report missing field: {field_name}"
             )
         return explicit_report.get(field_name)
-
-    @staticmethod
-    def _validate_reflection(
-        reflection: Dict[str, Any],
-        *,
-        agent_type: AgentType,
-    ) -> Dict[str, Any]:
-        completion_state = OrchestrationProtocol._require_report_field(
-            reflection,
-            field_name="completion_state",
-            agent_type=agent_type,
-        )
-        if not isinstance(completion_state, str) or not completion_state.strip():
-            raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} orchestration_report reflection.completion_state "
-                "must be a non-empty string"
-            )
-
-        reported_gaps = OrchestrationProtocol._require_report_field(
-            reflection,
-            field_name="reported_gaps",
-            agent_type=agent_type,
-        )
-        if not isinstance(reported_gaps, list) or any(
-            not isinstance(item, str) for item in reported_gaps
-        ):
-            raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} orchestration_report reflection.reported_gaps "
-                "must be list[str]"
-            )
-
-        reported_hints = OrchestrationProtocol._require_report_field(
-            reflection,
-            field_name="reported_hints",
-            agent_type=agent_type,
-        )
-        if not isinstance(reported_hints, list) or any(
-            not isinstance(item, str) for item in reported_hints
-        ):
-            raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} orchestration_report reflection.reported_hints "
-                "must be list[str]"
-            )
-
-        if "summary" in reflection and not isinstance(reflection.get("summary"), str):
-            raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} orchestration_report reflection.summary "
-                "must be a string when present"
-            )
-
-        return dict(reflection)
-
-    @staticmethod
-    def _default_reflection(agent_output: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        output = dict(agent_output or {})
-        reflection: Dict[str, Any] = {
-            "completion_state": "completed",
-            "reported_gaps": [],
-            "reported_hints": [],
-        }
-        if isinstance(output.get("subtask_state"), str) and output.get("subtask_state"):
-            reflection["completion_state"] = str(output.get("subtask_state"))
-        if isinstance(output.get("completed_reason"), str) and output.get("completed_reason"):
-            reflection["completed_reason"] = str(output.get("completed_reason"))
-        if isinstance(output.get("reflection_summary"), str) and output.get("reflection_summary"):
-            reflection["summary"] = str(output.get("reflection_summary"))
-        return reflection
 
     def build_dispatch(
         self,
@@ -133,23 +77,19 @@ class OrchestrationProtocol:
             raise OrchestrationProtocolError(
                 f"Subagent {agent_type.value} must return AgentExecutionResult"
             )
-        output = agent_result.output_data.to_dict()
         try:
             explicit_report = agent_result.require_orchestration_report().to_dict()
         except AgentExecutionContractError as exc:
             raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} must return explicit orchestration_report: {exc}"
+                f"Subagent {agent_type.value} must return explicit orchestration_report: {exc}",
+                reason_code=exc.reason_code.value,
+                field_path=exc.field_path,
             ) from exc
         report: Dict[str, Any] = {
             "contract_version": "v1",
             "workflow_state_id": str(workflow_state_id or ""),
             "agent_type": agent_type.value,
             "execution_id": execution_id,
-            "status": "completed" if output.get("success", True) else "partial",
-            "boundary_event": "",
-            "gate_triggers": [],
-            "artifacts": [],
-            "reflection": self._default_reflection(output),
         }
 
         status = self._require_report_field(
@@ -157,12 +97,28 @@ class OrchestrationProtocol:
             field_name="status",
             agent_type=agent_type,
         )
-        if not isinstance(status, str) or not status.strip():
+        if not isinstance(status, str):
             raise OrchestrationProtocolError(
                 f"Subagent {agent_type.value} orchestration_report field status "
-                "must be a non-empty string"
+                "must be a string",
+                reason_code="orchestration_report_status_invalid",
+                field_path="orchestration_report.status",
             )
-        report["status"] = status.strip()
+        if status not in {"completed", "partial", "failed"}:
+            raise OrchestrationProtocolError(
+                f"Subagent {agent_type.value} orchestration_report field status "
+                "must be a canonical outcome value",
+                reason_code="orchestration_report_status_invalid",
+                field_path="orchestration_report.status",
+            )
+        if status != "completed":
+            raise OrchestrationProtocolError(
+                f"Subagent {agent_type.value} orchestration_report status must be completed "
+                "before runtime success finalization",
+                reason_code="orchestration_report_not_successful",
+                field_path="orchestration_report.status",
+            )
+        report["status"] = status
 
         boundary_event = self._require_report_field(
             explicit_report,
@@ -174,7 +130,7 @@ class OrchestrationProtocol:
                 f"Subagent {agent_type.value} orchestration_report field boundary_event "
                 "must be a string"
             )
-        report["boundary_event"] = boundary_event.strip()
+        report["boundary_event"] = boundary_event
 
         gate_triggers = self._require_report_field(
             explicit_report,
@@ -188,12 +144,12 @@ class OrchestrationProtocol:
             )
         normalized_gate_triggers: List[str] = []
         for index, item in enumerate(gate_triggers):
-            if not isinstance(item, str) or not item.strip():
+            if not isinstance(item, str) or not item:
                 raise OrchestrationProtocolError(
                     f"Subagent {agent_type.value} orchestration_report gate_triggers[{index}] "
                     "must be a non-empty string"
                 )
-            normalized_gate_triggers.append(item.strip())
+            normalized_gate_triggers.append(item)
         report["gate_triggers"] = normalized_gate_triggers
 
         artifacts = self._require_report_field(
@@ -226,11 +182,7 @@ class OrchestrationProtocol:
                 f"Subagent {agent_type.value} orchestration_report field reflection "
                 "must be a dict"
             )
-        merged_reflection = dict(report["reflection"])
-        merged_reflection.update(
-            self._validate_reflection(reflection, agent_type=agent_type)
-        )
-        report["reflection"] = merged_reflection
+        report["reflection"] = dict(reflection)
         return report
 
     def build_runtime_decision_request(

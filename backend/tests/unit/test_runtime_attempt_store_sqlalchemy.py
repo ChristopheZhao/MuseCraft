@@ -913,6 +913,55 @@ def test_runtime_read_model_is_immutable_and_preserves_public_projection(runtime
     assert payload["nodes"][0]["node_key"] == "image"
 
 
+def test_runtime_read_model_distinguishes_missing_continuation_checkpoint(runtime_db):
+    db, _ = runtime_db
+    _, session, _ = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    store.start_attempt(_start_command(session.id))
+    db.commit()
+
+    model = RuntimeReadModelService(store).load_for_task("public-task-1")
+
+    assert model is not None
+    assert model.resume_control is not None
+    assert model.resume_control.to_dict() == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "missing_continuation_checkpoint",
+    }
+
+
+def test_runtime_read_model_exposes_invalid_continuation_contract_reason(runtime_db):
+    db, _ = runtime_db
+    _, session, _ = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
+        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        conditional_task_specs={},
+        candidate_agents=[AgentType.IMAGE_GENERATOR],
+        anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+        node_key="image",
+        attempt_id=attempt.attempt_id,
+    )
+    checkpoint["task_specs"][AgentType.IMAGE_GENERATOR.value]["run"] = "false"
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+    assert persisted_attempt is not None
+    persisted_attempt.continuation_checkpoint = checkpoint
+    db.commit()
+
+    model = RuntimeReadModelService(store).load_for_task("public-task-1")
+
+    assert model is not None
+    assert model.resume_control is not None
+    assert model.resume_control.to_dict() == {
+        "state": "resume_blocked",
+        "can_resume": False,
+        "reason_code": "invalid_continuation_checkpoint",
+        "diagnostic_reason_code": "continuation_spec_boolean_invalid",
+    }
+
+
 def test_session_control_plane_resumes_with_explicit_attempt_and_node_outcomes(runtime_db):
     db, _ = runtime_db
     task, session, node = _seed_runtime(db)

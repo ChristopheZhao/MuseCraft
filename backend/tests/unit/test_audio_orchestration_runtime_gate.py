@@ -9,6 +9,10 @@ from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.tools.video_composition import composition_tool as composition_module
 from app.agents.tools.video_composition.composition_tool import CompositionTool
+from app.agents.utils.artifacts import (
+    evaluate_scene_output_acceptance,
+    issue_scene_output_acceptance_receipts,
+)
 from app.core.config import settings
 from app.core.prompt_manager import get_prompt_manager
 from app.domain import (
@@ -105,6 +109,8 @@ class _StubWorkflowAgent:
         if not self._outputs:
             raise AssertionError(f"{self.agent_name} executed more times than expected")
         output = self._outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
         return output if isinstance(output, AgentExecutionResult) else _make_agent_result(output)
 
 
@@ -162,6 +168,30 @@ def _build_video_wm(total_scenes, scene_records):
     )
 
 
+def _scene_output_record(
+    *,
+    kind,
+    scene_number,
+    workflow_state_id,
+    artifact_path="",
+    artifact_url="",
+):
+    artifact = {
+        "success": True,
+        "scene_number": scene_number,
+        f"{kind}_path": artifact_path,
+        f"{kind}_url": artifact_url,
+    }
+    if kind == "video" and artifact_path:
+        artifact["metadata"] = {"storage": {"status": "persisted"}}
+    issued, _receipts = issue_scene_output_acceptance_receipts(
+        kind=kind,
+        artifacts=[artifact],
+        workflow_state_id=workflow_state_id,
+    )
+    return issued[0]
+
+
 def _build_orchestrator_gate_agent(shared_facts):
     agent = object.__new__(OrchestratorAgent)
     agent.agent_name = "orchestrator"
@@ -193,8 +223,18 @@ def test_image_step_completion_accepts_scene_output_contract():
                 "scenes": [{"scene_number": 1}, {"scene_number": 2}],
             },
             "scene_outputs.image": {
-                1: {"scene_number": 1, "image_url": "https://example.com/scene-1.png"},
-                2: {"scene_number": 2, "image_path": "/tmp/scene-2.png"},
+                1: _scene_output_record(
+                    kind="image",
+                    scene_number=1,
+                    workflow_state_id="wf-image-complete",
+                    artifact_url="https://example.com/scene-1.png",
+                ),
+                2: _scene_output_record(
+                    kind="image",
+                    scene_number=2,
+                    workflow_state_id="wf-image-complete",
+                    artifact_path="/tmp/scene-2.png",
+                ),
             },
         }
     )
@@ -209,8 +249,18 @@ def test_video_step_completion_rejects_url_only_scene_outputs():
                 "scenes": [{"scene_number": 1}, {"scene_number": 2}],
             },
             "scene_outputs.video": {
-                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-                2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
+                1: _scene_output_record(
+                    kind="video",
+                    scene_number=1,
+                    workflow_state_id="wf-video-url-only",
+                    artifact_path="/tmp/scene-1.mp4",
+                ),
+                2: _scene_output_record(
+                    kind="video",
+                    scene_number=2,
+                    workflow_state_id="wf-video-url-only",
+                    artifact_url="https://example.com/scene-2.mp4",
+                ),
             },
         }
     )
@@ -225,13 +275,190 @@ def test_video_step_completion_accepts_scene_output_contract():
                 "scenes": [{"scene_number": 1}, {"scene_number": 2}],
             },
             "scene_outputs.video": {
-                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-                2: {"scene_number": 2, "video_path": "/tmp/scene-2.mp4"},
+                1: _scene_output_record(
+                    kind="video",
+                    scene_number=1,
+                    workflow_state_id="wf-video-complete",
+                    artifact_path="/tmp/scene-1.mp4",
+                ),
+                2: _scene_output_record(
+                    kind="video",
+                    scene_number=2,
+                    workflow_state_id="wf-video-complete",
+                    artifact_path="/tmp/scene-2.mp4",
+                ),
             },
         }
     )
 
     assert agent._is_video_step_completed("wf-video-complete") is True
+
+
+def test_scene_output_acceptance_does_not_mint_receipt_from_path():
+    shared = _FakeWM(
+        {
+            "scene_outputs.image": {
+                1: {"scene_number": 1, "image_path": "/tmp/scene-1.png"},
+            }
+        }
+    )
+
+    contract = evaluate_scene_output_acceptance(
+        kind="image",
+        workflow_id="wf-no-receipt",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert contract["accepted"] is False
+    assert contract["accepted_receipts"] == []
+    assert contract["rejected_scene_outputs"] == [
+        {
+            "scene_number": 1,
+            "reason_code": "scene_output_acceptance_receipt_missing",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status_value", "remove_status", "reason_code"),
+    [
+        ("", True, "scene_output_acceptance_receipt_incomplete"),
+        ("pending", False, "scene_output_acceptance_receipt_invalid"),
+        ("unknown", False, "scene_output_acceptance_receipt_invalid"),
+    ],
+)
+def test_scene_output_acceptance_rejects_missing_or_nonaccepted_status(
+    status_value,
+    remove_status,
+    reason_code,
+):
+    record = _scene_output_record(
+        kind="image",
+        scene_number=1,
+        workflow_state_id="wf-status-contract",
+        artifact_path="/tmp/scene-1.png",
+    )
+    receipt = record["acceptance_receipt"]
+    if remove_status:
+        receipt.pop("status")
+    else:
+        receipt["status"] = status_value
+    shared = _FakeWM({"scene_outputs.image": {1: record}})
+
+    contract = evaluate_scene_output_acceptance(
+        kind="image",
+        workflow_id="wf-status-contract",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert contract["accepted"] is False
+    assert contract["rejected_scene_outputs"][0]["reason_code"] == reason_code
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "reason_code"),
+    [
+        ("artifact_kind", "video", "scene_output_acceptance_kind_mismatch"),
+        (
+            "delivery_ref",
+            "scene_outputs.image.99",
+            "scene_output_acceptance_ref_mismatch",
+        ),
+        (
+            "artifact_ref",
+            "/tmp/other-scene.png",
+            "scene_output_acceptance_artifact_ref_mismatch",
+        ),
+        (
+            "workflow_state_id",
+            "wf-other",
+            "scene_output_acceptance_workflow_mismatch",
+        ),
+    ],
+)
+def test_scene_output_acceptance_rejects_mismatched_receipt_provenance(
+    field_name,
+    field_value,
+    reason_code,
+):
+    record = _scene_output_record(
+        kind="image",
+        scene_number=1,
+        workflow_state_id="wf-provenance",
+        artifact_path="/tmp/scene-1.png",
+    )
+    record["acceptance_receipt"][field_name] = field_value
+    shared = _FakeWM({"scene_outputs.image": {1: record}})
+
+    contract = evaluate_scene_output_acceptance(
+        kind="image",
+        workflow_id="wf-provenance",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert contract["accepted"] is False
+    assert contract["rejected_scene_outputs"][0]["reason_code"] == reason_code
+
+
+def test_scene_output_acceptance_rejects_unknown_receipt_keys():
+    record = _scene_output_record(
+        kind="image",
+        scene_number=1,
+        workflow_state_id="wf-unknown-receipt-key",
+        artifact_path="/tmp/scene-1.png",
+    )
+    record["acceptance_receipt"]["unreviewed_extension"] = True
+    shared = _FakeWM({"scene_outputs.image": {1: record}})
+
+    contract = evaluate_scene_output_acceptance(
+        kind="image",
+        workflow_id="wf-unknown-receipt-key",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert contract["accepted"] is False
+    assert contract["rejected_scene_outputs"][0] == {
+        "scene_number": 1,
+        "reason_code": "scene_output_acceptance_receipt_unknown_keys",
+        "detail": "unreviewed_extension",
+    }
+
+
+def test_video_scene_acceptance_rejects_failed_storage_for_stale_path():
+    record = _scene_output_record(
+        kind="video",
+        scene_number=1,
+        workflow_state_id="wf-stale-video",
+        artifact_path="/tmp/stale-scene-1.mp4",
+    )
+    record["metadata"]["storage"] = {
+        "status": "failed",
+        "fallback_reason": "artifact_missing_after_persist",
+    }
+    shared = _FakeWM({"scene_outputs.video": {1: record}})
+
+    contract = evaluate_scene_output_acceptance(
+        kind="video",
+        workflow_id="wf-stale-video",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert contract["accepted"] is False
+    assert contract["rejected_scene_outputs"][0] == {
+        "scene_number": 1,
+        "reason_code": "scene_output_storage_failed",
+        "detail": "artifact_missing_after_persist",
+    }
 
 
 def _make_gate_result(**facts):
@@ -291,7 +518,9 @@ def _build_main_loop_runtime_harness(
     *,
     gate_triggers,
     video_output=None,
+    video_outputs=None,
     runtime_decision_mode="activate",
+    retry_failed_step=False,
 ):
     shared_store = _FakeSharedMemoryStore()
     short_term = _FakeShortTermService(shared_store)
@@ -407,11 +636,14 @@ def _build_main_loop_runtime_harness(
             artifacts=[{"kind": "shared_fact", "ref": "scene_outputs.video"}],
         ),
     }
+    configured_video_outputs = (
+        list(video_outputs) if video_outputs is not None else [video_agent_output]
+    )
 
     agent.agents = {
         AgentType.VIDEO_GENERATOR: _StubWorkflowAgent(
             "video_generator",
-            [video_agent_output],
+            configured_video_outputs,
         ),
         AgentType.AUDIO_GENERATOR: _StubWorkflowAgent(
             "audio_generator",
@@ -484,7 +716,7 @@ def _build_main_loop_runtime_harness(
         return {}
 
     async def _should_retry_step(*args, **kwargs):
-        return False
+        return retry_failed_step
 
     agent._get_video_audio_capability = lambda: {
         "provider": "",
@@ -814,7 +1046,182 @@ def test_orchestration_protocol_prefers_explicit_subagent_report():
     assert report["gate_triggers"] == ["workflow_video_audio_delivery"]
     assert report["artifacts"] == [{"kind": "shared_fact", "ref": "custom.ref"}]
     assert report["reflection"]["reported_hints"] == ["prefer_custom_report"]
-    assert report["reflection"]["summary"] == "compose ok"
+    assert "summary" not in report["reflection"]
+
+
+def test_orchestration_protocol_uses_explicit_report_status_as_single_outcome():
+    protocol = OrchestrationProtocol()
+    report = _make_explicit_report(
+        boundary_event="scene_video_completed",
+        gate_triggers=[],
+    )
+    report["reflection"]["completion_state"] = "partial"
+
+    normalized = protocol.build_subagent_report(
+        workflow_state_id="wf-protocol-single-outcome",
+        agent_type=AgentType.VIDEO_GENERATOR,
+        agent_result=_make_agent_result(
+            {"success": False, "subtask_state": "partial"},
+            report=report,
+        ),
+        execution_id="exec-single-outcome",
+    )
+
+    assert normalized["status"] == "completed"
+    assert normalized["reflection"]["completion_state"] == "partial"
+
+
+def test_orchestration_protocol_rejects_non_successful_report_status():
+    protocol = OrchestrationProtocol()
+    report = _make_explicit_report(
+        boundary_event="scene_video_completed",
+        gate_triggers=[],
+    )
+    report["status"] = "partial"
+
+    with pytest.raises(OrchestrationProtocolError) as exc_info:
+        protocol.build_subagent_report(
+            workflow_state_id="wf-protocol-unsuccessful",
+            agent_type=AgentType.VIDEO_GENERATOR,
+            agent_result=_make_agent_result({"success": True}, report=report),
+            execution_id="exec-unsuccessful",
+        )
+
+    assert exc_info.value.reason_code == "orchestration_report_not_successful"
+
+
+def test_agent_success_path_does_not_publish_before_runtime_boundary_succeeds():
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.success_boundary")
+    agent._orchestration_protocol = OrchestrationProtocol()
+    agent._current_execution_id = lambda: "exec-success-boundary"
+
+    async def _fail_runtime_boundary(**_kwargs):
+        raise AgentError("runtime boundary rejected the result")
+
+    agent._finalize_successful_agent_runtime_boundary = _fail_runtime_boundary
+    agent._store_composer_outputs = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("authoritative composer outputs must not be published")
+    )
+    workflow_results = {}
+    workflow_data = {}
+    subagent = _StubWorkflowAgent(
+        "video_composer",
+        [
+            _make_agent_result(
+                {
+                    "success": True,
+                    "final_video_path": "stale.mp4",
+                    "final_video_url": "https://example.com/stale.mp4",
+                },
+                report=_make_explicit_report(
+                    boundary_event="final_video_composed",
+                    gate_triggers=[],
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(AgentError) as exc_info:
+        asyncio.run(
+            agent._execute_agent_success_path(
+                agent=subagent,
+                request=AgentExecutionRequest(
+                    task=AgentTaskReference(
+                        task_id="task-success-boundary",
+                        task_type="video_composition",
+                    ),
+                    agent_type=AgentType.VIDEO_COMPOSER.value,
+                    input_data=JsonObjectPayload.empty(),
+                    workflow_state_id="wf-success-boundary",
+                ),
+                workflow_state_id="wf-success-boundary",
+                workflow_results=workflow_results,
+                workflow_data=workflow_data,
+                current_agent=AgentType.VIDEO_COMPOSER,
+                audio_contract={},
+                candidate_agents=[AgentType.VIDEO_COMPOSER],
+                standby_agents=[],
+                replan_count=0,
+                max_replans=1,
+                current_index=0,
+                execution_queue=[AgentType.VIDEO_COMPOSER],
+                task_specs={AgentType.VIDEO_COMPOSER: {"run": True, "order": 0}},
+                conditional_task_specs={},
+                runtime_session_id=None,
+                runtime_node_key=None,
+                attempt_id=None,
+                lease_token=None,
+                attempt_trigger_reason="initial",
+                script_trigger_reason="initial",
+            )
+        )
+
+    assert "runtime boundary rejected" in str(exc_info.value)
+    assert workflow_results == {}
+    assert workflow_data == {}
+
+
+def test_runtime_success_boundary_consumes_authoritative_empty_standby_collection():
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.empty_standby")
+
+    async def _runtime_cycle(**_kwargs):
+        return {
+            "runtime_decision": {
+                "action": "activate_from_standby",
+                "reason": "audio_missing_or_unknown",
+            },
+            "apply_result": {
+                "status": "activated",
+                "target_agent": AgentType.AUDIO_GENERATOR,
+                "standby_agents": [],
+                "replan_count": 1,
+            },
+            "decision_ack": {},
+        }
+
+    agent._evaluate_runtime_boundary_cycle = _runtime_cycle
+    result = asyncio.run(
+        agent._finalize_successful_agent_runtime_boundary(
+            workflow_state_id="wf-empty-standby",
+            task_id="task-empty-standby",
+            current_agent=AgentType.VIDEO_GENERATOR,
+            agent_result=_make_agent_result(
+                {"success": True},
+                report=_make_explicit_report(
+                    boundary_event="scene_video_completed",
+                    gate_triggers=["workflow_video_audio_delivery"],
+                ),
+            ),
+            normalized_report=_make_explicit_report(
+                boundary_event="scene_video_completed",
+                gate_triggers=["workflow_video_audio_delivery"],
+            ),
+            agent_output={"success": True},
+            audio_contract={},
+            candidate_agents=[AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR],
+            standby_agents=[AgentType.AUDIO_GENERATOR],
+            replan_count=0,
+            max_replans=1,
+            current_index=0,
+            execution_queue=[AgentType.VIDEO_GENERATOR, AgentType.AUDIO_GENERATOR],
+            task_specs={
+                AgentType.VIDEO_GENERATOR: {"run": True, "order": 0},
+                AgentType.AUDIO_GENERATOR: {"run": False, "order": 1},
+            },
+            conditional_task_specs={},
+            runtime_session_id=None,
+            runtime_node_key=None,
+            attempt_id=None,
+            lease_token=None,
+            attempt_trigger_reason="initial",
+            script_trigger_reason="initial",
+        )
+    )
+
+    assert result.standby_agents == ()
+    assert result.replan_count == 1
 
 
 @pytest.mark.parametrize(
@@ -1214,6 +1621,34 @@ def test_orchestrator_main_loop_fails_fast_when_report_field_malformed(monkeypat
     assert runtime_calls["llm"] == []
     assert runtime_calls["apply"] == []
     assert state_calls["trace"] == []
+
+
+def test_orchestrator_video_retry_runs_the_same_runtime_gate_cycle(monkeypatch):
+    retry_output = {
+        "success": True,
+        "orchestration_report": _make_explicit_report(
+            boundary_event="scene_video_completed",
+            gate_triggers=["workflow_video_audio_delivery"],
+            artifacts=[{"kind": "shared_fact", "ref": "scene_outputs.video"}],
+        ),
+    }
+    agent, task, runtime_calls, state_calls = _build_main_loop_runtime_harness(
+        monkeypatch,
+        gate_triggers=[],
+        video_outputs=[RuntimeError("temporary video failure"), retry_output],
+        retry_failed_step=True,
+    )
+
+    result = asyncio.run(_run_main_loop(agent, task))
+
+    assert result["status"] == "completed"
+    assert runtime_calls["open"][0]["current_agent"] == AgentType.VIDEO_GENERATOR
+    assert runtime_calls["open"][0]["report"]["gate_triggers"] == ["workflow_video_audio_delivery"]
+    assert len(runtime_calls["llm"]) == 1
+    assert len(runtime_calls["apply"]) == 1
+    assert len(state_calls["trace"]) == 1
+    assert agent.agents[AgentType.VIDEO_GENERATOR]._outputs == []
+    assert agent.agents[AgentType.AUDIO_GENERATOR]._outputs == []
 
 
 def test_orchestrator_main_loop_aborts_workflow_on_runtime_abort_decision(monkeypatch):
@@ -1665,12 +2100,13 @@ def test_llm_task_decomposition_fails_fast_when_expected_agent_missing(monkeypat
             {
                 "agents": [
                     {
-                        "agent": "VIDEO_GENERATOR",
+                        "agent": AgentType.VIDEO_GENERATOR.value,
                         "run": True,
                         "mission": "generate scene video segments",
                         "deliverable": "scene video clips",
                         "constraints": [],
                         "order": 0,
+                        "runtime_hints": {},
                     }
                 ],
             }
@@ -1701,20 +2137,22 @@ def test_llm_task_decomposition_rejects_non_candidate_agent_spec(monkeypatch):
             {
                 "agents": [
                     {
-                        "agent": "VIDEO_GENERATOR",
+                        "agent": AgentType.VIDEO_GENERATOR.value,
                         "run": True,
                         "mission": "generate scene video segments",
                         "deliverable": "scene video clips",
                         "constraints": [],
                         "order": 0,
+                        "runtime_hints": {},
                     },
                     {
-                        "agent": "VOICE_SYNTHESIZER",
+                        "agent": AgentType.VOICE_SYNTHESIZER.value,
                         "run": False,
                         "mission": "produce narration",
                         "deliverable": "voice track",
                         "constraints": [],
                         "order": 1,
+                        "runtime_hints": {},
                     },
                 ],
             }
@@ -1734,6 +2172,41 @@ def test_llm_task_decomposition_rejects_non_candidate_agent_spec(monkeypatch):
         )
 
 
+def test_llm_task_decomposition_rejects_task_spec_type_coercion(monkeypatch):
+    agent = object.__new__(OrchestratorAgent)
+    agent._memory_services = SimpleNamespace(short_term=object())
+    agent.logger = logging.getLogger("test.orchestrator.decompose.types")
+    agent.prompt_manager = get_prompt_manager()
+    agent.get_system_instructions = lambda: {"primary_role": "工作流编排器"}
+    agent.get_llm = lambda role: SimpleNamespace(
+        chat_completion=_async_return_json(
+            {
+                "agents": [
+                    {
+                        "agent": AgentType.VIDEO_GENERATOR.value,
+                        "run": True,
+                        "mission": {"text": "generate scene video segments"},
+                        "deliverable": "scene video clips",
+                        "constraints": [],
+                        "order": 0,
+                        "runtime_hints": {},
+                    }
+                ],
+                "conditional_tasks": [],
+            }
+        )
+    )
+
+    with pytest.raises(AgentError, match="continuation_spec_field_type_invalid"):
+        asyncio.run(
+            agent._llm_decompose_tasks(
+                {"user_prompt": "make a short video"},
+                "wf-invalid-task-spec-type",
+                candidate_agents=[AgentType.VIDEO_GENERATOR],
+            )
+        )
+
+
 def test_llm_task_decomposition_preserves_runtime_hints(monkeypatch):
     agent = object.__new__(OrchestratorAgent)
     agent._memory_services = SimpleNamespace(short_term=object())
@@ -1745,7 +2218,7 @@ def test_llm_task_decomposition_preserves_runtime_hints(monkeypatch):
             {
                 "agents": [
                     {
-                        "agent": "VIDEO_GENERATOR",
+                        "agent": AgentType.VIDEO_GENERATOR.value,
                         "run": True,
                         "mission": "generate native-audio scene videos",
                         "deliverable": "scene video clips with native audio",
@@ -1754,7 +2227,7 @@ def test_llm_task_decomposition_preserves_runtime_hints(monkeypatch):
                         "runtime_hints": {"generate_audio": True},
                     },
                     {
-                        "agent": "VIDEO_COMPOSER",
+                        "agent": AgentType.VIDEO_COMPOSER.value,
                         "run": False,
                         "mission": "compose final video when activated",
                         "deliverable": "final composed video",
@@ -1766,7 +2239,7 @@ def test_llm_task_decomposition_preserves_runtime_hints(monkeypatch):
                 "conditional_tasks": [
                     {
                         "task_id": "bgm_mix",
-                        "agent": "VIDEO_COMPOSER",
+                        "agent": AgentType.VIDEO_COMPOSER.value,
                         "mission": "mix background music into the composed video",
                         "deliverable": "bgm-mixed final video",
                         "constraints": [],

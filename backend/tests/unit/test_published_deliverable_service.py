@@ -24,7 +24,11 @@ from app.domain import (
 )
 from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task, WorkflowNodeState, WorkflowPublishedDeliverable
-from app.services.orchestration_state_adapter import OrchestrationStateAdapter
+from app.services.orchestration_state_adapter import (
+    ContinuationCheckpointContractError,
+    ContinuationCheckpointContractReason,
+    OrchestrationStateAdapter,
+)
 from app.services.published_deliverable_adapter import build_script_deliverable_payload
 from app.services.published_deliverable_service import (
     PublishedDeliverableContractError,
@@ -287,7 +291,7 @@ def test_published_deliverable_collection_rejects_malformed_ref():
 
 
 def test_continuation_checkpoint_rejects_unknown_task_spec_keys():
-    with pytest.raises(ValueError, match="continuation_spec_unknown_keys: extra"):
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
             task_specs={AgentType.SCRIPT_WRITER: {"run": True, "extra": "discarded"}},
             conditional_task_specs={},
@@ -297,17 +301,23 @@ def test_continuation_checkpoint_rejects_unknown_task_spec_keys():
             attempt_id=1,
             decision_id=None,
         )
+    assert exc_info.value.reason_code is ContinuationCheckpointContractReason.SPEC_UNKNOWN_KEYS
+    assert exc_info.value.message == "extra"
 
 
 def test_continuation_checkpoint_rejects_unknown_checkpoint_keys():
     checkpoint = _build_continuation_checkpoint()
     checkpoint["extra"] = "discarded"
 
-    with pytest.raises(ValueError, match="continuation_checkpoint_unknown_keys: extra"):
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.validate_continuation_checkpoint(
             checkpoint,
             require_decision_id=False,
         )
+    assert (
+        exc_info.value.reason_code is ContinuationCheckpointContractReason.CHECKPOINT_UNKNOWN_KEYS
+    )
+    assert exc_info.value.message == "extra"
 
 
 def test_publish_script_deliverable_persists_payload_without_direct_wm_projection(

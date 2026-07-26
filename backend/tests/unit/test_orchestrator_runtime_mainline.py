@@ -32,6 +32,7 @@ from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task, WorkflowNodeAttempt, WorkflowSession
 from app.services.agent_execution_boundary import build_agent_execution_request
 from app.services.context_assembler import ContextContractAssembler
+from app.services.orchestration_protocol import OrchestrationProtocol
 from app.services.orchestration_runtime_resume_bootstrap_facade import (
     OrchestrationRuntimeResumeBootstrapError,
     OrchestrationRuntimeResumeBootstrapFacade,
@@ -409,6 +410,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
+    agent._orchestration_protocol = OrchestrationProtocol()
     agent._context_contract_assembler = SimpleNamespace(
         assemble_agent_context=lambda **kwargs: {},
         build_script_review_boundary_draft=_fake_script_review_boundary,
@@ -556,6 +558,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     agent._wm_cache = None
     agent._last_audio_route_payload = {}
     agent._orchestration_state = OrchestrationStateAdapter(memory_services=memory_services)
+    agent._orchestration_protocol = OrchestrationProtocol()
     agent._context_contract_assembler = SimpleNamespace(
         assemble_agent_context=lambda **kwargs: {},
         build_script_review_boundary_draft=_fake_script_review_boundary,
@@ -732,6 +735,58 @@ def test_orchestrator_mainline_opens_script_gate_and_stops_before_post_script(mo
         assert runtime_view["active_gate"]["gate_name"] == "script_review"
         assert task_snapshot["status"] == TaskStatus.IN_PROGRESS.value
         assert len(call_log["concept_planner"]) == 1
+        assert len(call_log["script_writer"]) == 1
+        assert call_log["image_generator"] == []
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_rejects_missing_script_report_before_opening_gate(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent.agents[AgentType.SCRIPT_WRITER] = _FakeAgent(
+            "script_writer",
+            {
+                "scenes_generated": 1,
+                "total_scenes": 1,
+                "script_results": {"scripts": {"1": {"script_text": "Scene 1 unreported script"}}},
+            },
+            call_log["script_writer"],
+        )
+        task = _create_task(sync_db)
+        session = _create_runtime_session(sync_db, task)
+
+        with pytest.raises(
+            AgentError,
+            match="Subagent script_writer must return explicit orchestration_report",
+        ):
+            asyncio.run(
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
+            )
+
+        runtime_view = _load_runtime_view_from_fresh_session(SessionLocal, task.id)
+        nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
+        script_attempt = _load_runtime_attempt_snapshot_from_fresh_session(
+            SessionLocal,
+            session.session_id,
+            runtime_view["current_attempt_id"],
+        )
+
+        assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
+        assert runtime_view["active_gate"] is None
+        assert nodes_by_key["script"]["status"] == WorkflowNodeStatus.FAILED.value
+        assert script_attempt["status"] == WorkflowAttemptStatus.FAILED.value
+        script_diagnostic = next(
+            item
+            for item in (nodes_by_key["script"]["diagnostics"] or [])
+            if item.get("code") == "script_stage_failed"
+        )
+        assert script_diagnostic["reason_code"] == "agent_contract_orchestration_report_missing"
         assert len(call_log["script_writer"]) == 1
         assert call_log["image_generator"] == []
     finally:
@@ -1144,7 +1199,7 @@ def test_orchestrator_mainline_fails_when_execution_host_keepalive_is_unavailabl
         engine.dispose()
 
 
-def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failure(monkeypatch):
+def test_orchestrator_mainline_fails_active_attempt_when_runtime_decision_fails(monkeypatch):
     engine, SessionLocal = _build_sync_db()
     sync_db = SessionLocal()
     try:
@@ -1189,9 +1244,9 @@ def test_orchestrator_mainline_preserves_post_completion_runtime_decision_failur
         assert task_snapshot["status"] == TaskStatus.FAILED.value
         assert node["status"] == WorkflowNodeStatus.FAILED.value
         assert stage_diagnostic["message"] == "Runtime replan missing action"
-        assert stage_diagnostic["state"] == "post_completion_failure"
-        assert stage_diagnostic["reason_code"] == "post_completion_control_plane_failure"
-        assert attempt_snapshot["status"] == WorkflowAttemptStatus.SUCCEEDED.value
+        assert "state" not in stage_diagnostic
+        assert "reason_code" not in stage_diagnostic
+        assert attempt_snapshot["status"] == WorkflowAttemptStatus.FAILED.value
         assert attempt_snapshot["lease_token"] in (None, "")
     finally:
         sync_db.close()
@@ -1338,9 +1393,11 @@ def test_orchestrator_planning_prompts_do_not_expose_workflow_state_id(monkeypat
         AgentType.VIDEO_COMPOSER: object(),
     }
     captured_user_messages = []
+    captured_kwargs = []
 
     async def _capture_chat_completion(*, messages, **kwargs):
         captured_user_messages.append(messages[1]["content"])
+        captured_kwargs.append(dict(kwargs))
         if len(captured_user_messages) == 1:
             return {
                 "content": json.dumps(
@@ -1412,6 +1469,10 @@ def test_orchestrator_planning_prompts_do_not_expose_workflow_state_id(monkeypat
     assert selected == [AgentType.VIDEO_GENERATOR, AgentType.VIDEO_COMPOSER]
     assert task_specs[AgentType.VIDEO_GENERATOR]["runtime_hints"] == {"generate_audio": True}
     assert len(captured_user_messages) == 2
+    assert [call["response_format"] for call in captured_kwargs] == [
+        {"type": "json_object"},
+        {"type": "json_object"},
+    ]
     rendered_planning_text = "\n".join(captured_user_messages)
     assert "workflow_state_id" not in rendered_planning_text
     assert workflow_id not in rendered_planning_text
@@ -1837,6 +1898,17 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
         agent._should_retry_step = _async_return(True)
+        boundary_calls = []
+
+        async def _record_runtime_boundary(**kwargs):
+            boundary_calls.append(dict(kwargs))
+            return {
+                "runtime_decision": {"action": "continue", "reason": "none"},
+                "apply_result": {},
+                "decision_ack": {},
+            }
+
+        agent._evaluate_runtime_boundary_cycle = _record_runtime_boundary
         agent.agents[AgentType.SCRIPT_WRITER] = _FlakyAgent(
             "script_writer",
             first_error=RuntimeError("temporary timeout"),
@@ -1868,6 +1940,142 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
         assert len(call_log["concept_planner"]) == 1
         assert len(call_log["script_writer"]) == 2
         assert call_log["image_generator"] == []
+        assert [call["current_agent"] for call in boundary_calls] == [
+            AgentType.CONCEPT_PLANNER,
+            AgentType.SCRIPT_WRITER,
+        ]
+        assert (
+            boundary_calls[-1]["agent_result"]
+            .require_orchestration_report()
+            .to_dict()["boundary_event"]
+            == "scene_script_completed"
+        )
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_malformed_retry_report_fails_retry_attempt(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._should_retry_step = _async_return(True)
+        malformed_report = _fake_report(
+            "concept_plan_completed",
+            "project.concept_plan",
+        )
+        malformed_report["gate_triggers"] = "not-a-list"
+        agent.agents[AgentType.CONCEPT_PLANNER] = _FlakyAgent(
+            "concept_planner",
+            first_error=RuntimeError("temporary concept failure"),
+            success_output={
+                "concept_plan": {"scenes": [{"scene_number": 1}]},
+                "orchestration_report": malformed_report,
+            },
+            calls=call_log["concept_planner"],
+        )
+        task = _create_task(sync_db)
+        session = _create_runtime_session(sync_db, task)
+
+        with pytest.raises(
+            AgentError,
+            match="orchestration_report field gate_triggers must be list",
+        ):
+            asyncio.run(
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
+            )
+
+        inspect_db = SessionLocal()
+        try:
+            attempts = (
+                inspect_db.query(WorkflowNodeAttempt)
+                .filter(WorkflowNodeAttempt.session_id == session.session_id)
+                .order_by(WorkflowNodeAttempt.attempt_no.asc())
+                .all()
+            )
+            runtime_model = RuntimeReadModelService(
+                SqlAlchemyRuntimeAttemptStore(inspect_db)
+            ).load_for_task(str(task.task_id))
+            assert runtime_model is not None
+            runtime_view = RuntimeReadModelPresenter.to_payload(runtime_model).to_dict()
+            assert [attempt.status for attempt in attempts] == [
+                WorkflowAttemptStatus.FAILED.value,
+                WorkflowAttemptStatus.FAILED.value,
+            ]
+            assert runtime_view["status"] == WorkflowSessionStatus.FAILED.value
+            assert runtime_view["active_gate"] is None
+        finally:
+            inspect_db.close()
+
+        assert len(call_log["concept_planner"]) == 2
+        assert call_log["script_writer"] == []
+    finally:
+        sync_db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def test_orchestrator_mainline_retry_input_failure_fails_retry_attempt(monkeypatch):
+    engine, SessionLocal = _build_sync_db()
+    sync_db = SessionLocal()
+    try:
+        call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
+        agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
+        agent._should_retry_step = _async_return(True)
+        agent.agents[AgentType.CONCEPT_PLANNER] = _FlakyAgent(
+            "concept_planner",
+            first_error=RuntimeError("temporary concept failure"),
+            success_output={
+                "concept_plan": {"scenes": [{"scene_number": 1}]},
+                "orchestration_report": _fake_report(
+                    "concept_plan_completed",
+                    "project.concept_plan",
+                ),
+            },
+            calls=call_log["concept_planner"],
+        )
+        original_prepare = agent._prepare_scheduled_agent_input
+        prepare_calls = []
+
+        async def _prepare_with_retry_failure(**kwargs):
+            prepare_calls.append(kwargs["agent_type"])
+            if len(prepare_calls) == 2:
+                raise AgentError("retry input contract unavailable")
+            return await original_prepare(**kwargs)
+
+        agent._prepare_scheduled_agent_input = _prepare_with_retry_failure
+        task = _create_task(sync_db)
+        session = _create_runtime_session(sync_db, task)
+
+        with pytest.raises(AgentError, match="retry input contract unavailable"):
+            asyncio.run(
+                agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
+            )
+
+        inspect_db = SessionLocal()
+        try:
+            attempts = (
+                inspect_db.query(WorkflowNodeAttempt)
+                .filter(WorkflowNodeAttempt.session_id == session.session_id)
+                .order_by(WorkflowNodeAttempt.attempt_no.asc())
+                .all()
+            )
+            assert [attempt.status for attempt in attempts] == [
+                WorkflowAttemptStatus.FAILED.value,
+                WorkflowAttemptStatus.FAILED.value,
+            ]
+        finally:
+            inspect_db.close()
+
+        assert prepare_calls == [
+            AgentType.CONCEPT_PLANNER,
+            AgentType.CONCEPT_PLANNER,
+        ]
+        assert len(call_log["concept_planner"]) == 1
+        assert call_log["script_writer"] == []
     finally:
         sync_db.close()
         Base.metadata.drop_all(bind=engine)

@@ -12,7 +12,10 @@ from ..domain import (
     TaskStatus,
     WorkflowNodeStatus,
 )
-from .orchestration_state_adapter import OrchestrationStateAdapter
+from .orchestration_state_adapter import (
+    ContinuationCheckpointContractError,
+    OrchestrationStateAdapter,
+)
 from .published_deliverable_service import (
     clear_published_deliverable_ref,
     set_published_deliverable_ref,
@@ -94,10 +97,20 @@ class ScriptGateDecisionControlPlane:
                 operation="submit_script_gate_decision",
                 message="script gate continuation checkpoint is missing",
             )
-        checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-            attempt.continuation_checkpoint.to_dict(),
-            require_decision_id=False,
-        )
+        try:
+            checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
+                attempt.continuation_checkpoint.to_dict(),
+                require_decision_id=False,
+            )
+        except ContinuationCheckpointContractError as exc:
+            raise RuntimeStoreError(
+                reason_code=RuntimeStoreReason.INTEGRITY_ERROR,
+                operation="submit_script_gate_decision",
+                message=(
+                    "script gate continuation checkpoint is invalid "
+                    f"reason_code={exc.reason_code.value}: {exc.message}"
+                ),
+            ) from exc
         checkpoint["decision_id"] = decision.decision_id
 
         session_payload = session.input_payload.to_dict()
