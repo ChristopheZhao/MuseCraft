@@ -65,8 +65,9 @@
 
 ## Remaining Gate
 
-- The consolidated A3/A4/A5 worktree remains intentionally uncommitted.
-- No commit or push is authorized by this checkpoint.
+- The correction is committed locally as `4385e22`, `5660f4e`, `048a338`, and
+  `ceffacd`; the tracked worktree is clean.
+- No push was performed.
 - Hosted `release-contracts`, `mas-runtime`, `backend-boundaries`, and
-  `postgres-runtime-contracts` evidence remains pending an authorized commit/push.
+  `postgres-runtime-contracts` evidence remains pending an authorized push.
 - PLAN-068 therefore remains `in_progress`.

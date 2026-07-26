@@ -3096,7 +3096,7 @@
       "file_path": "docs/plans/active/PLAN-20260718-068.md",
       "confirmed_by_user": true,
       "created_at": "2026-07-18T06:47:35Z",
-      "updated_at": "2026-07-26T10:03:28+08:00",
+      "updated_at": "2026-07-26T10:22:53+08:00",
       "archived_at": null,
       "notes": [
         {
@@ -3165,7 +3165,11 @@
         },
         {
           "at": "2026-07-26T10:03:28+08:00",
-          "text": "Gate A5 is locally green: report status is the sole orchestration outcome, authoritative publication follows runtime acceptance, task decomposition and continuation share one exact-type task-spec parser, and scene acceptance uses one exact-type receipt parser. Evidence: focused 147 passed; MAS runtime 137 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 613 passed with 2 known environment deselections. PLAN-068 remains in_progress because the consolidated worktree is intentionally uncommitted and hosted CI still requires authorized commit/push."
+          "text": "Gate A5 is locally green: report status is the sole orchestration outcome, authoritative publication follows runtime acceptance, task decomposition and continuation share one exact-type task-spec parser, and scene acceptance uses one exact-type receipt parser. Evidence: focused 147 passed; MAS runtime 137 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 613 passed with 2 known environment deselections."
+        },
+        {
+          "at": "2026-07-26T10:22:53+08:00",
+          "text": "The reviewed A3/A4/A5 correction was committed locally as project CAS 4385e22, scene receipt/read-model 5660f4e, orchestration thin contracts 048a338, and Gate A5 governance ceffacd. The tracked worktree is clean and no push was performed. PLAN-068 remains in_progress pending authorized push and hosted CI."
         }
       ]
     }
