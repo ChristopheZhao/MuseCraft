@@ -2,6 +2,7 @@ import logging
 
 import pytest
 
+from app.agents.utils.artifacts import issue_scene_output_acceptance_receipts
 from app.agents.utils.memory_helpers import ensure_mas_working_memory
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.video_generator import VideoGeneratorAgent
@@ -20,6 +21,28 @@ def _make_bare_video_generator_agent():
     agent._memory_services = build_memory_services()
     agent.logger = logging.getLogger("test.video_generator.progress")
     return agent
+
+
+def _video_record(scene_number, *, workflow_state_id, path="", url=""):
+    artifact = {
+        "success": True,
+        "scene_number": scene_number,
+        "video_path": path,
+        "video_url": url,
+    }
+    if path:
+        artifact["metadata"] = {"storage": {"status": "persisted"}}
+    artifacts, _receipts = issue_scene_output_acceptance_receipts(
+        kind="video",
+        artifacts=[artifact],
+        workflow_state_id=workflow_state_id,
+    )
+    artifacts[0]["acceptance_receipt"]["accepted_at"] = (
+        f"2026-07-25T00:00:0{scene_number}+00:00"
+        if artifacts[0]["acceptance_receipt"]["status"] == "accepted"
+        else ""
+    )
+    return artifacts[0]
 
 
 def test_progress_read_model_ignores_helper_only_success(monkeypatch):
@@ -75,12 +98,20 @@ def test_progress_read_model_uses_accepted_scene_outputs_with_provenance(monkeyp
     services = build_memory_services()
     shared = ensure_mas_working_memory("wf-video-accepted", service=services.short_term)
     shared.put(
-            "scene_outputs.video",
-            {
-                1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-                2: {"scene_number": 2, "video_url": "https://example.com/scene-2.mp4"},
-            },
-        )
+        "scene_outputs.video",
+        {
+            1: _video_record(
+                1,
+                workflow_state_id="wf-video-accepted",
+                path="/tmp/scene-1.mp4",
+            ),
+            2: _video_record(
+                2,
+                workflow_state_id="wf-video-accepted",
+                url="https://example.com/scene-2.mp4",
+            ),
+        },
+    )
 
     monkeypatch.setattr(
         "app.services.scene_info_reference_service.load_scene_info_payload",
@@ -125,11 +156,11 @@ def test_progress_read_model_uses_accepted_scene_outputs_with_provenance(monkeyp
     assert progress["successful_scene_numbers"] == [1]
     assert progress["remaining_scene_numbers"] == [2]
     assert progress["derived_from"] == ["scene_outputs.video"]
-    assert progress["last_receipt_watermark"] == "scene_outputs.video.1"
+    assert progress["last_receipt_watermark"] == "accepted:scene=1@2026-07-25T00:00:01+00:00"
     assert progress["max_staleness_seconds"] > 0
     diagnostics = ctx["plan_context_diagnostics"]["progress_read_model"]
     assert diagnostics["reason"] == "video_scene_outputs_not_accepted"
-    assert "scene=2:missing_local_path" in diagnostics["detail"]
+    assert "scene=2:acceptance_status_not_accepted" in diagnostics["detail"]
 
 
 def test_video_generator_completion_gate_requires_accepted_delivery(monkeypatch):
@@ -169,8 +200,16 @@ def test_video_generator_completion_gate_accepts_when_all_deliveries_exist():
     shared.put(
         "scene_outputs.video",
         {
-            1: {"scene_number": 1, "video_path": "/tmp/scene-1.mp4"},
-            2: {"scene_number": 2, "video_path": "/tmp/scene-2.mp4"},
+            1: _video_record(
+                1,
+                workflow_state_id="wf-video-progress",
+                path="/tmp/scene-1.mp4",
+            ),
+            2: _video_record(
+                2,
+                workflow_state_id="wf-video-progress",
+                path="/tmp/scene-2.mp4",
+            ),
         },
     )
 

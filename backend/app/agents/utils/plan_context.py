@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-from copy import deepcopy
 
 try:
     from ...core.config import settings  # type: ignore
 except Exception:  # pragma: no cover - import fallback for tests
     settings = None  # type: ignore
 
-from .memory_helpers import get_mas_working_memory
 from .artifacts import evaluate_scene_output_acceptance
+from .memory_helpers import get_mas_working_memory
 
 if TYPE_CHECKING:
     from ..memory.short_term.service import WorkingMemoryService
@@ -125,26 +125,6 @@ def _build_receipt(
     return receipt
 
 
-def _build_delivery_receipt(
-    *,
-    scene_number: int,
-    surface: str,
-    accepted_at: Optional[str] = None,
-    iteration: Optional[int] = None,
-) -> Dict[str, Any]:
-    receipt: Dict[str, Any] = {
-        "scene_number": scene_number,
-        "status": "accepted",
-        "delivery_surface": surface,
-        "delivery_ref": f"{surface}.{scene_number}",
-    }
-    if iteration is not None:
-        receipt["iteration"] = iteration
-    if accepted_at:
-        receipt["accepted_at"] = accepted_at
-    return receipt
-
-
 def _extract_receipts_from_act_log(
     *,
     act_log: List[Dict[str, Any]],
@@ -206,7 +186,9 @@ def _extract_receipts_from_executed_calls(
     return receipts
 
 
-def _extract_execution_receipts(iteration_context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _extract_execution_receipts(
+    iteration_context: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     if not isinstance(iteration_context, dict):
         return []
     obs_records = iteration_context.get("obs_records")
@@ -340,25 +322,23 @@ def _extract_scene_output_delivery_receipts(
         scene_number = _coerce_int(item.get("scene_number"))
         if scene_number is None:
             continue
-        receipt = _build_delivery_receipt(
-            scene_number=scene_number,
-            surface=key,
-        )
-        accepted_at = str(item.get("accepted_at") or "").strip()
-        if accepted_at:
-            receipt["accepted_at"] = accepted_at
+        receipt = dict(item)
+        receipt["scene_number"] = scene_number
         receipts.append(receipt)
     receipts.sort(key=lambda item: item.get("scene_number") or 0)
     diagnostic = None
-    if kind == "video" and contract.get("rejected_scene_outputs"):
+    if contract.get("rejected_scene_outputs"):
         reason_aliases = {
             "scene_output_missing_local_path": "missing_local_path",
             "scene_output_storage_failed": "storage_failed",
+            "scene_output_storage_not_persisted": "storage_not_persisted",
             "scene_output_artifact_ref_missing": "missing_artifact_ref",
             "scene_output_status_failed": "status_failed",
             "scene_output_scene_number_missing": "scene_number_missing",
+            "scene_output_acceptance_receipt_missing": "acceptance_receipt_missing",
+            "scene_output_acceptance_status_not_accepted": ("acceptance_status_not_accepted"),
         }
-        skipped_video_reasons: List[str] = []
+        skipped_reasons: List[str] = []
         for item in contract.get("rejected_scene_outputs") or []:
             if not isinstance(item, dict):
                 continue
@@ -367,10 +347,10 @@ def _extract_scene_output_delivery_receipts(
                 str(item.get("reason_code") or ""),
                 str(item.get("reason_code") or "not_accepted"),
             )
-            skipped_video_reasons.append(f"scene={scene_number}:{alias}")
+            skipped_reasons.append(f"scene={scene_number}:{alias}")
         diagnostic = _build_progress_diagnostic(
-            reason="video_scene_outputs_not_accepted",
-            detail=",".join(skipped_video_reasons[:5]),
+            reason=f"{kind}_scene_outputs_not_accepted",
+            detail=",".join(skipped_reasons[:5]),
         )
     return receipts, diagnostic
 
@@ -413,7 +393,10 @@ def _build_progress_read_model(
     derived_from: List[str] = []
 
     authoritative_receipts: List[Dict[str, Any]] = []
-    if progress_kind and workflow_state_id and service is not None:
+    authoritative_source_selected = bool(
+        progress_kind and workflow_state_id and service is not None
+    )
+    if authoritative_source_selected:
         authoritative_receipts, source_diagnostic = _extract_scene_output_delivery_receipts(
             workflow_state_id=str(workflow_state_id),
             service=service,
@@ -424,10 +407,14 @@ def _build_progress_read_model(
             for receipt in authoritative_receipts
             if _coerce_int(receipt.get("scene_number")) in planned_set
         ]
-    receipts = authoritative_receipts or delivery_receipts
-    if authoritative_receipts and progress_kind:
+    receipts = authoritative_receipts if authoritative_source_selected else delivery_receipts
+    if (
+        authoritative_source_selected
+        and progress_kind
+        and (authoritative_receipts or source_diagnostic)
+    ):
         derived_from.append(f"scene_outputs.{progress_kind}")
-    elif delivery_receipts:
+    elif not authoritative_source_selected and delivery_receipts:
         derived_from.append("obs_records.delivery_receipts")
     successful_scene_numbers = _sorted_unique(
         [
@@ -438,9 +425,7 @@ def _build_progress_read_model(
     )
     successful_set = set(successful_scene_numbers)
     remaining_scene_numbers = [
-        scene_number
-        for scene_number in planned_scene_numbers
-        if scene_number not in successful_set
+        scene_number for scene_number in planned_scene_numbers if scene_number not in successful_set
     ]
     return (
         {
@@ -493,7 +478,11 @@ def build_plan_context(
                 if progress_diagnostic:
                     diagnostics["progress_read_model"] = progress_diagnostic
             execution_contract = input_data.get("execution_contract") or {}
-            if include_execution_contract and isinstance(execution_contract, dict) and execution_contract:
+            if (
+                include_execution_contract
+                and isinstance(execution_contract, dict)
+                and execution_contract
+            ):
                 ctx["execution_contract"] = deepcopy(execution_contract)
     except Exception as exc:
         diagnostics["plan_context"] = _build_progress_diagnostic(

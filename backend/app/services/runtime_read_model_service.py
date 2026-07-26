@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..domain import (
@@ -20,22 +21,41 @@ from ..domain import (
     WorkflowGateStatus,
     WorkflowSessionStatus,
 )
-from .orchestration_state_adapter import OrchestrationStateAdapter
+from .orchestration_state_adapter import (
+    ContinuationCheckpointContractError,
+    OrchestrationStateAdapter,
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _payload(state: str, can_resume: bool, reason_code: str) -> JsonObjectPayload:
+def _payload(
+    state: str,
+    can_resume: bool,
+    reason_code: str,
+    *,
+    diagnostic_reason_code: str | None = None,
+) -> JsonObjectPayload:
+    payload = {
+        "state": state,
+        "can_resume": can_resume,
+        "reason_code": reason_code,
+    }
+    if diagnostic_reason_code:
+        payload["diagnostic_reason_code"] = diagnostic_reason_code
     return JsonObjectPayload.from_mapping(
-        {
-            "state": state,
-            "can_resume": can_resume,
-            "reason_code": reason_code,
-        },
+        payload,
         field_path="runtime_read_model.resume_control",
     )
+
+
+@dataclass(frozen=True)
+class _ContinuationValidation:
+    valid: bool
+    reason_code: str
+    diagnostic_reason_code: str | None = None
 
 
 class RuntimeReadModelService(RuntimeReadModelQuery):
@@ -116,24 +136,36 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
             return _payload("view_only_running", False, "active_execution_lease")
 
         if session.status is WorkflowSessionStatus.RESUMING:
-            if not self._continuation_is_valid(
+            validation = self._validate_continuation(
                 session,
                 attempt,
                 active_gate=active_gate,
                 latest_decision=latest_decision,
                 allow_gate_decision=True,
-            ):
-                return _payload("resume_blocked", False, "missing_continuation_checkpoint")
+            )
+            if not validation.valid:
+                return _payload(
+                    "resume_blocked",
+                    False,
+                    validation.reason_code,
+                    diagnostic_reason_code=validation.diagnostic_reason_code,
+                )
             return _payload("view_only_running", False, "resume_scheduled")
 
-        if not self._continuation_is_valid(
+        validation = self._validate_continuation(
             session,
             attempt,
             active_gate=active_gate,
             latest_decision=latest_decision,
             allow_gate_decision=False,
-        ):
-            return _payload("resume_blocked", False, "missing_continuation_checkpoint")
+        )
+        if not validation.valid:
+            return _payload(
+                "resume_blocked",
+                False,
+                validation.reason_code,
+                diagnostic_reason_code=validation.diagnostic_reason_code,
+            )
         return _payload("resume_available", True, "checkpoint_available")
 
     def _lease_is_live(self, attempt: RuntimeAttemptRecord) -> bool:
@@ -144,7 +176,7 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         return expires_at.astimezone(timezone.utc) > self._clock().astimezone(timezone.utc)
 
-    def _continuation_is_valid(
+    def _validate_continuation(
         self,
         session: RuntimeSessionRecord,
         attempt: RuntimeAttemptRecord,
@@ -152,47 +184,107 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
         active_gate: RuntimeGateRecord | None,
         latest_decision: RuntimeGateDecisionRecord | None,
         allow_gate_decision: bool,
-    ) -> bool:
+    ) -> _ContinuationValidation:
         if session.current_node_key is None or session.current_attempt_id is None:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_runtime_anchor_missing",
+            )
         checkpoint_payload = attempt.continuation_checkpoint
+        if checkpoint_payload is None:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="missing_continuation_checkpoint",
+            )
         try:
             checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-                checkpoint_payload.to_dict() if checkpoint_payload is not None else None,
+                checkpoint_payload.to_dict(),
                 require_decision_id=False,
             )
-        except (TypeError, ValueError):
-            return False
+        except ContinuationCheckpointContractError as exc:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code=exc.reason_code.value,
+            )
         if str(checkpoint.get("node_key") or "").strip().lower() != session.current_node_key:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_node_mismatch",
+            )
         checkpoint_attempt_id = checkpoint.get("attempt_id")
         if type(checkpoint_attempt_id) is not int:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_attempt_type_invalid",
+            )
         if checkpoint_attempt_id != session.current_attempt_id:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_attempt_mismatch",
+            )
 
         anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
         if anchor_type == OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT:
-            return True
+            return _ContinuationValidation(
+                valid=True,
+                reason_code="checkpoint_available",
+            )
         if not allow_gate_decision:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_anchor_not_resumable",
+            )
         if anchor_type != OrchestrationStateAdapter.CONTINUATION_ANCHOR_GATE_DECISION:
-            return False
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_anchor_invalid",
+            )
         try:
             checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-                checkpoint_payload.to_dict() if checkpoint_payload is not None else None,
+                checkpoint_payload.to_dict(),
                 require_decision_id=True,
             )
-        except (TypeError, ValueError):
-            return False
+        except ContinuationCheckpointContractError as exc:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code=exc.reason_code.value,
+            )
         checkpoint_decision_id = checkpoint.get("decision_id")
         if type(checkpoint_decision_id) is not int:
-            return False
-        return bool(
-            active_gate is not None
-            and latest_decision is not None
-            and active_gate.attempt_id == session.current_attempt_id
-            and checkpoint_decision_id == latest_decision.decision_id
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_decision_type_invalid",
+            )
+        if active_gate is None or latest_decision is None:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_gate_binding_missing",
+            )
+        if active_gate.attempt_id != session.current_attempt_id:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_gate_attempt_mismatch",
+            )
+        if checkpoint_decision_id != latest_decision.decision_id:
+            return _ContinuationValidation(
+                valid=False,
+                reason_code="invalid_continuation_checkpoint",
+                diagnostic_reason_code="continuation_checkpoint_decision_mismatch",
+            )
+        return _ContinuationValidation(
+            valid=True,
+            reason_code="checkpoint_available",
         )
 
 

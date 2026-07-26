@@ -18,12 +18,15 @@ scene_outputs:
         source: prompt_text
       metadata:
         source: metadata
+      acceptance_receipt:
+        source: acceptance_receipt
     return_fields:
       - scene_number
       - image_url
       - image_path
       - prompt_text
       - metadata
+      - acceptance_receipt
 
   video:
     fields:
@@ -54,6 +57,9 @@ scene_outputs:
       metadata:
         source:
           - metadata
+      acceptance_receipt:
+        source:
+          - acceptance_receipt
     return_fields:
       - scene_number
       - video_url
@@ -61,6 +67,7 @@ scene_outputs:
       - duration_sec
       - prompt_text
       - metadata
+      - acceptance_receipt
   audio:
     fields:
       scene_number:
