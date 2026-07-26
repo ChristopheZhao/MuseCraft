@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -114,27 +114,35 @@ class SqlAlchemyProjectDefinitionStore:
 
     def remove(self, project_id: str, *, expected_version: int) -> None:
         normalized_id = str(project_id or "").strip()
-        row = self._session.execute(
-            select(ProjectWorkspace).where(ProjectWorkspace.project_id == normalized_id)
-        ).scalar_one_or_none()
-        if row is None:
-            raise ProjectDefinitionError(
-                reason_code=ProjectDefinitionReason.RECORD_NOT_FOUND,
-                operation="remove_project_definition",
-                project_id=normalized_id,
-                message=f"Project definition {normalized_id} was not found",
+        normalized_expected_version = int(expected_version)
+        result = self._session.execute(
+            delete(ProjectWorkspace).where(
+                ProjectWorkspace.project_id == normalized_id,
+                ProjectWorkspace.version == normalized_expected_version,
             )
-        if int(row.version) != int(expected_version):
+        )
+        if result.rowcount != 1:
+            observed_version = self._session.execute(
+                select(ProjectWorkspace.version).where(ProjectWorkspace.project_id == normalized_id)
+            ).scalar_one_or_none()
+            reason = (
+                ProjectDefinitionReason.RECORD_NOT_FOUND
+                if observed_version is None
+                else ProjectDefinitionReason.VERSION_CONFLICT
+            )
             raise ProjectDefinitionError(
-                reason_code=ProjectDefinitionReason.VERSION_CONFLICT,
+                reason_code=reason,
                 operation="remove_project_definition",
                 project_id=normalized_id,
                 message=(
-                    f"Project definition {normalized_id} version mismatch; "
-                    f"expected {expected_version}"
+                    f"Project definition {normalized_id} was not found"
+                    if reason is ProjectDefinitionReason.RECORD_NOT_FOUND
+                    else (
+                        f"Project definition {normalized_id} version mismatch; "
+                        f"expected {normalized_expected_version}"
+                    )
                 ),
             )
-        self._session.delete(row)
         self._session.flush()
 
     def list_records(self) -> Sequence[ProjectDefinitionRecord]:

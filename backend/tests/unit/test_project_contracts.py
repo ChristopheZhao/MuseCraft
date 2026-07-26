@@ -1,5 +1,6 @@
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import event
 
 from app.api.v1.endpoints.projects import (
     EpisodeGenerationRequest,
@@ -79,6 +80,53 @@ def test_same_version_commands_yield_one_commit_and_one_typed_conflict(
     observed = service.get(definition.project_id)
     assert observed.version == updated.version == 2
     assert observed.definition.story_plan.episodes[0].approved_script == "Approved v1"
+
+
+def test_project_remove_uses_atomic_expected_version_compare_and_delete(
+    project_state_store,
+):
+    service = _service(project_state_store)
+    definition, _episode = _definition("project-delete-cas")
+    created = service.create(definition)
+    updated = service.replace(definition, expected_version=created.version)
+    statements = []
+    engine = project_state_store.kw["bind"]
+
+    def _capture_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        statements.append(" ".join(str(statement).lower().split()))
+
+    event.listen(engine, "before_cursor_execute", _capture_statement)
+    try:
+        with pytest.raises(ProjectDefinitionError) as exc_info:
+            service.remove(
+                definition.project_id,
+                expected_version=created.version,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture_statement)
+
+    assert exc_info.value.reason_code is ProjectDefinitionReason.VERSION_CONFLICT
+    observed = service.get(definition.project_id)
+    assert observed.version == updated.version == 2
+    delete_statement = next(
+        statement
+        for statement in statements
+        if statement.startswith("delete from project_workspaces")
+    )
+    assert "project_workspaces.project_id =" in delete_statement
+    assert "project_workspaces.version =" in delete_statement
+
+    service.remove(definition.project_id, expected_version=updated.version)
+    with pytest.raises(ProjectDefinitionError) as missing:
+        service.get(definition.project_id)
+    assert missing.value.reason_code is ProjectDefinitionReason.RECORD_NOT_FOUND
 
 
 def test_project_creation_persists_definition_and_task_in_one_uow(project_state_store):
