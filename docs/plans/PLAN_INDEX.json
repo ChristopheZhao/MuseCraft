@@ -3096,7 +3096,7 @@
       "file_path": "docs/plans/active/PLAN-20260718-068.md",
       "confirmed_by_user": true,
       "created_at": "2026-07-18T06:47:35Z",
-      "updated_at": "2026-07-24T00:44:09+08:00",
+      "updated_at": "2026-07-26T10:03:28+08:00",
       "archived_at": null,
       "notes": [
         {
@@ -3142,6 +3142,30 @@
         {
           "at": "2026-07-24T00:44:09+08:00",
           "text": "Gate F is locally green: PostgreSQL runtime transaction tests, full unit/architecture regressions, PLAN-066, backend boundary CI files, and uv API/worker/beat health/shutdown smoke passed. PLAN-050 and release/CI claims are corrected, but PLAN-068 remains in_progress until an approved push produces green hosted CI results."
+        },
+        {
+          "at": "2026-07-25T14:46:14+08:00",
+          "text": "User approved Amendment A3 after review found live ScriptWriter/retry report-and-gate bypasses, consumer-synthesized scene acceptance, permissive continuation normalization with invalid-to-missing projection, and non-atomic project deletion. Execute only these bounded control-plane and contract corrections before hosted CI closure."
+        },
+        {
+          "at": "2026-07-25T16:08:16+08:00",
+          "text": "Gate A3 is locally green: success finalization is unified, image/video completion consumes producer-issued acceptance, continuation diagnostics are strict and typed, and project deletion is atomic compare-and-delete. Focused A3 passed 171, PLAN-066/MAS passed 132 with 18 deselected, and backend boundaries passed 62; PLAN-068 remains in_progress for approved commit/push and hosted CI."
+        },
+        {
+          "at": "2026-07-25T16:49:26+08:00",
+          "text": "Amendment A4 opened after expectation review invalidated Gate A3 closure for report/attempt success semantics, empty standby consumption, authoritative scene-output projection, canonical acceptance receipts, and continuation Agent identity. P0-K, P0-L, and P1-G are reopened; P0-M is added; P1-H/A3.4 remains complete. The dirty worktree is uncommitted partial evidence and must not be published before A4 validation."
+        },
+        {
+          "at": "2026-07-25T17:44:35+08:00",
+          "text": "Gate A4 local validation passed: failed/partial/contradictory reports fail before output or attempt success with typed reasons, empty standby is authoritative, scene progress cannot override producer acceptance, receipt status/timestamps are canonical, and continuation Agent identity matches its task owner. Evidence: focused 187 passed; PLAN-066/MAS 136 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 594 passed with 2 known environment deselections. PLAN-068 remains in_progress for review, authorized commit/push, and hosted CI."
+        },
+        {
+          "at": "2026-07-26T09:27:39+08:00",
+          "text": "Amendment A5 opened after review and user correction rejected the thick-validator direction. P0-K, P0-L, and P1-G are reopened around thin module-owned schemas, single parsing, one report-owned outcome, and post-control-plane authoritative publication; P0-N is added. Empty-standby consumption and project compare-and-delete remain accepted. Gate A4 local-pass evidence is historical only and the dirty worktree remains uncommitted."
+        },
+        {
+          "at": "2026-07-26T10:03:28+08:00",
+          "text": "Gate A5 is locally green: report status is the sole orchestration outcome, authoritative publication follows runtime acceptance, task decomposition and continuation share one exact-type task-spec parser, and scene acceptance uses one exact-type receipt parser. Evidence: focused 147 passed; MAS runtime 137 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 613 passed with 2 known environment deselections. PLAN-068 remains in_progress because the consolidated worktree is intentionally uncommitted and hosted CI still requires authorized commit/push."
         }
       ]
     }
