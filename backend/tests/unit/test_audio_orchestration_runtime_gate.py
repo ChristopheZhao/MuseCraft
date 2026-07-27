@@ -432,7 +432,7 @@ def test_scene_output_acceptance_rejects_unknown_receipt_keys():
     }
 
 
-def test_video_scene_acceptance_rejects_failed_storage_for_stale_path():
+def test_video_scene_acceptance_does_not_reconcile_post_receipt_storage_diagnostic():
     record = _scene_output_record(
         kind="video",
         scene_number=1,
@@ -453,12 +453,9 @@ def test_video_scene_acceptance_rejects_failed_storage_for_stale_path():
         expected_scene_numbers=[1],
     )
 
-    assert contract["accepted"] is False
-    assert contract["rejected_scene_outputs"][0] == {
-        "scene_number": 1,
-        "reason_code": "scene_output_storage_failed",
-        "detail": "artifact_missing_after_persist",
-    }
+    assert contract["accepted"] is True
+    assert contract["reason_code"] == "scene_output_accepted"
+    assert contract["rejected_scene_outputs"] == []
 
 
 def _make_gate_result(**facts):
@@ -1049,7 +1046,7 @@ def test_orchestration_protocol_prefers_explicit_subagent_report():
     assert "summary" not in report["reflection"]
 
 
-def test_orchestration_protocol_uses_explicit_report_status_as_single_outcome():
+def test_orchestration_protocol_does_not_forward_reflection_outcome_alias():
     protocol = OrchestrationProtocol()
     report = _make_explicit_report(
         boundary_event="scene_video_completed",
@@ -1068,7 +1065,7 @@ def test_orchestration_protocol_uses_explicit_report_status_as_single_outcome():
     )
 
     assert normalized["status"] == "completed"
-    assert normalized["reflection"]["completion_state"] == "partial"
+    assert "completion_state" not in normalized["reflection"]
 
 
 def test_orchestration_protocol_rejects_non_successful_report_status():
@@ -1158,6 +1155,175 @@ def test_agent_success_path_does_not_publish_before_runtime_boundary_succeeds():
         )
 
     assert "runtime boundary rejected" in str(exc_info.value)
+    assert workflow_results == {}
+    assert workflow_data == {}
+
+
+def test_agent_success_path_does_not_complete_attempt_when_publication_fails():
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.publication_before_completion")
+    agent._orchestration_protocol = OrchestrationProtocol()
+    agent._current_execution_id = lambda: "exec-publication-before-completion"
+
+    async def _runtime_cycle(**_kwargs):
+        return {
+            "runtime_decision": {},
+            "apply_result": {"status": "continue", "replan_count": 0},
+            "decision_ack": {},
+        }
+
+    completed_attempts = []
+    transition_port = SimpleNamespace(
+        complete_runtime_attempt=lambda **kwargs: completed_attempts.append(dict(kwargs))
+    )
+    agent._evaluate_runtime_boundary_cycle = _runtime_cycle
+    agent._get_orchestration_runtime_transition_facade = lambda: transition_port
+    agent._store_composer_outputs = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AgentError("authoritative publication failed")
+    )
+
+    workflow_results = {"before": {"kept": True}}
+    workflow_data = {"before": "kept"}
+    subagent = _StubWorkflowAgent(
+        "video_composer",
+        [
+            _make_agent_result(
+                {
+                    "final_video_path": "/tmp/final.mp4",
+                    "final_video_url": "/files/final.mp4",
+                },
+                report=_make_explicit_report(
+                    boundary_event="final_video_composed",
+                    gate_triggers=[],
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(AgentError, match="authoritative publication failed"):
+        asyncio.run(
+            agent._execute_agent_success_path(
+                agent=subagent,
+                request=AgentExecutionRequest(
+                    task=AgentTaskReference(
+                        task_id="task-publication-fails",
+                        task_type="video_composition",
+                    ),
+                    agent_type=AgentType.VIDEO_COMPOSER.value,
+                    input_data=JsonObjectPayload.empty(),
+                    workflow_state_id="wf-publication-fails",
+                ),
+                workflow_state_id="wf-publication-fails",
+                workflow_results=workflow_results,
+                workflow_data=workflow_data,
+                current_agent=AgentType.VIDEO_COMPOSER,
+                audio_contract={},
+                candidate_agents=[AgentType.VIDEO_COMPOSER],
+                standby_agents=[],
+                replan_count=0,
+                max_replans=1,
+                current_index=0,
+                execution_queue=[AgentType.VIDEO_COMPOSER],
+                task_specs={AgentType.VIDEO_COMPOSER: {"run": True, "order": 0}},
+                conditional_task_specs={},
+                runtime_session_id=7,
+                runtime_node_key=AgentType.VIDEO_COMPOSER.value,
+                attempt_id=11,
+                lease_token="lease-publication-fails",
+                attempt_trigger_reason="initial",
+                script_trigger_reason="initial",
+            )
+        )
+
+    assert completed_attempts == []
+    assert workflow_results == {"before": {"kept": True}}
+    assert workflow_data == {"before": "kept"}
+
+
+def test_agent_success_path_rolls_back_publication_when_attempt_completion_fails():
+    agent = object.__new__(OrchestratorAgent)
+    agent.logger = logging.getLogger("test.orchestrator.completion_rollback")
+    agent._orchestration_protocol = OrchestrationProtocol()
+    agent._current_execution_id = lambda: "exec-completion-rollback"
+
+    async def _runtime_cycle(**_kwargs):
+        return {
+            "runtime_decision": {},
+            "apply_result": {"status": "continue", "replan_count": 0},
+            "decision_ack": {},
+        }
+
+    publication_state = {"published": False, "rolled_back": False}
+
+    def _publish(*_args, **_kwargs):
+        publication_state["published"] = True
+
+        def _rollback():
+            publication_state["rolled_back"] = True
+            publication_state["published"] = False
+
+        return _rollback
+
+    def _reject_completion(**_kwargs):
+        raise AgentError("attempt completion rejected")
+
+    agent._evaluate_runtime_boundary_cycle = _runtime_cycle
+    agent._get_orchestration_runtime_transition_facade = lambda: SimpleNamespace(
+        complete_runtime_attempt=_reject_completion
+    )
+    agent._store_composer_outputs = _publish
+
+    workflow_results = {}
+    workflow_data = {}
+    subagent = _StubWorkflowAgent(
+        "video_composer",
+        [
+            _make_agent_result(
+                {"final_video_path": "/tmp/final.mp4"},
+                report=_make_explicit_report(
+                    boundary_event="final_video_composed",
+                    gate_triggers=[],
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(AgentError, match="attempt completion rejected"):
+        asyncio.run(
+            agent._execute_agent_success_path(
+                agent=subagent,
+                request=AgentExecutionRequest(
+                    task=AgentTaskReference(
+                        task_id="task-completion-rollback",
+                        task_type="video_composition",
+                    ),
+                    agent_type=AgentType.VIDEO_COMPOSER.value,
+                    input_data=JsonObjectPayload.empty(),
+                    workflow_state_id="wf-completion-rollback",
+                ),
+                workflow_state_id="wf-completion-rollback",
+                workflow_results=workflow_results,
+                workflow_data=workflow_data,
+                current_agent=AgentType.VIDEO_COMPOSER,
+                audio_contract={},
+                candidate_agents=[AgentType.VIDEO_COMPOSER],
+                standby_agents=[],
+                replan_count=0,
+                max_replans=1,
+                current_index=0,
+                execution_queue=[AgentType.VIDEO_COMPOSER],
+                task_specs={AgentType.VIDEO_COMPOSER: {"run": True, "order": 0}},
+                conditional_task_specs={},
+                runtime_session_id=8,
+                runtime_node_key=AgentType.VIDEO_COMPOSER.value,
+                attempt_id=12,
+                lease_token="lease-completion-rollback",
+                attempt_trigger_reason="initial",
+                script_trigger_reason="initial",
+            )
+        )
+
+    assert publication_state == {"published": False, "rolled_back": True}
     assert workflow_results == {}
     assert workflow_data == {}
 
@@ -2794,6 +2960,27 @@ def test_control_plane_apply_uses_conditional_task_spec_for_activation():
     assert target_spec["deliverable"] == "bgm-mixed final video"
     assert target_spec["runtime_hints"] == {"compose_mode": "bgm"}
     assert target_spec["conditional_task_id"] == "bgm_mix"
+
+
+def test_control_plane_does_not_coerce_conditional_task_agent_identity():
+    control_plane = OrchestrationControlPlane(
+        memory_services=SimpleNamespace(short_term=object()),
+        protocol=OrchestrationProtocol(),
+        runtime_controller=SimpleNamespace(),
+    )
+
+    with pytest.raises(OrchestrationControlPlaneError, match="Conditional task agent mismatch"):
+        control_plane._resolve_conditional_task_spec(
+            target_agent=AgentType.VIDEO_COMPOSER,
+            runtime_decision={"task_id": "bgm_mix"},
+            conditional_task_specs={
+                "bgm_mix": {
+                    "agent": " VIDEO_COMPOSER ",
+                    "mission": "mix background music",
+                    "deliverable": "mixed final video",
+                }
+            },
+        )
 
 
 def _async_return_json(payload):

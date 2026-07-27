@@ -6,9 +6,10 @@ import json
 import logging
 import os
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..core.config import settings
 from ..core.prompt_manager import get_prompt_manager
@@ -89,6 +90,7 @@ class _RuntimeSuccessBoundaryOutcome:
     standby_agents: Tuple[AgentType, ...]
     replan_count: int
     gate_response: Optional[Dict[str, Any]] = None
+    attempt_completion_required: bool = False
     attempt_completed: bool = False
 
 
@@ -380,12 +382,7 @@ class OrchestratorAgent(BaseAgent):
         task_spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
         if not isinstance(task_spec, dict):
             raise AgentError(f"Missing task_spec for scheduled agent: {agent_type.value}")
-        assignment = dict(task_spec)
-        assignment.setdefault("agent", agent_type.value)
-        assignment.setdefault("constraints", [])
-        assignment.setdefault("runtime_hints", {})
-        assignment.setdefault("run", True)
-        return assignment
+        return dict(task_spec)
 
     def _get_orchestration_state_adapter(self) -> OrchestrationStateAdapter:
         adapter = getattr(self, "_orchestration_state", None)
@@ -1606,49 +1603,79 @@ class OrchestratorAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
 
-    def _store_composer_outputs(self, workflow_id: str, agent_output: Dict[str, Any]) -> None:
+    def _store_composer_outputs(
+        self,
+        workflow_id: str,
+        agent_output: Dict[str, Any],
+    ) -> Callable[[], None]:
         wf_id = str(workflow_id or "")
         if not wf_id or not isinstance(agent_output, dict):
-            return
+            return lambda: None
         final_path = str(agent_output.get("final_video_path") or "").strip()
         final_url = str(agent_output.get("final_video_url") or "").strip()
         mix_receipt = agent_output.get("mix_receipt")
         if not (final_path or final_url or isinstance(mix_receipt, dict)):
-            return
-        try:
-            if final_path or final_url:
-                resolved_final_url = final_url or build_local_public_url(final_path)
-                seed_metadata = normalize_video_metadata(agent_output.get("metadata", {}))
-                probed_metadata = probe_local_video_metadata_sync(final_path) if final_path else {}
-                final_video_metadata = merge_video_metadata(
-                    seed_metadata,
-                    probed_metadata,
-                    overwrite_non_empty=True,
-                )
-                payload = {
-                    "path": final_path,
+            return lambda: None
+        facts: Dict[str, Any] = {}
+        if final_path or final_url:
+            resolved_final_url = final_url or build_local_public_url(final_path)
+            seed_metadata = normalize_video_metadata(agent_output.get("metadata", {}))
+            probed_metadata = probe_local_video_metadata_sync(final_path) if final_path else {}
+            final_video_metadata = merge_video_metadata(
+                seed_metadata,
+                probed_metadata,
+                overwrite_non_empty=True,
+            )
+            payload = {
+                "path": final_path,
+                "url": resolved_final_url,
+                "storage": {
+                    "provider": "local",
                     "url": resolved_final_url,
-                    "storage": {
-                        "provider": "local",
-                        "url": resolved_final_url,
-                        "skipped": True,
-                    },
-                }
-                if isinstance(final_video_metadata, dict) and final_video_metadata:
-                    payload["metadata"] = dict(final_video_metadata)
-                write_shared_fact(
-                    wf_id, "project.final_video", payload, service=self.short_term_service
-                )
-            if isinstance(mix_receipt, dict) and mix_receipt:
-                write_shared_fact(
-                    wf_id,
-                    "project.final_video_mix",
-                    dict(mix_receipt),
-                    service=self.short_term_service,
-                )
+                    "skipped": True,
+                },
+            }
+            if isinstance(final_video_metadata, dict) and final_video_metadata:
+                payload["metadata"] = dict(final_video_metadata)
+            facts["project.final_video"] = payload
+        if isinstance(mix_receipt, dict) and mix_receipt:
+            facts["project.final_video_mix"] = dict(mix_receipt)
+
+        shared = None
+        previous_facts: Dict[str, Tuple[bool, Any]] = {}
+
+        def _rollback() -> None:
+            if shared is None:
+                return
+            for key, (existed, previous_value) in previous_facts.items():
+                if existed:
+                    shared.put(key, deepcopy(previous_value))
+                else:
+                    shared.delete(key)
+
+        try:
+            shared = get_mas_working_memory(wf_id, service=self.short_term_service)
+            existing_keys = set(shared.list_keys())
+            previous_facts = {
+                key: (key in existing_keys, deepcopy(shared.get(key))) for key in facts
+            }
+            for key, value in facts.items():
+                shared.put(key, value)
         except Exception as exc:
+            try:
+                _rollback()
+            except Exception as rollback_exc:
+                self.logger.error(
+                    "Failed to roll back composer output publication: %s",
+                    rollback_exc,
+                    exc_info=True,
+                )
             self.logger.error("❌ Failed to store composer outputs: %s", exc, exc_info=True)
-            raise AgentError("Shared WM write failed (final_video)") from exc
+            raise _OrchestrationBoundaryError(
+                f"Authoritative composer publication failed: {exc}",
+                reason_code="authoritative_publication_failed",
+            ) from exc
+        return _rollback
 
     def _record_agent_output(
         self,
@@ -1658,12 +1685,41 @@ class OrchestratorAgent(BaseAgent):
         workflow_results: Dict[str, Any],
         workflow_data: Dict[str, Any],
         agent_output: Dict[str, Any],
-    ) -> None:
-        workflow_results[agent_type.value] = agent_output
-        workflow_data.update(agent_output)
+    ) -> Callable[[], None]:
+        previous_results = dict(workflow_results)
+        previous_data = dict(workflow_data)
+        composer_rollback: Callable[[], None] = lambda: None
 
-        if agent_type == AgentType.VIDEO_COMPOSER:
-            self._store_composer_outputs(workflow_id, agent_output)
+        def _restore_local_maps() -> None:
+            workflow_results.clear()
+            workflow_results.update(previous_results)
+            workflow_data.clear()
+            workflow_data.update(previous_data)
+
+        try:
+            if agent_type == AgentType.VIDEO_COMPOSER:
+                rollback_candidate = self._store_composer_outputs(workflow_id, agent_output)
+                if callable(rollback_candidate):
+                    composer_rollback = rollback_candidate
+            workflow_results[agent_type.value] = agent_output
+            workflow_data.update(agent_output)
+        except Exception:
+            _restore_local_maps()
+            try:
+                composer_rollback()
+            except Exception as rollback_exc:
+                self.logger.error(
+                    "Failed to roll back authoritative composer publication: %s",
+                    rollback_exc,
+                    exc_info=True,
+                )
+            raise
+
+        def _rollback() -> None:
+            _restore_local_maps()
+            composer_rollback()
+
+        return _rollback
 
     async def _execute_agent_success_path(
         self,
@@ -1729,13 +1785,31 @@ class OrchestratorAgent(BaseAgent):
                 attempt_trigger_reason=attempt_trigger_reason,
                 script_trigger_reason=script_trigger_reason,
             )
-            self._record_agent_output(
+            rollback_publication = self._record_agent_output(
                 workflow_id=workflow_state_id,
                 agent_type=current_agent,
                 workflow_results=workflow_results,
                 workflow_data=workflow_data,
                 agent_output=agent_output,
             )
+            try:
+                success_boundary = self._complete_successful_runtime_attempt(
+                    success_boundary=success_boundary,
+                    runtime_session_id=runtime_session_id,
+                    runtime_node_key=runtime_node_key,
+                    attempt_id=attempt_id,
+                    lease_token=lease_token,
+                )
+            except Exception:
+                try:
+                    rollback_publication()
+                except Exception as rollback_exc:
+                    self.logger.error(
+                        "Failed to roll back output publication after runtime completion error: %s",
+                        rollback_exc,
+                        exc_info=True,
+                    )
+                raise
             return agent_output, success_boundary
         except Exception as exc:
             if fail_runtime_attempt_on_error:
@@ -1898,7 +1972,30 @@ class OrchestratorAgent(BaseAgent):
                 gate_response=gate_response,
             )
 
-        transition_port.complete_runtime_attempt(
+        return _RuntimeSuccessBoundaryOutcome(
+            standby_agents=tuple(updated_standby_agents),
+            replan_count=updated_replan_count,
+            attempt_completion_required=True,
+        )
+
+    def _complete_successful_runtime_attempt(
+        self,
+        *,
+        success_boundary: _RuntimeSuccessBoundaryOutcome,
+        runtime_session_id: Optional[int],
+        runtime_node_key: Optional[str],
+        attempt_id: Optional[int],
+        lease_token: Optional[str],
+    ) -> _RuntimeSuccessBoundaryOutcome:
+        if not success_boundary.attempt_completion_required:
+            return success_boundary
+        if runtime_session_id is None:
+            raise AgentError("Runtime attempt completion requires a runtime session")
+        if runtime_node_key is None or attempt_id is None or not str(lease_token or "").strip():
+            raise AgentError(
+                "Runtime attempt completion requires an active node, attempt, and lease"
+            )
+        self._get_orchestration_runtime_transition_facade().complete_runtime_attempt(
             runtime_session_id=runtime_session_id,
             node_key=runtime_node_key,
             attempt_id=attempt_id,
@@ -1906,8 +2003,9 @@ class OrchestratorAgent(BaseAgent):
             node_status=WorkflowNodeStatus.COMPLETED.value,
         )
         return _RuntimeSuccessBoundaryOutcome(
-            standby_agents=tuple(updated_standby_agents),
-            replan_count=updated_replan_count,
+            standby_agents=success_boundary.standby_agents,
+            replan_count=success_boundary.replan_count,
+            gate_response=success_boundary.gate_response,
             attempt_completed=True,
         )
 
@@ -2480,24 +2578,17 @@ class OrchestratorAgent(BaseAgent):
                         raise ValueError(
                             f"LLM task decomposition agents[{index}] must be an object"
                         )
-                    required_fields = {
-                        "agent",
-                        "run",
-                        "mission",
-                        "deliverable",
-                        "constraints",
-                        "order",
-                        "runtime_hints",
-                    }
-                    missing_fields = sorted(required_fields - set(item))
-                    if missing_fields:
-                        raise ValueError(
-                            f"LLM task decomposition agents[{index}] missing fields: "
-                            + ", ".join(missing_fields)
-                        )
                     spec = OrchestrationStateAdapter.parse_task_spec_payload(
                         spec=item,
                         require_explicit_agent=True,
+                        required_fields=(
+                            "run",
+                            "mission",
+                            "deliverable",
+                            "constraints",
+                            "order",
+                            "runtime_hints",
+                        ),
                         field_path=f"task_decomposition.agents[{index}]",
                     )
                     atype = AgentType(spec["agent"])
@@ -2548,6 +2639,7 @@ class OrchestratorAgent(BaseAgent):
                 spec = OrchestrationStateAdapter.parse_task_spec_payload(
                     spec={key: value for key, value in item.items() if key != "task_id"},
                     require_explicit_agent=True,
+                    required_fields=("mission", "deliverable"),
                     field_path=f"task_decomposition.conditional_tasks[{index}]",
                 )
                 atype = AgentType(spec["agent"])

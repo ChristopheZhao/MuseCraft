@@ -182,7 +182,9 @@ class OrchestrationProtocol:
                 f"Subagent {agent_type.value} orchestration_report field reflection "
                 "must be a dict"
             )
-        report["reflection"] = dict(reflection)
+        normalized_reflection = dict(reflection)
+        normalized_reflection.pop("completion_state", None)
+        report["reflection"] = normalized_reflection
         return report
 
     def build_runtime_decision_request(
