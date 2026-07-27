@@ -1,9 +1,14 @@
+import asyncio
 import logging
 
 import pytest
 
-from app.agents.utils.artifacts import issue_scene_output_acceptance_receipts
-from app.agents.utils.memory_helpers import ensure_mas_working_memory
+from app.agents.utils.artifacts import (
+    SceneOutputAuthorityError,
+    finalize_scene_outputs,
+    issue_scene_output_acceptance_receipts,
+)
+from app.agents.utils.memory_helpers import ensure_agent_working_memory, ensure_mas_working_memory
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.video_generator import VideoGeneratorAgent
 from app.services.memory_provider import build_memory_services
@@ -228,3 +233,86 @@ def test_video_generator_completion_gate_accepts_when_all_deliveries_exist():
 
     assert decision["accepted"] is True
     assert decision["accepted_scene_numbers"] == [1, 2]
+
+
+def test_video_generator_finalizer_reads_only_accepted_shared_scene_outputs(monkeypatch):
+    agent = _make_bare_video_generator_agent()
+    shared = ensure_mas_working_memory(
+        "wf-video-progress",
+        service=agent.short_term_service,
+    )
+    agent._wm_cache = ensure_agent_working_memory(
+        "wf-video-progress",
+        "video_generator",
+        service=agent.short_term_service,
+        shared_view=shared,
+    )
+    accepted = _video_record(
+        1,
+        workflow_state_id="wf-video-progress",
+        path="/tmp/scene-1.mp4",
+    )
+    rejected = _video_record(
+        2,
+        workflow_state_id="wf-video-progress",
+        url="https://example.com/scene-2.mp4",
+    )
+    shared.put(
+        "scene_outputs.video",
+        {
+            1: accepted,
+            2: rejected,
+        },
+    )
+
+    async def _base_finalize(_self, final_action_result, _context):
+        return dict(final_action_result or {})
+
+    monkeypatch.setattr(
+        VideoGeneratorAgent.__mro__[1],
+        "_finalize_success_results",
+        _base_finalize,
+    )
+
+    result = asyncio.run(
+        agent._finalize_success_results(
+            {},
+            {"workflow_state_id": "wf-video-progress"},
+        )
+    )
+
+    assert [item["scene_number"] for item in result["final_completed_scenes"]] == [1]
+    assert result["orchestration_report"]["reflection"]["completed_scene_count"] == 1
+
+
+def test_scene_finalizer_does_not_fallback_when_shared_authority_load_fails(monkeypatch):
+    agent = _make_bare_video_generator_agent()
+    local = ensure_agent_working_memory(
+        "wf-video-progress",
+        "video_generator",
+        service=agent.short_term_service,
+    )
+    local.put(
+        "scene_outputs.video",
+        {
+            1: _video_record(
+                1,
+                workflow_state_id="wf-video-progress",
+                path="/tmp/stale-agent-scope.mp4",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "app.agents.utils.artifacts.get_mas_working_memory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("shared unavailable")),
+    )
+
+    with pytest.raises(SceneOutputAuthorityError) as exc_info:
+        finalize_scene_outputs(
+            kind="video",
+            workflow_id="wf-video-progress",
+            agent_memory=local,
+            service=agent.short_term_service,
+        )
+
+    assert exc_info.value.reason_code == "scene_output_authority_load_failed"

@@ -620,7 +620,8 @@ class VideoGeneratorAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="video",
             workflow_id=wf_id or None,
-            agent_memory=self.wm,
+            agent_memory=None,
+            service=self.short_term_service,
         )
 
         result = dict(base or {})
@@ -663,7 +664,8 @@ class VideoGeneratorAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="video",
             workflow_id=wf_id or None,
-            agent_memory=self.wm,
+            agent_memory=None,
+            service=self.short_term_service,
         )
 
         result = dict(base or {})

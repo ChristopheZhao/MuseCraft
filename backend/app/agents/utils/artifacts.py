@@ -308,10 +308,10 @@ _SCENE_OUTPUT_ACCEPTANCE_REQUIRED_KEYS = {
     "delivery_ref",
     "workflow_state_id",
     "artifact_ref",
-    "producer_status",
     "accepted_at",
 }
 _SCENE_OUTPUT_ACCEPTANCE_OPTIONAL_KEYS = {
+    "producer_status",
     "storage_status",
     "failure_reason",
 }
@@ -322,6 +322,13 @@ class _SceneOutputAcceptanceReceiptError(ValueError):
         self.reason_code = reason_code
         self.field_path = field_path
         super().__init__(f"{reason_code}: {field_path}")
+
+
+class SceneOutputAuthorityError(ValueError):
+    def __init__(self, *, reason_code: str, detail: str) -> None:
+        self.reason_code = reason_code
+        self.detail = detail
+        super().__init__(f"{reason_code}: {detail}")
 
 
 def _parse_scene_output_acceptance_receipt(receipt: Any) -> Dict[str, Any]:
@@ -364,9 +371,13 @@ def _parse_scene_output_acceptance_receipt(receipt: Any) -> Dict[str, Any]:
         "status": {"accepted", "failed"},
         "artifact_kind": {"image", "video"},
         "producer_status": {"succeeded", "failed"},
+        "storage_status": {"", "persisted", "failed"},
     }
     for field_name, allowed_values in enum_fields.items():
-        if parsed.get(field_name) not in allowed_values:
+        if field_name not in parsed:
+            continue
+        field_value = parsed.get(field_name)
+        if type(field_value) is not str or field_value not in allowed_values:
             raise _SceneOutputAcceptanceReceiptError(
                 reason_code="scene_output_acceptance_receipt_invalid",
                 field_path=f"acceptance_receipt.{field_name}",
@@ -410,10 +421,11 @@ def issue_scene_output_acceptance_receipts(
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
-        scene_number = coerce_scene_number(item.get("scene_number"))
-        if scene_number is None:
+        raw_scene_number = item.get("scene_number")
+        if type(raw_scene_number) is not int:
             issued_artifacts.append(item)
             continue
+        scene_number = raw_scene_number
 
         artifact_path = str(
             item.get(f"{normalized_kind}_path")
@@ -487,12 +499,17 @@ def _accept_scene_output_record(
     record: Dict[str, Any],
     expected_workflow_id: Optional[str],
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    scene_number = coerce_scene_number(record.get("scene_number"))
-    if scene_number is None:
+    raw_scene_number = record.get("scene_number")
+    if type(raw_scene_number) is not int:
         return None, _reject_scene_output(
             scene_number=None,
-            reason_code="scene_output_scene_number_missing",
+            reason_code=(
+                "scene_output_scene_number_missing"
+                if raw_scene_number is None
+                else "scene_output_scene_number_invalid"
+            ),
         )
+    scene_number = raw_scene_number
 
     try:
         receipt = _parse_scene_output_acceptance_receipt(record.get("acceptance_receipt"))
@@ -549,12 +566,6 @@ def _accept_scene_output_record(
             reason_code="scene_output_acceptance_workflow_mismatch",
             detail=receipt_wf_id or "missing",
         )
-    if receipt.get("producer_status") != "succeeded":
-        return None, _reject_scene_output(
-            scene_number=scene_number,
-            reason_code="scene_output_acceptance_producer_status_invalid",
-            detail=str(receipt.get("producer_status") or ""),
-        )
     accepted_at = receipt.get("accepted_at")
     if not isinstance(accepted_at, str) or not accepted_at:
         return None, _reject_scene_output(
@@ -586,27 +597,10 @@ def _accept_scene_output_record(
             reason_code="scene_output_acceptance_artifact_ref_mismatch",
             detail=str(receipt.get("artifact_ref") or ""),
         )
-    storage = _extract_storage_diagnostic(record)
-    raw_storage_status = storage.get("status") if storage else ""
-    storage_status = raw_storage_status if isinstance(raw_storage_status, str) else ""
-    if storage_status == "failed":
-        return None, _reject_scene_output(
-            scene_number=scene_number,
-            reason_code="scene_output_storage_failed",
-            detail=str(storage.get("fallback_reason") or "storage_failed"),
-        )
     if kind == "video" and not artifact_path:
         return None, _reject_scene_output(
             scene_number=scene_number,
             reason_code="scene_output_missing_local_path",
-        )
-    if kind == "video" and (
-        storage_status != "persisted" or receipt.get("storage_status") != "persisted"
-    ):
-        return None, _reject_scene_output(
-            scene_number=scene_number,
-            reason_code="scene_output_storage_not_persisted",
-            detail=storage_status or "missing",
         )
     if not artifact_path and not artifact_url:
         return None, _reject_scene_output(
@@ -741,9 +735,22 @@ def finalize_scene_outputs(
     if shared is None and wf_id and service is not None:
         try:
             shared = get_mas_working_memory(wf_id, service=service)
-        except Exception:
-            shared = None
-    completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)
+        except Exception as exc:
+            raise SceneOutputAuthorityError(
+                reason_code="scene_output_authority_load_failed",
+                detail=type(exc).__name__,
+            ) from exc
+    source_memory = shared if shared is not None else agent_memory
+    completed_records = collect_scene_outputs(kind=kind, memory=source_memory)
+    completed: List[Dict[str, Any]] = []
+    for record in completed_records:
+        receipt, _rejection = _accept_scene_output_record(
+            kind=kind,
+            record=record,
+            expected_workflow_id=wf_id,
+        )
+        if receipt is not None:
+            completed.append(record)
     overview = (
         load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
     )

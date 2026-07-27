@@ -119,6 +119,9 @@ def test_video_delivery_receipt_accepts_only_persisted_local_artifact():
             {"producer_status": " Succeeded "},
             "scene_output_acceptance_receipt_invalid",
         ),
+        ({"status": []}, "scene_output_acceptance_receipt_invalid"),
+        ({"artifact_kind": {}}, "scene_output_acceptance_receipt_invalid"),
+        ({"producer_status": []}, "scene_output_acceptance_receipt_invalid"),
         ({"scene_number": "1"}, "scene_output_acceptance_receipt_invalid"),
         ({"artifact_kind": " Image "}, "scene_output_acceptance_receipt_invalid"),
         (
@@ -161,6 +164,23 @@ def test_scene_output_acceptance_rejects_noncanonical_receipt_values(
     assert result["rejected_scene_outputs"][0]["reason_code"] == reason_code
 
 
+def test_scene_output_receipt_issuer_does_not_coerce_string_scene_identity():
+    artifacts, receipts = issue_scene_output_acceptance_receipts(
+        kind="image",
+        artifacts=[
+            {
+                "success": True,
+                "scene_number": "1",
+                "image_path": "/tmp/scene-1.png",
+            }
+        ],
+        workflow_state_id="wf-source-identity",
+    )
+
+    assert receipts == []
+    assert "acceptance_receipt" not in artifacts[0]
+
+
 def test_video_acceptance_rejects_noncanonical_storage_status():
     artifacts, _receipts = issue_scene_output_acceptance_receipts(
         kind="video",
@@ -187,8 +207,39 @@ def test_video_acceptance_rejects_noncanonical_storage_status():
 
     assert result["accepted"] is False
     assert (
-        result["rejected_scene_outputs"][0]["reason_code"] == "scene_output_storage_not_persisted"
+        result["rejected_scene_outputs"][0]["reason_code"]
+        == "scene_output_acceptance_receipt_invalid"
     )
+
+
+def test_accepted_receipt_status_is_the_only_scene_acceptance_outcome():
+    artifacts, _receipts = issue_scene_output_acceptance_receipts(
+        kind="video",
+        artifacts=[
+            {
+                "success": True,
+                "scene_number": 1,
+                "video_path": "/tmp/scene-1.mp4",
+                "storage": {"status": "persisted"},
+            }
+        ],
+        workflow_state_id="wf-single-receipt-outcome",
+    )
+    artifacts[0]["acceptance_receipt"]["producer_status"] = "failed"
+    artifacts[0]["acceptance_receipt"]["storage_status"] = "failed"
+    artifacts[0]["storage"] = {"status": "failed", "fallback_reason": "late_diagnostic"}
+    shared = _SharedMemory({"scene_outputs.video": {1: artifacts[0]}})
+
+    result = evaluate_scene_output_acceptance(
+        kind="video",
+        workflow_id="wf-single-receipt-outcome",
+        agent_memory=None,
+        shared_memory=shared,
+        expected_scene_numbers=[1],
+    )
+
+    assert result["accepted"] is True
+    assert result["accepted_scene_numbers"] == [1]
 
 
 def test_video_delivery_receipt_rejects_url_only_artifact():
