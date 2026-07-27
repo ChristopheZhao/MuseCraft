@@ -3096,7 +3096,7 @@
       "file_path": "docs/plans/active/PLAN-20260718-068.md",
       "confirmed_by_user": true,
       "created_at": "2026-07-18T06:47:35Z",
-      "updated_at": "2026-07-26T10:22:53+08:00",
+      "updated_at": "2026-07-27T16:20:30Z",
       "archived_at": null,
       "notes": [
         {
@@ -3170,6 +3170,18 @@
         {
           "at": "2026-07-26T10:22:53+08:00",
           "text": "The reviewed A3/A4/A5 correction was committed locally as project CAS 4385e22, scene receipt/read-model 5660f4e, orchestration thin contracts 048a338, and Gate A5 governance ceffacd. The tracked worktree is clean and no push was performed. PLAN-068 remains in_progress pending authorized push and hosted CI."
+        },
+        {
+          "at": "2026-07-26T03:15:25Z",
+          "text": "Amendment A6 opened after post-commit review invalidated Gate A5 local closure for terminal attempt/publication coordination, continuation single-parse semantics, authoritative VideoGenerator finalization, and typed receipt parsing. P0-K, P0-L, P1-G, and P0-N are reopened; no push before A6 validation."
+        },
+        {
+          "at": "2026-07-26T04:45:30Z",
+          "text": "Gate A6 local validation passed: terminal publication rollback, single-parse continuation/Agent identity, authoritative scene finalization, and sole report/receipt outcomes are green; A6 remains uncommitted and hosted CI is pending."
+        },
+        {
+          "at": "2026-07-27T16:20:30Z",
+          "text": "Amendment A6 was committed locally in four responsibility-aligned layers; no push was performed and hosted CI remains pending."
         }
       ]
     }
