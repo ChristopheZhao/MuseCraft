@@ -72,13 +72,13 @@ class RuntimeResumeControlPlane:
                     f"reason_code={exc.reason_code.value}: {exc.message}"
                 ),
             ) from exc
-        anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
-        if expected_anchor_type is not None and anchor_type != expected_anchor_type.strip().lower():
+        anchor_type = checkpoint["anchor_type"]
+        if expected_anchor_type is not None and anchor_type != expected_anchor_type:
             self._conflict(
                 operation,
                 "runtime continuation anchor type does not match the requested resume path",
             )
-        if str(checkpoint.get("node_key") or "").strip().lower() != node_key:
+        if checkpoint["node_key"] != node_key:
             self._integrity(operation, "runtime continuation node anchor is stale")
         if checkpoint["attempt_id"] != attempt_id:
             self._integrity(operation, "runtime continuation attempt anchor is stale")

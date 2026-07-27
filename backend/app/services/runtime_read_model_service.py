@@ -200,7 +200,7 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
         try:
             checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
                 checkpoint_payload.to_dict(),
-                require_decision_id=False,
+                require_decision_id=allow_gate_decision,
             )
         except ContinuationCheckpointContractError as exc:
             return _ContinuationValidation(
@@ -208,19 +208,13 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
                 reason_code="invalid_continuation_checkpoint",
                 diagnostic_reason_code=exc.reason_code.value,
             )
-        if str(checkpoint.get("node_key") or "").strip().lower() != session.current_node_key:
+        if checkpoint["node_key"] != session.current_node_key:
             return _ContinuationValidation(
                 valid=False,
                 reason_code="invalid_continuation_checkpoint",
                 diagnostic_reason_code="continuation_checkpoint_node_mismatch",
             )
-        checkpoint_attempt_id = checkpoint.get("attempt_id")
-        if type(checkpoint_attempt_id) is not int:
-            return _ContinuationValidation(
-                valid=False,
-                reason_code="invalid_continuation_checkpoint",
-                diagnostic_reason_code="continuation_checkpoint_attempt_type_invalid",
-            )
+        checkpoint_attempt_id = checkpoint["attempt_id"]
         if checkpoint_attempt_id != session.current_attempt_id:
             return _ContinuationValidation(
                 valid=False,
@@ -228,7 +222,7 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
                 diagnostic_reason_code="continuation_checkpoint_attempt_mismatch",
             )
 
-        anchor_type = str(checkpoint.get("anchor_type") or "").strip().lower()
+        anchor_type = checkpoint["anchor_type"]
         if anchor_type == OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT:
             return _ContinuationValidation(
                 valid=True,
@@ -246,24 +240,7 @@ class RuntimeReadModelService(RuntimeReadModelQuery):
                 reason_code="invalid_continuation_checkpoint",
                 diagnostic_reason_code="continuation_checkpoint_anchor_invalid",
             )
-        try:
-            checkpoint = OrchestrationStateAdapter.validate_continuation_checkpoint(
-                checkpoint_payload.to_dict(),
-                require_decision_id=True,
-            )
-        except ContinuationCheckpointContractError as exc:
-            return _ContinuationValidation(
-                valid=False,
-                reason_code="invalid_continuation_checkpoint",
-                diagnostic_reason_code=exc.reason_code.value,
-            )
-        checkpoint_decision_id = checkpoint.get("decision_id")
-        if type(checkpoint_decision_id) is not int:
-            return _ContinuationValidation(
-                valid=False,
-                reason_code="invalid_continuation_checkpoint",
-                diagnostic_reason_code="continuation_checkpoint_decision_type_invalid",
-            )
+        checkpoint_decision_id = checkpoint["decision_id"]
         if active_gate is None or latest_decision is None:
             return _ContinuationValidation(
                 valid=False,

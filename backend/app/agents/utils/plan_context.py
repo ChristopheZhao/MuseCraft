@@ -17,32 +17,22 @@ if TYPE_CHECKING:
 
 
 def _normalize_task_assignment(task_ctx: Dict[str, Any]) -> Dict[str, Any]:
-    assignment: Dict[str, Any] = {}
     if not isinstance(task_ctx, dict):
-        return assignment
-    agent = str(task_ctx.get("agent") or "").strip()
-    if agent:
-        assignment["agent"] = agent
-    if task_ctx.get("run") is not None:
-        assignment["run"] = bool(task_ctx.get("run"))
-    mission = str(task_ctx.get("mission") or "").strip()
-    if mission:
-        assignment["mission"] = mission
-    deliverable = str(task_ctx.get("deliverable") or "").strip()
-    if deliverable:
-        assignment["deliverable"] = deliverable
-    constraints = task_ctx.get("constraints")
-    if isinstance(constraints, list):
-        assignment["constraints"] = [
-            str(item).strip() for item in constraints if str(item or "").strip()
-        ]
-    runtime_hints = task_ctx.get("runtime_hints")
-    if isinstance(runtime_hints, dict) and runtime_hints:
-        assignment["runtime_hints"] = deepcopy(runtime_hints)
-    order = task_ctx.get("order")
-    if order is not None:
-        assignment["order"] = order
-    return assignment
+        return {}
+    downstream_fields = (
+        "agent",
+        "run",
+        "mission",
+        "deliverable",
+        "constraints",
+        "runtime_hints",
+        "order",
+    )
+    return {
+        field_name: deepcopy(task_ctx[field_name])
+        for field_name in downstream_fields
+        if field_name in task_ctx
+    }
 
 
 def _coerce_int(value: Any) -> Optional[int]:

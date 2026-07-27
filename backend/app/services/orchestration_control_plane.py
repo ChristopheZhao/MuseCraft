@@ -122,9 +122,7 @@ class OrchestrationControlPlane:
             decision_basis="boundary_trigger",
             execution_id=execution_id,
         )
-        gate_result = self._audio_delivery_gate.evaluate_workflow_video_audio(
-            workflow_state_id
-        )
+        gate_result = self._audio_delivery_gate.evaluate_workflow_video_audio(workflow_state_id)
         self._observation_adapter.persist_audio_gate_observation(
             workflow_state_id=workflow_state_id,
             route_payload=route_payload,
@@ -312,7 +310,7 @@ class OrchestrationControlPlane:
                 raise OrchestrationControlPlaneError(
                     f"Conditional task {selected_task_id} not found for runtime activation"
                 )
-            selected_agent = str(selected_spec.get("agent") or "").strip().lower()
+            selected_agent = selected_spec.get("agent")
             if selected_agent != target_agent.value:
                 raise OrchestrationControlPlaneError(
                     "Conditional task agent mismatch: "
@@ -327,10 +325,10 @@ class OrchestrationControlPlane:
         for task_id, spec in conditional_task_specs.items():
             if not isinstance(spec, dict):
                 continue
-            if str(spec.get("agent") or "").strip().lower() != target_agent.value:
+            if spec.get("agent") != target_agent.value:
                 continue
             merged = dict(spec)
-            merged["task_id"] = str(task_id)
+            merged["task_id"] = task_id
             matching_specs.append(merged)
 
         if not matching_specs:

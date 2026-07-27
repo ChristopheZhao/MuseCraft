@@ -233,6 +233,74 @@ def _valid_image_checkpoint():
     )
 
 
+def test_build_continuation_checkpoint_requires_primary_run_control():
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
+        OrchestrationStateAdapter.build_continuation_checkpoint(
+            task_specs={
+                AgentType.IMAGE_GENERATOR: {
+                    "agent": AgentType.IMAGE_GENERATOR.value,
+                    "order": 0,
+                }
+            },
+            conditional_task_specs={},
+            candidate_agents=[AgentType.IMAGE_GENERATOR],
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="image",
+            attempt_id=1,
+        )
+
+    assert exc_info.value.reason_code.value == "continuation_spec_required_field_missing"
+    assert exc_info.value.field_path.endswith(".run")
+
+
+def test_validate_continuation_checkpoint_rejects_duplicate_candidates():
+    checkpoint = _valid_image_checkpoint()
+    checkpoint["candidate_agents"].append(AgentType.IMAGE_GENERATOR.value)
+
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
+        OrchestrationStateAdapter.validate_continuation_checkpoint(
+            checkpoint,
+            require_decision_id=False,
+        )
+
+    assert (
+        exc_info.value.reason_code
+        is ContinuationCheckpointContractReason.CHECKPOINT_CANDIDATES_INVALID
+    )
+
+
+def test_validate_continuation_checkpoint_requires_candidate_spec_identity_set_match():
+    checkpoint = _valid_image_checkpoint()
+    checkpoint["candidate_agents"].append(AgentType.VIDEO_GENERATOR.value)
+
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
+        OrchestrationStateAdapter.validate_continuation_checkpoint(
+            checkpoint,
+            require_decision_id=False,
+        )
+
+    assert (
+        exc_info.value.reason_code
+        is ContinuationCheckpointContractReason.CHECKPOINT_TASK_SPECS_INVALID
+    )
+
+
+def test_validate_continuation_checkpoint_rejects_float_version():
+    checkpoint = _valid_image_checkpoint()
+    checkpoint["version"] = float(OrchestrationStateAdapter.CONTINUATION_CHECKPOINT_VERSION)
+
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
+        OrchestrationStateAdapter.validate_continuation_checkpoint(
+            checkpoint,
+            require_decision_id=False,
+        )
+
+    assert (
+        exc_info.value.reason_code
+        is ContinuationCheckpointContractReason.CHECKPOINT_VERSION_UNSUPPORTED
+    )
+
+
 def test_build_continuation_checkpoint_rejects_task_key_spec_agent_mismatch():
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(

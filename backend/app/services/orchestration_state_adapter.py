@@ -16,6 +16,7 @@ class ContinuationCheckpointContractReason(str, Enum):
     SPEC_UNKNOWN_KEYS = "continuation_spec_unknown_keys"
     SPEC_BOOLEAN_INVALID = "continuation_spec_boolean_invalid"
     SPEC_FIELD_TYPE_INVALID = "continuation_spec_field_type_invalid"
+    SPEC_REQUIRED_FIELD_MISSING = "continuation_spec_required_field_missing"
     SPEC_AGENT_INVALID = "continuation_spec_agent_invalid"
     SPEC_AGENT_MISMATCH = "continuation_spec_agent_mismatch"
     CHECKPOINT_NOT_OBJECT = "continuation_checkpoint_not_object"
@@ -181,6 +182,7 @@ class OrchestrationStateAdapter:
         spec: Dict[str, Any],
         default_agent: Optional[str] = None,
         require_explicit_agent: bool = False,
+        required_fields: Tuple[str, ...] = (),
         field_path: str = "continuation_checkpoint.task_specs",
     ) -> Dict[str, Any]:
         if not isinstance(spec, dict):
@@ -197,6 +199,14 @@ class OrchestrationStateAdapter:
                 message=",".join(sorted(str(key) for key in unknown_keys)),
                 field_path=field_path,
             )
+
+        for field_name in required_fields:
+            if field_name not in spec:
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_REQUIRED_FIELD_MISSING,
+                    message=f"Continuation spec field {field_name} is required",
+                    field_path=f"{field_path}.{field_name}",
+                )
 
         parsed: Dict[str, Any] = {}
         expected_agent: Optional[AgentType] = None
@@ -399,16 +409,26 @@ class OrchestrationStateAdapter:
 
         ordered_candidates: List[AgentType] = []
         seen_agents = set()
-        for index, raw_agent in enumerate(candidate_agents or list((task_specs or {}).keys())):
+        raw_candidates = (
+            candidate_agents if candidate_agents is not None else list((task_specs or {}).keys())
+        )
+        for index, raw_agent in enumerate(raw_candidates):
             if not isinstance(raw_agent, AgentType):
                 raise ContinuationCheckpointContractError(
                     reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
                     message=f"Unsupported continuation candidate agent: {raw_agent!r}",
                     field_path=f"continuation_checkpoint.candidate_agents[{index}]",
                 )
-            if raw_agent not in seen_agents:
-                ordered_candidates.append(raw_agent)
-                seen_agents.add(raw_agent)
+            if raw_agent in seen_agents:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(
+                        ContinuationCheckpointContractReason.CHECKPOINT_CANDIDATES_INVALID
+                    ),
+                    message=f"Duplicate continuation candidate agent: {raw_agent.value}",
+                    field_path=f"continuation_checkpoint.candidate_agents[{index}]",
+                )
+            ordered_candidates.append(raw_agent)
+            seen_agents.add(raw_agent)
 
         serialized_task_specs: Dict[str, Dict[str, Any]] = {}
         for agent_type, spec in (task_specs or {}).items():
@@ -427,11 +447,18 @@ class OrchestrationStateAdapter:
             serialized_task_specs[agent_type.value] = cls.parse_task_spec_payload(
                 spec=dict(spec),
                 default_agent=agent_type.value,
+                required_fields=("run",),
                 field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
             )
-            if agent_type not in seen_agents:
-                ordered_candidates.append(agent_type)
-                seen_agents.add(agent_type)
+
+        candidate_values = {agent_type.value for agent_type in ordered_candidates}
+        task_spec_values = set(serialized_task_specs)
+        if not ordered_candidates or candidate_values != task_spec_values:
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_TASK_SPECS_INVALID),
+                message="Continuation candidate_agents must match task_specs owners exactly",
+                field_path="continuation_checkpoint.task_specs",
+            )
 
         serialized_conditional_specs: Dict[str, Dict[str, Any]] = {}
         for raw_task_id, spec in (conditional_task_specs or {}).items():
@@ -496,7 +523,7 @@ class OrchestrationStateAdapter:
             )
 
         raw_version = checkpoint.get("version")
-        if raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:
+        if type(raw_version) is not int or raw_version != cls.CONTINUATION_CHECKPOINT_VERSION:
             raise ContinuationCheckpointContractError(
                 reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_VERSION_UNSUPPORTED),
                 message=f"Unsupported continuation checkpoint version: {raw_version!r}",
@@ -582,6 +609,7 @@ class OrchestrationStateAdapter:
                 field_path="continuation_checkpoint.candidate_agents",
             )
         normalized_candidate_agents: List[str] = []
+        seen_candidate_agents = set()
         for index, item in enumerate(raw_candidate_agents):
             if type(item) is not str:
                 raise ContinuationCheckpointContractError(
@@ -590,13 +618,23 @@ class OrchestrationStateAdapter:
                     field_path=f"continuation_checkpoint.candidate_agents[{index}]",
                 )
             try:
-                normalized_candidate_agents.append(AgentType(item).value)
+                normalized_agent = AgentType(item).value
             except ValueError as exc:
                 raise ContinuationCheckpointContractError(
                     reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_AGENT_INVALID),
                     message=f"Unsupported continuation candidate agent: {item!r}",
                     field_path=f"continuation_checkpoint.candidate_agents[{index}]",
                 ) from exc
+            if normalized_agent in seen_candidate_agents:
+                raise ContinuationCheckpointContractError(
+                    reason_code=(
+                        ContinuationCheckpointContractReason.CHECKPOINT_CANDIDATES_INVALID
+                    ),
+                    message=f"Duplicate continuation candidate agent: {normalized_agent}",
+                    field_path=f"continuation_checkpoint.candidate_agents[{index}]",
+                )
+            normalized_candidate_agents.append(normalized_agent)
+            seen_candidate_agents.add(normalized_agent)
 
         raw_task_specs = checkpoint.get("task_specs")
         if not isinstance(raw_task_specs, dict) or not raw_task_specs:
@@ -631,7 +669,15 @@ class OrchestrationStateAdapter:
                 spec=dict(spec),
                 default_agent=agent_type.value,
                 require_explicit_agent=True,
+                required_fields=("run",),
                 field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
+            )
+
+        if set(normalized_candidate_agents) != set(normalized_task_specs):
+            raise ContinuationCheckpointContractError(
+                reason_code=(ContinuationCheckpointContractReason.CHECKPOINT_TASK_SPECS_INVALID),
+                message="Continuation candidate_agents must match task_specs owners exactly",
+                field_path="continuation_checkpoint.task_specs",
             )
 
         raw_conditional_specs = checkpoint.get("conditional_task_specs")
@@ -695,29 +741,26 @@ class OrchestrationStateAdapter:
             require_decision_id=require_decision_id,
         )
 
-        candidate_agents = [
-            AgentType(str(raw_agent)) for raw_agent in (normalized.get("candidate_agents") or [])
-        ]
+        candidate_agents = [AgentType(raw_agent) for raw_agent in normalized["candidate_agents"]]
         candidate_order = {agent_type: index for index, agent_type in enumerate(candidate_agents)}
-        normalized_task_specs = normalized.get("task_specs", {})
+        normalized_task_specs = normalized["task_specs"]
         ordered_task_specs = sorted(
             normalized_task_specs.items(),
             key=lambda item: (
-                int(item[1]["order"])
+                item[1]["order"]
                 if item[1].get("order") is not None
-                else candidate_order.get(AgentType(str(item[0])), len(candidate_order)),
-                candidate_order.get(AgentType(str(item[0])), len(candidate_order)),
-                str(item[0]),
+                else candidate_order[AgentType(item[0])],
+                candidate_order[AgentType(item[0])],
+                item[0],
             ),
         )
         task_specs: Dict[AgentType, Dict[str, Any]] = {}
         for raw_agent, spec in ordered_task_specs:
-            agent_type = AgentType(str(raw_agent))
+            agent_type = AgentType(raw_agent)
             task_specs[agent_type] = dict(spec)
 
         conditional_task_specs: Dict[str, Dict[str, Any]] = {
-            str(task_id): dict(spec)
-            for task_id, spec in (normalized.get("conditional_task_specs") or {}).items()
+            task_id: dict(spec) for task_id, spec in normalized["conditional_task_specs"].items()
         }
         return task_specs, conditional_task_specs, candidate_agents
 

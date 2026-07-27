@@ -28,8 +28,10 @@ class OrchestrationQueuePolicy:
         task_specs: Dict[AgentType, Dict[str, Any]],
         candidate_agents: Optional[List[AgentType]] = None,
     ) -> List[AgentType]:
-        if isinstance(candidate_agents, list) and candidate_agents:
-            return [agent for agent in candidate_agents if isinstance(agent, AgentType)]
+        if isinstance(candidate_agents, list):
+            if any(not isinstance(agent, AgentType) for agent in candidate_agents):
+                raise ValueError("Parsed candidate_agents must contain only AgentType values")
+            return list(candidate_agents)
         return [
             agent_type
             for agent_type in (task_specs or {}).keys()
@@ -45,10 +47,11 @@ class OrchestrationQueuePolicy:
     ) -> Tuple[int, int]:
         spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
         raw_order = spec.get("order") if isinstance(spec, dict) else None
-        try:
-            return int(raw_order), fallback_index
-        except Exception:
+        if raw_order is None:
             return fallback_index, fallback_index
+        if type(raw_order) is not int:
+            raise ValueError(f"Parsed task spec order must be int for agent {agent_type.value}")
+        return raw_order, fallback_index
 
     @classmethod
     def _reorder_for_script_prerequisite(
@@ -75,7 +78,7 @@ class OrchestrationQueuePolicy:
             for agent_type in before_script
             if agent_type not in cls._SCRIPT_CONSUMER_AGENTS
         ]
-        after_script = ordered_agents[script_index + 1:]
+        after_script = ordered_agents[script_index + 1 :]
         return kept_before + [AgentType.SCRIPT_WRITER] + moved_consumers + after_script
 
     @classmethod
@@ -95,7 +98,9 @@ class OrchestrationQueuePolicy:
             spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
             if not isinstance(spec, dict):
                 continue
-            if spec.get("run") is False:
+            if "run" not in spec or type(spec["run"]) is not bool:
+                raise ValueError(f"Parsed task spec run must be bool for agent {agent_type.value}")
+            if spec["run"] is False:
                 continue
             order, fallback_index = cls._rank_agent_spec(
                 agent_type=agent_type,
@@ -120,7 +125,11 @@ class OrchestrationQueuePolicy:
             candidate_agents=candidate_agents,
         ):
             spec = task_specs.get(agent_type) if isinstance(task_specs, dict) else None
-            if isinstance(spec, dict) and spec.get("run") is False:
+            if not isinstance(spec, dict):
+                continue
+            if "run" not in spec or type(spec["run"]) is not bool:
+                raise ValueError(f"Parsed task spec run must be bool for agent {agent_type.value}")
+            if spec["run"] is False:
                 standby.append(agent_type)
         return standby
 
@@ -135,7 +144,7 @@ class OrchestrationQueuePolicy:
         candidate_agents: Optional[List[AgentType]] = None,
     ) -> bool:
         updated_queue = list(execution_queue or [])
-        for pending in updated_queue[max(0, int(current_index)) + 1:]:
+        for pending in updated_queue[max(0, int(current_index)) + 1 :]:
             if pending == agent_type:
                 execution_queue[:] = updated_queue
                 return False
