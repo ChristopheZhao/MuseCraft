@@ -3184,6 +3184,20 @@
           "text": "Amendment A6 was committed locally in four responsibility-aligned layers; no push was performed and hosted CI remains pending."
         }
       ]
+    },
+    {
+      "id": "PLAN-20260808-069",
+      "title": "Anti-agentic 审查修复：质量评估去规则化、协议放行 partial 与残留清理",
+      "kind": "fix",
+      "status": "draft",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260808-069.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-08-08T03:03:21Z",
+      "updated_at": "2026-08-08T03:03:21Z",
+      "archived_at": null,
+      "notes": []
     }
   ]
 }
