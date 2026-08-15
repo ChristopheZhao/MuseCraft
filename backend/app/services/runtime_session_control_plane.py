@@ -124,6 +124,79 @@ class RuntimeSessionControlPlane:
             )
         )
 
+    def abandon_current_attempt_for_replan(
+        self,
+        session_id: int,
+        *,
+        node_key: str,
+        attempt_id: int,
+        expected_lease_token: str,
+        reason: str,
+    ) -> RuntimeSessionRecord:
+        operation = "abandon_runtime_attempt_for_replan"
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("reason must be a non-empty string")
+        session = self._session(session_id, operation=operation)
+        self._require_non_terminal(session, operation=operation)
+        nodes = self._nodes(session_id, operation=operation)
+        node = self._current_node(session, nodes, operation=operation)
+        attempt = self._current_attempt(session, operation=operation)
+        if node.node_key != node_key or attempt.attempt_id != attempt_id:
+            self._state_conflict(
+                operation=operation,
+                message="runtime replan anchor changed before attempt abandonment",
+            )
+        if attempt.lease_token != expected_lease_token:
+            self._state_conflict(
+                operation=operation,
+                message="runtime replan lease changed before attempt abandonment",
+            )
+        if node.status is not WorkflowNodeStatus.RUNNING:
+            self._state_conflict(
+                operation=operation,
+                message=(f"runtime node {node.node_key} must be running before standby replan"),
+            )
+        if attempt.status is not WorkflowAttemptStatus.RUNNING:
+            self._state_conflict(
+                operation=operation,
+                message=(
+                    f"runtime attempt {attempt.attempt_id} must be running before standby replan"
+                ),
+            )
+        return self._store.transition_session(
+            RuntimeSessionTransitionCommand(
+                session_id=session_id,
+                expected_statuses=(session.status,),
+                target_status=session.status,
+                expected_current_node_key=session.current_node_key,
+                expected_current_attempt_id=session.current_attempt_id,
+                target_current_node_key=session.current_node_key,
+                target_current_attempt_id=session.current_attempt_id,
+                node_transitions=(
+                    RuntimeSessionNodeTransition(
+                        node_key=node.node_key,
+                        expected_status=node.status,
+                        target_status=WorkflowNodeStatus.SKIPPED,
+                    ),
+                ),
+                attempt_transition=RuntimeSessionAttemptTransition(
+                    attempt_id=attempt.attempt_id,
+                    expected_status=attempt.status,
+                    target_status=WorkflowAttemptStatus.ABORTED,
+                    clear_lease=True,
+                    error_code="runtime_replan_activated",
+                    error_message=normalized_reason,
+                ),
+                clear_error_message=True,
+                task_transition=self._task_transition(
+                    session,
+                    target_status=TaskStatus.IN_PROGRESS,
+                    clear_error_message=True,
+                ),
+            )
+        )
+
     def mark_completed(
         self,
         session_id: int,

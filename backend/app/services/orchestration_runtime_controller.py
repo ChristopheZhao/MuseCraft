@@ -48,7 +48,13 @@ class OrchestrationRuntimeController:
         facts = apply_payload.get("facts") if isinstance(apply_payload, dict) else {}
         replan_count = int(apply_payload.get("replan_count") or 0)
 
-        if action not in {"continue", "activate_from_standby", "abort"}:
+        if action not in {
+            "continue",
+            "retry_current",
+            "activate_from_standby",
+            "accept_with_gaps",
+            "abort",
+        }:
             raise OrchestrationRuntimeControllerError(f"Unsupported apply action: {action}")
 
         if action == "activate_from_standby":
@@ -102,11 +108,11 @@ class OrchestrationRuntimeController:
                 "trace_record": trace_record,
             }
 
-        if action == "abort":
+        if action in {"retry_current", "accept_with_gaps", "abort"}:
             trace_record = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "trigger_agent": current_agent.value,
-                "action": "abort",
+                "action": action,
                 "reason": reason,
                 "replan_count": replan_count,
                 "facts": facts if isinstance(facts, dict) else {},
@@ -115,8 +121,13 @@ class OrchestrationRuntimeController:
                 workflow_state_id=workflow_state_id,
                 record=trace_record,
             )
+            status_by_action = {
+                "retry_current": "retry",
+                "accept_with_gaps": "accepted_with_gaps",
+                "abort": "abort",
+            }
             return {
-                "status": "abort",
+                "status": status_by_action[action],
                 "reason": reason,
                 "replan_count": replan_count,
                 "trace_record": trace_record,

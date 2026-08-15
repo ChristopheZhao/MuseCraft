@@ -154,6 +154,9 @@ class OrchestrationControlPlane:
         max_replans: int,
         execution_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        report_status = report.get("status") if isinstance(report, dict) else None
+        if report_status not in {"completed", "partial", "failed"}:
+            raise OrchestrationControlPlaneError("runtime report must contain a canonical status")
         gate_events = self._collect_boundary_gate_events(
             workflow_state_id=workflow_state_id,
             current_agent=current_agent,
@@ -161,7 +164,7 @@ class OrchestrationControlPlane:
             audio_contract=audio_contract,
             execution_id=execution_id,
         )
-        if not gate_events:
+        if report_status == "completed" and not gate_events:
             return {
                 "status": "no_gate",
                 "reason": "no_boundary_gate_event",
@@ -213,8 +216,17 @@ class OrchestrationControlPlane:
             "replan_count": int(replan_count),
         }
 
-        if action not in {"continue", "activate_from_standby", "abort"}:
+        if action not in {
+            "continue",
+            "retry_current",
+            "activate_from_standby",
+            "accept_with_gaps",
+            "abort",
+        }:
             raise OrchestrationControlPlaneError(f"Unsupported runtime action: {action}")
+
+        if action == "retry_current":
+            apply_payload["replan_count"] = int(replan_count) + 1
 
         if action != "activate_from_standby":
             return apply_payload

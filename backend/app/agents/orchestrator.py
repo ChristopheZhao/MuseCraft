@@ -92,6 +92,8 @@ class _RuntimeSuccessBoundaryOutcome:
     gate_response: Optional[Dict[str, Any]] = None
     attempt_completion_required: bool = False
     attempt_completed: bool = False
+    output_accepted: bool = True
+    attempt_abandoned: bool = False
 
 
 class _OrchestrationBoundaryError(AgentError):
@@ -100,6 +102,14 @@ class _OrchestrationBoundaryError(AgentError):
     def __init__(self, message: str, *, reason_code: str) -> None:
         self.reason_code = str(reason_code)
         super().__init__(message)
+
+
+class _RuntimeRetryRequested(_OrchestrationBoundaryError):
+    """The runtime disposition explicitly selected another attempt."""
+
+    def __init__(self, message: str, *, replan_count: int) -> None:
+        self.replan_count = int(replan_count)
+        super().__init__(message, reason_code="runtime_retry_requested")
 
 
 class OrchestratorAgent(BaseAgent):
@@ -1004,6 +1014,10 @@ class OrchestratorAgent(BaseAgent):
                     )
                     standby_agents = list(success_boundary.standby_agents)
                     replan_count = success_boundary.replan_count
+                    if success_boundary.attempt_abandoned:
+                        _retire_runtime_attempt_scope(reason="attempt_abandoned_for_replan")
+                    if not success_boundary.output_accepted:
+                        continue
                     if success_boundary.attempt_completed:
                         retired_completed_attempt_context = _retire_runtime_attempt_scope(
                             reason="attempt_completed",
@@ -1137,8 +1151,8 @@ class OrchestratorAgent(BaseAgent):
                     )
                     self.logger.error(error_msg)
 
-                    # Check if we should retry the failed step
-                    if await self._should_retry_step(agent_type, e):
+                    if isinstance(e, _RuntimeRetryRequested):
+                        replan_count = e.replan_count
                         self.logger.info(f"Retrying step {step_index + 1}: {agent.agent_name}")
                         retry_trigger_reason = (
                             script_trigger_reason
@@ -1241,6 +1255,12 @@ class OrchestratorAgent(BaseAgent):
                                 pass
                         standby_agents = list(success_boundary.standby_agents)
                         replan_count = success_boundary.replan_count
+                        if success_boundary.attempt_abandoned:
+                            _retire_runtime_attempt_scope(
+                                reason="retry_attempt_abandoned_for_replan"
+                            )
+                        if not success_boundary.output_accepted:
+                            continue
                         if success_boundary.attempt_completed:
                             retired_completed_attempt_context = _retire_runtime_attempt_scope(
                                 reason="retry_attempt_completed",
@@ -1516,20 +1536,6 @@ class OrchestratorAgent(BaseAgent):
 
     # WorkflowStatus 已移除；active-path live status now comes from runtime view only.
 
-    async def _should_retry_step(self, agent_type: AgentType, error: Exception) -> bool:
-        """Determine if a failed workflow step should be retried"""
-        # 简化：按错误类型和策略决定，不依赖 AgentExecution 表
-        retry_conditions = {
-            AgentType.IMAGE_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
-            AgentType.VIDEO_GENERATOR: ["timeout", "api_rate_limit", "temporary_service_error"],
-            AgentType.VIDEO_COMPOSER: ["processing_error", "temporary_file_error"],
-        }
-
-        error_type = type(error).__name__.lower()
-        if agent_type in retry_conditions:
-            return any(condition in error_type for condition in retry_conditions[agent_type])
-        return "timeout" in error_type or "temporary" in error_type
-
     def _is_image_step_completed(self, workflow_id: str) -> bool:
         """Gate condition for image generation step completion."""
         contract = evaluate_scene_output_acceptance(
@@ -1748,7 +1754,50 @@ class OrchestratorAgent(BaseAgent):
         fail_runtime_attempt_on_error: bool = False,
     ) -> Tuple[Dict[str, Any], _RuntimeSuccessBoundaryOutcome]:
         try:
-            agent_result = await agent.execute(request)
+            try:
+                agent_result = await agent.execute(request)
+            except Exception as agent_error:
+                failure_observation = (
+                    self._orchestration_protocol.build_agent_execution_failure_observation(
+                        workflow_state_id=workflow_state_id,
+                        agent_type=current_agent,
+                        error=agent_error,
+                        execution_id=self._current_execution_id(),
+                    )
+                )
+                runtime_cycle = await self._evaluate_runtime_boundary_cycle(
+                    workflow_state_id=workflow_state_id,
+                    current_agent=current_agent,
+                    agent_result=None,
+                    normalized_report=failure_observation,
+                    audio_contract=dict(audio_contract or {}),
+                    candidate_agents=list(candidate_agents),
+                    standby_agents=list(standby_agents),
+                    replan_count=replan_count,
+                    max_replans=max_replans,
+                    current_index=current_index,
+                    execution_queue=execution_queue,
+                    task_specs=task_specs,
+                    conditional_task_specs=conditional_task_specs,
+                )
+                failure_outcome = self._apply_runtime_cycle_outcome(
+                    normalized_report=failure_observation,
+                    runtime_cycle=runtime_cycle,
+                    standby_agents=standby_agents,
+                    replan_count=replan_count,
+                    execution_queue=execution_queue,
+                    task_specs=task_specs,
+                    runtime_session_id=runtime_session_id,
+                    runtime_node_key=runtime_node_key,
+                    attempt_id=attempt_id,
+                    lease_token=lease_token,
+                )
+                if failure_outcome.output_accepted:
+                    raise _OrchestrationBoundaryError(
+                        "Agent execution failure cannot authorize output publication",
+                        reason_code="runtime_failure_publication_invalid",
+                    )
+                return {}, failure_outcome
             agent_output = agent_result.output_data.to_dict()
             try:
                 normalized_report = self._orchestration_protocol.build_subagent_report(
@@ -1785,6 +1834,8 @@ class OrchestratorAgent(BaseAgent):
                 attempt_trigger_reason=attempt_trigger_reason,
                 script_trigger_reason=script_trigger_reason,
             )
+            if not success_boundary.output_accepted:
+                return {}, success_boundary
             rollback_publication = self._record_agent_output(
                 workflow_id=workflow_state_id,
                 agent_type=current_agent,
@@ -1857,6 +1908,138 @@ class OrchestratorAgent(BaseAgent):
             ],
         )
 
+    def _apply_runtime_cycle_outcome(
+        self,
+        *,
+        normalized_report: Dict[str, Any],
+        runtime_cycle: Dict[str, Any],
+        standby_agents: List[AgentType],
+        replan_count: int,
+        execution_queue: List[AgentType],
+        task_specs: Dict[AgentType, Dict[str, Any]],
+        runtime_session_id: Optional[int],
+        runtime_node_key: Optional[str],
+        attempt_id: Optional[int],
+        lease_token: Optional[str],
+    ) -> _RuntimeSuccessBoundaryOutcome:
+        runtime_decision = runtime_cycle.get("runtime_decision") or {}
+        apply_result = runtime_cycle.get("apply_result") or {}
+        apply_status = apply_result.get("status")
+        report_status = normalized_report.get("status")
+        replan_reason = runtime_decision.get("reason") or apply_result.get("reason")
+        if not isinstance(replan_reason, str) or not replan_reason:
+            raise _OrchestrationBoundaryError(
+                "Runtime apply result missing reason",
+                reason_code="runtime_apply_reason_missing",
+            )
+        updated_standby_agents = list(standby_agents)
+        updated_replan_count = replan_count
+        output_accepted = True
+        attempt_abandoned = False
+
+        if apply_status == "activated":
+            target_agent = apply_result.get("target_agent")
+            updated_queue = apply_result.get("execution_queue")
+            if not isinstance(updated_queue, list) or any(
+                not isinstance(candidate, AgentType) for candidate in updated_queue
+            ):
+                raise _OrchestrationBoundaryError(
+                    "Runtime apply_result execution_queue must be list[AgentType]",
+                    reason_code="runtime_apply_execution_queue_invalid",
+                )
+            execution_queue[:] = list(updated_queue)
+            updated_task_specs = apply_result.get("task_specs")
+            if not isinstance(updated_task_specs, dict):
+                raise _OrchestrationBoundaryError(
+                    "Runtime apply_result task_specs must be a dict",
+                    reason_code="runtime_apply_task_specs_invalid",
+                )
+            task_specs.clear()
+            task_specs.update(updated_task_specs)
+            raw_standby_agents = apply_result.get("standby_agents")
+            if not isinstance(raw_standby_agents, list) or any(
+                not isinstance(candidate, AgentType) for candidate in raw_standby_agents
+            ):
+                raise _OrchestrationBoundaryError(
+                    "Runtime apply_result standby_agents must be list[AgentType]",
+                    reason_code="runtime_apply_standby_agents_invalid",
+                )
+            updated_standby_agents = list(raw_standby_agents)
+            raw_replan_count = apply_result.get("replan_count")
+            if type(raw_replan_count) is not int:
+                raise _OrchestrationBoundaryError(
+                    "Runtime apply_result replan_count must be an integer",
+                    reason_code="runtime_apply_replan_count_invalid",
+                )
+            updated_replan_count = raw_replan_count
+            self.logger.info(
+                "ADAPTIVE_REPLAN action=activate_from_standby target=%s reason=%s "
+                "queue_changed=%s count=%s",
+                target_agent.value if isinstance(target_agent, AgentType) else target_agent,
+                replan_reason,
+                bool(apply_result.get("queue_changed")),
+                updated_replan_count,
+            )
+            if report_status != "completed":
+                output_accepted = False
+                if runtime_session_id is not None:
+                    if (
+                        runtime_node_key is None
+                        or attempt_id is None
+                        or not isinstance(lease_token, str)
+                        or not lease_token
+                    ):
+                        raise AgentError(
+                            "Runtime standby activation requires an active node, attempt, and lease"
+                        )
+                    self._get_orchestration_runtime_transition_facade().abandon_runtime_attempt_for_replan(
+                        runtime_session_id=runtime_session_id,
+                        node_key=runtime_node_key,
+                        attempt_id=attempt_id,
+                        lease_token=lease_token,
+                        reason=replan_reason,
+                    )
+                    attempt_abandoned = True
+        elif apply_status == "retry":
+            raw_replan_count = apply_result.get("replan_count")
+            if type(raw_replan_count) is not int:
+                raise _OrchestrationBoundaryError(
+                    "Runtime retry result missing integer replan_count",
+                    reason_code="runtime_retry_replan_count_invalid",
+                )
+            raise _RuntimeRetryRequested(
+                f"Runtime disposition requested retry: {replan_reason}",
+                replan_count=raw_replan_count,
+            )
+        elif apply_status == "accepted_with_gaps":
+            if report_status != "partial":
+                raise AgentError("Runtime disposition accept_with_gaps requires a partial report")
+        elif apply_status == "abort":
+            raise AgentError(f"Workflow halted by runtime decision: {replan_reason}")
+        elif apply_status == "continue":
+            if report_status != "completed":
+                raise _OrchestrationBoundaryError(
+                    "Non-success report cannot continue without an explicit disposition",
+                    reason_code="runtime_non_success_continue_invalid",
+                )
+        else:
+            raise _OrchestrationBoundaryError(
+                f"Unsupported runtime apply status: {apply_status!r}",
+                reason_code="runtime_apply_status_invalid",
+            )
+
+        decision_ack = runtime_cycle.get("decision_ack") or {}
+        self.logger.debug(
+            "RUNTIME_DECISION_ACK %s",
+            json.dumps(decision_ack, ensure_ascii=False),
+        )
+        return _RuntimeSuccessBoundaryOutcome(
+            standby_agents=tuple(updated_standby_agents),
+            replan_count=updated_replan_count,
+            output_accepted=output_accepted,
+            attempt_abandoned=attempt_abandoned,
+        )
+
     async def _finalize_successful_agent_runtime_boundary(
         self,
         *,
@@ -1898,55 +2081,25 @@ class OrchestratorAgent(BaseAgent):
                 task_specs=task_specs,
                 conditional_task_specs=conditional_task_specs,
             )
-            runtime_decision = runtime_cycle.get("runtime_decision") or {}
-            replan_reason = str(runtime_decision.get("reason") or "none").strip()
-            apply_result = runtime_cycle.get("apply_result") or {}
-            updated_standby_agents = list(standby_agents)
-            updated_replan_count = replan_count
-            if apply_result.get("status") == "activated":
-                target_agent = apply_result.get("target_agent")
-                updated_queue = apply_result.get("execution_queue")
-                if isinstance(updated_queue, list):
-                    execution_queue[:] = list(updated_queue)
-                updated_task_specs = apply_result.get("task_specs")
-                if isinstance(updated_task_specs, dict):
-                    task_specs.clear()
-                    task_specs.update(updated_task_specs)
-                if "standby_agents" in apply_result:
-                    raw_standby_agents = apply_result.get("standby_agents")
-                    if not isinstance(raw_standby_agents, list) or any(
-                        not isinstance(candidate, AgentType) for candidate in raw_standby_agents
-                    ):
-                        raise _OrchestrationBoundaryError(
-                            "Runtime apply_result standby_agents must be list[AgentType]",
-                            reason_code="runtime_apply_standby_agents_invalid",
-                        )
-                    updated_standby_agents = list(raw_standby_agents)
-                updated_replan_count = int(apply_result.get("replan_count") or updated_replan_count)
-                self.logger.info(
-                    "ADAPTIVE_REPLAN action=activate_from_standby target=%s reason=%s "
-                    "queue_changed=%s count=%s",
-                    target_agent.value if isinstance(target_agent, AgentType) else target_agent,
-                    replan_reason,
-                    bool(apply_result.get("queue_changed")),
-                    updated_replan_count,
-                )
-            elif apply_result.get("status") == "abort":
-                raise AgentError(f"Workflow halted by runtime decision: {replan_reason}")
-            decision_ack = runtime_cycle.get("decision_ack") or {}
-            self.logger.debug(
-                "RUNTIME_DECISION_ACK %s",
-                json.dumps(decision_ack, ensure_ascii=False),
+            outcome = self._apply_runtime_cycle_outcome(
+                normalized_report=normalized_report,
+                runtime_cycle=runtime_cycle,
+                standby_agents=standby_agents,
+                replan_count=replan_count,
+                execution_queue=execution_queue,
+                task_specs=task_specs,
+                runtime_session_id=runtime_session_id,
+                runtime_node_key=runtime_node_key,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
             )
         except AgentError:
             raise
         except Exception as replan_err:
             raise AgentError(f"Runtime decision evaluation failed: {replan_err}") from replan_err
 
-        outcome = _RuntimeSuccessBoundaryOutcome(
-            standby_agents=tuple(updated_standby_agents),
-            replan_count=updated_replan_count,
-        )
+        if not outcome.output_accepted:
+            return outcome
         if runtime_session_id is None:
             return outcome
         if runtime_node_key is None or attempt_id is None or not str(lease_token or "").strip():
@@ -1967,14 +2120,14 @@ class OrchestratorAgent(BaseAgent):
                 candidate_agents=list(candidate_agents),
             )
             return _RuntimeSuccessBoundaryOutcome(
-                standby_agents=tuple(updated_standby_agents),
-                replan_count=updated_replan_count,
+                standby_agents=outcome.standby_agents,
+                replan_count=outcome.replan_count,
                 gate_response=gate_response,
             )
 
         return _RuntimeSuccessBoundaryOutcome(
-            standby_agents=tuple(updated_standby_agents),
-            replan_count=updated_replan_count,
+            standby_agents=outcome.standby_agents,
+            replan_count=outcome.replan_count,
             attempt_completion_required=True,
         )
 
@@ -2007,6 +2160,8 @@ class OrchestratorAgent(BaseAgent):
             replan_count=success_boundary.replan_count,
             gate_response=success_boundary.gate_response,
             attempt_completed=True,
+            output_accepted=success_boundary.output_accepted,
+            attempt_abandoned=success_boundary.attempt_abandoned,
         )
 
     def _build_execution_queue(
@@ -2044,7 +2199,7 @@ class OrchestratorAgent(BaseAgent):
         *,
         workflow_state_id: str,
         current_agent: AgentType,
-        agent_result: AgentExecutionResult,
+        agent_result: Optional[AgentExecutionResult],
         normalized_report: Optional[Dict[str, Any]] = None,
         audio_contract: Dict[str, Any],
         candidate_agents: List[AgentType],
@@ -2158,21 +2313,9 @@ class OrchestratorAgent(BaseAgent):
         replan_count: int,
         max_replans: int,
     ) -> Dict[str, Any]:
-        if not gate_events:
-            return {
-                "action": "continue",
-                "reason": "no_runtime_gate_event",
-                "facts": {"report": report or {}},
-            }
-        if not standby_agents:
-            return {
-                "action": "continue",
-                "reason": "standby_pool_empty",
-                "facts": {
-                    "report": report or {},
-                    "gate_events": list(gate_events or []),
-                },
-            }
+        report_status = report.get("status") if isinstance(report, dict) else None
+        if report_status not in {"completed", "partial", "failed"}:
+            raise AgentError("Runtime replan report missing canonical status")
 
         llm = self.get_llm("plan")
         pm = getattr(self, "prompt_manager", None) or get_prompt_manager()
@@ -2231,48 +2374,88 @@ class OrchestratorAgent(BaseAgent):
         except Exception as exc:
             raise AgentError(f"Runtime replan LLM decision failed: {exc}") from exc
 
-        action_raw = data.get("action")
-        if not isinstance(action_raw, str) or not action_raw.strip():
+        if not isinstance(data, dict):
+            raise AgentError("Runtime replan response must be a JSON object")
+        action = data.get("action")
+        if not isinstance(action, str) or not action:
             raise AgentError("Runtime replan missing action")
-        action = action_raw.strip().lower()
-        reason = str(data.get("reason") or data.get("rationale") or "llm_runtime_replan").strip()
-        target_raw = str(data.get("target_agent") or "").strip()
+        if action != action.strip():
+            raise AgentError("Runtime replan action must be canonical")
+        reason = data.get("reason")
+        if not isinstance(reason, str) or not reason or reason != reason.strip():
+            raise AgentError("Runtime replan missing canonical reason")
+        target_raw = data.get("target_agent")
         allowed_targets = {agent.value: agent for agent in standby_agents}
 
-        if action not in {"continue", "activate_from_standby", "abort"}:
+        if action not in {
+            "continue",
+            "retry_current",
+            "activate_from_standby",
+            "accept_with_gaps",
+            "abort",
+        }:
             raise AgentError(f"Runtime replan returned invalid action: {action}")
 
+        allowed_actions_by_status = {
+            "completed": {"continue", "activate_from_standby", "abort"},
+            "partial": {
+                "retry_current",
+                "activate_from_standby",
+                "accept_with_gaps",
+                "abort",
+            },
+            "failed": {"retry_current", "activate_from_standby", "abort"},
+        }
+        if action not in allowed_actions_by_status[report_status]:
+            if report_status == "failed" and action == "accept_with_gaps":
+                raise AgentError("Runtime replan failed report cannot be accepted")
+            raise AgentError(
+                f"Runtime replan action {action} is invalid for report status {report_status}"
+            )
+
+        if action != "activate_from_standby" and "target_agent" in data:
+            raise AgentError("Runtime replan target_agent is only valid for standby activation")
+
+        if action == "accept_with_gaps":
+            reflection = report.get("reflection")
+            reported_gaps = (
+                reflection.get("reported_gaps") if isinstance(reflection, dict) else None
+            )
+            if (
+                not isinstance(reported_gaps, list)
+                or not reported_gaps
+                or any(
+                    not isinstance(gap, str) or not gap or gap != gap.strip()
+                    for gap in reported_gaps
+                )
+            ):
+                raise AgentError(
+                    "Runtime replan partial acceptance requires explicit reported_gaps"
+                )
+
+        if action in {"retry_current", "activate_from_standby"} and replan_count >= max(
+            0, int(max_replans)
+        ):
+            raise AgentError("Runtime replan budget exhausted")
+
         if action == "activate_from_standby":
+            if (
+                not isinstance(target_raw, str)
+                or not target_raw
+                or target_raw != target_raw.strip()
+            ):
+                raise AgentError(
+                    "Runtime replan activate_from_standby missing canonical target_agent"
+                )
             target_agent = allowed_targets.get(target_raw)
             if target_agent is None:
                 raise AgentError(
                     f"Runtime replan returned invalid target_agent: {target_raw or '<empty>'}"
                 )
-            if replan_count >= max(0, int(max_replans)):
-                return {
-                    "action": "abort",
-                    "reason": "replan_budget_exhausted",
-                    "facts": {
-                        "report": report,
-                        "gate_events": gate_events,
-                        "llm_output": data,
-                    },
-                }
             return {
                 "action": "activate_from_standby",
                 "target_agent": target_agent,
-                "reason": reason or "llm_runtime_replan_activation",
-                "facts": {
-                    "report": report,
-                    "gate_events": gate_events,
-                    "llm_output": data,
-                },
-            }
-
-        if action == "abort":
-            return {
-                "action": "abort",
-                "reason": reason or "llm_runtime_replan_abort",
+                "reason": reason,
                 "facts": {
                     "report": report,
                     "gate_events": gate_events,
@@ -2281,8 +2464,8 @@ class OrchestratorAgent(BaseAgent):
             }
 
         return {
-            "action": "continue",
-            "reason": reason or "llm_runtime_replan_continue",
+            "action": action,
+            "reason": reason,
             "facts": {
                 "report": report,
                 "gate_events": gate_events,

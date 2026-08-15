@@ -86,6 +86,17 @@ class OrchestrationRuntimeResumePort(Protocol):
 
 
 class OrchestrationRuntimeTransitionPort(Protocol):
+    def abandon_runtime_attempt_for_replan(
+        self,
+        *,
+        runtime_session_id: int,
+        node_key: str,
+        attempt_id: int,
+        lease_token: str,
+        reason: str,
+    ) -> None:
+        ...
+
     def complete_runtime_attempt(
         self,
         *,

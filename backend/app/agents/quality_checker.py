@@ -121,7 +121,6 @@ class QualityCheckerAgent(BaseAgent):
                 "gate_triggers": [],
                 "artifacts": [{"kind": "quality_report", "ref": "quality_assessment"}],
                 "reflection": {
-                    "completion_state": "completed",
                     "reported_gaps": [],
                     "reported_hints": [],
                     "summary": f"quality_score={quality_assessment['overall_score']}",

@@ -154,6 +154,34 @@ class OrchestrationRuntimeTransitionFacade:
             action=_complete,
         )
 
+    def abandon_runtime_attempt_for_replan(
+        self,
+        *,
+        runtime_session_id: int,
+        node_key: str,
+        attempt_id: int,
+        lease_token: str,
+        reason: str,
+    ) -> None:
+        def _abandon(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            _runtime_session: RuntimeSessionRecord,
+        ) -> None:
+            RuntimeSessionControlPlane(store).abandon_current_attempt_for_replan(
+                runtime_session_id,
+                node_key=node_key,
+                attempt_id=attempt_id,
+                expected_lease_token=lease_token,
+                reason=reason,
+            )
+            runtime_db.commit()
+
+        self._run_with_fresh_runtime_control_plane_session(
+            runtime_session_id=runtime_session_id,
+            action=_abandon,
+        )
+
     def fail_runtime_attempt(
         self,
         *,

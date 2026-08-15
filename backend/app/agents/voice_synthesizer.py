@@ -46,7 +46,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         *,
         status: str,
-        completion_state: str,
         completed_count: int,
         failed_count: int,
         reported_gaps: Optional[List[str]] = None,
@@ -57,7 +56,6 @@ class VoiceSynthesizerAgent(ReActAgent):
             "gate_triggers": [],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.voice"}],
             "reflection": {
-                "completion_state": completion_state,
                 "reported_gaps": list(reported_gaps or []),
                 "reported_hints": [],
                 "completed_scene_count": int(completed_count),
@@ -417,7 +415,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         result["final_failed_scenes"] = failed
         result["orchestration_report"] = self._build_voice_orchestration_report(
             status="completed",
-            completion_state="completed",
             completed_count=len(finals),
             failed_count=len(failed),
         )
@@ -439,7 +436,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         result["final_failed_scenes"] = failed
         result["orchestration_report"] = self._build_voice_orchestration_report(
             status="partial",
-            completion_state=str(result.get("subtask_state") or "partial"),
             completed_count=len(finals),
             failed_count=len(failed),
             reported_gaps=["scene_voice_generation_incomplete"],

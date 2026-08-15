@@ -638,7 +638,6 @@ class VideoGeneratorAgent(ReActAgent):
             "gate_triggers": ["workflow_video_audio_delivery"],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
             "reflection": {
-                "completion_state": "completed",
                 "reported_gaps": [],
                 "reported_hints": [],
                 "completed_scene_count": len(finals),
@@ -682,7 +681,6 @@ class VideoGeneratorAgent(ReActAgent):
             "gate_triggers": ["workflow_video_audio_delivery"],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
             "reflection": {
-                "completion_state": str(result.get("subtask_state") or "partial"),
                 "reported_gaps": ["scene_video_generation_incomplete"],
                 "reported_hints": [],
                 "completed_scene_count": len(finals),

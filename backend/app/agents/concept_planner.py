@@ -395,7 +395,6 @@ class ConceptPlannerAgent(BaseAgent):
                     {"kind": "shared_fact", "ref": "scene_overview"},
                 ],
                 "reflection": {
-                    "completion_state": "completed",
                     "reported_gaps": [],
                     "reported_hints": [],
                     "summary": f"planned_scenes={len(scenes_data)}",

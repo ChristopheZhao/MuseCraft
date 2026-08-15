@@ -122,7 +122,6 @@ def _fake_report(boundary_event: str, artifact_ref: str) -> dict:
         "gate_triggers": [],
         "artifacts": [{"kind": "shared_fact", "ref": artifact_ref}],
         "reflection": {
-            "completion_state": "completed",
             "reported_gaps": [],
             "reported_hints": [],
         },
@@ -456,7 +455,7 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent._evaluate_runtime_boundary_cycle = _async_return(
         {
             "runtime_decision": {"action": "continue", "reason": "none"},
-            "apply_result": {},
+            "apply_result": {"status": "continue", "reason": "none"},
             "decision_ack": {},
         }
     )
@@ -594,7 +593,7 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     agent._evaluate_runtime_boundary_cycle = _async_return(
         {
             "runtime_decision": {"action": "continue", "reason": "none"},
-            "apply_result": {},
+            "apply_result": {"status": "continue", "reason": "none"},
             "decision_ack": {},
         }
     )
@@ -662,6 +661,27 @@ def _async_return(value):
         return value
 
     return _wrapped
+
+
+async def _retry_failed_runtime_boundary(**kwargs):
+    if (kwargs.get("normalized_report") or {}).get("status") == "failed":
+        return {
+            "runtime_decision": {
+                "action": "retry_current",
+                "reason": "retry the failed agent execution",
+            },
+            "apply_result": {
+                "status": "retry",
+                "reason": "retry the failed agent execution",
+                "replan_count": 1,
+            },
+            "decision_ack": {},
+        }
+    return {
+        "runtime_decision": {"action": "continue", "reason": "none"},
+        "apply_result": {"status": "continue", "reason": "none"},
+        "decision_ack": {},
+    }
 
 
 async def _async_identity(*args, **kwargs):
@@ -1275,7 +1295,10 @@ def test_runtime_decision_prompt_requires_explicit_continue_action(monkeypatch):
             workflow_state_id="wf-runtime-contract-1",
             current_agent=AgentType.VIDEO_GENERATOR,
             standby_agents=[AgentType.AUDIO_GENERATOR],
-            report={"boundary_event": "scene_video_completed"},
+            report={
+                "status": "completed",
+                "boundary_event": "scene_video_completed",
+            },
             gate_events=[
                 {
                     "gate_name": "workflow_video_audio_delivery",
@@ -1294,9 +1317,9 @@ def test_runtime_decision_prompt_requires_explicit_continue_action(monkeypatch):
 
     assert decision["action"] == "continue"
     assert captured["kwargs"]["response_format"] == {"type": "json_object"}
-    assert "输出 JSON 对象必须始终包含字符串字段 action 和 reason" in system_content
-    assert '{"action":"continue","reason":"..."}' in system_content
-    assert "不允许只返回 reason、rationale" in system_content
+    assert "必须包含规范字符串 action 与 reason" in system_content
+    assert "partial 可选择 retry_current" in system_content
+    assert "failed 可选择 retry_current" in system_content
 
 
 def test_candidate_selection_prompt_includes_mainline_and_audio_optionality_priors(monkeypatch):
@@ -1897,14 +1920,26 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
-        agent._should_retry_step = _async_return(True)
         boundary_calls = []
 
         async def _record_runtime_boundary(**kwargs):
             boundary_calls.append(dict(kwargs))
+            if (kwargs.get("normalized_report") or {}).get("status") == "failed":
+                return {
+                    "runtime_decision": {
+                        "action": "retry_current",
+                        "reason": "retry the failed script execution",
+                    },
+                    "apply_result": {
+                        "status": "retry",
+                        "reason": "retry the failed script execution",
+                        "replan_count": 1,
+                    },
+                    "decision_ack": {},
+                }
             return {
                 "runtime_decision": {"action": "continue", "reason": "none"},
-                "apply_result": {},
+                "apply_result": {"status": "continue", "reason": "none"},
                 "decision_ack": {},
             }
 
@@ -1943,6 +1978,7 @@ def test_orchestrator_mainline_script_retry_reopens_review_gate(monkeypatch):
         assert [call["current_agent"] for call in boundary_calls] == [
             AgentType.CONCEPT_PLANNER,
             AgentType.SCRIPT_WRITER,
+            AgentType.SCRIPT_WRITER,
         ]
         assert (
             boundary_calls[-1]["agent_result"]
@@ -1962,7 +1998,7 @@ def test_orchestrator_mainline_malformed_retry_report_fails_retry_attempt(monkey
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
-        agent._should_retry_step = _async_return(True)
+        agent._evaluate_runtime_boundary_cycle = _retry_failed_runtime_boundary
         malformed_report = _fake_report(
             "concept_plan_completed",
             "project.concept_plan",
@@ -2024,7 +2060,7 @@ def test_orchestrator_mainline_retry_input_failure_fails_retry_attempt(monkeypat
     try:
         call_log = {"concept_planner": [], "script_writer": [], "image_generator": []}
         agent = _build_agent(monkeypatch, sync_db, call_log=call_log, session_factory=SessionLocal)
-        agent._should_retry_step = _async_return(True)
+        agent._evaluate_runtime_boundary_cycle = _retry_failed_runtime_boundary
         agent.agents[AgentType.CONCEPT_PLANNER] = _FlakyAgent(
             "concept_planner",
             first_error=RuntimeError("temporary concept failure"),

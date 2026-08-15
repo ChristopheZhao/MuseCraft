@@ -43,7 +43,6 @@ class ImageGeneratorAgent(ReActAgent):
         self,
         *,
         status: str,
-        completion_state: str,
         completed_count: int,
         failed_count: int,
         reported_gaps: List[str] | None = None,
@@ -54,7 +53,6 @@ class ImageGeneratorAgent(ReActAgent):
             "gate_triggers": [],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.image"}],
             "reflection": {
-                "completion_state": completion_state,
                 "reported_gaps": list(reported_gaps or []),
                 "reported_hints": [],
                 "completed_scene_count": int(completed_count),
@@ -280,7 +278,6 @@ class ImageGeneratorAgent(ReActAgent):
         result["final_failed_scenes"] = finals_failed
         result["orchestration_report"] = self._build_image_orchestration_report(
             status="completed",
-            completion_state="completed",
             completed_count=len(finals),
             failed_count=len(finals_failed),
         )
@@ -311,7 +308,6 @@ class ImageGeneratorAgent(ReActAgent):
         result["final_failed_scenes"] = finals_failed
         result["orchestration_report"] = self._build_image_orchestration_report(
             status="partial",
-            completion_state=str(result.get("subtask_state") or "partial"),
             completed_count=len(finals),
             failed_count=len(finals_failed),
             reported_gaps=["scene_image_generation_incomplete"],

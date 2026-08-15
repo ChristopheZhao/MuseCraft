@@ -191,7 +191,6 @@ def test_script_writer_partial_result_reports_deterministic_boundary():
     report = result["orchestration_report"]
     assert report["status"] == "partial"
     assert report["boundary_event"] == "scene_script_completed"
-    assert report["reflection"]["completion_state"] == "partial"
     assert report["reflection"]["reported_gaps"] == ["scene_script_generation_incomplete"]
 
 

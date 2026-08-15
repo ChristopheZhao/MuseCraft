@@ -267,12 +267,10 @@ class ScriptWriterAgent(BaseAgent):
             failed_scenes = []
         generated_count = int(result.get("scenes_generated") or 0) if isinstance(result, dict) else 0
         total_scenes = int(result.get("total_scenes") or generated_count or 0) if isinstance(result, dict) else 0
-        completion_state = "completed" if success else "partial"
         reported_gaps: List[str] = []
         if not success:
             reported_gaps.append("scene_script_generation_incomplete")
         reflection: Dict[str, Any] = {
-            "completion_state": completion_state,
             "reported_gaps": reported_gaps,
             "reported_hints": [self.EXECUTION_BOUNDARY_REASON_CODE],
             "summary": f"generated_scene_scripts={generated_count}/{total_scenes}",

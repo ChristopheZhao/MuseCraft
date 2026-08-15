@@ -111,13 +111,6 @@ class OrchestrationProtocol:
                 reason_code="orchestration_report_status_invalid",
                 field_path="orchestration_report.status",
             )
-        if status != "completed":
-            raise OrchestrationProtocolError(
-                f"Subagent {agent_type.value} orchestration_report status must be completed "
-                "before runtime success finalization",
-                reason_code="orchestration_report_not_successful",
-                field_path="orchestration_report.status",
-            )
         report["status"] = status
 
         boundary_event = self._require_report_field(
@@ -182,9 +175,14 @@ class OrchestrationProtocol:
                 f"Subagent {agent_type.value} orchestration_report field reflection "
                 "must be a dict"
             )
-        normalized_reflection = dict(reflection)
-        normalized_reflection.pop("completion_state", None)
-        report["reflection"] = normalized_reflection
+        if "completion_state" in reflection:
+            raise OrchestrationProtocolError(
+                f"Subagent {agent_type.value} orchestration_report reflection must not "
+                "repeat the top-level outcome",
+                reason_code="orchestration_report_outcome_alias_invalid",
+                field_path="orchestration_report.reflection.completion_state",
+            )
+        report["reflection"] = dict(reflection)
         return report
 
     def build_runtime_decision_request(
@@ -208,6 +206,37 @@ class OrchestrationProtocol:
             "replan_budget": {
                 "used": int(replan_count),
                 "max": int(max_replans),
+            },
+        }
+
+    def build_agent_execution_failure_observation(
+        self,
+        *,
+        workflow_state_id: str,
+        agent_type: AgentType,
+        error: Exception,
+        execution_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        reason_code = getattr(error, "reason_code", None)
+        failure: Dict[str, Any] = {
+            "exception_type": type(error).__name__,
+            "message": str(error),
+        }
+        if isinstance(reason_code, str) and reason_code:
+            failure["reason_code"] = reason_code
+        return {
+            "contract_version": "v1",
+            "workflow_state_id": str(workflow_state_id or ""),
+            "agent_type": agent_type.value,
+            "execution_id": execution_id,
+            "status": "failed",
+            "boundary_event": "agent_execution_failed",
+            "gate_triggers": [],
+            "artifacts": [],
+            "reflection": {
+                "reported_gaps": ["agent_execution_failed"],
+                "reported_hints": [],
+                "failure": failure,
             },
         }
 

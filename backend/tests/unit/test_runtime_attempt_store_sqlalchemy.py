@@ -1000,6 +1000,45 @@ def test_session_control_plane_resumes_with_explicit_attempt_and_node_outcomes(r
     assert task.status == TaskStatus.IN_PROGRESS.value
 
 
+def test_session_control_plane_abandons_current_attempt_for_standby_replan(runtime_db):
+    db, _ = runtime_db
+    task, session, node = _seed_runtime(db)
+    store = SqlAlchemyRuntimeAttemptStore(db)
+    attempt = store.start_attempt(_start_command(session.id))
+    RuntimeAttemptControlPlane(
+        store,
+        clock=lambda: datetime(2026, 7, 19, 1, 0, tzinfo=timezone.utc),
+        token_factory=lambda: "runtime-replan-lease",
+    ).grant_lease(
+        session_id=session.id,
+        attempt_id=attempt.attempt_id,
+        lease_owner="orchestrator:image",
+        lease_timeout_seconds=120,
+    )
+    db.commit()
+
+    result = RuntimeSessionControlPlane(store).abandon_current_attempt_for_replan(
+        session.id,
+        node_key="image",
+        attempt_id=attempt.attempt_id,
+        expected_lease_token="runtime-replan-lease",
+        reason="activate audio recovery",
+    )
+    db.commit()
+    db.refresh(task)
+    db.refresh(session)
+    db.refresh(node)
+    persisted_attempt = db.get(WorkflowNodeAttempt, attempt.attempt_id)
+
+    assert result.status is WorkflowSessionStatus.RUNNING
+    assert persisted_attempt.status == WorkflowAttemptStatus.ABORTED.value
+    assert persisted_attempt.error_code == "runtime_replan_activated"
+    assert persisted_attempt.error_message == "activate audio recovery"
+    assert persisted_attempt.lease_token is None
+    assert node.status == WorkflowNodeStatus.SKIPPED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
+
+
 def test_session_control_plane_completion_closes_running_attempt_and_nodes(runtime_db):
     db, _ = runtime_db
     task, session, node = _seed_runtime(db)

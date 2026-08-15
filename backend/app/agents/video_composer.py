@@ -112,7 +112,6 @@ class VideoComposerAgent(ReActAgent):
                 {"kind": "shared_fact", "ref": "project.final_video_mix"},
             ],
             "reflection": {
-                "completion_state": "completed",
                 "mix_type": mix_type,
                 "reported_gaps": [],
                 "reported_hints": [],
