@@ -1581,6 +1581,17 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         agent._orchestration_runtime_resume_bootstrap_facade = (
             _build_recording_resume_bootstrap_facade(agent)
         )
+        published_runtime_states = []
+        published_kwargs = []
+
+        async def _publish_after_terminal_commit(**kwargs):
+            published_runtime_states.append(
+                _load_runtime_view_from_fresh_session(SessionLocal, task.id)["status"]
+            )
+            published_kwargs.append(dict(kwargs))
+            return {"final_video_url": "https://example.com/final.mp4"}
+
+        agent._workflow_completion_adapter.publish_completed = _publish_after_terminal_commit
 
         second = asyncio.run(
             agent._execute_impl(_orchestrator_request(task, {"user_prompt": "test prompt"}))
@@ -1590,6 +1601,9 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
         nodes_by_key = {node["node_key"]: node for node in runtime_view["nodes"]}
 
         assert second["status"] == "completed"
+        assert published_runtime_states == [WorkflowSessionStatus.COMPLETED.value]
+        assert published_kwargs[0]["runtime_session_id"] == session.session_id
+        assert published_kwargs[0]["runtime_terminal_committed"] is True
         assert runtime_view["status"] == WorkflowSessionStatus.COMPLETED.value
         assert fresh_task["status"] == TaskStatus.COMPLETED.value
         assert nodes_by_key["concept"]["status"] == WorkflowNodeStatus.COMPLETED.value

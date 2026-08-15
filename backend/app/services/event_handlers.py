@@ -38,25 +38,35 @@ async def handle_persistence_event(event: Event) -> None:
             payload.setdefault("resources", []).append(res)
         # workflow 完成事件附带 final_video
         if payload.get("final_video_url") or payload.get("final_video_path"):
-            payload.setdefault("resources", []).append(
-                {
-                    "scope": "task",
-                    "kind": "final_video",
-                    "url": payload.get("final_video_url"),
-                    "path": payload.get("final_video_path"),
-                    "resource_type": "video",
-                }
-            )
+            resources = payload.setdefault("resources", [])
+            if not any(
+                isinstance(item, dict) and item.get("kind") == "final_video"
+                for item in resources
+            ):
+                resources.append(
+                    {
+                        "scope": "task",
+                        "kind": "final_video",
+                        "url": payload.get("final_video_url"),
+                        "path": payload.get("final_video_path"),
+                        "resource_type": "video",
+                    }
+                )
         # 状态映射
         if event.event_kind == EventKind.STATE and "status" not in payload:
-            payload["status"] = payload.get("state") or "PERSISTING"
+            payload["status"] = "persisting_data"
         return payload
 
     def _sync_handle() -> None:
         payload = _build_payload()
         svc = DataPersistenceService()
         with SessionLocal() as db:  # type: Session
-            svc.persist_from_event_payload(payload, db)
+            result = svc.persist_from_event_payload(payload, db)
+            if result.get("status") in {"partial", "skipped", "failed"}:
+                logger.warning(
+                    "Persistence projection completed with diagnostics: %s",
+                    result,
+                )
 
     try:
         loop = asyncio.get_running_loop()

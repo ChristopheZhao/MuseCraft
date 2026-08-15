@@ -1294,28 +1294,43 @@ class OrchestratorAgent(BaseAgent):
                     "runtime summary and persistence projection would diverge"
                 )
 
-            completion_payload = await self._workflow_completion_adapter.publish_completed(
-                task=task,
-                workflow_id=wf_id,
-                persistence_payload=persistence_payload,
-                results=workflow_results,
-                quality_score=workflow_results.get("quality_checker", {}).get("quality_score"),
-            )
-            final_url = str(completion_payload.get("final_video_url") or "").strip()
-            final_path = str(completion_payload.get("final_video_path") or "").strip()
             quality_result = workflow_results.get("quality_checker")
             quality_result = quality_result if isinstance(quality_result, dict) else {}
             quality_score = quality_result.get("quality_score")
-            if runtime_session_id is not None:
-                self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
+            if runtime_session_id is None:
+                raise AgentError("Workflow completion has no runtime terminal authority")
+            self._get_orchestration_runtime_transition_facade().mark_runtime_session_completed(
+                runtime_session_id=runtime_session_id,
+                task_id=task.task_id,
+                summary_output=self._workflow_completion_adapter.build_runtime_summary_output(
+                    final_video_url=final_url,
+                    final_video_path=final_path,
+                    results=workflow_results,
+                    quality_score=quality_score,
+                ),
+            )
+            runtime_session_status = WorkflowSessionStatus.COMPLETED.value
+
+            completion_payload: Dict[str, Any] = {}
+            persistence_status = "event_published"
+            projection_error: Optional[str] = None
+            try:
+                completion_payload = await self._workflow_completion_adapter.publish_completed(
+                    task=task,
+                    workflow_id=wf_id,
+                    persistence_payload=persistence_payload,
+                    results=workflow_results,
+                    quality_score=quality_score,
                     runtime_session_id=runtime_session_id,
-                    task_id=task.task_id,
-                    summary_output=self._workflow_completion_adapter.build_runtime_summary_output(
-                        final_video_url=final_url,
-                        final_video_path=final_path,
-                        results=workflow_results,
-                        quality_score=quality_score,
-                    ),
+                    runtime_terminal_committed=True,
+                )
+            except Exception as event_error:
+                persistence_status = "event_publish_failed"
+                projection_error = str(event_error)
+                self.logger.error(
+                    "Runtime terminal committed but completion projection failed for session=%s: %s",
+                    runtime_session_id,
+                    event_error,
                 )
 
             self.logger.info(f"🎉 工作流完成，任务ID: {task.task_id}")
@@ -1330,7 +1345,8 @@ class OrchestratorAgent(BaseAgent):
                 "role_continuity_diagnostics": completion_payload.get(
                     "role_continuity_diagnostics"
                 ),
-                "persistence_status": "event_published",
+                "persistence_status": persistence_status,
+                "projection_error": projection_error,
                 "workflow_state_id": wf_id,
             }
 
@@ -1348,7 +1364,11 @@ class OrchestratorAgent(BaseAgent):
                 self.logger.warning("Failed to publish workflow_failed event: %s", evt_err)
             if (
                 runtime_session_id is not None
-                and runtime_session_status != WorkflowSessionStatus.FAILED.value
+                and runtime_session_status
+                not in {
+                    WorkflowSessionStatus.COMPLETED.value,
+                    WorkflowSessionStatus.FAILED.value,
+                }
             ):
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_failed(
                     runtime_session_id=runtime_session_id,

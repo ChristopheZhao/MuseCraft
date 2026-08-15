@@ -212,7 +212,17 @@ class WorkflowCompletionAdapter:
         persistence_payload: Optional[Dict[str, Any]] = None,
         results: Optional[Dict[str, Any]] = None,
         quality_score: Optional[Any] = None,
+        runtime_session_id: Optional[int] = None,
+        runtime_terminal_committed: bool = False,
     ) -> Dict[str, Any]:
+        if (
+            type(runtime_session_id) is not int
+            or runtime_session_id <= 0
+            or runtime_terminal_committed is not True
+        ):
+            raise ValueError(
+                "workflow completion requires a durable runtime terminal commit marker"
+            )
         persistence_payload = persistence_payload or self.build_persistence_payload(workflow_id)
         try:
             facts_summary = build_mas_state_view(str(workflow_id), service=self._memory_services.short_term)
@@ -226,6 +236,8 @@ class WorkflowCompletionAdapter:
             "status": "COMPLETED",
             "projection_role": "bounded_terminal_summary",
             "runtime_authoritative": False,
+            "runtime_session_id": runtime_session_id,
+            "runtime_terminal_committed": True,
             "refresh_required": True,
             "final_video_url": final_video_url,
             "final_video_path": final_video_path,

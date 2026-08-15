@@ -78,6 +78,8 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
             workflow_id="wf-1",
             results={"ok": True},
             quality_score=0.92,
+            runtime_session_id=17,
+            runtime_terminal_committed=True,
         )
     )
 
@@ -85,6 +87,8 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
     assert payload["state"] == "workflow_completed"
     assert payload["projection_role"] == "bounded_terminal_summary"
     assert payload["runtime_authoritative"] is False
+    assert payload["runtime_session_id"] == 17
+    assert payload["runtime_terminal_committed"] is True
     assert payload["refresh_required"] is True
     assert payload["facts_summary"]["completed_scenes"] == 1
     assert payload["results"] == {"ok": True}
@@ -94,6 +98,24 @@ def test_publish_completed_emits_bounded_terminal_summary(monkeypatch):
     assert result["final_video_url"] == "/files/final.mp4"
     assert result["final_video_path"] == "/tmp/final.mp4"
     assert result["role_continuity_diagnostics"]["fallback_reason"] == "quality_checker_result_missing"
+
+
+def test_publish_completed_requires_durable_runtime_terminal_marker():
+    adapter = WorkflowCompletionAdapter(memory_services=SimpleNamespace(short_term=object()))
+    task = SimpleNamespace(task_id="task-uncommitted", id=13)
+
+    try:
+        asyncio.run(
+            adapter.publish_completed(
+                task=task,
+                workflow_id="wf-uncommitted",
+                persistence_payload={"scenes": [], "resources": []},
+            )
+        )
+    except ValueError as exc:
+        assert "runtime terminal commit marker" in str(exc)
+    else:
+        raise AssertionError("publish_completed accepted an uncommitted runtime terminal")
 
 
 def test_build_runtime_summary_output_projects_role_continuity_read_model():

@@ -517,6 +517,7 @@ def _build_main_loop_runtime_harness(
     video_outputs=None,
     runtime_decision_mode="activate",
     retry_failed_step=False,
+    publish_error=None,
 ):
     shared_store = _FakeSharedMemoryStore()
     short_term = _FakeShortTermService(shared_store)
@@ -525,7 +526,7 @@ def _build_main_loop_runtime_harness(
         global_service=object(),
         long_term=object(),
     )
-    state_calls = {"trace": []}
+    state_calls = {"trace": [], "terminal": [], "attempts": []}
     runtime_calls = {"open": [], "apply": [], "llm": []}
 
     monkeypatch.setattr(
@@ -542,6 +543,16 @@ def _build_main_loop_runtime_harness(
         orchestrator_module,
         "read_shared_fact",
         lambda workflow_id, key, default=None, service=None: shared_store.get(key, default),
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "activate_current_attempt_keepalive",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "deactivate_current_attempt_keepalive",
+        lambda **kwargs: True,
     )
 
     state_adapter = SimpleNamespace(
@@ -610,10 +621,22 @@ def _build_main_loop_runtime_harness(
         publish_failed=_async_return_json({}),
         build_runtime_summary_output=lambda **kwargs: dict(kwargs),
     )
+    attempt_ids = iter(range(1, 20))
+
+    def _start_runtime_attempt(**kwargs):
+        attempt_id = next(attempt_ids)
+        state_calls["attempts"].append(dict(kwargs, attempt_id=attempt_id))
+        return SimpleNamespace(
+            node_key=kwargs["current_agent_type"].value,
+            attempt_id=attempt_id,
+            trigger_reason=kwargs.get("trigger_reason_override") or "initial",
+            lease_token=f"lease-{attempt_id}",
+        )
+
     agent._orchestration_runtime_resume_bootstrap_facade = SimpleNamespace(
         resolve_runtime_resume_context=lambda **kwargs: SimpleNamespace(
-            runtime_session_id=None,
-            runtime_session_status="",
+            runtime_session_id=17,
+            runtime_session_status="running",
             runtime_input_payload={},
             script_gate_id=None,
             latest_script_decision_exists=False,
@@ -621,8 +644,20 @@ def _build_main_loop_runtime_harness(
             script_resume_action="",
             runtime_resume_checkpoint=None,
             resume_anchor_agent=None,
-        )
+        ),
+        start_runtime_attempt=_start_runtime_attempt,
     )
+    agent._orchestration_runtime_transition_facade = SimpleNamespace(
+        complete_runtime_attempt=lambda **kwargs: None,
+        abandon_runtime_attempt=lambda **kwargs: None,
+        fail_runtime_attempt=lambda **kwargs: None,
+        upsert_runtime_attempt_diagnostic=lambda **kwargs: None,
+        mark_runtime_session_completed=lambda **kwargs: state_calls["terminal"].append(
+            dict(kwargs)
+        ),
+        mark_runtime_session_failed=lambda **kwargs: None,
+    )
+    agent._ensure_dispatch_prerequisites = lambda **kwargs: None
     agent._last_audio_route_payload = {}
     video_agent_output = video_output or {
         "success": True,
@@ -675,11 +710,15 @@ def _build_main_loop_runtime_harness(
         task_specs = {
             AgentType.VIDEO_GENERATOR: {
                 "run": True,
+                "mission": "Generate the scene videos",
+                "deliverable": "Accepted scene video artifacts",
                 "order": 0,
                 "scope": {"workflow_id": "wf-mainloop-1"},
             },
             AgentType.AUDIO_GENERATOR: {
                 "run": False,
+                "mission": "Generate required audio",
+                "deliverable": "Accepted audio artifacts",
                 "order": 1,
                 "scope": {"workflow_id": "wf-mainloop-1"},
             },
@@ -712,6 +751,8 @@ def _build_main_loop_runtime_harness(
         }
 
     async def _publish_completed(**kwargs):
+        if publish_error is not None:
+            raise publish_error
         return {"final_video_url": ""}
 
     async def _publish_failed(**kwargs):
@@ -1849,6 +1890,21 @@ def test_orchestrator_main_loop_skips_runtime_llm_when_no_gate_event(monkeypatch
     assert runtime_calls["apply"] == []
     assert AgentType.AUDIO_GENERATOR.value not in result["results"]
     assert state_calls["trace"] == []
+
+
+def test_completion_projection_failure_does_not_downgrade_committed_runtime(monkeypatch):
+    agent, task, _runtime_calls, state_calls = _build_main_loop_runtime_harness(
+        monkeypatch,
+        gate_triggers=[],
+        publish_error=RuntimeError("projection unavailable"),
+    )
+
+    result = asyncio.run(_run_main_loop(agent, task))
+
+    assert result["status"] == "completed"
+    assert result["persistence_status"] == "event_publish_failed"
+    assert result["projection_error"] == "projection unavailable"
+    assert len(state_calls["terminal"]) == 1
 
 
 def test_orchestrator_main_loop_fails_fast_when_runtime_decision_errors(monkeypatch):

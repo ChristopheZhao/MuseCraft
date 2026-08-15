@@ -20,26 +20,71 @@ class DataPersistenceService:
     def persist_from_event_payload(self, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
         """使用事件载荷（或终态摘要）写入任务/场景/资源最小投影。"""
         task_id = str(payload.get("task_id") or payload.get("external_task_id") or "")
-        scenes = payload.get("scenes") or []
-        resources = payload.get("resources") or []
+        projection_payload = dict(payload)
+        runtime_authoritative = payload.get("runtime_authoritative") is True
+        terminal_committed = (
+            type(payload.get("runtime_session_id")) is int
+            and payload.get("runtime_session_id") > 0
+            and payload.get("runtime_terminal_committed") is True
+        )
+        final_video_url, final_video_path = self._extract_final_video_refs(payload)
+        reported_gaps: List[str] = []
+        if (final_video_url or final_video_path) and not (
+            runtime_authoritative or terminal_committed
+        ):
+            projection_payload.pop("final_video_url", None)
+            projection_payload.pop("final_video_path", None)
+            projection_payload["resources"] = [
+                item
+                for item in (payload.get("resources") or [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("kind") == "final_video"
+                    and item.get("scope") == "task"
+                )
+            ]
+            reported_gaps.append("final_video_projection_not_committed")
+
+        scenes = projection_payload.get("scenes") or []
+        resources = projection_payload.get("resources") or []
         facts = payload.get("facts") or {}
-        status = payload.get("status") or "PERSISTING"
-        progress = payload.get("progress") or 90
+        status = payload.get("status") or TaskStatus.PERSISTING_DATA.value
+        progress = payload.get("progress") if payload.get("progress") is not None else 90
         current_step = payload.get("current_step") or "Persisting data"
 
         try:
-            task = self._persist_task_from_payload(task_id, facts, payload, status, progress, current_step, db)
+            task = self._persist_task_from_payload(
+                task_id,
+                facts,
+                projection_payload,
+                status,
+                progress,
+                current_step,
+                db,
+                allow_lifecycle_mutation=runtime_authoritative,
+            )
+            if task is None:
+                return {
+                    "task_id": task_id,
+                    "external_task_id": task_id,
+                    "status": "skipped",
+                    "reason_code": "non_authoritative_task_projection_target_missing",
+                    "persistence_time": datetime.now().isoformat(),
+                }
             scene_results = self._persist_scenes_from_payload(task, scenes, db)
-            resource_results = self._persist_resources_from_payload(task, resources, scenes, db)
+            resource_results = self._persist_resources_from_payload(task, resources, db)
             db.commit()
-            return {
+            result = {
                 "task_id": task.id,
                 "external_task_id": task_id,
-                "status": "success",
+                "status": "partial" if reported_gaps else "success",
                 "scenes_persisted": len(scene_results),
                 "resources_persisted": len(resource_results),
                 "persistence_time": datetime.now().isoformat(),
             }
+            if reported_gaps:
+                result["reported_gaps"] = reported_gaps
+            return result
         except Exception as exc:  # pragma: no cover - defensive
             db.rollback()
             self.logger.error("Persist from event payload failed: %s", exc)
@@ -59,7 +104,9 @@ class DataPersistenceService:
         progress: Any,
         current_step: str,
         db: Session,
-    ) -> Task:
+        *,
+        allow_lifecycle_mutation: bool,
+    ) -> Optional[Task]:
         ext_id = str(ext_id or "")
         concept_plan = facts.get("concept_plan", {}) if isinstance(facts, dict) else {}
         voice_plan = facts.get("voice_plan", {}) if isinstance(facts, dict) else {}
@@ -71,16 +118,15 @@ class DataPersistenceService:
 
         task = db.query(Task).filter(Task.task_id == ext_id).first()
         if not task:
-            try:
-                task_status = TaskStatus(status) if isinstance(status, TaskStatus) else TaskStatus[status]  # type: ignore[index]
-            except Exception:
-                task_status = TaskStatus.PERSISTING
+            if not allow_lifecycle_mutation:
+                return None
+            task_status = self._parse_task_status(status)
             task = Task(
                 task_id=ext_id,
                 title="Short Video Task",
                 description="",
                 task_type=TaskType.VIDEO_GENERATION if hasattr(TaskType, "VIDEO_GENERATION") else None,
-                status=task_status if isinstance(task_status, TaskStatus) else TaskStatus.PERSISTING,
+                status=task_status.value,
                 progress_percentage=int(progress) if progress is not None else 90,
                 current_step=current_step,
                 input_parameters={
@@ -92,16 +138,10 @@ class DataPersistenceService:
             db.add(task)
             db.flush()
 
-        # 更新状态/进度
-        try:
-            task.status = TaskStatus(status) if isinstance(status, TaskStatus) else TaskStatus[status]  # type: ignore[index]
-        except Exception:
-            pass
-        try:
+        if allow_lifecycle_mutation:
+            task.status = self._parse_task_status(status).value
             task.progress_percentage = int(progress)
-        except Exception:
-            pass
-        task.current_step = current_step
+            task.current_step = current_step
 
         # 元数据
         if hasattr(task, "output_metadata"):
@@ -146,9 +186,13 @@ class DataPersistenceService:
             results.append({"scene_id": scene.id, "scene_number": scene.scene_number, "status": status})
         return results
 
-    def _persist_resources_from_payload(self, task: Task, resources: List[Dict[str, Any]], scenes: List[Dict[str, Any]], db: Session) -> List[Dict[str, Any]]:
+    def _persist_resources_from_payload(
+        self,
+        task: Task,
+        resources: List[Dict[str, Any]],
+        db: Session,
+    ) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
-        scene_index = {(sd.get("scene_number")): sd for sd in scenes if isinstance(sd, dict)}
         for res in resources:
             if not isinstance(res, dict):
                 continue
@@ -159,32 +203,17 @@ class DataPersistenceService:
             file_url = (res.get("url") or res.get("file_url") or "") if isinstance(res.get("url") or res.get("file_url"), str) else ""
             file_path = (res.get("path") or res.get("file_path") or "") if isinstance(res.get("path") or res.get("file_path"), str) else ""
             rtype = res.get("resource_type") or res.get("type") or ""
-            # 兼容旧字段：缺失资源列表时，从 scenes 衍生
-            if not (file_url or file_path) and scene_number in scene_index:
-                sd = scene_index.get(scene_number) or {}
-                kind = res.get("kind") or sd.get("kind")
-                if kind == "video":
-                    file_url = (sd.get("video_url") or "") if isinstance(sd.get("video_url"), str) else ""
-                    file_path = (sd.get("video_path") or "") if isinstance(sd.get("video_path"), str) else ""
-                    rtype = rtype or ResourceType.VIDEO
-                if kind == "audio":
-                    file_url = (sd.get("audio_url") or "") if isinstance(sd.get("audio_url"), str) else ""
-                    file_path = (sd.get("audio_path") or "") if isinstance(sd.get("audio_path"), str) else ""
-                    rtype = rtype or self._resolve_voice_resource_type()
             if not (file_url or file_path):
                 continue
-            try:
-                if isinstance(rtype, ResourceType):
-                    resource_type = rtype
-                elif isinstance(rtype, str):
-                    try:
-                        resource_type = ResourceType(rtype)
-                    except Exception:
-                        resource_type = ResourceType[rtype.upper()]  # type: ignore[index]
-                else:
-                    resource_type = ResourceType.VIDEO
-            except Exception:
-                resource_type = ResourceType.VIDEO
+            if isinstance(rtype, ResourceType):
+                resource_type = rtype
+            elif isinstance(rtype, str):
+                try:
+                    resource_type = ResourceType(rtype)
+                except ValueError as exc:
+                    raise ValueError(f"unsupported resource_type: {rtype!r}") from exc
+            else:
+                raise ValueError("resource_type is required for persisted resources")
             is_final_output = bool(res.get("scope") == "task" and res.get("kind") == "final_video")
             model = Resource(
                 task_id=task.id,
@@ -248,11 +277,16 @@ class DataPersistenceService:
         scene.script_text = _s("script_text")
         scene.voice_over_text = _s("voice_over_text")
 
-    def _resolve_voice_resource_type(self) -> ResourceType:
+    @staticmethod
+    def _parse_task_status(value: Any) -> TaskStatus:
+        if isinstance(value, TaskStatus):
+            return value
+        if not isinstance(value, str) or not value:
+            raise ValueError("task status must be a TaskStatus value or enum name")
         try:
-            enum_values = getattr(Resource.__table__.c.resource_type.type, "enums", [])
-        except Exception:
-            enum_values = []
-        if ResourceType.VOICE_OVER.value in enum_values:
-            return ResourceType.VOICE_OVER
-        return ResourceType.AUDIO
+            return TaskStatus(value)
+        except ValueError:
+            try:
+                return TaskStatus[value]
+            except KeyError as exc:
+                raise ValueError(f"unsupported task status: {value!r}") from exc
