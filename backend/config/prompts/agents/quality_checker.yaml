@@ -40,21 +40,18 @@ templates:
       3. 场景转换和节奏把控
       4. 整体内容质量
 
+      直接给出语义质量裁决。确定性运行时会在此结果之后单独应用产物完整性和角色连续性硬门禁。
       以JSON格式提供分析：
 
       ```json
       {
-        "narrative_coherence": "故事流程和逻辑进展的评估",
-        "message_clarity": "关键信息传达清晰度的评估", 
-        "pacing_analysis": "视频节奏和时机的评估",
-        "scene_transitions": "场景连接和流畅度的分析",
-        "visual_consistency": "跨场景视觉风格一致性的评估",
-        "audio_quality": "音频元素和同步效果的评估",
-        "technical_quality": "技术执行质量的评估",
-        "content_suggestions": ["具体改进建议1", "具体改进建议2"],
-        "overall_assessment": "视频质量的综合总结",
-        "quality_score": 8.5,
-        "recommended_actions": ["建议行动1", "建议行动2"]
+        "quality_score": 85,
+        "quality_grade": "Good",
+        "approval_status": "approved",
+        "requires_human_review": false,
+        "overall_assessment": "视频质量的综合总结和裁决理由",
+        "issues": ["具体问题"],
+        "recommendations": ["具体改进建议"]
       }
       ```
 

@@ -27,6 +27,18 @@ FIXTURE_PATH = (
 )
 
 
+def _quality_ai_assessment(*, score: int = 100) -> dict:
+    return {
+        "quality_score": score,
+        "quality_grade": "Excellent",
+        "approval_status": "approved",
+        "requires_human_review": False,
+        "overall_assessment": "offline e2e quality assessment",
+        "issues": [],
+        "recommendations": [],
+    }
+
+
 class _NoopMemoryProvider:
     async def retrieve_scene_references(self, workflow_state_id: str, scene_number: int, agent_name: str):
         return {}
@@ -367,7 +379,7 @@ def test_task_1080_offline_e2e_projects_role_diagnostics_to_runtime_read_model(
     agent.logger = logging.getLogger("test.task_1080.e2e")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "offline_e2e_stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
     content_quality = asyncio.run(
@@ -442,6 +454,7 @@ def test_quality_scoring_caps_excellent_when_role_continuity_contract_missing():
             technical_quality={"score": 100, "issues": [], "recommendations": []},
             content_quality={
                 "score": 90,
+                "ai_analysis": _quality_ai_assessment(score=93),
                 "issues": [],
                 "recommendations": [],
                 "contract_readiness": {"status": "missing_contract", "score": 0},

@@ -528,19 +528,13 @@ class ScriptGenerationTool(AsyncTool):
             )
             llm_content = (res.get("content") or "").strip()
             
-            try:
-                narrative_data = json.loads(llm_content)
-                if "success" not in narrative_data:
-                    narrative_data["success"] = True
-                return narrative_data
-            except json.JSONDecodeError:
-                return {
-                    "narrative_theme": "基于提供场景的连贯叙事",
-                    "story_arc": llm_content,
-                    "scene_connections": ["场景间自然过渡"],
-                    "emotional_curve": "渐进式情感发展",
-                    "key_moments": ["各场景重点时刻"],
-                }
+            narrative_data = json.loads(llm_content)
+            if not isinstance(narrative_data, dict):
+                raise ToolError(
+                    "叙事结构必须是 JSON 对象",
+                    error_code="narrative_structure_invalid_json",
+                )
+            return narrative_data
 
         except Exception as e:
             raise ToolError(f"叙事结构生成失败: {str(e)}", error_code="narrative_structure_failed")
@@ -627,16 +621,13 @@ class ScriptGenerationTool(AsyncTool):
             )
             llm_content = (res.get("content") or "").strip()
             if llm_content:
-                try:
-                    analysis_data = json.loads(llm_content)
-                    return analysis_data
-                except json.JSONDecodeError:
-                    return {
-                        "continuity_score": 0.7,
-                        "analysis": llm_content,
-                        "weak_points": [],
-                        "suggestions": ["基于LLM分析进行优化"],
-                    }
+                analysis_data = json.loads(llm_content)
+                if not isinstance(analysis_data, dict):
+                    raise ToolError(
+                        "连续性分析必须是 JSON 对象",
+                        error_code="continuity_analysis_invalid_json",
+                    )
+                return analysis_data
             raise ToolError(
                 "连续性分析失败",
                 error_code="continuity_analysis_failed",

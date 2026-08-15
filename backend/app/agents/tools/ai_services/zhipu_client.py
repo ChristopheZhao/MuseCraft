@@ -804,31 +804,17 @@ class ZhipuClientTool(AsyncTool):
                 "messages": messages,
                 "model": self.default_model,
                 "temperature": 0.3,
-                "max_tokens": max_tokens
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
             }
             
             result = await self._chat_completion(chat_params)
-            
-            # 尝试解析JSON
-            try:
-                json_result = json.loads(result["content"])
-                result["json_result"] = json_result
-                result["valid_json"] = True
-            except json.JSONDecodeError:
-                # 尝试提取JSON
-                import re
-                json_match = re.search(r'\{.*\}', result["content"], re.DOTALL)
-                if json_match:
-                    try:
-                        json_result = json.loads(json_match.group())
-                        result["json_result"] = json_result
-                        result["valid_json"] = True
-                    except:
-                        result["valid_json"] = False
-                        result["error"] = "Failed to parse JSON from response"
-                else:
-                    result["valid_json"] = False
-                    result["error"] = "No JSON found in response"
+
+            json_result = json.loads(result["content"])
+            if not isinstance(json_result, dict):
+                raise ToolError("JSON response must be an object", self.metadata.name)
+            result["json_result"] = json_result
+            result["valid_json"] = True
             
             return result
             

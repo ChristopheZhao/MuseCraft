@@ -113,13 +113,8 @@ class AgentToolAllocator:
             "file_storage_tool"
         ]
         
-        # 定义工具依赖关系
-        # 精简依赖：仅保留已注册、稳定的依赖
-        self._tool_dependencies = {
-            # 允许 video_generation 伴随 scene_analysis（均为已注册工具）
-            "video_generation": ["scene_analysis"],
-            # 其余移除不稳定依赖，避免装载未注册工具
-        }
+        # 工具依赖只能表达执行必需条件，不能偷偷扩张 Agent 的决策能力。
+        self._tool_dependencies = {}
     
     def get_tools_for_agent(self, agent_type: AgentType) -> List[str]:
         """
