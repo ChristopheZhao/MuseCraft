@@ -170,6 +170,16 @@ def test_resolve_execution_contract_uses_explicit_contract_without_plan_or_route
     assert resolved["constraints"]["generate_audio"] is False
 
 
+def test_resolve_execution_contract_rejects_missing_boundary():
+    agent = object.__new__(VideoGeneratorAgent)
+
+    with pytest.raises(ValueError, match="execution_contract"):
+        agent._resolve_execution_contract(
+            {"workflow_state_id": "wf-missing-contract"},
+            workflow_id="wf-missing-contract",
+        )
+
+
 def test_orchestrator_builds_video_execution_contract_from_runtime_hints():
     contract = OrchestratorAgent._build_agent_execution_contract(
         agent_type=AgentType.VIDEO_GENERATOR,

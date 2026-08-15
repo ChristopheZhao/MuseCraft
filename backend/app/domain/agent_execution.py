@@ -22,6 +22,8 @@ class AgentExecutionContractReason(str, Enum):
     INVALID_CONTRACT_MEMBER = "agent_contract_invalid_member"
     RESERVED_OUTPUT_FIELD = "agent_contract_reserved_output_field"
     ORCHESTRATION_REPORT_MISSING = "agent_contract_orchestration_report_missing"
+    EXECUTION_CONTRACT_MISSING = "agent_execution_contract_missing"
+    EXECUTION_CONTRACT_INVALID = "agent_execution_contract_invalid"
 
 
 class AgentExecutionContractError(ValueError):

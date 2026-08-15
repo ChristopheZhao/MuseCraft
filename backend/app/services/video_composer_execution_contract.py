@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .agent_execution_contract import require_agent_execution_contract
+
 
 VALID_COMPOSE_MODES = ("compose", "bgm", "voiceover")
 
@@ -55,10 +57,15 @@ def build_video_composer_execution_contract(
 
 
 def get_video_composer_compose_mode(execution_contract: Optional[Dict[str, Any]]) -> str:
-    constraints = execution_contract.get("constraints") if isinstance(execution_contract, dict) else {}
+    if not isinstance(execution_contract, dict):
+        raise ValueError("video_composer execution_contract is required")
+    constraints = execution_contract.get("constraints")
     if not isinstance(constraints, dict):
-        constraints = {}
-    return normalize_video_composer_compose_mode(constraints.get("compose_mode") or "compose")
+        raise ValueError("video_composer execution_contract.constraints must be an object")
+    compose_mode = constraints.get("compose_mode")
+    if type(compose_mode) is not str or compose_mode not in VALID_COMPOSE_MODES:
+        raise ValueError("video_composer execution_contract.constraints.compose_mode is required")
+    return compose_mode
 
 
 def get_video_composer_execution_contract(
@@ -71,11 +78,10 @@ def get_video_composer_execution_contract(
             raise ValueError(
                 "legacy video_composer inputs are no longer supported; provide execution_contract without legacy compose flags"
             )
-        contract = payload.get("execution_contract")
-        if isinstance(contract, dict):
-            return dict(contract)
-    return build_video_composer_execution_contract(
-        workflow_state_id=str(workflow_state_id or ""),
+    del workflow_state_id
+    return require_agent_execution_contract(
+        payload,
+        expected_agent="video_composer",
     )
 
 

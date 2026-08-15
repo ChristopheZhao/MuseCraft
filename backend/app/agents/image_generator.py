@@ -259,17 +259,9 @@ class ImageGeneratorAgent(ReActAgent):
         返回字段：final_completed_scenes / final_failed_scenes
         """
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        shared = None
-        try:
-            if wf_id:
-                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-        except Exception:
-            shared = None
         finals, finals_failed = finalize_scene_outputs(
             kind="image",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
-            shared_memory=shared,
             service=self.short_term_service,
         )
 
@@ -291,17 +283,9 @@ class ImageGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         result = await super()._finalize_incomplete_results(context, task)
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        shared = None
-        try:
-            if wf_id:
-                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-        except Exception:
-            shared = None
         finals, finals_failed = finalize_scene_outputs(
             kind="image",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
-            shared_memory=shared,
             service=self.short_term_service,
         )
         result["final_completed_scenes"] = finals

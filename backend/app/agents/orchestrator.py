@@ -2761,17 +2761,9 @@ class OrchestratorAgent(BaseAgent):
                         raise ValueError(
                             f"LLM task decomposition agents[{index}] must be an object"
                         )
-                    spec = OrchestrationStateAdapter.parse_task_spec_payload(
+                    spec = OrchestrationStateAdapter.parse_primary_task_spec_payload(
                         spec=item,
                         require_explicit_agent=True,
-                        required_fields=(
-                            "run",
-                            "mission",
-                            "deliverable",
-                            "constraints",
-                            "order",
-                            "runtime_hints",
-                        ),
                         field_path=f"task_decomposition.agents[{index}]",
                     )
                     atype = AgentType(spec["agent"])
@@ -2819,10 +2811,8 @@ class OrchestratorAgent(BaseAgent):
                         f"LLM task decomposition conditional_tasks[{index}].task_id "
                         "must be a canonical string"
                     )
-                spec = OrchestrationStateAdapter.parse_task_spec_payload(
+                spec = OrchestrationStateAdapter.parse_conditional_task_spec_payload(
                     spec={key: value for key, value in item.items() if key != "task_id"},
-                    require_explicit_agent=True,
-                    required_fields=("mission", "deliverable"),
                     field_path=f"task_decomposition.conditional_tasks[{index}]",
                 )
                 atype = AgentType(spec["agent"])

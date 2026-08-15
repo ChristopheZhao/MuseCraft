@@ -30,18 +30,27 @@ def test_resolve_execution_contract_rejects_legacy_inputs_even_when_boundary_pre
         )
 
 
-def test_resolve_execution_contract_defaults_to_compose_when_boundary_missing():
+def test_resolve_execution_contract_rejects_missing_boundary():
     agent = object.__new__(VideoComposerAgent)
 
-    resolved = agent._resolve_execution_contract(
-        {
-            "workflow_state_id": "wf-voice",
-        },
-        "wf-voice",
-    )
+    with pytest.raises(AgentError, match="execution_contract"):
+        agent._resolve_execution_contract(
+            {
+                "workflow_state_id": "wf-voice",
+            },
+            "wf-voice",
+        )
 
-    assert get_video_composer_compose_mode(resolved) == "compose"
-    assert resolved["storage"]["workflow_state_id"] == "wf-voice"
+
+def test_compose_mode_rejects_missing_contract_constraint():
+    contract = build_video_composer_execution_contract(
+        workflow_state_id="wf-compose",
+        compose_mode="compose",
+    )
+    contract["constraints"].pop("compose_mode")
+
+    with pytest.raises(ValueError, match="compose_mode"):
+        get_video_composer_compose_mode(contract)
 
 
 def test_resolve_execution_contract_rejects_legacy_inputs_without_boundary():

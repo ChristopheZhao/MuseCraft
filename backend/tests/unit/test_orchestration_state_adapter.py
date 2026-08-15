@@ -8,12 +8,23 @@ from app.services.orchestration_state_adapter import (
 )
 
 
+def _primary_task_spec(agent_type=AgentType.IMAGE_GENERATOR, **overrides):
+    spec = {
+        "agent": agent_type.value,
+        "run": True,
+        "mission": f"Execute the {agent_type.value} assignment",
+        "deliverable": f"Accepted {agent_type.value} output",
+    }
+    spec.update(overrides)
+    return spec
+
+
 def test_checkpoint_task_specs_use_explicit_order_after_canonical_json_round_trip():
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
-            AgentType.SCRIPT_WRITER: {"run": True, "order": 1},
-            AgentType.IMAGE_GENERATOR: {"run": True, "order": 2},
+            AgentType.CONCEPT_PLANNER: _primary_task_spec(AgentType.CONCEPT_PLANNER, order=0),
+            AgentType.SCRIPT_WRITER: _primary_task_spec(AgentType.SCRIPT_WRITER, order=1),
+            AgentType.IMAGE_GENERATOR: _primary_task_spec(AgentType.IMAGE_GENERATOR, order=2),
         },
         conditional_task_specs={},
         candidate_agents=[
@@ -59,10 +70,9 @@ def test_continuation_spec_boolean_fields_reject_truthiness_coercion(
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
             task_specs={
-                AgentType.IMAGE_GENERATOR: {
-                    "run": True,
-                    field_name: invalid_value,
-                }
+                AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                    **{field_name: invalid_value}
+                )
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.IMAGE_GENERATOR],
@@ -78,10 +88,10 @@ def test_continuation_spec_boolean_fields_reject_truthiness_coercion(
 def test_continuation_spec_preserves_explicit_false_booleans():
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.IMAGE_GENERATOR: {
-                "run": False,
-                "fallback_used": False,
-            }
+            AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                run=False,
+                fallback_used=False,
+            )
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.IMAGE_GENERATOR],
@@ -115,10 +125,9 @@ def test_continuation_spec_rejects_noncanonical_json_field_types(
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
             task_specs={
-                AgentType.IMAGE_GENERATOR: {
-                    "run": True,
-                    field_name: invalid_value,
-                }
+                AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                    **{field_name: invalid_value}
+                )
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.IMAGE_GENERATOR],
@@ -159,7 +168,7 @@ def test_build_continuation_checkpoint_rejects_noncanonical_boundary_types(
     reason,
 ):
     kwargs = {
-        "task_specs": {AgentType.IMAGE_GENERATOR: {"run": True}},
+        "task_specs": {AgentType.IMAGE_GENERATOR: _primary_task_spec()},
         "conditional_task_specs": {},
         "candidate_agents": [AgentType.IMAGE_GENERATOR],
         "anchor_type": OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
@@ -219,11 +228,7 @@ def test_validate_continuation_checkpoint_rejects_noncanonical_boundary_types(
 def _valid_image_checkpoint():
     return OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.IMAGE_GENERATOR: {
-                "agent": AgentType.IMAGE_GENERATOR.value,
-                "run": True,
-                "order": 0,
-            }
+            AgentType.IMAGE_GENERATOR: _primary_task_spec(order=0)
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.IMAGE_GENERATOR],
@@ -234,14 +239,11 @@ def _valid_image_checkpoint():
 
 
 def test_build_continuation_checkpoint_requires_primary_run_control():
+    spec = _primary_task_spec(order=0)
+    spec.pop("run")
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
-            task_specs={
-                AgentType.IMAGE_GENERATOR: {
-                    "agent": AgentType.IMAGE_GENERATOR.value,
-                    "order": 0,
-                }
-            },
+            task_specs={AgentType.IMAGE_GENERATOR: spec},
             conditional_task_specs={},
             candidate_agents=[AgentType.IMAGE_GENERATOR],
             anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
@@ -251,6 +253,52 @@ def test_build_continuation_checkpoint_requires_primary_run_control():
 
     assert exc_info.value.reason_code.value == "continuation_spec_required_field_missing"
     assert exc_info.value.field_path.endswith(".run")
+
+
+@pytest.mark.parametrize("missing_field", ["mission", "deliverable"])
+def test_primary_task_spec_uses_same_thin_required_fields_at_checkpoint_boundary(
+    missing_field,
+):
+    spec = {
+        "agent": AgentType.IMAGE_GENERATOR.value,
+        "run": True,
+        "mission": "Generate the requested scene images",
+        "deliverable": "Accepted scene image artifacts",
+    }
+    spec.pop(missing_field)
+
+    with pytest.raises(ContinuationCheckpointContractError) as exc_info:
+        OrchestrationStateAdapter.build_continuation_checkpoint(
+            task_specs={AgentType.IMAGE_GENERATOR: spec},
+            conditional_task_specs={},
+            candidate_agents=[AgentType.IMAGE_GENERATOR],
+            anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
+            node_key="image",
+            attempt_id=1,
+        )
+
+    assert exc_info.value.reason_code is ContinuationCheckpointContractReason.SPEC_REQUIRED_FIELD_MISSING
+    assert exc_info.value.field_path.endswith(f".{missing_field}")
+
+
+def test_primary_task_spec_keeps_optional_planning_metadata_thin():
+    parsed = OrchestrationStateAdapter.parse_primary_task_spec_payload(
+        spec={
+            "agent": AgentType.IMAGE_GENERATOR.value,
+            "run": True,
+            "mission": "Generate the requested scene images",
+            "deliverable": "Accepted scene image artifacts",
+        },
+        require_explicit_agent=True,
+        field_path="test.primary_task_spec",
+    )
+
+    assert parsed == {
+        "agent": AgentType.IMAGE_GENERATOR.value,
+        "run": True,
+        "mission": "Generate the requested scene images",
+        "deliverable": "Accepted scene image artifacts",
+    }
 
 
 def test_validate_continuation_checkpoint_rejects_duplicate_candidates():
@@ -305,10 +353,9 @@ def test_build_continuation_checkpoint_rejects_task_key_spec_agent_mismatch():
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
             task_specs={
-                AgentType.IMAGE_GENERATOR: {
-                    "agent": AgentType.VIDEO_GENERATOR.value,
-                    "run": True,
-                }
+                AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                    agent=AgentType.VIDEO_GENERATOR.value,
+                )
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.IMAGE_GENERATOR],
@@ -324,10 +371,7 @@ def test_build_continuation_checkpoint_rejects_explicit_null_spec_agent():
     with pytest.raises(ContinuationCheckpointContractError) as exc_info:
         OrchestrationStateAdapter.build_continuation_checkpoint(
             task_specs={
-                AgentType.IMAGE_GENERATOR: {
-                    "agent": None,
-                    "run": True,
-                }
+                AgentType.IMAGE_GENERATOR: _primary_task_spec(agent=None)
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.IMAGE_GENERATOR],

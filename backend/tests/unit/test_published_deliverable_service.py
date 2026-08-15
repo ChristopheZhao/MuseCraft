@@ -122,8 +122,18 @@ def _seed_script_facts(service: WorkingMemoryService, workflow_id: str) -> None:
 def _build_continuation_checkpoint(*, attempt_id=1):
     return OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.CONCEPT_PLANNER: {"run": True, "order": 0},
-            AgentType.SCRIPT_WRITER: {"run": True, "order": 1},
+            AgentType.CONCEPT_PLANNER: {
+                "run": True,
+                "mission": "Plan the concept",
+                "deliverable": "Concept plan",
+                "order": 0,
+            },
+            AgentType.SCRIPT_WRITER: {
+                "run": True,
+                "mission": "Write the script",
+                "deliverable": "Scene scripts",
+                "order": 1,
+            },
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.CONCEPT_PLANNER, AgentType.SCRIPT_WRITER],

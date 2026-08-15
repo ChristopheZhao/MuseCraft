@@ -56,6 +56,16 @@ from app.services.runtime_session_control_plane import RuntimeSessionControlPlan
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
 
+def _primary_task_spec(agent_type, *, order=0):
+    return {
+        "agent": agent_type.value,
+        "run": True,
+        "mission": f"Execute the {agent_type.value} assignment",
+        "deliverable": f"Accepted {agent_type.value} output",
+        "order": order,
+    }
+
+
 @pytest.fixture
 def runtime_db():
     engine = create_engine("sqlite:///:memory:")
@@ -653,8 +663,8 @@ def test_script_gate_approve_applies_decision_checkpoint_and_deliverable_atomica
     attempt = store.start_attempt(_start_command(session.id, node_key="script"))
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.SCRIPT_WRITER: {"run": True, "order": 0},
-            AgentType.IMAGE_GENERATOR: {"run": True, "order": 1},
+            AgentType.SCRIPT_WRITER: _primary_task_spec(AgentType.SCRIPT_WRITER, order=0),
+            AgentType.IMAGE_GENERATOR: _primary_task_spec(AgentType.IMAGE_GENERATOR, order=1),
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.SCRIPT_WRITER, AgentType.IMAGE_GENERATOR],
@@ -878,7 +888,7 @@ def test_runtime_read_model_is_immutable_and_preserves_public_projection(runtime
     store = SqlAlchemyRuntimeAttemptStore(db)
     attempt = store.start_attempt(_start_command(session.id))
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
-        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        task_specs={AgentType.IMAGE_GENERATOR: _primary_task_spec(AgentType.IMAGE_GENERATOR)},
         conditional_task_specs={},
         candidate_agents=[AgentType.IMAGE_GENERATOR],
         anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
@@ -937,7 +947,7 @@ def test_runtime_read_model_exposes_invalid_continuation_contract_reason(runtime
     store = SqlAlchemyRuntimeAttemptStore(db)
     attempt = store.start_attempt(_start_command(session.id))
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
-        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        task_specs={AgentType.IMAGE_GENERATOR: _primary_task_spec(AgentType.IMAGE_GENERATOR)},
         conditional_task_specs={},
         candidate_agents=[AgentType.IMAGE_GENERATOR],
         anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,
@@ -968,7 +978,7 @@ def test_session_control_plane_resumes_with_explicit_attempt_and_node_outcomes(r
     store = SqlAlchemyRuntimeAttemptStore(db)
     attempt = store.start_attempt(_start_command(session.id))
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
-        task_specs={AgentType.IMAGE_GENERATOR: {"run": True, "order": 0}},
+        task_specs={AgentType.IMAGE_GENERATOR: _primary_task_spec(AgentType.IMAGE_GENERATOR)},
         conditional_task_specs={},
         candidate_agents=[AgentType.IMAGE_GENERATOR],
         anchor_type=OrchestrationStateAdapter.CONTINUATION_ANCHOR_RUNTIME_CHECKPOINT,

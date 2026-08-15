@@ -18,6 +18,7 @@ from app.domain import (
     TaskStatus,
     WorkflowSessionStatus,
 )
+from app.services.runtime_resume_control_plane import RuntimeResumeControlPlane
 
 
 def test_runtime_session_record_uses_stable_task_id_and_strict_json_payloads():
@@ -48,6 +49,35 @@ def test_runtime_session_record_rejects_database_identity_and_raw_status_strings
             mode="quick",
             status=WorkflowSessionStatus.QUEUED,
         )
+
+
+@pytest.mark.parametrize("stored_node_key", [" Script ", "SCRIPT"])
+def test_runtime_resume_rejects_noncanonical_database_node_key(stored_node_key):
+    session = RuntimeSessionRecord(
+        session_id=7,
+        task_id="task-public-7",
+        task_status=TaskStatus.IN_PROGRESS,
+        mode="quick",
+        status=WorkflowSessionStatus.RESUMING,
+        current_node_key=stored_node_key,
+        current_attempt_id=11,
+    )
+
+    class _Store:
+        @staticmethod
+        def load_session(_session_id):
+            return session
+
+    with pytest.raises(RuntimeStoreError) as exc_info:
+        RuntimeResumeControlPlane(_Store()).load_continuation(
+            7,
+            expected_anchor_type=None,
+            require_decision_id=False,
+            require_resuming=True,
+            expected_node_key="script",
+        )
+
+    assert exc_info.value.reason_code is RuntimeStoreReason.INTEGRITY_ERROR
 
     with pytest.raises(ValueError, match="WorkflowSessionStatus"):
         RuntimeSessionRecord(

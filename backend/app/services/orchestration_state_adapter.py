@@ -67,6 +67,8 @@ class OrchestrationStateAdapter:
         "scope",
         "fallback_used",
     )
+    _PRIMARY_TASK_SPEC_REQUIRED_FIELDS = ("run", "mission", "deliverable")
+    _CONDITIONAL_TASK_SPEC_REQUIRED_FIELDS = ("mission", "deliverable")
     _CONTINUATION_ALLOWED_CHECKPOINT_FIELDS = (
         "version",
         "anchor_type",
@@ -176,7 +178,7 @@ class OrchestrationStateAdapter:
         return alias_map.get(raw, "adaptive")
 
     @classmethod
-    def parse_task_spec_payload(
+    def _parse_task_spec_payload(
         cls,
         *,
         spec: Dict[str, Any],
@@ -274,6 +276,12 @@ class OrchestrationStateAdapter:
                     message=f"Task spec {field_name} must be a string",
                     field_path=f"{field_path}.{field_name}",
                 )
+            if field_name in required_fields and not field_value.strip():
+                raise ContinuationCheckpointContractError(
+                    reason_code=ContinuationCheckpointContractReason.SPEC_REQUIRED_FIELD_MISSING,
+                    message=f"Continuation spec field {field_name} cannot be empty",
+                    field_path=f"{field_path}.{field_name}",
+                )
             parsed[field_name] = field_value
         if "constraints" in spec:
             raw_constraints = spec.get("constraints")
@@ -329,6 +337,38 @@ class OrchestrationStateAdapter:
                 field_path=field_path,
             )
         return parsed
+
+    @classmethod
+    def parse_primary_task_spec_payload(
+        cls,
+        *,
+        spec: Dict[str, Any],
+        default_agent: Optional[str] = None,
+        require_explicit_agent: bool = False,
+        field_path: str = "continuation_checkpoint.task_specs",
+    ) -> Dict[str, Any]:
+        return cls._parse_task_spec_payload(
+            spec=spec,
+            default_agent=default_agent,
+            require_explicit_agent=require_explicit_agent,
+            required_fields=cls._PRIMARY_TASK_SPEC_REQUIRED_FIELDS,
+            field_path=field_path,
+        )
+
+    @classmethod
+    def parse_conditional_task_spec_payload(
+        cls,
+        *,
+        spec: Dict[str, Any],
+        require_explicit_agent: bool = True,
+        field_path: str = "continuation_checkpoint.conditional_task_specs",
+    ) -> Dict[str, Any]:
+        return cls._parse_task_spec_payload(
+            spec=spec,
+            require_explicit_agent=require_explicit_agent,
+            required_fields=cls._CONDITIONAL_TASK_SPEC_REQUIRED_FIELDS,
+            field_path=field_path,
+        )
 
     @staticmethod
     def _parse_spec_boolean(value: Any, *, field_name: str, field_path: str) -> bool:
@@ -444,10 +484,9 @@ class OrchestrationStateAdapter:
                     message=f"Continuation task spec for {agent_type.value} must be a dict",
                     field_path=(f"continuation_checkpoint.task_specs.{agent_type.value}"),
                 )
-            serialized_task_specs[agent_type.value] = cls.parse_task_spec_payload(
+            serialized_task_specs[agent_type.value] = cls.parse_primary_task_spec_payload(
                 spec=dict(spec),
                 default_agent=agent_type.value,
-                required_fields=("run",),
                 field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
             )
 
@@ -481,9 +520,8 @@ class OrchestrationStateAdapter:
                     message=(f"Continuation conditional task spec for {task_id} must be a dict"),
                     field_path=(f"continuation_checkpoint.conditional_task_specs.{task_id}"),
                 )
-            serialized_conditional_specs[task_id] = cls.parse_task_spec_payload(
+            serialized_conditional_specs[task_id] = cls.parse_conditional_task_spec_payload(
                 spec=dict(spec),
-                require_explicit_agent=True,
                 field_path=f"continuation_checkpoint.conditional_task_specs.{task_id}",
             )
 
@@ -665,11 +703,10 @@ class OrchestrationStateAdapter:
                     message=(f"Continuation task spec for {agent_type.value} must be a dict"),
                     field_path=(f"continuation_checkpoint.task_specs.{agent_type.value}"),
                 )
-            normalized_task_specs[agent_type.value] = cls.parse_task_spec_payload(
+            normalized_task_specs[agent_type.value] = cls.parse_primary_task_spec_payload(
                 spec=dict(spec),
                 default_agent=agent_type.value,
                 require_explicit_agent=True,
-                required_fields=("run",),
                 field_path=f"continuation_checkpoint.task_specs.{agent_type.value}",
             )
 
@@ -712,9 +749,8 @@ class OrchestrationStateAdapter:
                     message=(f"Continuation conditional task spec for {task_id} must be a dict"),
                     field_path=(f"continuation_checkpoint.conditional_task_specs.{task_id}"),
                 )
-            normalized_conditional_specs[task_id] = cls.parse_task_spec_payload(
+            normalized_conditional_specs[task_id] = cls.parse_conditional_task_spec_payload(
                 spec=dict(spec),
-                require_explicit_agent=True,
                 field_path=f"continuation_checkpoint.conditional_task_specs.{task_id}",
             )
 

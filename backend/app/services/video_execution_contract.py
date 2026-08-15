@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .agent_execution_contract import require_agent_execution_contract
+
 
 def build_video_generation_execution_contract(
     *,
@@ -38,10 +40,8 @@ def get_video_generation_execution_contract(
     *,
     workflow_state_id: str = "",
 ) -> Dict[str, Any]:
-    if isinstance(payload, dict):
-        contract = payload.get("execution_contract")
-        if isinstance(contract, dict):
-            return dict(contract)
-    return build_video_generation_execution_contract(
-        workflow_state_id=str(workflow_state_id or ""),
+    del workflow_state_id
+    return require_agent_execution_contract(
+        payload,
+        expected_agent="video_generator",
     )

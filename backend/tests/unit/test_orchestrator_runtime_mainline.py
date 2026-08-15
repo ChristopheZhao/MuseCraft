@@ -369,6 +369,19 @@ def _load_runtime_attempt_snapshot_from_fresh_session(SessionLocal, session_id, 
         inspect_db.close()
 
 
+def _primary_task_spec(agent_type, *, order=0, scope=None):
+    spec = {
+        "agent": agent_type.value,
+        "run": True,
+        "mission": f"Execute the {agent_type.value} assignment",
+        "deliverable": f"Accepted {agent_type.value} output",
+        "order": order,
+    }
+    if scope is not None:
+        spec["scope"] = scope
+    return spec
+
+
 def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     shared_store = _FakeSharedStore()
     short_term = _FakeShortTermService(shared_store)
@@ -468,9 +481,15 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent._llm_decompose_tasks = _async_return(
         (
             {
-                AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
-                AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
-                AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                    AgentType.CONCEPT_PLANNER, order=0, scope={}
+                ),
+                AgentType.SCRIPT_WRITER: _primary_task_spec(
+                    AgentType.SCRIPT_WRITER, order=1, scope={}
+                ),
+                AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                    AgentType.IMAGE_GENERATOR, order=2, scope={}
+                ),
             },
             {},
         )
@@ -925,7 +944,9 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
             current_agent_type=AgentType.CONCEPT_PLANNER,
             workflow_state_id=str(task.task_id),
             task_specs={
-                AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                    AgentType.CONCEPT_PLANNER, scope={}
+                ),
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.CONCEPT_PLANNER],
@@ -951,7 +972,9 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
                 current_agent_type=AgentType.SERIES_PLANNER,
                 workflow_state_id=str(task.task_id),
                 task_specs={
-                    AgentType.SERIES_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.SERIES_PLANNER: _primary_task_spec(
+                        AgentType.SERIES_PLANNER, scope={}
+                    ),
                 },
                 conditional_task_specs={},
                 candidate_agents=[AgentType.SERIES_PLANNER],
@@ -996,7 +1019,9 @@ def test_runtime_resume_bootstrap_rolls_back_attempt_when_continuation_bind_fail
                 current_agent_type=AgentType.CONCEPT_PLANNER,
                 workflow_state_id=str(task.task_id),
                 task_specs={
-                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
+                    AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                        AgentType.CONCEPT_PLANNER, scope={}
+                    ),
                 },
                 conditional_task_specs={},
                 candidate_agents=[AgentType.CONCEPT_PLANNER],
@@ -1524,9 +1549,15 @@ def test_orchestrator_mainline_resumes_after_script_approve_without_kernel(monke
             planning_calls["decompose"] += 1
             return (
                 {
-                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
-                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
-                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                    AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                        AgentType.CONCEPT_PLANNER, order=0, scope={}
+                    ),
+                    AgentType.SCRIPT_WRITER: _primary_task_spec(
+                        AgentType.SCRIPT_WRITER, order=1, scope={}
+                    ),
+                    AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                        AgentType.IMAGE_GENERATOR, order=2, scope={}
+                    ),
                 },
                 {},
             )
@@ -1603,7 +1634,14 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
 
         async def _count_decompose(*args, **kwargs):
             planning_calls["decompose"] += 1
-            return ({AgentType.SCRIPT_WRITER: {"run": True, "order": 0, "scope": {}}}, {})
+            return (
+                {
+                    AgentType.SCRIPT_WRITER: _primary_task_spec(
+                        AgentType.SCRIPT_WRITER, scope={}
+                    )
+                },
+                {},
+            )
 
         agent._llm_select_candidate_agents = _count_select
         agent._llm_decompose_tasks = _count_decompose
@@ -1615,7 +1653,9 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
         )
         continuation_checkpoint = agent._orchestration_state.build_continuation_checkpoint(
             task_specs={
-                AgentType.SCRIPT_WRITER: {"run": True, "order": 0, "scope": {}},
+                AgentType.SCRIPT_WRITER: _primary_task_spec(
+                    AgentType.SCRIPT_WRITER, scope={}
+                ),
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.SCRIPT_WRITER],
@@ -1726,9 +1766,15 @@ def test_orchestrator_mainline_blocks_script_consumers_before_dispatch_when_queu
         agent._llm_decompose_tasks = _async_return(
             (
                 {
-                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
-                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 1, "scope": {}},
-                    AgentType.SCRIPT_WRITER: {"run": True, "order": 2, "scope": {}},
+                    AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                        AgentType.CONCEPT_PLANNER, order=0, scope={}
+                    ),
+                    AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                        AgentType.IMAGE_GENERATOR, order=1, scope={}
+                    ),
+                    AgentType.SCRIPT_WRITER: _primary_task_spec(
+                        AgentType.SCRIPT_WRITER, order=2, scope={}
+                    ),
                 },
                 {},
             )
@@ -1778,9 +1824,15 @@ def test_orchestrator_mainline_revise_reopens_script_gate_via_concept_and_script
             planning_calls["decompose"] += 1
             return (
                 {
-                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
-                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
-                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                    AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                        AgentType.CONCEPT_PLANNER, order=0, scope={}
+                    ),
+                    AgentType.SCRIPT_WRITER: _primary_task_spec(
+                        AgentType.SCRIPT_WRITER, order=1, scope={}
+                    ),
+                    AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                        AgentType.IMAGE_GENERATOR, order=2, scope={}
+                    ),
                 },
                 {},
             )
@@ -1861,9 +1913,15 @@ def test_orchestrator_mainline_replan_reopens_script_gate_with_review_contract(m
             planning_calls["decompose"] += 1
             return (
                 {
-                    AgentType.CONCEPT_PLANNER: {"run": True, "order": 0, "scope": {}},
-                    AgentType.SCRIPT_WRITER: {"run": True, "order": 1, "scope": {}},
-                    AgentType.IMAGE_GENERATOR: {"run": True, "order": 2, "scope": {}},
+                    AgentType.CONCEPT_PLANNER: _primary_task_spec(
+                        AgentType.CONCEPT_PLANNER, order=0, scope={}
+                    ),
+                    AgentType.SCRIPT_WRITER: _primary_task_spec(
+                        AgentType.SCRIPT_WRITER, order=1, scope={}
+                    ),
+                    AgentType.IMAGE_GENERATOR: _primary_task_spec(
+                        AgentType.IMAGE_GENERATOR, order=2, scope={}
+                    ),
                 },
                 {},
             )

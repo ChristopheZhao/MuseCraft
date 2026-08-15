@@ -311,8 +311,34 @@ def test_scene_finalizer_does_not_fallback_when_shared_authority_load_fails(monk
         finalize_scene_outputs(
             kind="video",
             workflow_id="wf-video-progress",
-            agent_memory=local,
             service=agent.short_term_service,
         )
 
     assert exc_info.value.reason_code == "scene_output_authority_load_failed"
+
+
+def test_scene_finalizer_rejects_unbound_shared_authority():
+    services = build_memory_services()
+    local = ensure_agent_working_memory(
+        "wf-video-unbound",
+        "video_generator",
+        service=services.short_term,
+    )
+    local.put(
+        "scene_outputs.video",
+        {
+            1: _video_record(
+                1,
+                workflow_state_id="wf-video-unbound",
+                path="/tmp/stale-agent-scope.mp4",
+            )
+        },
+    )
+
+    with pytest.raises(SceneOutputAuthorityError) as exc_info:
+        finalize_scene_outputs(
+            kind="video",
+            workflow_id="wf-video-unbound",
+        )
+
+    assert exc_info.value.reason_code == "scene_output_authority_unbound"

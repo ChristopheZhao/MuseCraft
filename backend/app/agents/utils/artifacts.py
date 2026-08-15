@@ -725,14 +725,22 @@ def finalize_scene_outputs(
     *,
     kind: str,
     workflow_id: Optional[str],
-    agent_memory: Optional[WorkingMemory],
     shared_memory: Optional[WorkingMemory] = None,
     service: Optional["WorkingMemoryService"] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Collect completion/failure payloads for a given scene output kind."""
-    wf_id = str(workflow_id) if workflow_id else None
+    """Collect accepted scene outputs from the shared MAS authority only."""
+    if (
+        not isinstance(workflow_id, str)
+        or not workflow_id
+        or workflow_id != workflow_id.strip()
+    ):
+        raise SceneOutputAuthorityError(
+            reason_code="scene_output_authority_unbound",
+            detail="canonical workflow_id is required",
+        )
+    wf_id = workflow_id
     shared = shared_memory
-    if shared is None and wf_id and service is not None:
+    if shared is None and service is not None:
         try:
             shared = get_mas_working_memory(wf_id, service=service)
         except Exception as exc:
@@ -740,8 +748,12 @@ def finalize_scene_outputs(
                 reason_code="scene_output_authority_load_failed",
                 detail=type(exc).__name__,
             ) from exc
-    source_memory = shared if shared is not None else agent_memory
-    completed_records = collect_scene_outputs(kind=kind, memory=source_memory)
+    if shared is None:
+        raise SceneOutputAuthorityError(
+            reason_code="scene_output_authority_unbound",
+            detail="shared_memory or service binding is required",
+        )
+    completed_records = collect_scene_outputs(kind=kind, memory=shared)
     completed: List[Dict[str, Any]] = []
     for record in completed_records:
         receipt, _rejection = _accept_scene_output_record(
@@ -752,7 +764,7 @@ def finalize_scene_outputs(
         if receipt is not None:
             completed.append(record)
     overview = (
-        load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
+        load_scene_overview(wf_id, service=service) if service is not None else None
     )
     failed = extract_failed_scenes(overview)
     return completed, failed

@@ -408,7 +408,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="voice",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
         result = dict(base or {})
         result["final_completed_scenes"] = finals
@@ -430,7 +430,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="voice",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed

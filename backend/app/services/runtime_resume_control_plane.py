@@ -43,10 +43,25 @@ class RuntimeResumeControlPlane:
         session = self._require_session(session_id, operation=operation)
         if require_resuming and session.status is not WorkflowSessionStatus.RESUMING:
             self._conflict(operation, f"runtime session {session_id} is not resuming")
-        node_key = str(session.current_node_key or "").strip().lower()
-        if not node_key:
-            self._integrity(operation, f"runtime session {session_id} has no node anchor")
-        if expected_node_key is not None and node_key != expected_node_key.strip().lower():
+        node_key = session.current_node_key
+        if (
+            not isinstance(node_key, str)
+            or not node_key
+            or node_key != node_key.strip()
+            or node_key != node_key.lower()
+        ):
+            self._integrity(
+                operation,
+                f"runtime session {session_id} has a noncanonical node anchor",
+            )
+        if expected_node_key is not None and (
+            not isinstance(expected_node_key, str)
+            or not expected_node_key
+            or expected_node_key != expected_node_key.strip()
+            or expected_node_key != expected_node_key.lower()
+        ):
+            self._integrity(operation, "expected runtime node anchor is noncanonical")
+        if expected_node_key is not None and node_key != expected_node_key:
             self._conflict(
                 operation,
                 f"runtime continuation is not anchored to node {expected_node_key}",
