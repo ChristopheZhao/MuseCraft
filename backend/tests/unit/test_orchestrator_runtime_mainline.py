@@ -476,7 +476,6 @@ def _build_agent(monkeypatch, sync_db, *, call_log, session_factory=None):
     agent._build_execution_queue = lambda task_specs, candidate_agents=None: list(task_specs.keys())
     agent._build_standby_agents = lambda task_specs, candidate_agents=None: []
     agent._store_composer_outputs = lambda *args, **kwargs: None
-    agent._store_creative_guidance_from_output = _async_noop
     agent._should_retry_step = _async_return(False)
     agent._llm_decompose_tasks = _async_return(
         (
@@ -618,7 +617,6 @@ def _build_stage_g_agent(monkeypatch, sync_db, *, call_log, llm_responses, sessi
     )
     agent._emit_pre_dispatch_diagnostics = lambda *args, **kwargs: None
     agent._store_composer_outputs = lambda *args, **kwargs: None
-    agent._store_creative_guidance_from_output = _async_noop
     agent._should_retry_step = _async_return(False)
     agent.agents = {
         AgentType.CONCEPT_PLANNER: _FakeAgent(

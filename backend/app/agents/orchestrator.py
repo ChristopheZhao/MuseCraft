@@ -1068,29 +1068,6 @@ class OrchestratorAgent(BaseAgent):
                             extra or None,
                         )
 
-                    # Handle memory storage if this agent produced memory data
-                    if agent_type == AgentType.CONCEPT_PLANNER:
-                        self.logger.info(
-                            "🧠 DEBUG: About to store creative guidance from ConceptPlanner"
-                        )
-                        await self._store_creative_guidance_from_output(agent_output)
-
-                        # 🔧 同步概念计划到 Shared WM facts（去除 WorkflowState 依赖）
-                        if "concept_plan" in agent_output:
-                            try:
-                                write_shared_fact(
-                                    wf_id,
-                                    "project.concept_plan",
-                                    agent_output["concept_plan"],
-                                    service=self.short_term_service,
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        self.logger.info(
-                            f"🧠 DEBUG: No memory storage needed for {agent_type.value}"
-                        )
-
                     self.logger.info(
                         f"Completed workflow step {step_index + 1}/{total_steps}: {agent.agent_name}"
                     )
@@ -1239,20 +1216,6 @@ class OrchestratorAgent(BaseAgent):
                             script_trigger_reason=retry_trigger_reason,
                             fail_runtime_attempt_on_error=True,
                         )
-                        if (
-                            agent_type == AgentType.CONCEPT_PLANNER
-                            and "concept_plan" in agent_output
-                        ):
-                            try:
-                                write_shared_fact(
-                                    wf_id,
-                                    "project.concept_plan",
-                                    agent_output["concept_plan"],
-                                    service=self.short_term_service,
-                                )
-                                self.logger.info("🎭 重试后 concept_plan 已写入 MAS WM")
-                            except Exception:
-                                pass
                         standby_agents = list(success_boundary.standby_agents)
                         replan_count = success_boundary.replan_count
                         if success_boundary.attempt_abandoned:
@@ -1601,33 +1564,6 @@ class OrchestratorAgent(BaseAgent):
             },
         )
         return False
-
-    async def _store_creative_guidance_from_output(self, agent_output: Dict[str, Any]):
-        """从ConceptPlanner输出中存储创意指导到全局记忆"""
-
-        try:
-            memory_data = agent_output.get("memory_for_storage")
-            if not memory_data:
-                self.logger.warning("No memory data found in ConceptPlanner output")
-                return
-
-            success = await self._global_memory.store_creative_guidance(
-                workflow_id=memory_data["workflow_id"],
-                concept_plan=memory_data["concept_plan"],
-                agent_name=memory_data["agent_name"],
-            )
-
-            if success:
-                self.logger.info(
-                    f"✅ Orchestrator stored creative guidance for workflow {memory_data['workflow_id']}"
-                )
-            else:
-                self.logger.error(
-                    f"❌ Failed to store creative guidance for workflow {memory_data['workflow_id']}"
-                )
-
-        except Exception as e:
-            self.logger.error(f"❌ Orchestrator failed to handle memory storage: {e}")
 
     def _store_composer_outputs(
         self,

@@ -36,3 +36,14 @@ def test_default_registration_does_not_expose_unused_parameter_optimizer() -> No
 
     with pytest.raises(ToolError, match="Tool not registered: parameter_optimization"):
         get_tool_registry().get_tool("parameter_optimization")
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["scene_analysis", "intelligent_scene_planning"],
+)
+def test_default_registration_does_not_expose_semantic_heuristic_tools(tool_name) -> None:
+    register_default_tools()
+
+    with pytest.raises(ToolError, match=f"Tool not registered: {tool_name}"):
+        get_tool_registry().get_tool(tool_name)

@@ -121,31 +121,5 @@ def test_record_agent_output_routes_video_composer_through_shared_handoff(monkey
     assert captured["agent_output"]["final_video_url"] == "/files/outputs/videos/final.mp4"
 
 
-@pytest.mark.asyncio
-async def test_store_creative_guidance_uses_injected_global_memory_service():
-    captured = {}
-
-    class _GlobalMemory:
-        async def store_creative_guidance(self, **kwargs):
-            captured.update(kwargs)
-            return True
-
-    agent = object.__new__(OrchestratorAgent)
-    agent.logger = logging.getLogger("test.orchestrator.store_creative_guidance")
-    agent._global_memory = _GlobalMemory()
-
-    await agent._store_creative_guidance_from_output(
-        {
-            "memory_for_storage": {
-                "workflow_id": "wf-memory-boundary",
-                "concept_plan": {"overview": "concept"},
-                "agent_name": "concept_planner",
-            }
-        }
-    )
-
-    assert captured == {
-        "workflow_id": "wf-memory-boundary",
-        "concept_plan": {"overview": "concept"},
-        "agent_name": "concept_planner",
-    }
+def test_orchestrator_has_no_creative_guidance_second_writer():
+    assert not hasattr(OrchestratorAgent, "_store_creative_guidance_from_output")

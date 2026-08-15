@@ -254,10 +254,6 @@ class ConceptPlannerAgent(BaseAgent):
             voice_plan,
             skeleton_payload,
         )
-        try:
-            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan, service=self.short_term_service)
-        except Exception:
-            self.logger.warning("voice_plan 写回 MAS WM 失败，忽略")
 
         await self._update_progress(65, "Detailing scenes")
 
@@ -305,51 +301,45 @@ class ConceptPlannerAgent(BaseAgent):
             total_planned_duration,
         )
 
-        # 共享记忆作为事实源，WorkflowState 写回移除
+        # MAS WorkingMemory is the runtime source of truth for planner outputs.
+        # A completed report must never name an artifact whose authoritative write failed.
+        artifact_refs = [
+            {"kind": "shared_fact", "ref": "project.concept_plan"},
+            {"kind": "shared_fact", "ref": "project.voice_plan"},
+        ]
+        self._write_authoritative_fact(workflow_state_id, "project.concept_plan", concept_plan)
+        self._write_authoritative_fact(workflow_state_id, "project.voice_plan", voice_plan)
 
-        # --- 写回 MAS WorkingMemory (facts + scenes) ---
-        try:
-            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan, service=self.short_term_service)
-        except Exception as _wm_err:
-            self.logger.warning(f"WM write failed for concept_plan: {_wm_err}")
-        try:
-            write_shared_fact(workflow_state_id, "project.voice_plan", voice_plan, service=self.short_term_service)
-        except Exception:
-            pass
-
-        try:
-            scenes_payload: List[Dict[str, Any]] = []
-            for s in concept_plan.get("scenes", []) or []:
-                try:
-                    sn = int(s.get("scene_number") or 0)
-                except Exception:
-                    sn = 0
-                if sn <= 0:
-                    continue
-                try:
-                    dur = float(s.get("final_duration", s.get("duration", 0.0)) or 0.0)
-                except Exception:
-                    dur = 0.0
-                scenes_payload.append(
-                    {
-                        "scene_number": sn,
-                        "duration": dur,
-                        "visual_description": s.get("visual_description", ""),
-                        "narrative_description": s.get("narrative_description", ""),
-                        "image_url": s.get("image_url", ""),
-                        "motion_beats": s.get("motion_beats", []) if isinstance(s.get("motion_beats"), list) else [],
-                    }
-                )
-            if scenes_payload:
-                overview = {
-                    "scenes": scenes_payload,
-                    "completed_scene_numbers": [],
-                    "failed_scene_numbers": [],
+        scenes_payload: List[Dict[str, Any]] = []
+        for s in concept_plan.get("scenes", []) or []:
+            try:
+                sn = int(s.get("scene_number") or 0)
+            except Exception:
+                sn = 0
+            if sn <= 0:
+                continue
+            try:
+                dur = float(s.get("final_duration", s.get("duration", 0.0)) or 0.0)
+            except Exception:
+                dur = 0.0
+            scenes_payload.append(
+                {
+                    "scene_number": sn,
+                    "duration": dur,
+                    "visual_description": s.get("visual_description", ""),
+                    "narrative_description": s.get("narrative_description", ""),
+                    "image_url": s.get("image_url", ""),
+                    "motion_beats": s.get("motion_beats", []) if isinstance(s.get("motion_beats"), list) else [],
                 }
-                write_shared_fact(workflow_state_id, "scene_overview", overview, service=self.short_term_service)
-        except Exception as _wm_err:
-            # Fail-fast 是核心流程，记忆写回为尽力而为
-            self.logger.warning(f"scene_overview write failed (non-fatal): {_wm_err}")
+            )
+        if scenes_payload:
+            overview = {
+                "scenes": scenes_payload,
+                "completed_scene_numbers": [],
+                "failed_scene_numbers": [],
+            }
+            self._write_authoritative_fact(workflow_state_id, "scene_overview", overview)
+            artifact_refs.append({"kind": "shared_fact", "ref": "scene_overview"})
 
         if concept_mode == "project":
             scenes_data: List[Dict[str, Any]] = []
@@ -359,18 +349,6 @@ class ConceptPlannerAgent(BaseAgent):
                 scenes_data = list(concept_plan.get("scenes", []) or []) if isinstance(concept_plan, dict) else []
             except Exception:
                 scenes_data = []
-
-        try:
-            memory_stored = await self.store_creative_guidance(
-                workflow_id=workflow_state_id,
-                concept_plan=concept_plan,
-            )
-            self.logger.info(
-                "🧠 ConceptPlanner: creative guidance stored in MAS memory (success=%s)",
-                memory_stored,
-            )
-        except Exception as exc:
-            self.logger.warning(f"⚠️ ConceptPlanner: failed to store creative guidance - {exc}")
 
         await self._update_progress(100, "Concept planning completed")
 
@@ -389,11 +367,7 @@ class ConceptPlannerAgent(BaseAgent):
                 "status": "completed",
                 "boundary_event": "concept_plan_completed",
                 "gate_triggers": [],
-                "artifacts": [
-                    {"kind": "shared_fact", "ref": "project.concept_plan"},
-                    {"kind": "shared_fact", "ref": "project.voice_plan"},
-                    {"kind": "shared_fact", "ref": "scene_overview"},
-                ],
+                "artifacts": artifact_refs,
                 "reflection": {
                     "reported_gaps": [],
                     "reported_hints": [],
@@ -401,6 +375,19 @@ class ConceptPlannerAgent(BaseAgent):
                 },
             },
         }
+
+    def _write_authoritative_fact(self, workflow_state_id: str, key: str, value: Any) -> None:
+        try:
+            write_shared_fact(
+                workflow_state_id,
+                key,
+                value,
+                service=self.short_term_service,
+            )
+        except Exception as exc:
+            raise AgentError(
+                f"ConceptPlanner failed to persist authoritative shared fact: {key}"
+            ) from exc
 
     def _build_system_prompt(self) -> str:
         try:

@@ -775,7 +775,6 @@ def _build_main_loop_runtime_harness(
     agent._update_progress = _update_progress
     agent._prepare_agent_context = _prepare_agent_context
     agent._llm_decide_runtime_decision = _llm_decide_runtime_decision
-    agent._store_creative_guidance_from_output = _publish_failed
     agent._is_image_step_completed = lambda workflow_id: False
     agent._is_video_step_completed = lambda workflow_id: False
     agent._workflow_completion_adapter = SimpleNamespace(

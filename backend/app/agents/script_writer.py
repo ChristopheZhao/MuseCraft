@@ -431,14 +431,6 @@ class ScriptWriterAgent(BaseAgent):
                     enriched_style = dict(intelligent_style)
                     enriched_style['taxonomy'] = taxonomy_match
                     intelligent_style = enriched_style
-                    if isinstance(concept_plan, dict):
-                        concept_plan['intelligent_style_design'] = enriched_style
-                        try:
-                            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan, service=self.short_term_service)
-                        except Exception as slot_err:
-                            raise AgentError(
-                                f"Failed to persist enriched concept_plan: {slot_err}"
-                            ) from slot_err
             # 读取脚本写作模型与token预算（来自ai_config）
             try:
                 from ..core.ai_config import get_ai_config

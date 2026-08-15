@@ -38,8 +38,6 @@ _LAZY_IMPORTS = {
     "JimengImageTool": (".ai_services.jimeng_image_tool", "JimengImageTool"),
     "VideoGenerationTool": (".ai_services.video_generation_tool_v2", "VideoGenerationTool"),
     "VoiceSynthesisTool": (".ai_services.voice_synth_tool", "VoiceSynthesisTool"),
-    "SceneAnalysisTool": (".ai_services.scene_analysis_tool", "SceneAnalysisTool"),
-    "IntelligentScenePlanningTool": (".ai_services.intelligent_scene_planning_tool", "IntelligentScenePlanningTool"),
     "ScriptGenerationTool": (".ai_services.script_generation_tool", "ScriptGenerationTool"),
     "ImageGenerationTool": (".ai_services.image_generation_tool", "ImageGenerationTool"),
     "QualityAnalysisTool": (".ai_services.quality_analysis_tool", "QualityAnalysisTool"),
@@ -103,8 +101,6 @@ def register_default_tools() -> None:
     from .video_processing.scene_continuity_preparation_tool import SceneContinuityPreparationTool
 
     from .ai_services.video_generation_tool_v2 import VideoGenerationTool
-    from .ai_services.scene_analysis_tool import SceneAnalysisTool
-    from .ai_services.intelligent_scene_planning_tool import IntelligentScenePlanningTool
     from .ai_services.script_generation_tool import ScriptGenerationTool
     from .ai_services.image_generation_tool import ImageGenerationTool
     from .ai_services.quality_analysis_tool import QualityAnalysisTool
@@ -137,8 +133,6 @@ def register_default_tools() -> None:
     registry.register_tool(SceneContinuityPreparationTool)
 
     registry.register_tool(VideoGenerationTool)
-    registry.register_tool(SceneAnalysisTool)
-    registry.register_tool(IntelligentScenePlanningTool)
     registry.register_tool(ScriptGenerationTool)
     registry.register_tool(ImageGenerationTool)
     registry.register_tool(QualityAnalysisTool)

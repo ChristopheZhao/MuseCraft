@@ -18,6 +18,16 @@ from app.services.context_assembler import ContextContractAssembler
 from app.services.scene_info_reference_service import persist_scene_info_ref
 
 
+def test_quality_checker_exposes_no_fabricated_quality_fallback_helpers():
+    for method_name in (
+        "_perform_image_based_quality_check",
+        "_get_content_recommendations",
+        "_generate_quality_summary",
+        "_generate_review_notes",
+    ):
+        assert not hasattr(QualityCheckerAgent, method_name)
+
+
 def _build_service() -> WorkingMemoryService:
     return WorkingMemoryService(store_factory=lambda: InMemoryShortTermStore())
 
