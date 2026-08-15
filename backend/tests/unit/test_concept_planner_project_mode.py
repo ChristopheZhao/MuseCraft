@@ -20,11 +20,7 @@ async def test_project_mode_skips_scene_generation(monkeypatch):
     async def noop_update_progress(*args, **kwargs):
         return None
 
-    async def noop_store_guidance(*args, **kwargs):
-        return False
-
     agent._update_progress = noop_update_progress  # type: ignore
-    agent.store_creative_guidance = noop_store_guidance  # type: ignore
     agent.websocket_manager = SimpleNamespace(
         broadcast_to_task=lambda *args, **kwargs: asyncio.Future(),
     )

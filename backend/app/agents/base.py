@@ -1858,27 +1858,6 @@ class BaseAgent(ABC):
         
         return await self._long_term_service.get_memory_stats()
     
-    # 🚀 MAS记忆共享机制 - Phase 1.2新增
-    async def store_creative_guidance(
-        self, 
-        workflow_id: str, 
-        concept_plan: Dict[str, Any]
-    ) -> bool:
-        """存储创意指导供其他Agent使用"""
-        return await self._global_memory.store_creative_guidance(
-            workflow_id, concept_plan, self.agent_name
-        )
-    
-    async def retrieve_creative_guidance(
-        self, 
-        workflow_id: str, 
-        scene_number: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """检索创意指导信息"""
-        return await self._global_memory.retrieve_creative_guidance(
-            workflow_id, scene_number, self.agent_name
-        )
-    
     async def store_scene_references(
         self, 
         workflow_id: str, 

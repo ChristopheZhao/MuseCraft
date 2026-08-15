@@ -193,11 +193,9 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
     async def _noop_progress(*_args, **_kwargs):
         return None
 
-    async def _forbid_second_writer(*_args, **_kwargs):
-        raise AssertionError("concept planner must not copy runtime guidance to global memory")
-
     agent._update_progress = _noop_progress  # type: ignore[attr-defined]
-    agent.store_creative_guidance = _forbid_second_writer  # type: ignore[attr-defined]
+    assert not hasattr(agent, "store_creative_guidance")
+    assert not hasattr(agent, "retrieve_creative_guidance")
 
     result = asyncio.run(
         agent._execute_impl(
