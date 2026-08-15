@@ -3195,7 +3195,7 @@
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-08-15T04:43:47Z",
+      "updated_at": "2026-08-15T15:44:12Z",
       "archived_at": null,
       "notes": [
         {
@@ -3209,6 +3209,26 @@
         {
           "at": "2026-08-15T04:43:47Z",
           "text": "Amendment A1 local gate passed: 670 unit, 31 architecture, and 2 offline composer integration tests passed; hosted CI and user confirmation remain pending."
+        },
+        {
+          "at": "2026-08-15T05:23:35Z",
+          "text": "Amendment A2 opened after review reproduced active capability fabrication, cross-workflow execution identity acceptance, missing-finalize-boundary success synthesis, and multi-layer runtime decision defaulting; PLAN-069 remains the single owner."
+        },
+        {
+          "at": "2026-08-15T06:01:31Z",
+          "text": "Amendment A2 local checkpoint passed without remediation: 682 unit, 31 architecture, and 2 offline VideoComposer integration tests passed; plan remains in_progress pending user review and hosted CI."
+        },
+        {
+          "at": "2026-08-15T06:12:28Z",
+          "text": "Amendment A2 post-review checkpoint attempt 2 passed without remediation after removing residual controller defaults and workflow-id coercion: 685 unit, 31 architecture, and 2 offline VideoComposer integration tests passed."
+        },
+        {
+          "at": "2026-08-15T06:21:41Z",
+          "text": "Amendment A2 final checkpoint attempt 3 passed without remediation after request-budget exactness cleanup: 686 unit, 31 architecture, and 2 offline VideoComposer integration tests passed; this is the final local code evidence."
+        },
+        {
+          "at": "2026-08-15T15:44:12Z",
+          "text": "Amendment A2 implementation and counterexample tests committed as f64113e after final MAS ownership review; governance/checkpoint evidence remains a separate commit layer and plan stays in_progress pending hosted CI and user acceptance."
         }
       ]
     }
