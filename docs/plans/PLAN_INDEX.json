@@ -3195,7 +3195,7 @@
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-08-15T01:52:10Z",
+      "updated_at": "2026-08-15T04:43:47Z",
       "archived_at": null,
       "notes": [
         {
@@ -3205,6 +3205,10 @@
         {
           "at": "2026-08-15T01:52:10Z",
           "text": "User authorized Amendment A1 for root-owned anti-agentic, fallback, contract, and SoT closure; original execution ordering superseded."
+        },
+        {
+          "at": "2026-08-15T04:43:47Z",
+          "text": "Amendment A1 local gate passed: 670 unit, 31 architecture, and 2 offline composer integration tests passed; hosted CI and user confirmation remain pending."
         }
       ]
     }
