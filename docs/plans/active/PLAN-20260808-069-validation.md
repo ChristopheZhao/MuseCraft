@@ -24,9 +24,10 @@
   - parameter_optimization_tool LLM 消费分支恢复单测；fallback 仅失败触发且 fallback_method=True
   - 回归：orchestration/continuation contract/A6 既有用例全绿
 - Evidence:
-  - (待补)
+  - S1-3 考证（2026-08-09）：git blame 确认 L107-120 出自 048a338（A3/A4/A5 合并提交 "orchestration thin contracts"）；PLAN-068 log 2026-07-25T17:44（A4 "reject failed/partial ... before output or attempt success"）、2026-07-26T10:03（A5 "explicit report status is the sole orchestration outcome"）、2026-07-26T10:22（四提交映射：4385e22/5660f4e/048a338/ceffacd）
+  - 调用点语境：orchestrator.py:1754（execute 后立即 parse，partial 在此被击毙）、:2064（open_runtime_decision 路径，partial 的天然去处）
 - Results:
-  - (待补)
+  - S1-3 考证 PASS：确定采用拆分方案（Option A），A4/A5 不变量（非 completed 不得进入发布/attempt success）保留在 `_finalize_successful_agent_runtime_boundary`，partial/failed 路由到 runtime decision；实现须 negative-first（先加反例测试）
 
 ### S2 — Medium 级修复
 - Status: not started

@@ -3189,15 +3189,20 @@
       "id": "PLAN-20260808-069",
       "title": "Anti-agentic 审查修复：质量评估去规则化、协议放行 partial 与残留清理",
       "kind": "fix",
-      "status": "draft",
+      "status": "in_progress",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-08-08T03:03:21Z",
+      "updated_at": "2026-08-09T01:39:16Z",
       "archived_at": null,
-      "notes": []
+      "notes": [
+        {
+          "at": "2026-08-09T01:39:16Z",
+          "text": "Governance anchor committed (c7fdcdd); starting S1-3 provenance investigation"
+        }
+      ]
     }
   ]
 }
