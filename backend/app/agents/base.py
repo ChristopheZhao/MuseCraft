@@ -1346,9 +1346,7 @@ class BaseAgent(ABC):
                 if meta_payload:
                     record["metadata"] = meta_payload
                 if is_success:
-                    record["result"] = tool_result
-                    results.append(record)
-                    round_metrics['success'] += 1
+                    record["result"] = payload
                 else:
                     record["error"] = error_text or "tool execution failed"
                     record["error_type"] = error_type
@@ -1358,7 +1356,14 @@ class BaseAgent(ABC):
                             record["error_details"] = meta_payload.get("error_details_struct")
                         elif "error_details" in meta_payload:
                             record["error_details"] = meta_payload.get("error_details")
-                    results.append(record)
+                record = JsonObjectPayload.from_mapping(
+                    record,
+                    field_path=f"executed_calls[{idx}]",
+                ).to_dict()
+                results.append(record)
+                if is_success:
+                    round_metrics['success'] += 1
+                else:
                     round_metrics['fail'] += 1
                 # 写入FC执行轨迹（用于后续FC上下文注入）
                 try:
@@ -1367,7 +1372,7 @@ class BaseAgent(ABC):
                         "tool": fn,
                         "args": args,
                         "success": is_success,
-                        "result": tool_result if is_success else None,
+                        "result": record.get("result") if is_success else None,
                         "error": error_text,
                         "error_type": error_type,
                         "ts": _now(),
@@ -1489,6 +1494,7 @@ class BaseAgent(ABC):
                 except Exception:
                     self.logger.error(f"Tool execution failed: {e}")
                 results.append({"tool": tool_call.get("function", {}).get("name"), "args": tool_call.get("function", {}).get("arguments"), "error": str(e), "success": False})
+                round_metrics['fail'] += 1
         # 写入 WorkingMemory 的最近产物索引（如可用），以便跨回合/跨Agent消费
         try:
             wm = self.wm
