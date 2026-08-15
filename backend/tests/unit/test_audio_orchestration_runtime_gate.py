@@ -36,6 +36,7 @@ from app.services.orchestration_runtime_controller import (
     OrchestrationRuntimeController,
     OrchestrationRuntimeControllerError,
 )
+from app.services.orchestration_runtime_decision import RuntimeAction, RuntimeDecision
 from app.services.orchestration_state_adapter import OrchestrationStateAdapter
 
 
@@ -732,23 +733,23 @@ def _build_main_loop_runtime_harness(
         if runtime_decision_mode == "raise_agent_error":
             raise AgentError("synthetic_runtime_decision_failure")
         if runtime_decision_mode == "abort":
-            return {
-                "action": "abort",
-                "reason": "synthetic_runtime_abort",
-                "facts": {"gate_events": kwargs.get("gate_events") or []},
-            }
+            return RuntimeDecision(
+                action=RuntimeAction.ABORT,
+                reason="synthetic_runtime_abort",
+                facts={"gate_events": kwargs.get("gate_events") or []},
+            )
         if retry_failed_step and (kwargs.get("report") or {}).get("status") == "failed":
-            return {
-                "action": "retry_current",
-                "reason": "retry the failed agent execution",
-                "facts": {"report": kwargs.get("report") or {}},
-            }
-        return {
-            "action": "activate_from_standby",
-            "target_agent": AgentType.AUDIO_GENERATOR,
-            "reason": "audio_missing_or_unknown",
-            "facts": {"gate_events": kwargs.get("gate_events") or []},
-        }
+            return RuntimeDecision(
+                action=RuntimeAction.RETRY_CURRENT,
+                reason="retry the failed agent execution",
+                facts={"report": kwargs.get("report") or {}},
+            )
+        return RuntimeDecision(
+            action=RuntimeAction.ACTIVATE_FROM_STANDBY,
+            target_agent=AgentType.AUDIO_GENERATOR,
+            reason="audio_missing_or_unknown",
+            facts={"gate_events": kwargs.get("gate_events") or []},
+        )
 
     async def _publish_completed(**kwargs):
         if publish_error is not None:
@@ -1251,9 +1252,7 @@ def test_partial_standby_activation_abandons_attempt_without_publishing_output()
                 report=_make_explicit_report(
                     status="partial",
                     boundary_event="scene_video_completed",
-                    reflection={
-                        "reported_gaps": ["scene_video_generation_incomplete"]
-                    },
+                    reflection={"reported_gaps": ["scene_video_generation_incomplete"]},
                 ),
             )
         ],
@@ -1811,12 +1810,12 @@ def test_orchestrator_runtime_boundary_cycle_delegates_open_and_apply_to_control
 
     async def _runtime_decision(**kwargs):
         calls["llm"] = kwargs
-        return {
-            "action": "activate_from_standby",
-            "target_agent": AgentType.AUDIO_GENERATOR,
-            "reason": "audio_missing_or_unknown",
-            "facts": {"gate_events": kwargs["gate_events"]},
-        }
+        return RuntimeDecision(
+            action=RuntimeAction.ACTIVATE_FROM_STANDBY,
+            target_agent=AgentType.AUDIO_GENERATOR,
+            reason="audio_missing_or_unknown",
+            facts={"gate_events": kwargs["gate_events"]},
+        )
 
     agent._llm_decide_runtime_decision = _runtime_decision
 
@@ -2239,6 +2238,42 @@ def test_control_plane_open_runtime_decision_skips_gate_collection_for_non_bound
 
     assert payload["status"] == "no_gate"
     assert payload["apply_result"]["reason"] == "no_boundary_gate_event"
+
+
+def test_control_plane_open_runtime_decision_rejects_non_exact_replan_budget():
+    control_plane = OrchestrationControlPlane(
+        memory_services=SimpleNamespace(short_term=object()),
+        protocol=OrchestrationProtocol(),
+        orchestration_state=OrchestrationStateAdapter(
+            memory_services=SimpleNamespace(short_term=object())
+        ),
+        audio_delivery_gate=SimpleNamespace(
+            evaluate_workflow_video_audio=lambda workflow_id: {},
+            evaluate_global_bgm_mix_delivery=lambda workflow_id: {},
+        ),
+        observation_adapter=SimpleNamespace(
+            build_audio_route_payload=lambda **kwargs: {},
+            persist_audio_gate_observation=lambda **kwargs: None,
+        ),
+        runtime_controller=SimpleNamespace(apply_runtime_decision=lambda **kwargs: {}),
+    )
+
+    with pytest.raises(OrchestrationControlPlaneError, match="replan_count"):
+        control_plane.open_runtime_decision(
+            workflow_state_id="wf-protocol-invalid-budget",
+            current_agent=AgentType.CONCEPT_PLANNER,
+            standby_agents=[],
+            report={
+                "status": "completed",
+                "boundary_event": "",
+                "gate_triggers": [],
+                "agent_type": AgentType.CONCEPT_PLANNER.value,
+            },
+            audio_contract={},
+            replan_count="0",
+            max_replans=2,
+            execution_id="exec-invalid-budget",
+        )
 
 
 def test_control_plane_open_runtime_decision_fails_fast_on_unknown_gate_trigger():
@@ -3094,7 +3129,7 @@ def test_runtime_controller_applies_activation_outside_orchestrator():
         workflow_state_id="wf-apply-1",
         current_agent=AgentType.VIDEO_GENERATOR,
         apply_payload={
-            "action": "activate_from_standby",
+            "action": RuntimeAction.ACTIVATE_FROM_STANDBY,
             "target_agent": AgentType.AUDIO_GENERATOR,
             "reason": "audio_missing_or_unknown",
             "facts": {
@@ -3128,9 +3163,7 @@ def test_runtime_controller_rejects_unknown_apply_action():
         ),
     )
 
-    with pytest.raises(
-        OrchestrationRuntimeControllerError, match="Unsupported apply action: pause"
-    ):
+    with pytest.raises(OrchestrationRuntimeControllerError, match="RuntimeAction"):
         controller.apply_runtime_decision(
             workflow_state_id="wf-apply-unknown-action",
             current_agent=AgentType.VIDEO_GENERATOR,
@@ -3159,16 +3192,16 @@ def test_control_plane_apply_requires_preplanned_task_spec():
             workflow_state_id="wf-apply-missing-spec",
             current_agent=AgentType.VIDEO_GENERATOR,
             current_index=1,
-            runtime_decision={
-                "action": "activate_from_standby",
-                "target_agent": AgentType.AUDIO_GENERATOR,
-                "reason": "audio_missing_or_unknown",
-                "facts": {
+            runtime_decision=RuntimeDecision(
+                action=RuntimeAction.ACTIVATE_FROM_STANDBY,
+                target_agent=AgentType.AUDIO_GENERATOR,
+                reason="audio_missing_or_unknown",
+                facts={
                     "gate_events": [
                         _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
                     ]
                 },
-            },
+            ),
             execution_queue=[
                 AgentType.CONCEPT_PLANNER,
                 AgentType.VIDEO_GENERATOR,
@@ -3204,7 +3237,7 @@ def test_control_plane_apply_requires_explicit_action():
         ),
     )
 
-    with pytest.raises(OrchestrationControlPlaneError, match="runtime_decision missing action"):
+    with pytest.raises(OrchestrationControlPlaneError, match="canonical runtime decision"):
         control_plane.apply_runtime_decision(
             workflow_state_id="wf-apply-missing-action",
             current_agent=AgentType.VIDEO_GENERATOR,
@@ -3222,6 +3255,52 @@ def test_control_plane_apply_requires_explicit_action():
         )
 
     assert called["controller_apply"] == 0
+
+
+def test_control_plane_apply_rejects_missing_canonical_reason():
+    called = {"controller_apply": 0}
+    control_plane = OrchestrationControlPlane(
+        memory_services=SimpleNamespace(short_term=object()),
+        protocol=OrchestrationProtocol(),
+        runtime_controller=SimpleNamespace(
+            apply_runtime_decision=lambda **kwargs: called.__setitem__("controller_apply", 1)
+        ),
+    )
+
+    with pytest.raises(OrchestrationControlPlaneError, match="canonical runtime decision"):
+        control_plane.apply_runtime_decision(
+            workflow_state_id="wf-apply-missing-reason",
+            current_agent=AgentType.VIDEO_GENERATOR,
+            current_index=0,
+            runtime_decision={"action": "continue", "facts": {}},
+            execution_queue=[AgentType.VIDEO_GENERATOR],
+            task_specs={AgentType.VIDEO_GENERATOR: {"run": True, "order": 0}},
+            candidate_agents=[AgentType.VIDEO_GENERATOR],
+            conditional_task_specs={},
+            standby_agents=[],
+            replan_count=0,
+        )
+
+    assert called["controller_apply"] == 0
+
+
+def test_runtime_controller_rejects_non_exact_replan_count():
+    controller = OrchestrationRuntimeController(
+        memory_services=SimpleNamespace(short_term=object()),
+        orchestration_state=SimpleNamespace(append_replan_trace=lambda **kwargs: None),
+    )
+
+    with pytest.raises(OrchestrationRuntimeControllerError, match="replan_count"):
+        controller.apply_runtime_decision(
+            workflow_state_id="wf-apply-nonexact-replan",
+            current_agent=AgentType.VIDEO_GENERATOR,
+            apply_payload={
+                "action": RuntimeAction.CONTINUE,
+                "reason": "no_gate",
+                "facts": {},
+                "replan_count": "1",
+            },
+        )
 
 
 def test_control_plane_apply_uses_conditional_task_spec_for_activation():
@@ -3249,17 +3328,18 @@ def test_control_plane_apply_uses_conditional_task_spec_for_activation():
         workflow_state_id="wf-conditional-spec",
         current_agent=AgentType.VIDEO_GENERATOR,
         current_index=1,
-        runtime_decision={
-            "action": "activate_from_standby",
-            "target_agent": AgentType.VIDEO_COMPOSER,
-            "reason": "global_bgm_missing",
-            "facts": {
+        runtime_decision=RuntimeDecision(
+            action=RuntimeAction.ACTIVATE_FROM_STANDBY,
+            target_agent=AgentType.VIDEO_COMPOSER,
+            task_id="bgm_mix",
+            reason="global_bgm_missing",
+            facts={
                 "llm_output": {"task_id": "bgm_mix"},
                 "gate_events": [
                     _make_gate_result(without_audio=1, reason="audio_missing_or_unknown")
                 ],
             },
-        },
+        ),
         execution_queue=[
             AgentType.CONCEPT_PLANNER,
             AgentType.VIDEO_GENERATOR,
@@ -3316,7 +3396,13 @@ def test_control_plane_does_not_coerce_conditional_task_agent_identity():
     with pytest.raises(OrchestrationControlPlaneError, match="Conditional task agent mismatch"):
         control_plane._resolve_conditional_task_spec(
             target_agent=AgentType.VIDEO_COMPOSER,
-            runtime_decision={"task_id": "bgm_mix"},
+            runtime_decision=RuntimeDecision(
+                action=RuntimeAction.ACTIVATE_FROM_STANDBY,
+                target_agent=AgentType.VIDEO_COMPOSER,
+                task_id="bgm_mix",
+                reason="global_bgm_missing",
+                facts={},
+            ),
             conditional_task_specs={
                 "bgm_mix": {
                     "agent": " VIDEO_COMPOSER ",

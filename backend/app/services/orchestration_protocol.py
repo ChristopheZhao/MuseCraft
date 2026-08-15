@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..domain import AgentExecutionContractError, AgentExecutionResult, AgentType
+from .orchestration_runtime_decision import RuntimeDecision
 
 
 class OrchestrationProtocolError(ValueError):
@@ -204,8 +205,8 @@ class OrchestrationProtocol:
             "standby_candidates": [agent.value for agent in standby_agents],
             "gate_events": list(gate_events or []),
             "replan_budget": {
-                "used": int(replan_count),
-                "max": int(max_replans),
+                "used": replan_count,
+                "max": max_replans,
             },
         }
 
@@ -245,13 +246,13 @@ class OrchestrationProtocol:
         *,
         workflow_state_id: str,
         current_agent: AgentType,
-        runtime_decision: Dict[str, Any],
+        runtime_decision: RuntimeDecision,
         apply_result: Dict[str, Any],
     ) -> Dict[str, Any]:
         return {
             "contract_version": "v1",
             "workflow_state_id": str(workflow_state_id or ""),
             "current_agent": current_agent.value,
-            "decision": dict(runtime_decision or {}),
+            "decision": runtime_decision.to_json_dict(),
             "apply_result": dict(apply_result or {}),
         }

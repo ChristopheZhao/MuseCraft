@@ -46,6 +46,7 @@ from ..services.orchestration_runtime_controller import (
     OrchestrationRuntimeController,
     OrchestrationRuntimeControllerError,
 )
+from ..services.orchestration_runtime_decision import RuntimeAction, RuntimeDecision
 from ..services.orchestration_runtime_ports import (
     OrchestrationRuntimeResumeBootstrapError,
     OrchestrationRuntimeResumePort,
@@ -108,7 +109,9 @@ class _RuntimeRetryRequested(_OrchestrationBoundaryError):
     """The runtime disposition explicitly selected another attempt."""
 
     def __init__(self, message: str, *, replan_count: int) -> None:
-        self.replan_count = int(replan_count)
+        if type(replan_count) is not int or replan_count < 0:
+            raise ValueError("replan_count must be a non-negative integer")
+        self.replan_count = replan_count
         super().__init__(message, reason_code="runtime_retry_requested")
 
 
@@ -346,10 +349,11 @@ class OrchestratorAgent(BaseAgent):
     ) -> Dict[str, Any]:
         if agent_type == AgentType.VIDEO_GENERATOR:
             generate_audio = None
-            if isinstance(runtime_hints, dict):
+            if isinstance(runtime_hints, dict) and "generate_audio" in runtime_hints:
                 candidate = runtime_hints.get("generate_audio")
-                if isinstance(candidate, bool):
-                    generate_audio = bool(candidate)
+                if type(candidate) is not bool:
+                    raise AgentError("video_generator runtime_hints.generate_audio must be boolean")
+                generate_audio = candidate
             return build_video_generation_execution_contract(
                 workflow_state_id=workflow_state_id,
                 generate_audio=generate_audio,
@@ -373,7 +377,7 @@ class OrchestratorAgent(BaseAgent):
                     isinstance(runtime_hints, dict)
                     and runtime_hints.get("compose_mode") is not None
                 ):
-                    compose_mode = str(runtime_hints.get("compose_mode"))
+                    compose_mode = runtime_hints.get("compose_mode")
                 return build_video_composer_execution_contract(
                     workflow_state_id=workflow_state_id,
                     compose_mode=compose_mode,
@@ -602,6 +606,8 @@ class OrchestratorAgent(BaseAgent):
                 workflow_state_id=wf_id,
                 input_data=input_data,
             )
+        except AgentError:
+            raise
         except Exception as route_err:
             raise AgentError(
                 f"Failed to initialize orchestration context: {route_err}"
@@ -1325,14 +1331,10 @@ class OrchestratorAgent(BaseAgent):
                 )
             except Exception as evt_err:
                 self.logger.warning("Failed to publish workflow_failed event: %s", evt_err)
-            if (
-                runtime_session_id is not None
-                and runtime_session_status
-                not in {
-                    WorkflowSessionStatus.COMPLETED.value,
-                    WorkflowSessionStatus.FAILED.value,
-                }
-            ):
+            if runtime_session_id is not None and runtime_session_status not in {
+                WorkflowSessionStatus.COMPLETED.value,
+                WorkflowSessionStatus.FAILED.value,
+            }:
                 self._get_orchestration_runtime_transition_facade().mark_runtime_session_failed(
                     runtime_session_id=runtime_session_id,
                     task_id=task.task_id,
@@ -2268,7 +2270,11 @@ class OrchestratorAgent(BaseAgent):
         gate_events: List[Dict[str, Any]],
         replan_count: int,
         max_replans: int,
-    ) -> Dict[str, Any]:
+    ) -> RuntimeDecision:
+        if type(replan_count) is not int or replan_count < 0:
+            raise AgentError("Runtime replan count must be a non-negative integer")
+        if type(max_replans) is not int or max_replans < 0:
+            raise AgentError("Runtime replan max must be a non-negative integer")
         report_status = report.get("status") if isinstance(report, dict) else None
         if report_status not in {"completed", "partial", "failed"}:
             raise AgentError("Runtime replan report missing canonical status")
@@ -2300,8 +2306,8 @@ class OrchestratorAgent(BaseAgent):
                 "gate_events_json": json.dumps(list(gate_events or []), ensure_ascii=False),
                 "replan_budget_json": json.dumps(
                     {
-                        "used": int(replan_count),
-                        "max": int(max_replans),
+                        "used": replan_count,
+                        "max": max_replans,
                     },
                     ensure_ascii=False,
                 ),
@@ -2343,36 +2349,40 @@ class OrchestratorAgent(BaseAgent):
         target_raw = data.get("target_agent")
         allowed_targets = {agent.value: agent for agent in standby_agents}
 
-        if action not in {
-            "continue",
-            "retry_current",
-            "activate_from_standby",
-            "accept_with_gaps",
-            "abort",
-        }:
+        try:
+            runtime_action = RuntimeAction(action)
+        except ValueError:
             raise AgentError(f"Runtime replan returned invalid action: {action}")
 
         allowed_actions_by_status = {
-            "completed": {"continue", "activate_from_standby", "abort"},
-            "partial": {
-                "retry_current",
-                "activate_from_standby",
-                "accept_with_gaps",
-                "abort",
+            "completed": {
+                RuntimeAction.CONTINUE,
+                RuntimeAction.ACTIVATE_FROM_STANDBY,
+                RuntimeAction.ABORT,
             },
-            "failed": {"retry_current", "activate_from_standby", "abort"},
+            "partial": {
+                RuntimeAction.RETRY_CURRENT,
+                RuntimeAction.ACTIVATE_FROM_STANDBY,
+                RuntimeAction.ACCEPT_WITH_GAPS,
+                RuntimeAction.ABORT,
+            },
+            "failed": {
+                RuntimeAction.RETRY_CURRENT,
+                RuntimeAction.ACTIVATE_FROM_STANDBY,
+                RuntimeAction.ABORT,
+            },
         }
-        if action not in allowed_actions_by_status[report_status]:
-            if report_status == "failed" and action == "accept_with_gaps":
+        if runtime_action not in allowed_actions_by_status[report_status]:
+            if report_status == "failed" and runtime_action is RuntimeAction.ACCEPT_WITH_GAPS:
                 raise AgentError("Runtime replan failed report cannot be accepted")
             raise AgentError(
                 f"Runtime replan action {action} is invalid for report status {report_status}"
             )
 
-        if action != "activate_from_standby" and "target_agent" in data:
+        if runtime_action is not RuntimeAction.ACTIVATE_FROM_STANDBY and "target_agent" in data:
             raise AgentError("Runtime replan target_agent is only valid for standby activation")
 
-        if action == "accept_with_gaps":
+        if runtime_action is RuntimeAction.ACCEPT_WITH_GAPS:
             reflection = report.get("reflection")
             reported_gaps = (
                 reflection.get("reported_gaps") if isinstance(reflection, dict) else None
@@ -2389,12 +2399,30 @@ class OrchestratorAgent(BaseAgent):
                     "Runtime replan partial acceptance requires explicit reported_gaps"
                 )
 
-        if action in {"retry_current", "activate_from_standby"} and replan_count >= max(
-            0, int(max_replans)
+        if (
+            runtime_action
+            in {
+                RuntimeAction.RETRY_CURRENT,
+                RuntimeAction.ACTIVATE_FROM_STANDBY,
+            }
+            and replan_count >= max_replans
         ):
             raise AgentError("Runtime replan budget exhausted")
 
-        if action == "activate_from_standby":
+        task_id = data.get("task_id")
+        if task_id is not None and (
+            type(task_id) is not str or not task_id or task_id != task_id.strip()
+        ):
+            raise AgentError("Runtime replan task_id must be canonical when provided")
+        if runtime_action is not RuntimeAction.ACTIVATE_FROM_STANDBY and task_id is not None:
+            raise AgentError("Runtime replan task_id is only valid for standby activation")
+
+        facts = {
+            "report": report,
+            "gate_events": gate_events,
+            "llm_output": data,
+        }
+        if runtime_action is RuntimeAction.ACTIVATE_FROM_STANDBY:
             if (
                 not isinstance(target_raw, str)
                 or not target_raw
@@ -2408,51 +2436,62 @@ class OrchestratorAgent(BaseAgent):
                 raise AgentError(
                     f"Runtime replan returned invalid target_agent: {target_raw or '<empty>'}"
                 )
-            return {
-                "action": "activate_from_standby",
-                "target_agent": target_agent,
-                "reason": reason,
-                "facts": {
-                    "report": report,
-                    "gate_events": gate_events,
-                    "llm_output": data,
-                },
-            }
+            return RuntimeDecision(
+                action=runtime_action,
+                target_agent=target_agent,
+                task_id=task_id,
+                reason=reason,
+                facts=facts,
+            )
 
-        return {
-            "action": action,
-            "reason": reason,
-            "facts": {
-                "report": report,
-                "gate_events": gate_events,
-                "llm_output": data,
-            },
-        }
+        return RuntimeDecision(
+            action=runtime_action,
+            reason=reason,
+            facts=facts,
+        )
 
     def _get_video_audio_capability(self) -> Dict[str, Any]:
         """Read current provider audio capability from video config manager."""
         try:
             provider_cfg = self.video_config.get_current_provider_config()
+            provider = getattr(provider_cfg, "provider_name", None)
+            supports_native_audio = getattr(provider_cfg, "supports_native_audio", None)
+            native_audio_param_name = getattr(
+                provider_cfg,
+                "native_audio_param_name",
+                None,
+            )
+            native_audio_default_enabled = getattr(
+                provider_cfg,
+                "native_audio_default_enabled",
+                None,
+            )
+            if type(provider) is not str or not provider or provider != provider.strip():
+                raise ValueError("provider_name must be a canonical non-empty string")
+            if type(supports_native_audio) is not bool:
+                raise ValueError("supports_native_audio must be boolean")
+            if (
+                type(native_audio_param_name) is not str
+                or not native_audio_param_name
+                or native_audio_param_name != native_audio_param_name.strip()
+            ):
+                raise ValueError("native_audio_param_name must be a canonical non-empty string")
+            if (
+                native_audio_default_enabled is not None
+                and type(native_audio_default_enabled) is not bool
+            ):
+                raise ValueError("native_audio_default_enabled must be boolean or null")
             return {
-                "provider": provider_cfg.provider_name,
-                "supports_native_audio": bool(
-                    getattr(provider_cfg, "supports_native_audio", False)
-                ),
-                "native_audio_param_name": str(
-                    getattr(provider_cfg, "native_audio_param_name", "generate_audio")
-                    or "generate_audio"
-                ),
-                "native_audio_default_enabled": getattr(
-                    provider_cfg, "native_audio_default_enabled", None
-                ),
+                "provider": provider,
+                "supports_native_audio": supports_native_audio,
+                "native_audio_param_name": native_audio_param_name,
+                "native_audio_default_enabled": native_audio_default_enabled,
             }
-        except Exception:
-            return {
-                "provider": "",
-                "supports_native_audio": False,
-                "native_audio_param_name": "generate_audio",
-                "native_audio_default_enabled": None,
-            }
+        except Exception as exc:
+            raise _OrchestrationBoundaryError(
+                f"video_audio_capability_unavailable: {exc}",
+                reason_code="video_audio_capability_unavailable",
+            ) from exc
 
     def _emit_pre_dispatch_diagnostics(self, agent_type: AgentType, workflow_state_id: str) -> None:
         if agent_type == AgentType.AUDIO_GENERATOR:

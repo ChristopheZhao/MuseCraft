@@ -42,15 +42,66 @@ def test_resolve_execution_contract_rejects_missing_boundary():
         )
 
 
-def test_compose_mode_rejects_missing_contract_constraint():
+def test_resolve_execution_contract_rejects_cross_workflow_identity():
+    agent = object.__new__(VideoComposerAgent)
+    contract = build_video_composer_execution_contract(
+        workflow_state_id="wf-other",
+        compose_mode="compose",
+    )
+
+    with pytest.raises(AgentError, match="workflow_state_id"):
+        agent._resolve_execution_contract(
+            {
+                "workflow_state_id": "wf-current",
+                "execution_contract": contract,
+            },
+            "wf-current",
+        )
+
+
+def test_compose_mode_rejects_missing_operation():
     contract = build_video_composer_execution_contract(
         workflow_state_id="wf-compose",
         compose_mode="compose",
     )
-    contract["constraints"].pop("compose_mode")
+    contract.pop("operation")
 
     with pytest.raises(ValueError, match="compose_mode"):
         get_video_composer_compose_mode(contract)
+
+
+def test_compose_contract_rejects_duplicate_compose_intent_source():
+    contract = build_video_composer_execution_contract(
+        workflow_state_id="wf-compose",
+        compose_mode="compose",
+    )
+    contract["constraints"] = {"compose_mode": "bgm"}
+
+    with pytest.raises(ValueError, match="duplicate compose intent"):
+        get_video_composer_compose_mode(contract)
+
+
+def test_compose_contract_rejects_legacy_mode_alias():
+    with pytest.raises(ValueError, match="unsupported video_composer compose_mode"):
+        build_video_composer_execution_contract(
+            workflow_state_id="wf-compose",
+            compose_mode="compose_story",
+        )
+
+
+def test_compose_contract_rejects_unconsumed_fields():
+    agent = object.__new__(VideoComposerAgent)
+    contract = build_video_composer_execution_contract(
+        workflow_state_id="wf-compose",
+        compose_mode="compose",
+    )
+    contract["debug"] = True
+
+    with pytest.raises(AgentError, match="unexpected execution contract field"):
+        agent._resolve_execution_contract(
+            {"execution_contract": contract},
+            "wf-compose",
+        )
 
 
 def test_resolve_execution_contract_rejects_legacy_inputs_without_boundary():
@@ -94,8 +145,12 @@ def test_orchestrator_builds_video_composer_execution_contract_from_runtime_hint
     )
 
     assert contract["agent"] == AgentType.VIDEO_COMPOSER.value
-    assert contract["storage"]["workflow_state_id"] == "wf-bgm"
-    assert contract["constraints"]["compose_mode"] == "bgm"
+    assert contract["workflow_state_id"] == "wf-bgm"
+    assert contract["operation"] == "bgm"
+    assert "scope" not in contract
+    assert "inputs" not in contract
+    assert "storage" not in contract
+    assert "constraints" not in contract
 
 
 def test_orchestrator_rejects_legacy_video_composer_runtime_hints():
@@ -121,7 +176,7 @@ def test_build_plan_context_includes_execution_contract():
     )
 
     assert "execution_contract" in ctx
-    assert ctx["execution_contract"]["constraints"]["compose_mode"] == "compose"
+    assert ctx["execution_contract"]["operation"] == "compose"
 
 
 def test_build_plan_context_exposes_task_assignment_contract():

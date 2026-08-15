@@ -348,22 +348,16 @@ class VideoGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         return get_video_generation_execution_contract(
             input_data,
-            workflow_state_id=str(workflow_id or ""),
+            workflow_state_id=workflow_id,
         )
 
     def _build_execution_context(
         self,
         execution_contract: Dict[str, Any],
     ) -> Dict[str, Any]:
-        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
-        if not isinstance(storage, dict):
-            storage = {}
-        workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
         context: Dict[str, Any] = {
             "execution_contract": dict(execution_contract or {}),
         }
-        if workflow_state_id:
-            context["workflow_state_id"] = workflow_state_id
         return context
 
     def _bind_execution_context_to_tool_calls(
@@ -445,9 +439,6 @@ class VideoGeneratorAgent(ReActAgent):
         if not isinstance(tool_calls, list) or not tool_calls:
             return
 
-        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
-        if not isinstance(storage, dict):
-            storage = {}
         constraints = (
             execution_contract.get("constraints") if isinstance(execution_contract, dict) else {}
         )
@@ -479,8 +470,14 @@ class VideoGeneratorAgent(ReActAgent):
             if not isinstance(args, dict):
                 raise AgentError("视频生成工具参数必须是对象")
 
-            expected_workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
-            explicit_workflow_state_id = str(args.get("workflow_state_id") or "").strip()
+            expected_workflow_state_id = execution_contract.get("workflow_state_id")
+            explicit_workflow_state_id = args.get("workflow_state_id")
+            if explicit_workflow_state_id is not None and (
+                type(explicit_workflow_state_id) is not str
+                or not explicit_workflow_state_id
+                or explicit_workflow_state_id != explicit_workflow_state_id.strip()
+            ):
+                raise AgentError("视频生成调用的 workflow_state_id 必须是规范非空字符串")
             if (
                 explicit_workflow_state_id
                 and expected_workflow_state_id
@@ -488,13 +485,13 @@ class VideoGeneratorAgent(ReActAgent):
             ):
                 raise AgentError("视频生成调用提供了与 execution context 冲突的 workflow_state_id")
 
-            if isinstance(required_generate_audio, bool):
+            if type(required_generate_audio) is bool:
                 actual_generate_audio = args.get("generate_audio")
                 if actual_generate_audio is None:
                     continue
-                if not isinstance(actual_generate_audio, bool):
+                if type(actual_generate_audio) is not bool:
                     raise AgentError("视频生成调用的 generate_audio 必须为 boolean")
-                if bool(actual_generate_audio) != bool(required_generate_audio):
+                if actual_generate_audio != required_generate_audio:
                     raise AgentError("视频生成调用提供了与 execution context 冲突的 generate_audio")
 
     def _get_video_uploader(self):

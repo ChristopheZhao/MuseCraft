@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from ..domain import AgentType
 from .memory_provider import MemoryServices
+from .orchestration_runtime_decision import RuntimeAction
 from .orchestration_state_adapter import OrchestrationStateAdapter
 
 
@@ -40,24 +41,24 @@ class OrchestrationRuntimeController:
         if not isinstance(apply_payload, dict):
             raise OrchestrationRuntimeControllerError("apply_payload must be a dict")
 
-        action_raw = apply_payload.get("action")
-        if not isinstance(action_raw, str) or not action_raw.strip():
-            raise OrchestrationRuntimeControllerError("apply_payload missing action")
-        action = action_raw.strip()
-        reason = str(apply_payload.get("reason") or "none").strip()
-        facts = apply_payload.get("facts") if isinstance(apply_payload, dict) else {}
-        replan_count = int(apply_payload.get("replan_count") or 0)
+        action = apply_payload.get("action")
+        if not isinstance(action, RuntimeAction):
+            raise OrchestrationRuntimeControllerError("apply_payload.action must be RuntimeAction")
+        reason = apply_payload.get("reason")
+        if type(reason) is not str or not reason or reason != reason.strip():
+            raise OrchestrationRuntimeControllerError(
+                "apply_payload.reason must be a canonical non-empty string"
+            )
+        facts = apply_payload.get("facts")
+        if not isinstance(facts, dict):
+            raise OrchestrationRuntimeControllerError("apply_payload.facts must be a JSON object")
+        replan_count = apply_payload.get("replan_count")
+        if type(replan_count) is not int or replan_count < 0:
+            raise OrchestrationRuntimeControllerError(
+                "apply_payload.replan_count must be a non-negative integer"
+            )
 
-        if action not in {
-            "continue",
-            "retry_current",
-            "activate_from_standby",
-            "accept_with_gaps",
-            "abort",
-        }:
-            raise OrchestrationRuntimeControllerError(f"Unsupported apply action: {action}")
-
-        if action == "activate_from_standby":
+        if action is RuntimeAction.ACTIVATE_FROM_STANDBY:
             target_agent = apply_payload.get("target_agent")
             if not isinstance(target_agent, AgentType):
                 raise OrchestrationRuntimeControllerError(
@@ -68,7 +69,7 @@ class OrchestrationRuntimeController:
             candidate_agents = apply_payload.get("candidate_agents")
             execution_queue = apply_payload.get("execution_queue")
             standby_agents = apply_payload.get("standby_agents")
-            queue_changed = bool(apply_payload.get("queue_changed"))
+            queue_changed = apply_payload.get("queue_changed")
 
             if not isinstance(task_specs, dict):
                 raise OrchestrationRuntimeControllerError(
@@ -82,16 +83,20 @@ class OrchestrationRuntimeController:
                 raise OrchestrationRuntimeControllerError(
                     "activate_from_standby requires explicit standby_agents payload"
                 )
+            if type(queue_changed) is not bool:
+                raise OrchestrationRuntimeControllerError(
+                    "activate_from_standby requires queue_changed as boolean"
+                )
 
             trace_record = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "trigger_agent": current_agent.value,
-                "action": "activate_from_standby",
+                "action": RuntimeAction.ACTIVATE_FROM_STANDBY.value,
                 "target_agent": target_agent.value,
                 "reason": reason,
                 "replan_count": replan_count,
-                "queue_changed": bool(queue_changed),
-                "facts": facts if isinstance(facts, dict) else {},
+                "queue_changed": queue_changed,
+                "facts": dict(facts),
             }
             self._orchestration_state.append_replan_trace(
                 workflow_state_id=workflow_state_id,
@@ -102,29 +107,33 @@ class OrchestrationRuntimeController:
                 "target_agent": target_agent,
                 "execution_queue": execution_queue,
                 "task_specs": task_specs,
-                "queue_changed": bool(queue_changed),
+                "queue_changed": queue_changed,
                 "standby_agents": standby_agents,
                 "replan_count": replan_count,
                 "trace_record": trace_record,
             }
 
-        if action in {"retry_current", "accept_with_gaps", "abort"}:
+        if action in {
+            RuntimeAction.RETRY_CURRENT,
+            RuntimeAction.ACCEPT_WITH_GAPS,
+            RuntimeAction.ABORT,
+        }:
             trace_record = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "trigger_agent": current_agent.value,
-                "action": action,
+                "action": action.value,
                 "reason": reason,
                 "replan_count": replan_count,
-                "facts": facts if isinstance(facts, dict) else {},
+                "facts": dict(facts),
             }
             self._orchestration_state.append_replan_trace(
                 workflow_state_id=workflow_state_id,
                 record=trace_record,
             )
             status_by_action = {
-                "retry_current": "retry",
-                "accept_with_gaps": "accepted_with_gaps",
-                "abort": "abort",
+                RuntimeAction.RETRY_CURRENT: "retry",
+                RuntimeAction.ACCEPT_WITH_GAPS: "accepted_with_gaps",
+                RuntimeAction.ABORT: "abort",
             }
             return {
                 "status": status_by_action[action],
@@ -133,8 +142,12 @@ class OrchestrationRuntimeController:
                 "trace_record": trace_record,
             }
 
-        return {
-            "status": "continue",
-            "reason": reason,
-            "replan_count": replan_count,
-        }
+        if action is RuntimeAction.CONTINUE:
+            return {
+                "status": "continue",
+                "reason": reason,
+                "replan_count": replan_count,
+            }
+        raise OrchestrationRuntimeControllerError(
+            f"apply_payload.action is not executable: {action.value}"
+        )

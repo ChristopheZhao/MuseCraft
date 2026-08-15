@@ -51,6 +51,36 @@ from app.services.runtime_session_control_plane import RuntimeSessionControlPlan
 from app.services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
 
 
+def test_video_audio_capability_failure_is_not_fabricated_as_unsupported():
+    agent = object.__new__(OrchestratorAgent)
+
+    def _raise_provider_config_error():
+        raise RuntimeError("provider config unavailable")
+
+    agent.video_config = SimpleNamespace(
+        get_current_provider_config=_raise_provider_config_error,
+    )
+
+    with pytest.raises(AgentError, match="video_audio_capability_unavailable") as exc_info:
+        agent._get_video_audio_capability()
+
+    assert getattr(exc_info.value, "reason_code", None) == "video_audio_capability_unavailable"
+
+
+def test_video_audio_capability_rejects_missing_supplier_fact():
+    agent = object.__new__(OrchestratorAgent)
+    agent.video_config = SimpleNamespace(
+        get_current_provider_config=lambda: SimpleNamespace(
+            provider_name="provider-a",
+            native_audio_param_name="generate_audio",
+            native_audio_default_enabled=None,
+        ),
+    )
+
+    with pytest.raises(AgentError, match="supports_native_audio must be boolean"):
+        agent._get_video_audio_capability()
+
+
 class _FakeSharedStore(dict):
     def put(self, key, value):
         self[key] = value
@@ -942,9 +972,7 @@ def test_runtime_resume_bootstrap_facade_owns_fresh_session(monkeypatch):
             current_agent_type=AgentType.CONCEPT_PLANNER,
             workflow_state_id=str(task.task_id),
             task_specs={
-                AgentType.CONCEPT_PLANNER: _primary_task_spec(
-                    AgentType.CONCEPT_PLANNER, scope={}
-                ),
+                AgentType.CONCEPT_PLANNER: _primary_task_spec(AgentType.CONCEPT_PLANNER, scope={}),
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.CONCEPT_PLANNER],
@@ -1647,11 +1675,7 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
         async def _count_decompose(*args, **kwargs):
             planning_calls["decompose"] += 1
             return (
-                {
-                    AgentType.SCRIPT_WRITER: _primary_task_spec(
-                        AgentType.SCRIPT_WRITER, scope={}
-                    )
-                },
+                {AgentType.SCRIPT_WRITER: _primary_task_spec(AgentType.SCRIPT_WRITER, scope={})},
                 {},
             )
 
@@ -1665,9 +1689,7 @@ def test_orchestrator_mainline_resumes_from_runtime_checkpoint_via_resume_facade
         )
         continuation_checkpoint = agent._orchestration_state.build_continuation_checkpoint(
             task_specs={
-                AgentType.SCRIPT_WRITER: _primary_task_spec(
-                    AgentType.SCRIPT_WRITER, scope={}
-                ),
+                AgentType.SCRIPT_WRITER: _primary_task_spec(AgentType.SCRIPT_WRITER, scope={}),
             },
             conditional_task_specs={},
             candidate_agents=[AgentType.SCRIPT_WRITER],
