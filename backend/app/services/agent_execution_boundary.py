@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
-from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType, JsonObjectPayload
+from ..domain import (
+    AgentExecutionContractError,
+    AgentExecutionContractReason,
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from ..models import Task
 
 
@@ -32,3 +39,34 @@ def build_agent_execution_request(
         workflow_state_id=workflow_state_id,
         execution_order=execution_order,
     )
+
+
+def require_canonical_execution_status(
+    payload: Mapping[str, object],
+    *,
+    field_path: str,
+    allowed_statuses: Collection[str],
+) -> str:
+    """Validate an explicit execution status without inferring completion."""
+
+    if not isinstance(payload, Mapping):
+        raise AgentExecutionContractError(
+            reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+            field_path=field_path,
+            message="execution result must be a JSON object",
+        )
+    status = payload.get("status")
+    if type(status) is not str or not status or status != status.strip():
+        raise AgentExecutionContractError(
+            reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+            field_path=field_path,
+            message="execution status must be an explicit canonical string",
+        )
+    allowed = frozenset(allowed_statuses)
+    if status not in allowed:
+        raise AgentExecutionContractError(
+            reason_code=AgentExecutionContractReason.INVALID_CONTRACT_MEMBER,
+            field_path=field_path,
+            message=f"unsupported execution status {status!r}",
+        )
+    return status

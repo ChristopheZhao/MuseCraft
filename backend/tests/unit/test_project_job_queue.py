@@ -23,7 +23,10 @@ from app.services.project_job_contract import (
     attach_project_plan_contract,
 )
 from app.services.project_service import ProjectDefinitionApplicationService
-from app.services.queued_execution_use_case import QueuedExecutionUseCase
+from app.services.queued_execution_use_case import (
+    QueuedExecutionApplicationError,
+    QueuedExecutionUseCase,
+)
 
 
 def _definition_service(session_factory):
@@ -167,6 +170,69 @@ def test_project_execution_applies_planner_result_through_versioned_service(
         task = db.query(Task).filter(Task.task_id == task_id).one()
         assert task.status == TaskStatus.COMPLETED.value
         assert task.output_metadata["character_references"]["status"] == "skipped"
+    finally:
+        db.close()
+
+
+def test_project_execution_rejects_nonterminal_planner_status_before_promotion(
+    project_state_store,
+):
+    project_id = "project-nonterminal"
+    definition = ProjectDefinition(
+        project_id=project_id,
+        mode="project",
+        story_plan=StoryPlan(
+            project_id=project_id,
+            user_prompt="placeholder",
+            target_duration_seconds=60,
+            aspect_ratio="16:9",
+        ),
+    )
+    definitions = _definition_service(project_state_store)
+    created = definitions.create(definition)
+    planned = ProjectDefinition.from_dict(definition.to_dict())
+    planned.story_plan.global_theme = "Must not be promoted"
+    task_id = _create_task(
+        project_state_store,
+        project_id=project_id,
+        status=TaskStatus.QUEUED.value,
+        input_parameters=attach_project_plan_contract(
+            {
+                "project_id": project_id,
+                "mode": "project",
+                "project_definition_version": created.version,
+                "generate_character_references": False,
+            }
+        ),
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=project_state_store,
+        host_runner=lambda **kwargs: AgentExecutionResult(
+            output_data=JsonObjectPayload.from_mapping(
+                {
+                    "status": "waiting_gate",
+                    "project_definition": planned.to_dict(),
+                },
+                field_path="test.output",
+            )
+        ),
+        agent_factory=lambda _agent_type: object(),
+        project_definitions=definitions,
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.PROJECT_WORKFLOW)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    stored = definitions.get(project_id)
+    assert stored.version == created.version
+    assert stored.definition.story_plan.global_theme != "Must not be promoted"
+    db = project_state_store()
+    try:
+        task = db.query(Task).filter(Task.task_id == task_id).one()
+        assert task.status == TaskStatus.FAILED.value
     finally:
         db.close()
 

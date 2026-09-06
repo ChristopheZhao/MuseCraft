@@ -15,9 +15,11 @@ from app.domain import (
     TaskStatus,
     TaskType,
 )
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
 from app.models import Task
 from app.services.agent_execution_boundary import build_agent_execution_request
 from app.services.episode_workflow_execution import PersistentEpisodeWorkflowExecutor
+from app.services.runtime_read_model_service import RuntimeReadModelService
 
 
 def test_application_boundary_snapshots_orm_task_into_typed_agent_request():
@@ -125,7 +127,11 @@ async def test_episode_executor_closes_persistence_session_before_agent_invocati
         session_id="session-1",
     )
     input_data = JsonObjectPayload.from_mapping(
-        {"user_prompt": "episode one"},
+        {
+            "user_prompt": "episode one",
+            "project_id": "project-1",
+            "episode_id": "episode-1",
+        },
         field_path="episode.input_data",
     )
 
@@ -149,8 +155,21 @@ async def test_episode_executor_closes_persistence_session_before_agent_invocati
     try:
         persisted = db.query(Task).filter(Task.task_id == receipt.task_id).one()
         assert persisted.status == TaskStatus.PENDING.value
-        assert persisted.input_parameters == {"user_prompt": "episode one"}
+        assert persisted.input_parameters == {
+            "user_prompt": "episode one",
+            "project_id": "project-1",
+            "episode_id": "episode-1",
+        }
         assert persisted.error_message is None
+        runtime = RuntimeReadModelService(
+            SqlAlchemyRuntimeAttemptStore(db)
+        ).load_for_task(receipt.task_id)
+        assert runtime is not None
+        assert runtime.session.task_id == receipt.task_id
+        assert runtime.session.shared_memory_id == receipt.task_id
+        assert runtime.session.mode == "quick"
+        assert runtime.session.project_id == "project-1"
+        assert runtime.session.episode_id == "episode-1"
     finally:
         db.close()
         engine.dispose()

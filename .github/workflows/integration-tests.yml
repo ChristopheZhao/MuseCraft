@@ -118,15 +118,17 @@ jobs:
       - name: Run focused control-plane and runtime tests
         run: >-
           uv run --project backend pytest -q
+          backend/tests/e2e/test_quick_mas_runtime.py
           backend/tests/unit/test_base_agent_orchestration_report_boundary.py
           backend/tests/unit/test_audio_orchestration_runtime_gate.py
           backend/tests/unit/test_video_generator_progress_boundary.py
           backend/tests/unit/test_script_writer_episode_context.py
+          backend/tests/unit/test_scene_contract.py
           backend/tests/unit/test_published_deliverable_service.py
           backend/tests/unit/test_execution_boundary_assembler_contexts.py
           backend/tests/unit/test_tasks_endpoint.py
           backend/tests/unit/test_orchestrator_runtime_mainline.py
-          -k "base_agent_does_not_synthesize_orchestration_report or base_agent_preserves_explicit_orchestration_report or legacy_orchestrator_decision_rejects or image_step_completion or video_step_completion or progress_read_model_uses_accepted_scene_outputs_with_provenance or video_generator_completion_gate or assembler_static_context or partial_result_reports_deterministic_boundary or malformed_scene_scripts_slot or published_payload or continuation_checkpoint_rejects_unknown or publish_script_deliverable or submit_gate_decision_approve or script_revise_resume_projects_candidate_deliverable_into_mas_boundary or rejects_malformed_script_candidate_payload or checkpoint or resume_task_runtime or mainline or runtime"
+          -k "base_agent_does_not_synthesize_orchestration_report or base_agent_preserves_explicit_orchestration_report or legacy_orchestrator_decision_rejects or image_step_completion or video_step_completion or progress_read_model_uses_accepted_scene_outputs_with_provenance or video_generator_completion_gate or text_to_video or receipt_authority or assembler_static_context or partial_result_reports_deterministic_boundary or malformed_scene_scripts_slot or published_payload or continuation_checkpoint_rejects_unknown or publish_script_deliverable or submit_gate_decision_approve or script_revise_resume_projects_candidate_deliverable_into_mas_boundary or rejects_malformed_script_candidate_payload or checkpoint or resume_task_runtime or mainline or runtime"
 
   backend-boundaries:
     name: Agent, Transport, And Persistence Boundaries

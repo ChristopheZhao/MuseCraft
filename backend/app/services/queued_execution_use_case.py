@@ -14,6 +14,7 @@ from ..core.database import SessionLocal
 from ..core.generation_mode import resolve_generation_mode
 from ..core.story_plan import ProjectDefinition
 from ..domain import (
+    AgentExecutionContractError,
     AgentExecutionRequest,
     AgentExecutionResult,
     AgentTaskReference,
@@ -26,7 +27,10 @@ from ..domain import (
 )
 from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from ..models import Task
-from .agent_execution_boundary import build_agent_execution_request
+from .agent_execution_boundary import (
+    build_agent_execution_request,
+    require_canonical_execution_status,
+)
 from .project_job_contract import resolve_project_job_contract
 from .queued_task_execution_host import run_agent_execution_in_host
 from .runtime_attempt_keepalive_adapter import create_runtime_attempt_keepalive_controller
@@ -73,6 +77,10 @@ class _PreparedEpisodeExecution:
 
 class QueuedExecutionUseCase:
     """Own application/control-plane decisions outside scheduler transports."""
+
+    _QUICK_RUNTIME_EXECUTION_STATUSES = frozenset({"completed", "waiting_gate"})
+    _PROJECT_PLANNING_EXECUTION_STATUSES = frozenset({"completed"})
+    _EPISODE_COORDINATION_EXECUTION_STATUSES = frozenset({"completed"})
 
     def __init__(
         self,
@@ -202,9 +210,15 @@ class QueuedExecutionUseCase:
                         input_data=prepared.input_data,
                     )
                 )
+                result_status = self._require_execution_status(
+                    result_payload,
+                    task_id=command.task_id,
+                    field_path="episode_coordination_result.status",
+                    allowed_statuses=self._EPISODE_COORDINATION_EXECUTION_STATUSES,
+                )
                 self._complete_episode_coordination(command, result_payload)
                 return {
-                    "status": result_payload.get("status") or "completed",
+                    "status": result_status,
                     "result": result_payload,
                     **prepared.result_metadata,
                 }
@@ -228,6 +242,16 @@ class QueuedExecutionUseCase:
                 )
 
             result_payload = execution_result.output_data.to_dict()
+            result_status = self._require_execution_status(
+                result_payload,
+                task_id=command.task_id,
+                field_path="agent_execution_result.output_data.status",
+                allowed_statuses=(
+                    self._PROJECT_PLANNING_EXECUTION_STATUSES
+                    if command.execution_kind == QueuedExecutionKind.PROJECT_WORKFLOW
+                    else self._QUICK_RUNTIME_EXECUTION_STATUSES
+                ),
+            )
             if command.execution_kind == QueuedExecutionKind.PROJECT_WORKFLOW:
                 self._complete_project_execution(
                     command,
@@ -236,7 +260,7 @@ class QueuedExecutionUseCase:
                 )
 
             return {
-                "status": result_payload.get("status") or "completed",
+                "status": result_status,
                 "result": result_payload,
                 **prepared.result_metadata,
             }
@@ -253,6 +277,27 @@ class QueuedExecutionUseCase:
                     ),
                 ) from transition_error
             raise
+
+    @staticmethod
+    def _require_execution_status(
+        payload: Any,
+        *,
+        task_id: str,
+        field_path: str,
+        allowed_statuses: frozenset[str],
+    ) -> str:
+        try:
+            return require_canonical_execution_status(
+                payload,
+                field_path=field_path,
+                allowed_statuses=allowed_statuses,
+            )
+        except AgentExecutionContractError as exc:
+            raise QueuedExecutionApplicationError(
+                reason_code="execution_status_invalid",
+                task_id=task_id,
+                message=f"Execution returned no canonical status: {exc}",
+            ) from exc
 
     def _prepare_execution(
         self,

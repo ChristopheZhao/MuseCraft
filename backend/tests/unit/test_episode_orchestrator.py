@@ -85,8 +85,13 @@ class _ExecutionQuery:
 
 
 class _Executor:
-    def __init__(self):
+    def __init__(self, output=None):
         self.calls = []
+        self.output = (
+            {"status": "completed", "workflow_state_id": "child-task"}
+            if output is None
+            else dict(output)
+        )
 
     async def execute_episode(self, **kwargs):
         self.calls.append(kwargs)
@@ -94,7 +99,7 @@ class _Executor:
             task_id="child-task",
             result=AgentExecutionResult(
                 output_data=JsonObjectPayload.from_mapping(
-                    {"status": "completed", "workflow_state_id": "child-task"},
+                    self.output,
                     field_path="test.output",
                 )
             ),
@@ -127,6 +132,70 @@ async def test_episode_coordinator_builds_identity_bound_payload_without_runtime
     assert payload["episode_editorial_revision"] == episode.editorial_revision
     assert payload["episode_context"]["approved_script"] == "Approved script"
     assert result["episodes"][0]["task_id"] == "child-task"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {},
+        {"status": ""},
+        {"status": " completed "},
+        {"status": "success"},
+        {"status": 42},
+    ],
+)
+@pytest.mark.asyncio
+async def test_episode_coordinator_rejects_missing_or_noncanonical_child_status(output):
+    definition, episode = _definition()
+    executor = _Executor(output)
+    coordinator = EpisodeExecutionCoordinator(
+        project_definitions=_Definitions(definition),
+        execution_query=_ExecutionQuery(definition),
+        episode_executor=executor,
+    )
+
+    with pytest.raises(EpisodeExecutionCoordinationError) as exc_info:
+        await coordinator.execute(
+            parent_task=AgentTaskReference(
+                task_id="parent-task",
+                task_type="video_generation",
+            ),
+            input_data={
+                "project_id": definition.project_id,
+                "project_definition_version": 3,
+                "episode_ids": [episode.episode_id],
+            },
+        )
+
+    assert exc_info.value.reason_code == "child_execution_status_invalid"
+
+
+@pytest.mark.asyncio
+async def test_episode_coordinator_preserves_explicit_waiting_gate_child_status():
+    definition, episode = _definition()
+    executor = _Executor(
+        {"status": "waiting_gate", "workflow_state_id": "child-task"}
+    )
+    coordinator = EpisodeExecutionCoordinator(
+        project_definitions=_Definitions(definition),
+        execution_query=_ExecutionQuery(definition),
+        episode_executor=executor,
+    )
+
+    result = await coordinator.execute(
+        parent_task=AgentTaskReference(
+            task_id="parent-task",
+            task_type="video_generation",
+        ),
+        input_data={
+            "project_id": definition.project_id,
+            "project_definition_version": 3,
+            "episode_ids": [episode.episode_id],
+        },
+    )
+
+    assert result["status"] == "completed"
+    assert result["episodes"][0]["status"] == "waiting_gate"
 
 
 @pytest.mark.asyncio

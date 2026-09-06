@@ -4,6 +4,7 @@ from app.agents.adapters.memory_views import (
 )
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
+from app.agents.utils.memory_helpers import write_shared_fact
 from app.services.scene_contract import (
     SCENE_CONTRACT_DOC_REF,
     SCENE_CONTRACT_VERSION,
@@ -121,3 +122,76 @@ def test_build_video_generation_context_attaches_scene_contract_meta():
     assert "generation_diagnostics" not in result["context"]
     assert "image_purpose" not in scene_payload
     assert "frame_thesis" not in scene_payload
+
+
+def test_build_video_generation_context_keeps_text_to_video_scene_without_image_ref():
+    service = _build_service()
+    payload = {
+        "concept_plan": {
+            "overview": "A calm sunrise",
+            "scenes": [{"scene_number": 1, "title": "Dawn"}],
+        },
+        "scene_overview": {
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "visual_description": "A city skyline at sunrise",
+                    "narrative_description": "The city wakes",
+                    "duration": 5.0,
+                }
+            ]
+        },
+        "scene_scripts": {"1": {"script_text": "Morning light appears."}},
+    }
+
+    result = build_video_generation_context(
+        "wf-text-to-video",
+        service=service,
+        published_payload=payload,
+    )
+
+    scenes = result["scene_info_payload"]["scenes_to_generate"]
+    assert [scene["scene_number"] for scene in scenes] == [1]
+    assert scenes[0]["image_url"] == ""
+
+
+def test_build_video_generation_context_keeps_planned_scene_for_receipt_authority():
+    service = _build_service()
+    workflow_id = "wf-video-membership-receipt-authority"
+    write_shared_fact(
+        workflow_id,
+        "scene_outputs.video",
+        {
+            1: {
+                "scene_number": 1,
+                "success": True,
+                "video_path": "/tmp/unaccepted-scene-1.mp4",
+            }
+        },
+        service=service,
+    )
+    payload = {
+        "concept_plan": {
+            "overview": "A calm sunrise",
+            "scenes": [{"scene_number": 1, "title": "Dawn"}],
+        },
+        "scene_overview": {
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "visual_description": "A city skyline at sunrise",
+                    "duration": 5.0,
+                }
+            ]
+        },
+        "scene_scripts": {"1": {"script_text": "Morning light appears."}},
+    }
+
+    result = build_video_generation_context(
+        workflow_id,
+        service=service,
+        published_payload=payload,
+    )
+
+    scenes = result["scene_info_payload"]["scenes_to_generate"]
+    assert [scene["scene_number"] for scene in scenes] == [1]

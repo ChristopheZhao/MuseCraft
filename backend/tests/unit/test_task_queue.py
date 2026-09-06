@@ -358,6 +358,126 @@ def test_use_case_prefers_runtime_payload_and_builds_persistence_free_request(se
     assert "attempt_lease_keepalive" in calls
 
 
+@pytest.mark.parametrize(
+    "output_payload",
+    [
+        {},
+        {"status": ""},
+        {"status": " completed "},
+        {"status": "success"},
+        {"status": 42},
+    ],
+)
+def test_use_case_rejects_missing_or_noncanonical_host_status(
+    session_factory,
+    output_payload,
+):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: _execution_result(output_payload),
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    db = session_factory()
+    try:
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        runtime_session = SqlAlchemyRuntimeAttemptStore(db).load_latest_session_for_task(
+            task_id
+        )
+        assert task.status == TaskStatus.FAILED.value
+        assert runtime_session is not None
+        assert runtime_session.status is WorkflowSessionStatus.FAILED
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("status", ["waiting_gate", "completed"])
+def test_use_case_preserves_explicit_canonical_host_status(session_factory, status):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: _execution_result({"status": status}),
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
+    )
+
+    result = use_case.execute(
+        QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+    )
+
+    assert result["status"] == status
+
+
+def test_use_case_rejects_episode_coordination_without_canonical_status(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"mode": "project", "project_id": "project-1"},
+        status=TaskStatus.QUEUED.value,
+        create_runtime=False,
+    )
+
+    class _Coordinator:
+        async def execute(self, **kwargs):
+            return {}
+
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        episode_coordinator_factory=lambda: _Coordinator(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    task = _load_task(session_factory, task_id)
+    assert task.status == TaskStatus.FAILED.value
+
+
+def test_use_case_rejects_nonterminal_episode_coordination_status(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"mode": "project", "project_id": "project-1"},
+        status=TaskStatus.QUEUED.value,
+        create_runtime=False,
+    )
+
+    class _Coordinator:
+        async def execute(self, **kwargs):
+            return {"status": "waiting_gate", "episodes": []}
+
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        episode_coordinator_factory=lambda: _Coordinator(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    task = _load_task(session_factory, task_id)
+    assert task.status == TaskStatus.FAILED.value
+
+
 def test_use_case_terminal_runtime_fails_closed_before_host(session_factory):
     task_id = _create_task(
         session_factory,

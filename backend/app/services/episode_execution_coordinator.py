@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core.story_plan import EpisodeEditorialStatus, EpisodePlan, ProjectDefinition
 from ..domain import (
+    AgentExecutionContractError,
     AgentTaskReference,
     EpisodeWorkflowExecutionPort,
     JsonObjectPayload,
@@ -13,6 +14,7 @@ from ..domain import (
     ProjectDefinitionReason,
     ProjectExecutionReadModelQuery,
 )
+from .agent_execution_boundary import require_canonical_execution_status
 from .project_service import ProjectDefinitionApplicationService
 
 
@@ -24,6 +26,8 @@ class EpisodeExecutionCoordinationError(RuntimeError):
 
 class EpisodeExecutionCoordinator:
     """Select approved episodes and invoke the MAS workflow through an injected port."""
+
+    _ALLOWED_CHILD_EXECUTION_STATUSES = frozenset({"completed", "waiting_gate"})
 
     def __init__(
         self,
@@ -123,10 +127,26 @@ class EpisodeExecutionCoordinator:
                 execution_order=order,
             )
             output = receipt.result.output_data.to_dict()
+            try:
+                child_status = require_canonical_execution_status(
+                    output,
+                    field_path=(
+                        f"episode_execution[{episode.episode_id}].output_data.status"
+                    ),
+                    allowed_statuses=self._ALLOWED_CHILD_EXECUTION_STATUSES,
+                )
+            except AgentExecutionContractError as exc:
+                raise EpisodeExecutionCoordinationError(
+                    reason_code="child_execution_status_invalid",
+                    message=(
+                        f"Episode {episode.episode_id} returned no canonical execution "
+                        f"status: {exc}"
+                    ),
+                ) from exc
             results.append(
                 {
                     "episode_id": episode.episode_id,
-                    "status": str(output.get("status") or "completed"),
+                    "status": child_status,
                     "task_id": receipt.task_id,
                     "workflow_state_id": output.get("workflow_state_id"),
                     "output": output,

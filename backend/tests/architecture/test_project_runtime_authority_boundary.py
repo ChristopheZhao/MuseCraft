@@ -98,3 +98,11 @@ def test_episode_execution_adapter_does_not_choose_terminal_runtime_state():
     assert "TaskStatus.COMPLETED" not in execute_body
     assert "TaskStatus.FAILED" not in execute_body
     assert "_update_task_status" not in source
+
+
+def test_project_wrapper_composes_the_same_mas_orchestrator_for_episode_children():
+    source = _source(QUEUED_EXECUTION)
+    factory_body = source.split("def _create_default_episode_coordinator", 1)[1]
+    assert "orchestrator = build_orchestrator_agent()" in factory_body
+    assert "PersistentEpisodeWorkflowExecutor(orchestrator=orchestrator)" in factory_body
+    assert "EpisodeOrchestratorAgent" not in factory_body
