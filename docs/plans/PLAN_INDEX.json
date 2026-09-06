@@ -3203,7 +3203,7 @@
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-09-06T14:16:56Z",
+      "updated_at": "2026-09-06T14:30:45Z",
       "archived_at": null,
       "notes": [
         {
@@ -3273,6 +3273,10 @@
         {
           "at": "2026-09-06T14:16:56Z",
           "text": "Fresh local revalidation 2026-09-06 at 627a37d: 739 collected, 739 passed, 0 skipped (unit, architecture, Quick E2E, offline composer integration). The earlier 'stalled before collection' observation was an output-buffering/capture artifact, not a hang. Hosted CI and user acceptance remain pending; status unchanged."
+        },
+        {
+          "at": "2026-09-06T14:30:45Z",
+          "text": "Hosted CI local equivalents 2026-09-06: mas-runtime 154 passed/25 deselected, backend-boundaries 73 passed; PostgreSQL-backed jobs remain hosted-only. Push authorization still required for hosted CI; status unchanged."
         }
       ]
     },
