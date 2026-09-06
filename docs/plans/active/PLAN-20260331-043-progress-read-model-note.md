@@ -1,5 +1,10 @@
 # Supplement: PLAN-20260331-043 Progress Read-Model Design Freeze
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260331-043
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Purpose
 - Record the design decision that supersedes the earlier duplicate-gate mainline in [PLAN-20260331-043.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260331-043.md).
 - Keep design rationale, owner/host boundaries, and single-SoT mapping out of the main execution plan so the plan can stay concise.

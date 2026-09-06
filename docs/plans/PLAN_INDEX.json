@@ -5,7 +5,7 @@
       "id": "PLAN-20260306-001",
       "title": "音频编排边界收敛与 Orchestrator 计划化修复",
       "kind": "fix",
-      "status": "archived",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260306-001.md",
@@ -45,6 +45,10 @@
         {
           "at": "2026-03-07T13:38:07Z",
           "text": "User confirmed acceptance; plan completed"
+        },
+        {
+          "at": "2026-09-06T13:18:32Z",
+          "text": "Historical record repair: 15c95fc changed 001 completed -> archived while archiving 026, without moving 001 or recording its archive. Restore the prior completed record from a2af5c0; preserve existing confirmation and dates. No new acceptance or archive is asserted. See PLAN-070 reconciliation."
         }
       ]
     },
@@ -1344,7 +1348,7 @@
       "id": "PLAN-20260326-026",
       "title": "MAS residual purity successor for runtime read-path, scene-info contract, and governance inventory cleanup",
       "kind": "fix",
-      "status": "completed",
+      "status": "archived",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/archive/2026-03/PLAN-20260326-026.md",
@@ -1408,6 +1412,10 @@
         {
           "at": "2026-03-26T14:19:04Z",
           "text": "Archived 026 on user request after completion: moved the plan and validation ledger from docs/plans/active/ to docs/plans/archive/2026-03/, updated file_path and archived_at in PLAN_INDEX.json, and left 024 as the only active retained follow-up in this area"
+        },
+        {
+          "at": "2026-09-06T13:18:32Z",
+          "text": "Historical record repair: 15c95fc added 026 at its archive path with archived_at and an explicit archive note, but left the index status completed and changed 001 instead. Restore archived to match that existing operation; no new archive or acceptance is asserted. See PLAN-070 reconciliation."
         }
       ]
     },
@@ -3268,18 +3276,22 @@
       "id": "PLAN-20260906-070",
       "title": "文档权威入口、历史记录与持续校验收敛",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "awaiting_user_confirmation",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260906-070.md",
       "confirmed_by_user": false,
       "created_at": "2026-09-06T13:14:57Z",
-      "updated_at": "2026-09-06T13:14:57Z",
+      "updated_at": "2026-09-06T13:20:16Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-09-06T13:14:57Z",
           "text": "User authorized the four-batch documentation governance proposal; implementation baseline b612963 and evidence anchor 78ff0a4 are committed. This plan owns documentation only, not PLAN-069 acceptance."
+        },
+        {
+          "at": "2026-09-06T13:20:16Z",
+          "text": "Documentation implementation complete: scoped authority navigation, six supersession notices, DP applicability review, historical index repair and explicit attachment ownership. Local checker 0 issues; 10 counterexample tests passed; deferred doctor 0 issues. No business-plan acceptance or hosted CI claimed."
         }
       ]
     }

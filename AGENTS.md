@@ -1,7 +1,7 @@
 ## 代理与工具原则 / Principles for Agents and Tools
 
 - Tools-First: Agents must perform external I/O and service calls strictly via registered tools. Avoid direct SDK/HTTP calls in agents. Encapsulate providers in tools or service interfaces.
-- Memory Decoupling: Agents consume context via the ContextAssembler and write results via MemoryWriter. Optional long-term memory may degrade with explicit diagnostics; required execution identities, authority bindings, and published input contracts must fail closed rather than being reconstructed from stale memory.
+- Memory Decoupling: Agents consume context via the ContextAssembler; orchestration writes long-term summaries via MemoryWriter. Iteration facts and accepted shared outputs use their explicit adapters and acceptance boundaries. Optional long-term memory may degrade with explicit diagnostics; required execution identities, authority bindings, and published input contracts must fail closed rather than being reconstructed from stale memory.
 - Supplier-Agnostic: Prefer service interfaces and provider configs over hardcoding vendor names, endpoints, or capabilities. Inject provider capabilities (durations, models) into LLM context instead of branching on if/else.
 - Anti-Hardcoding: Do not encode LLM decisions in code via regex or if/else. Express priors and constraints in system/context messages and tool schemas; let the LLM choose within schema.
 - Prompt Neutrality: Prompts must not include tool names, parameter names, or value ranges. Expose capabilities exclusively via tools schema; let validation happen in tools.
@@ -60,9 +60,9 @@
 
 ## 记忆解耦与可选回写（ReAct 基类） / Memory Decoupling & Optional Writeback
 
-（架构说明-中文）ReAct 基类仅提供可选迭代回写钩子（默认关），生产读写统一在编排层的 ContextAssembler/MemoryWriter，保持记忆解耦。
+（架构说明-中文）ReAct 基类仅提供可选迭代回写钩子（默认关），上下文装配和长期记忆回写统一在编排层的 ContextAssembler/MemoryWriter；迭代事实与共享交付事实经各自显式边界写入，保持记忆解耦。
 - Optional per-iteration writeback hook (default off via `REACT_ITERATION_MEMORY_ENABLED`), lightweight summaries only.
-- Production path: read via `ContextAssembler`, write via `MemoryWriter` at orchestration layer to keep memory decoupled.
+- Production path: assemble context via `ContextAssembler` and write long-term summaries via `MemoryWriter` at orchestration layer. Iteration and shared delivery facts use their owning adapters; these writes do not advance runtime state.
 
 
 ## 故障定位与降级准则（重要）

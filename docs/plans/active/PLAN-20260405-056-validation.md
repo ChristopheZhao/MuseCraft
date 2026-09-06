@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260405-056
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260405-056
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate the new `quality_checker` diagnostic-distortion stream without reopening `054` or `055` by default.
 - Freeze the real sample first, then allow implementation only after Stage A explicitly names the owner boundary.

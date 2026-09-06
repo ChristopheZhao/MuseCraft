@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260331-043
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260331-043
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate the amendment that replaces duplicate-gate mainline handling with a planner-visible progress file/read-model.
 - Preserve the already-valid `plan contract precedence` and `lease fresh-read + diagnostics` slices.

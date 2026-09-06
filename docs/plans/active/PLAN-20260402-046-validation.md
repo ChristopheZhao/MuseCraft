@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260402-046
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260402-046
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate owner-boundary restoration for the image mainline.
 - Confirm helper/adapter/composer/tool layers no longer perform semantic owner work that belongs to scene contract or consistency assets.

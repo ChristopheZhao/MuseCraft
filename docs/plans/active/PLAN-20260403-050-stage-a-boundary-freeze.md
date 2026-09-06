@@ -1,5 +1,10 @@
 # Stage A Boundary Freeze: PLAN-20260403-050
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260403-050
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Freeze the bounded `050` follow-on before any runtime implementation starts.
 - Confirm that `050` is limited to orchestrator resume/load/bootstrap slimming after `049/C1`, not a reopen of `049`, `045`, or `047`.

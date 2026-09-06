@@ -1,5 +1,10 @@
 # PLAN-20260404-052 Stage A Memory Governance Freeze
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260404-052
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Purpose
 - Freeze the reviewed memory backend/config/contract surface before any cleanup or backend hardening work starts.
 - Keep memory governance separate from runtime SQL governance.

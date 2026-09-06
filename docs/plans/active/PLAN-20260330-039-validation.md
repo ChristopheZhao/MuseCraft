@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260330-039
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260330-039
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate the dedicated remediation of runtime-boundary deviations discovered during `PLAN-20260329-038` review, without expanding scope into generic runtime redesign or content-quality work.
 - Validate the amended-but-still-narrow boundary slice: runtime view purity, selector transparency, API reconcile-owner removal, and the ownership handoff path spanning control-plane lease issuance plus execution-host heartbeat sender for `lease_owner` / heartbeat sender / reconcile owner freezing.

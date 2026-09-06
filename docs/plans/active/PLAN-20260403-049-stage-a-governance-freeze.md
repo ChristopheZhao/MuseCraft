@@ -1,5 +1,10 @@
 # Stage A Governance Freeze: PLAN-20260403-049
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260403-049
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Freeze the governance boundary for the `049` successor stream before any refactor slice is proposed.
 - Confirm that `049` is a review-first control-plane governance pass after `045`, not a reopen of the `execution lease expired` repair itself.
