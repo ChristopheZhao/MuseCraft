@@ -1,12 +1,12 @@
 ## 代理与工具原则 / Principles for Agents and Tools
 
 - Tools-First: Agents must perform external I/O and service calls strictly via registered tools. Avoid direct SDK/HTTP calls in agents. Encapsulate providers in tools or service interfaces.
-- Memory Decoupling: Agents consume context via the ContextAssembler and write results via MemoryWriter. If memory is unavailable, degrade gracefully to info-level behavior without breaking flows.
+- Memory Decoupling: Agents consume context via the ContextAssembler and write results via MemoryWriter. Optional long-term memory may degrade with explicit diagnostics; required execution identities, authority bindings, and published input contracts must fail closed rather than being reconstructed from stale memory.
 - Supplier-Agnostic: Prefer service interfaces and provider configs over hardcoding vendor names, endpoints, or capabilities. Inject provider capabilities (durations, models) into LLM context instead of branching on if/else.
 - Anti-Hardcoding: Do not encode LLM decisions in code via regex or if/else. Express priors and constraints in system/context messages and tool schemas; let the LLM choose within schema.
 - Prompt Neutrality: Prompts must not include tool names, parameter names, or value ranges. Expose capabilities exclusively via tools schema; let validation happen in tools.
 - Fallbacks as System Guarantees: Fail fast on missing capabilities at tool level, provide minimal, safe fallbacks only where explicitly designed. Surface diagnostics early (keys, endpoints, capabilities).
-- Non-Pipeline Autonomy: Agents should always follow the ReAct loop (observe → plan → act → reflect) instead of relying on hard-coded pipelines. Even if an orchestrator schedules agents in a fixed order today, the agent must still retain the freedom to skip/insert stages based on task traits so it can evolve toward higher autonomy later.
+- Non-Pipeline Autonomy: Native agents should always follow the ReAct loop (observe → plan → act → reflect) instead of relying on hard-coded pipelines. Even if an orchestrator schedules agents in a fixed order today, the agent must still retain the freedom to skip/insert stages based on task traits so it can evolve toward higher autonomy later.
 - Root‑Cause First (TDD mindset): When a failure or mismatch appears, diagnose and fix the root cause before adding case‑specific workarounds. Avoid “for this case only” hardcoding. For LLM JSON outputs that require structure, always request `response_format={"type":"json_object"}` and ensure messages/payloads are JSON‑serializable primitives (no runtime objects). Keep supplier constraints in tool schemas; where a supplier cannot guarantee a constraint (e.g., precise audio duration), treat it as a soft hint and enforce exactness via post‑processing tools. Add small tests/telemetry to prevent regressions and capture fallback_reason when degradation occurs.
 - Contract‑First Normalization (no patchy fixes): Normalize and validate model/tool outputs at the contract boundary (parse/adapter) with explicit diagnostics. Do not add silent “consumption‑site” workarounds that mask errors. Temporary guards must be traceable and removed after root cause is fixed.
 - Error Transparency: In agent flows, prefer surfacing explicit errors or prominent diagnostics over silent fallbacks—never mask unexpected states just to keep the run alive unless the product spec mandates a controlled downgrade.
@@ -15,11 +15,13 @@
 - External Scheduler Decoupling: Task queues, workers, and other external schedulers are transport/execution containers only. They must not own MAS runtime semantics, workflow node/gate meaning, or control-plane decisions.
 - Runtime SoT Ownership: Runtime/session/node/attempt/gate/decision state belongs to the MAS control plane only. Any code that advances or persists those live execution states must be treated as control-plane logic, not queue/transport logic.
 - Read-Model Separation: Frontends and external clients must consume explicit runtime/read-model projections rather than inferring MAS execution state from queue, worker, or broker signals. Queue health is diagnostics, not business-state truth.
-- ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; update workflow state and continuity memory each turn; stop on clear success criteria.
+- ReAct Loops: Image/Video generators should iterate plan–act–observe–reflect. Use FC schemas to select tools and parameters; record iteration observations and accepted facts through their owning adapters; runtime transitions remain control-plane-owned, and completion requires accepted delivery facts.
 - Content Safety: Prompts and templates must avoid explicit or sensitive body-part phrasing and NSFW content. Prefer neutral, professional descriptions of attire, posture, and composition.
 - Config over Constants: Enforce constraints via schemas driven by config (e.g., video durations from provider config) and environment (.env) for timeouts and limits.
 
 参考 / References
+- Current authority by scope and document lifecycle: [docs/README.md](docs/README.md), [docs/governance.md](docs/governance.md).
+- Native agents, deterministic MAS stages, and application coordinators have distinct identities: [project/runtime boundary](docs/architecture/project_runtime_authority_boundary_20260719.md).
 - Composer Agent + Tools usage and ReAct guidelines: see docs/agents/composer_guidelines.md
 
 ## 工作记忆与上下文剪裁 / Working Memory and Context Editing Principles
@@ -54,7 +56,7 @@
 - THINK/PLAN via minimal FC controls (continue/repeat/abort), avoid hard-coded if/else.
 - ACT via unified `agent.execute(...)` with progress/timeout/retry/WS/memory hooks.
 - REFLECT uses fact-driven completion (required steps + quality threshold/iteration cap).
-- Orchestrator may run a default order, but each agent still runs observe→plan→act→reflect; fixed order is transitional for later dynamic insertion/skipping.
+- Orchestrator may run a default order, but each native agent still runs observe→plan→act→reflect; fixed order is transitional for later dynamic insertion/skipping.
 
 ## 记忆解耦与可选回写（ReAct 基类） / Memory Decoupling & Optional Writeback
 
