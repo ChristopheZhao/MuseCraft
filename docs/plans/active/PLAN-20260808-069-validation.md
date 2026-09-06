@@ -10,8 +10,15 @@
 
 ## Validation Matrix
 
+### Evidence navigation (reviewed 2026-09-06)
+- A1 implementation and local validation: main plan A1.6, recorded by `71f47de`.
+- A2 implementation: `f64113e`; evidence: `0c81520` and [A2 checkpoint](../../checkpoints/PLAN-20260808-069/CHK-a2-boundary-closure-gate.json), attempt 3.
+- A3/A4 historical local validation: [trajectory](../../checkpoints/PLAN-20260808-069/CHK-a3-e2e-trajectory.md) and [checkpoint](../../checkpoints/PLAN-20260808-069/CHK-a3-a4-mainline-closure-gate.json), attempt 2. This evidence predates the real-Agent and caller-specific corrections in A5.
+- A5 local validation: [real-Agent mainline checkpoint](../../checkpoints/PLAN-20260808-069/CHK-a5-real-agent-mainline.md). Its original `0c81520 + uncommitted WIP` anchor and 2026-08-16 counts remain historical evidence, not a claim about later commits.
+- Current implementation is WIP checkpoint `b612963`; baseline revalidation details are recorded in the main plan's Execution Handoff. Hosted CI and explicit user acceptance remain pending; this ledger does not close the plan.
+
 ### Amendment A1 — Root-owned anti-agentic/fallback closure
-- Status: negative-first design registered; implementation not started
+- Evidence scope: implemented and locally validated; later A2–A5 amendments qualify its coverage. See the evidence navigation above.
 - Contract checks:
   - canonical partial/failed report parses without implying success
   - no-gate and empty-standby non-success reports still reach LLM disposition
@@ -35,7 +42,7 @@
   - 2026-08-15 current architecture + A6 contract selection: `171 passed, 2 warnings`
   - review found the existing partial-rejection test locks an obsolete protocol policy and found no tests for missing scene authority binding or noncanonical runtime node SoT
 - Results:
-  - pending negative-first implementation
+  - A1.6 records focused suites, 670 unit passes, 31 architecture passes and 2 offline integrations at the A1 anchor. These are historical results and do not establish A5 coverage.
 
 ### Historical S1 — Superseded by Amendment A1
 - Status: historical inventory only

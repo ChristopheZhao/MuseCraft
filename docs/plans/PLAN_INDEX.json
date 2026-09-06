@@ -3195,7 +3195,7 @@
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-08-15T15:44:12Z",
+      "updated_at": "2026-09-06T13:13:42Z",
       "archived_at": null,
       "notes": [
         {
@@ -3229,6 +3229,38 @@
         {
           "at": "2026-08-15T15:44:12Z",
           "text": "Amendment A2 implementation and counterexample tests committed as f64113e after final MAS ownership review; governance/checkpoint evidence remains a separate commit layer and plan stays in_progress pending hosted CI and user acceptance."
+        },
+        {
+          "at": "2026-08-16T01:41:29Z",
+          "text": "Amendment A3 opened: derive E2E from current Quick/Project production composition, delete invalid legacy E2E assets, and forbid production changes made only for test convenience."
+        },
+        {
+          "at": "2026-08-16T01:48:43Z",
+          "text": "Amendment A4 opened from A3 trajectory evidence: application and Episode wrappers must reject missing/invalid execution status instead of defaulting to completed before current-mainline E2E implementation resumes."
+        },
+        {
+          "at": "2026-08-16T02:19:00Z",
+          "text": "Amendments A3/A4 local gate passed without remediation: current Quick API-to-runtime-read-model E2E 1 passed, full unit 700 passed, architecture 32 passed, offline composer integration 2 passed; hosted CI and user confirmation remain pending."
+        },
+        {
+          "at": "2026-08-16T02:29:37Z",
+          "text": "A3/A4 final local checkpoint attempt 2 passed without remediation after removing fixed Agent-order assertions from the E2E; evidence counts unchanged, hosted CI and user confirmation still pending."
+        },
+        {
+          "at": "2026-08-16T02:51:32Z",
+          "text": "Amendment A5 opened after A3/A4 review: split execution-status semantics by caller boundary and replace the specialist-agent test double in the maintained Quick E2E with real production Agents; no new plan or lifecycle transition."
+        },
+        {
+          "at": "2026-08-16T03:40:34Z",
+          "text": "Amendment A5 local gate passed: caller-specific status contracts, real production specialist-Agent Quick E2E, and text-to-video scene membership are green (focused 50, E2E 1, unit 703, architecture 32, composer integration 2); hosted CI and explicit user acceptance remain pending."
+        },
+        {
+          "at": "2026-08-16T04:03:34Z",
+          "text": "A5 final receipt-authority gate passed locally: complete published scene membership no longer depends on raw artifact paths; accepted receipts remain the sole success projection. Focused 51, hosted MAS local equivalent 154/25 deselected, E2E 1, unit 704, architecture 32, composer integration 2. Hosted CI and explicit acceptance remain pending."
+        },
+        {
+          "at": "2026-09-06T13:13:42Z",
+          "text": "Documentation governance 2026-09-06: A3-A5 implementation preserved at b612963 as WIP; historical checkpoints retain original anchors. Validation ledger refreshed without extending old coverage. Fresh baseline invocation stalled before collection; hosted CI and user acceptance remain pending."
         }
       ]
     }
