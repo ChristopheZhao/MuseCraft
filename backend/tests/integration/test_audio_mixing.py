@@ -29,19 +29,23 @@ async def test_audio_mixing_with_final_video(tmp_path):
     try:
         from app.core.database import engine, SessionLocal  # type: ignore
         from app.models.base import BaseModel  # type: ignore
-        from app.models import Task, TaskType  # type: ignore
+        from app.domain import TaskType  # type: ignore
+        from app.models import Task  # type: ignore
         from app.core.workflow_state import workflow_manager, SceneData  # type: ignore
         from app.agents.audio_generator import AudioGeneratorAgent  # type: ignore
         from app.agents.tools.tool_registry import get_tool_registry  # type: ignore
         from app.agents.tools import register_default_tools  # type: ignore
+        from app.services.agent_execution_boundary import build_agent_execution_request  # type: ignore
     except ModuleNotFoundError:
         from backend.app.core.database import engine, SessionLocal
         from backend.app.models.base import BaseModel
-        from backend.app.models import Task, TaskType
+        from backend.app.domain import TaskType
+        from backend.app.models import Task
         from backend.app.core.workflow_state import workflow_manager, SceneData
         from backend.app.agents.audio_generator import AudioGeneratorAgent
         from backend.app.agents.tools.tool_registry import get_tool_registry
         from backend.app.agents.tools import register_default_tools
+        from backend.app.services.agent_execution_boundary import build_agent_execution_request
 
     # Ensure tables
     BaseModel.metadata.create_all(bind=engine)
@@ -149,7 +153,16 @@ async def test_audio_mixing_with_final_video(tmp_path):
         agent.llm_function_call = fake_llm_function_call  # type: ignore
 
         # Execute AudioAgent to produce BGM (no mixing in composer mode)
-        result = await agent.execute(task=task, input_data={"workflow_state_id": ws.task_id}, db=db, execution_order=1)
+        result = (
+            await agent.execute(
+                build_agent_execution_request(
+                    task=task,
+                    agent_type=agent.agent_type,
+                    input_data={"workflow_state_id": ws.task_id},
+                    execution_order=1,
+                )
+            )
+        ).output_data.to_dict()
 
         # Then call Composer to add BGM
         if 'app.' in str(type(agent)):
@@ -158,18 +171,22 @@ async def test_audio_mixing_with_final_video(tmp_path):
             from backend.app.services.video_composer_execution_contract import build_video_composer_execution_contract  # type: ignore
         from app.agents.video_composer import VideoComposerAgent as _VCA  # type: ignore
         comp = _VCA() if 'app.' in str(type(agent)) else __import__('backend.app.agents.video_composer', fromlist=['VideoComposerAgent']).VideoComposerAgent()
-        comp_out = await comp.execute(
-            task=task,
-            input_data={
-                "workflow_state_id": ws.task_id,
-                "execution_contract": build_video_composer_execution_contract(
-                    workflow_state_id=ws.task_id,
-                    compose_mode="bgm",
-                ),
-            },
-            db=db,
-            execution_order=2,
-        )
+        comp_out = (
+            await comp.execute(
+                build_agent_execution_request(
+                    task=task,
+                    agent_type=comp.agent_type,
+                    input_data={
+                        "workflow_state_id": ws.task_id,
+                        "execution_contract": build_video_composer_execution_contract(
+                            workflow_state_id=ws.task_id,
+                            compose_mode="bgm",
+                        ),
+                    },
+                    execution_order=2,
+                )
+            )
+        ).output_data.to_dict()
 
         # Restore
         registry.get_tool = original_get_tool  # type: ignore

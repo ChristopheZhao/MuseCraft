@@ -1,22 +1,11 @@
 """
 Resource model for managing generated and uploaded files
 """
-import enum
 from sqlalchemy import Column, String, Text, JSON, Enum, Integer, ForeignKey, BigInteger, Boolean
 from sqlalchemy.orm import relationship
 
+from ..domain import ResourceType as _ResourceType
 from .base import BaseModel
-
-
-class ResourceType(str, enum.Enum):
-    IMAGE = "image"
-    VIDEO = "video"
-    AUDIO = "audio"
-    VOICE_OVER = "voice_over"
-    TEXT = "text"
-    SCRIPT = "script"
-    THUMBNAIL = "thumbnail"
-    TEMP_FILE = "temp_file"
 
 
 class Resource(BaseModel):
@@ -36,7 +25,7 @@ class Resource(BaseModel):
     file_url = Column(String(500))  # For external URLs or CDN
     
     # File metadata
-    resource_type = Column(Enum(ResourceType), nullable=False)
+    resource_type = Column(Enum(_ResourceType), nullable=False)
     mime_type = Column(String(100))
     file_size = Column(BigInteger)  # in bytes
     checksum = Column(String(64))  # SHA256 hash
@@ -89,19 +78,19 @@ class Resource(BaseModel):
     
     @property
     def is_image(self) -> bool:
-        return self.resource_type == ResourceType.IMAGE
+        return self.resource_type == _ResourceType.IMAGE
     
     @property
     def is_video(self) -> bool:
-        return self.resource_type == ResourceType.VIDEO
+        return self.resource_type == _ResourceType.VIDEO
     
     @property
     def is_audio(self) -> bool:
-        return self.resource_type in {ResourceType.AUDIO, ResourceType.VOICE_OVER}
+        return self.resource_type in {_ResourceType.AUDIO, _ResourceType.VOICE_OVER}
 
     @property
     def is_voice_over(self) -> bool:
-        if self.resource_type == ResourceType.VOICE_OVER:
+        if self.resource_type == _ResourceType.VOICE_OVER:
             return True
         params = self.generation_parameters or {}
         if isinstance(params, dict) and params.get("audio_role") == "voice_over":

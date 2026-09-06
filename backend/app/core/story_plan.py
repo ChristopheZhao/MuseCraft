@@ -33,6 +33,8 @@ class EpisodePlan:
     continuity_notes: Dict[str, Any] = field(default_factory=dict)
     required_assets: Dict[str, Any] = field(default_factory=dict)
     script_draft: str = ""
+    approved_script: str = ""
+    editorial_revision: int = 0
     status: EpisodeEditorialStatus = EpisodeEditorialStatus.DRAFT
 
     @classmethod
@@ -75,6 +77,8 @@ class EpisodePlan:
             continuity_notes=data.get("continuity_notes") or {},
             required_assets=data.get("required_assets") or {},
             script_draft=str(data.get("script_draft") or ""),
+            approved_script=str(data.get("approved_script") or ""),
+            editorial_revision=max(0, int(data.get("editorial_revision", 0))),
             status=status,
         )
 
@@ -596,6 +600,8 @@ class StoryPlan:
                     "continuity_notes": ep.continuity_notes,
                     "required_assets": ep.required_assets,
                     "script_draft": ep.script_draft,
+                    "approved_script": ep.approved_script,
+                    "editorial_revision": ep.editorial_revision,
                     "status": ep.status.value,
                 }
                 for ep in self.episodes
@@ -635,151 +641,15 @@ class StoryPlan:
         return list(self.character_bible.values())
 
 
-class EpisodeExecutionStatus(str, Enum):
-    """Execution/runtime lifecycle states for an episode run."""
-
-    IDLE = "idle"
-    GENERATING = "generating"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    STALE = "stale"
-
-
-class ProjectOperationState(str, Enum):
-    """Status vocabulary for project-scoped async operations."""
-
-    IDLE = "idle"
-    QUEUED = "queued"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-
-
 @dataclass
-class ProjectOperationStatus:
-    """Typed progress state for a single project-scoped operation."""
-
-    status: ProjectOperationState = ProjectOperationState.IDLE
-    task_id: Optional[str] = None
-    error: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "status": self.status.value,
-            "task_id": self.task_id,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ProjectOperationStatus":
-        raw_status = data.get("status") or ProjectOperationState.IDLE.value
-        try:
-            status = (
-                raw_status
-                if isinstance(raw_status, ProjectOperationState)
-                else ProjectOperationState(str(raw_status))
-            )
-        except ValueError:
-            status = ProjectOperationState.IDLE
-
-        return cls(
-            status=status,
-            task_id=str(data.get("task_id")) if data.get("task_id") is not None else None,
-            error=str(data.get("error")) if data.get("error") is not None else None,
-        )
-
-
-@dataclass
-class ProjectProgressState:
-    """Typed project-level planning/reference progress projection."""
-
-    planning: ProjectOperationStatus = field(default_factory=ProjectOperationStatus)
-    character_references: ProjectOperationStatus = field(default_factory=ProjectOperationStatus)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "planning": self.planning.to_dict(),
-            "character_references": self.character_references.to_dict(),
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ProjectProgressState":
-        return cls(
-            planning=ProjectOperationStatus.from_dict(data.get("planning") or {}),
-            character_references=ProjectOperationStatus.from_dict(
-                data.get("character_references") or {}
-            ),
-        )
-
-
-@dataclass
-class EpisodeRuntimeState:
-    """Runtime execution status for an episode during orchestration."""
-
-    episode_id: str
-    status: EpisodeExecutionStatus = EpisodeExecutionStatus.IDLE
-    approved_script: str = ""
-    workflow_task_id: Optional[str] = None
-    aggregated_cost: float = 0.0
-    aggregated_tokens: int = 0
-    output_assets: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "episode_id": self.episode_id,
-            "status": self.status.value,
-            "approved_script": self.approved_script,
-            "workflow_task_id": self.workflow_task_id,
-            "aggregated_cost": self.aggregated_cost,
-            "aggregated_tokens": self.aggregated_tokens,
-            "output_assets": self.output_assets,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "EpisodeRuntimeState":
-        raw_status = data.get("status") or EpisodeExecutionStatus.IDLE.value
-        try:
-            status = (
-                raw_status
-                if isinstance(raw_status, EpisodeExecutionStatus)
-                else EpisodeExecutionStatus(str(raw_status))
-            )
-        except ValueError:
-            status = EpisodeExecutionStatus.IDLE
-
-        return cls(
-            episode_id=str(data.get("episode_id") or ""),
-            status=status,
-            approved_script=str(data.get("approved_script") or ""),
-            workflow_task_id=(
-                str(data.get("workflow_task_id"))
-                if data.get("workflow_task_id") is not None
-                else None
-            ),
-            aggregated_cost=float(data.get("aggregated_cost") or 0.0),
-            aggregated_tokens=int(data.get("aggregated_tokens") or 0),
-            output_assets=data.get("output_assets") or {},
-            error=str(data.get("error")) if data.get("error") is not None else None,
-        )
-
-
-@dataclass
-class ProjectState:
-    """Aggregated state for the long-form project orchestration."""
+class ProjectDefinition:
+    """Versioned authored/editorial authority for a long-form project."""
 
     project_id: str
     mode: str
     story_plan: StoryPlan
-    episodes_runtime: Dict[str, EpisodeRuntimeState] = field(default_factory=dict)
-    progress: ProjectProgressState = field(default_factory=ProjectProgressState)
     global_settings: Dict[str, Any] = field(default_factory=dict)
     cost_budget: Optional[float] = None
-    total_cost: float = 0.0
-    total_tokens: int = 0
-    completed_episodes: int = 0
     style_profile: Dict[str, Any] = field(default_factory=dict)
     character_bible: Dict[str, CharacterProfile] = field(default_factory=dict)
 
@@ -788,43 +658,11 @@ class ProjectState:
         if self.character_bible:
             self.character_bible = normalize_character_bible(self.character_bible)
 
-    def ensure_runtime_state(self, episode_id: str) -> EpisodeRuntimeState:
-        if episode_id not in self.episodes_runtime:
-            self.episodes_runtime[episode_id] = EpisodeRuntimeState(episode_id=episode_id)
-        return self.episodes_runtime[episode_id]
-
-    def update_cost(self, episode_id: str, cost: float, tokens: int) -> None:
-        runtime = self.ensure_runtime_state(episode_id)
-        runtime.aggregated_cost += cost
-        runtime.aggregated_tokens += tokens
-        self.total_cost += cost
-        self.total_tokens += tokens
-
-    def mark_episode_runtime_status(
-        self,
-        episode_id: str,
-        status: EpisodeExecutionStatus,
-        error: Optional[str] = None,
-    ) -> None:
-        runtime = self.ensure_runtime_state(episode_id)
-        runtime.status = status
-        runtime.error = error
-        self.completed_episodes = sum(
-            1
-            for state in self.episodes_runtime.values()
-            if state.status == EpisodeExecutionStatus.COMPLETED
-        )
-
-    def sync_from(self, other: "ProjectState") -> None:
+    def sync_from(self, other: "ProjectDefinition") -> None:
         self.mode = other.mode
         self.story_plan = other.story_plan
-        self.episodes_runtime = other.episodes_runtime
-        self.progress = other.progress
         self.global_settings = other.global_settings
         self.cost_budget = other.cost_budget
-        self.total_cost = other.total_cost
-        self.total_tokens = other.total_tokens
-        self.completed_episodes = other.completed_episodes
         self.style_profile = other.style_profile
         self.character_bible = other.character_bible
         self.story_plan.character_bible = self.character_bible
@@ -836,16 +674,8 @@ class ProjectState:
             "project_id": self.project_id,
             "mode": self.mode,
             "story_plan": self.story_plan.to_dict(),
-            "episodes_runtime": {
-                episode_id: runtime.to_dict()
-                for episode_id, runtime in self.episodes_runtime.items()
-            },
-            "progress": self.progress.to_dict(),
             "global_settings": self.global_settings,
             "cost_budget": self.cost_budget,
-            "total_cost": self.total_cost,
-            "total_tokens": self.total_tokens,
-            "completed_episodes": self.completed_episodes,
             "style_profile": effective_style_profile,
             "character_bible": {
                 cid: profile.to_dict() if isinstance(profile, CharacterProfile) else profile
@@ -854,69 +684,51 @@ class ProjectState:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ProjectState":
+    def from_dict(cls, data: Dict[str, Any]) -> "ProjectDefinition":
+        allowed_fields = {
+            "project_id",
+            "mode",
+            "story_plan",
+            "global_settings",
+            "cost_budget",
+            "style_profile",
+            "character_bible",
+        }
+        forbidden_runtime_fields = {
+            "episodes_runtime",
+            "progress",
+            "total_cost",
+            "total_tokens",
+            "completed_episodes",
+        }.intersection(data)
+        if forbidden_runtime_fields:
+            raise ValueError(
+                "Project definition payload contains runtime/read-model fields: "
+                + ", ".join(sorted(forbidden_runtime_fields))
+            )
+        unknown_fields = set(data).difference(allowed_fields)
+        if unknown_fields:
+            raise ValueError(
+                "Project definition payload contains unsupported fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
         story_plan = StoryPlan.from_dict(data.get("story_plan") or {})
         raw_style_profile = data.get("style_profile") or story_plan.visual_style or {}
         raw_character_bible = data.get("character_bible") or story_plan.character_bible or {}
-        project_state = cls(
+        project_definition = cls(
             project_id=str(data.get("project_id") or story_plan.project_id or ""),
             mode=str(data.get("mode") or "project"),
             story_plan=story_plan,
-            episodes_runtime={
-                episode_id: EpisodeRuntimeState.from_dict(runtime)
-                for episode_id, runtime in (data.get("episodes_runtime") or {}).items()
-            },
-            progress=ProjectProgressState.from_dict(data.get("progress") or {}),
             global_settings=data.get("global_settings") or {},
             cost_budget=(
                 float(data.get("cost_budget"))
                 if data.get("cost_budget") is not None
                 else None
             ),
-            total_cost=float(data.get("total_cost") or 0.0),
-            total_tokens=int(data.get("total_tokens") or 0),
-            completed_episodes=int(data.get("completed_episodes") or 0),
             style_profile=raw_style_profile,
             character_bible=raw_character_bible,
         )
-        project_state.story_plan.character_bible = project_state.character_bible
-        if project_state.style_profile and not project_state.story_plan.visual_style:
-            project_state.story_plan.visual_style = project_state.style_profile
-        return project_state
-
-
-class ProjectStateRepository:
-    """Facade over the shared project authority backing."""
-
-    def bind_session_factory(self, session_factory) -> None:
-        from ..services.project_authority_store import project_authority_store
-
-        project_authority_store.bind_session_factory(session_factory)
-
-    def restore_default_session_factory(self) -> None:
-        from ..services.project_authority_store import project_authority_store
-
-        project_authority_store.restore_default_session_factory()
-
-    def save(self, project_state: ProjectState) -> ProjectState:
-        from ..services.project_authority_store import project_authority_store
-
-        return project_authority_store.save(project_state)
-
-    def get(self, project_id: str) -> Optional[ProjectState]:
-        from ..services.project_authority_store import project_authority_store
-
-        return project_authority_store.get(project_id)
-
-    def remove(self, project_id: str) -> None:
-        from ..services.project_authority_store import project_authority_store
-
-        project_authority_store.remove(project_id)
-
-    def list_states(self) -> List[ProjectState]:
-        from ..services.project_authority_store import project_authority_store
-
-        return project_authority_store.list_states()
-
-
-project_state_repository = ProjectStateRepository()
+        project_definition.story_plan.character_bible = project_definition.character_bible
+        if project_definition.style_profile and not project_definition.story_plan.visual_style:
+            project_definition.story_plan.visual_style = project_definition.style_profile
+        return project_definition

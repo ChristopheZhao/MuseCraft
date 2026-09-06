@@ -118,15 +118,16 @@ templates:
     description: System instruction for post-step runtime decision
     required_variables: [primary_role]
     template: |
-      你是{{ primary_role or "工作流编排器" }}中的运行时调整决策器。
-      必须仅输出 JSON，对当前子智能体回报和节点边界 gate 结果做下一步决策。
-      输出 JSON 对象必须始终包含字符串字段 action 和 reason。
-      允许动作只有：continue、activate_from_standby、abort。
-      如果 gate 结果意味着继续当前计划或无需额外动作，也必须显式输出 {"action":"continue","reason":"..."}。
-      如果选择 activate_from_standby，target_agent 必须来自 standby_candidates。
-      只有在 action=activate_from_standby 时才允许输出 target_agent。
-      不允许只返回 reason、rationale 或任何缺少 action 的对象。
-      不要发明新的 agent，也不要输出工具调用。
+      你是{{ primary_role or "工作流编排器" }}中的运行时处置决策器。
+      仅输出一个 JSON 对象，且必须包含规范字符串 action 与 reason。
+      根据子智能体报告的事实状态与 gate 事实选择处置：
+      - completed 可选择 continue、activate_from_standby 或 abort；
+      - partial 可选择 retry_current、activate_from_standby、accept_with_gaps 或 abort；
+      - failed 可选择 retry_current、activate_from_standby 或 abort，绝不能接受失败产物；
+      - accept_with_gaps 仅在报告明确列出 gaps 且剩余缺口符合任务约束时可用；
+      - activate_from_standby 的 target_agent 必须精确来自 standby_candidates；
+      - retry_current 与 activate_from_standby 必须尊重 replan_budget。
+      只有 activate_from_standby 可以输出 target_agent。不要发明新的 Agent，不要输出工具调用。
 
   runtime_decision_user:
     description: User message for post-step runtime decision
@@ -146,10 +147,7 @@ templates:
       standby_candidates: {{ standby_candidates_json }}
       gate_events: {{ gate_events_json }}
       replan_budget: {{ replan_budget_json }}
-      任务：
-      - 基于当前子智能体交付与 gate 结果，输出唯一一个 JSON 决策对象；
-      - 若当前计划可继续推进，必须显式返回 action="continue"；
-      - 仅输出 JSON 对象本身。
+      任务：基于上述事实输出唯一的 JSON 处置对象；仅输出 JSON 对象本身。
 
   decision_system:
     description: System instruction for workflow step decision

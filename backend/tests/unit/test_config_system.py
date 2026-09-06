@@ -2,12 +2,13 @@
 """
 测试配置系统的完整性和动态切换功能
 """
-import sys
 import os
+import sys
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from app.core.video_config_manager import get_video_config, VideoConfigManager
 from app.core.config import settings
+from app.core.video_config_manager import VideoConfigManager, get_video_config
 
 
 def test_basic_configuration():
@@ -140,8 +141,6 @@ def test_hardcoded_elimination():
     # 检查settings中的配置化参数
     duration_configs = [
         ("DEFAULT_SCENE_DURATION", settings.DEFAULT_SCENE_DURATION),
-        ("MIN_SCENE_DURATION", settings.MIN_SCENE_DURATION),
-        ("MAX_SCENE_DURATION", settings.MAX_SCENE_DURATION),
         ("TRANSITION_DURATION", settings.TRANSITION_DURATION),
         ("DEFAULT_AUDIO_DURATION", settings.DEFAULT_AUDIO_DURATION),
         ("AUDIO_FADE_IN_DURATION", settings.AUDIO_FADE_IN_DURATION),

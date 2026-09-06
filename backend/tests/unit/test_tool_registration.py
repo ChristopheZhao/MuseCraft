@@ -1,137 +1,49 @@
-#!/usr/bin/env python3
-"""
-测试工具注册是否正常工作
-"""
+"""Default tool registration contract tests."""
 
-import sys
-import asyncio
-from pathlib import Path
+import pytest
 
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+from app.agents.tools import register_default_tools
+from app.agents.tools.agent_tool_allocation import AgentToolAllocator
+from app.agents.tools.base_tool import ToolError
+from app.agents.tools.tool_registry import get_tool_registry
+from app.domain import AgentType
 
-async def test_tool_registration():
-    """测试Agent工具注册"""
-    
-    print("🔧 测试Agent工具注册")
-    print("=" * 60)
-    
-    # 首先注册默认工具
-    print("\n📋 预先注册工具")
-    print("-" * 40)
-    
-    try:
-        from app.agents.tools import register_default_tools
-        register_default_tools()
-        print("✅ 默认工具注册完成")
-    except Exception as e:
-        print(f"❌ 工具注册失败: {e}")
-    
-    # 测试ImageGenerator工具注册
-    print("\n📋 测试ImageGenerator工具注册")
-    print("-" * 40)
-    
-    try:
-        from app.agents.image_generator import ImageGeneratorAgent
-        
-        image_generator = ImageGeneratorAgent()
-        print(f"✅ ImageGenerator初始化成功")
-        
-        # 检查工具是否加载
-        available_tools = list(image_generator._available_tools.keys())
-        print(f"✅ 可用工具: {available_tools}")
-        
-        # 检查关键工具
-        required_tools = ["zhipu_client", "openai_client", "image_generation_client", "consistency_tool"]
-        missing_tools = [tool for tool in required_tools if tool not in available_tools]
-        
-        if missing_tools:
-            print(f"❌ 缺少工具: {missing_tools}")
-        else:
-            print(f"✅ 所有必需工具已加载")
-            
-        # 测试是否可以访问zhipu_client
-        if "zhipu_client" in image_generator._available_tools:
-            zhipu_tool = image_generator._available_tools["zhipu_client"]
-            print(f"✅ zhipu_client工具可用: {type(zhipu_tool).__name__}")
-        else:
-            print(f"❌ zhipu_client工具不可用")
-        
-    except Exception as e:
-        print(f"❌ ImageGenerator测试失败: {e}")
-    
-    # 测试VideoGenerator工具注册
-    print("\n📋 测试VideoGenerator工具注册")
-    print("-" * 40)
-    
-    try:
-        from app.agents.video_generator import VideoGeneratorAgent
-        
-        video_generator = VideoGeneratorAgent()
-        print(f"✅ VideoGenerator初始化成功")
-        
-        # 检查工具是否加载
-        available_tools = list(video_generator._available_tools.keys())
-        print(f"✅ 可用工具: {available_tools}")
 
-        # 检查关键工具
-        if "zhipu_client" in video_generator._available_tools:
-            zhipu_tool = video_generator._available_tools["zhipu_client"]
-            print(f"✅ zhipu_client工具可用: {type(zhipu_tool).__name__}")
-        else:
-            print(f"❌ zhipu_client工具不可用")
+def test_default_tool_registration_exposes_core_capabilities() -> None:
+    register_default_tools()
+    registry = get_tool_registry()
 
-        if "consistency_tool" in video_generator._available_tools:
-            print("✅ consistency_tool 工具可用")
-        else:
-            print("❌ consistency_tool 工具不可用")
-        
-    except Exception as e:
-        print(f"❌ VideoGenerator测试失败: {e}")
-    
-    # 测试工具注册表
-    print("\n📋 测试工具注册表")
-    print("-" * 40)
-    
-    try:
-        from app.agents.tools.tool_registry import get_tool_registry
-        from app.agents.tools import register_default_tools
-        
-        # 先注册默认工具
-        register_default_tools()
-        print("✅ 默认工具注册完成")
-        
-        tool_registry = get_tool_registry()
-        all_tools = tool_registry.list_tools()
-        
-        print(f"✅ 工具注册表可用")
-        print(f"✅ 注册的工具数量: {len(all_tools)}")
-        
-        # 显示所有可用工具
-        for tool_name in all_tools:
-            try:
-                tool = tool_registry.get_tool(tool_name)
-                print(f"   - {tool_name}: {type(tool).__name__}")
-            except Exception as e:
-                print(f"   - {tool_name}: 加载失败 ({e})")
-        
-        # 检查核心工具
-        core_tools = ["zhipu_client", "openai_client", "image_generation_client", "consistency_tool"]
-        for tool_name in core_tools:
-            if tool_name in all_tools:
-                print(f"✅ {tool_name} 已注册")
-            else:
-                print(f"❌ {tool_name} 未注册")
-    
-    except Exception as e:
-        print(f"❌ 工具注册表测试失败: {e}")
-    
-    print("\n🎊 工具注册测试完成!")
+    expected = {
+        "consistency_tool",
+        "image_generation_client",
+        "openai_client",
+        "zhipu_client",
+    }
 
-async def main():
-    await test_tool_registration()
+    assert {name: registry.get_tool(name).metadata.name for name in expected} == {
+        name: name for name in expected
+    }
 
-if __name__ == "__main__":
-    asyncio.run(main())
 
+def test_video_generator_has_no_keyword_scene_analysis_dependency() -> None:
+    tools = AgentToolAllocator().get_tools_for_agent(AgentType.VIDEO_GENERATOR)
+
+    assert "scene_analysis" not in tools
+
+
+def test_default_registration_does_not_expose_unused_parameter_optimizer() -> None:
+    register_default_tools()
+
+    with pytest.raises(ToolError, match="Tool not registered: parameter_optimization"):
+        get_tool_registry().get_tool("parameter_optimization")
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["scene_analysis", "intelligent_scene_planning"],
+)
+def test_default_registration_does_not_expose_semantic_heuristic_tools(tool_name) -> None:
+    register_default_tools()
+
+    with pytest.raises(ToolError, match=f"Tool not registered: {tool_name}"):
+        get_tool_registry().get_tool(tool_name)

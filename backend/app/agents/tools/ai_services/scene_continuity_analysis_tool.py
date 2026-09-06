@@ -149,30 +149,13 @@ class SceneContinuityAnalysisTool(AsyncTool):
                 "max_tokens": getattr(settings, "LLM_MAX_TOKENS_STANDARD", 2000)
             }))
             
-            # 处理结果
+            # json_completion owns JSON parsing; this boundary only validates its object contract.
             payload = getattr(result, 'result', result)
-            response_content = "{}"
-            if isinstance(payload, dict):
-                if payload.get("json_result") is not None:
-                    import json as _json
-                    response_content = _json.dumps(payload.get("json_result"), ensure_ascii=False)
-                else:
-                    response_content = payload.get("content", payload.get("raw_content", "{}"))
-            
-            # 解析JSON响应（统一工具，必要时保留兜底）
-            from ...utils.json_utils import safe_json_loads
-            try:
-                analysis_result = safe_json_loads(response_content, logger=self.logger, context="scene_continuity", allow_fallback=False)
-                if not isinstance(analysis_result, dict):
-                    raise ValueError("not a JSON object")
-            except Exception as e:
-                # 尝试提取JSON内容作为兜底
-                import re
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_content or "", re.DOTALL)
-                if json_match:
-                    analysis_result = json.loads(json_match.group(1))
-                else:
-                    raise ToolError(f"Failed to parse JSON response: {e}", self.metadata.name)
+            if not isinstance(payload, dict):
+                raise ToolError("Scene continuity provider returned a non-object result", self.metadata.name)
+            analysis_result = payload.get("json_result")
+            if not isinstance(analysis_result, dict):
+                raise ToolError("Scene continuity provider did not return json_result", self.metadata.name)
             
             # 验证和标准化结果 - 只处理第2个场景及之后
             llm_decisions = self._standardize_continuity_analysis(analysis_result, scenes_to_analyze)
@@ -191,29 +174,13 @@ class SceneContinuityAnalysisTool(AsyncTool):
                 "continuous_scenes": continuous_scenes
             }
             
+        except ToolError:
+            raise
         except Exception as e:
             self.logger.error(f"Scene continuity analysis failed: {e}")
-            # 返回默认策略 - 首个场景 new，其余场景也设为 new
-            default_decisions = {}
-            for scene in params.get("scenes", []):
-                scene_num = scene.get("scene_number", 1)
-                if scene_num == 1:
-                    default_decisions[str(scene_num)] = {
-                        "strategy": "new",
-                        "reason": "首个场景，无前置场景可继续",
-                        "confidence": 1.0
-                    }
-                else:
-                    default_decisions[str(scene_num)] = {
-                        "strategy": "new",
-                        "reason": f"Analysis failed, using default strategy: {str(e)}",
-                        "confidence": 0.5
-                    }
-            
-            return {
-                "continuity_decisions": default_decisions,
-                "analysis_summary": f"分析失败，使用默认策略（所有场景独立生成）: {str(e)}"
-            }
+            raise ToolError(
+                f"Scene continuity analysis failed: {e}", self.metadata.name
+            ) from e
     
     def _build_continuity_analysis_prompt(
         self, 
@@ -334,41 +301,68 @@ class SceneContinuityAnalysisTool(AsyncTool):
     ) -> Dict[str, Any]:
         """标准化连续性分析结果"""
         
-        continuity_decisions = analysis_result.get("continuity_decisions", {})
+        continuity_decisions = analysis_result.get("continuity_decisions")
+        if not isinstance(continuity_decisions, dict):
+            raise ToolError(
+                "continuity_decisions must be an object", self.metadata.name
+            )
         standardized_decisions = {}
         
         for scene in scenes:
             scene_number = scene.get("scene_number", 1)
             scene_key = str(scene_number)
-            
-            if scene_key in continuity_decisions:
-                decision = continuity_decisions[scene_key]
-                
-                # 标准化策略值
-                strategy = decision.get("strategy", "new")
-                if strategy not in ["new", "continue_from_previous"]:
-                    strategy = "new"
-                
-                # 标准化置信度
-                confidence = float(decision.get("confidence", 0.8))
-                confidence = max(0.0, min(1.0, confidence))
-                
-                standardized_decisions[scene_key] = {
-                    "strategy": strategy,
-                    "reason": decision.get("reason", ""),
-                    "confidence": confidence
-                }
-            else:
-                # 缺失的场景使用默认策略
-                standardized_decisions[scene_key] = {
-                    "strategy": "new",
-                    "reason": "Missing analysis, using default strategy",
-                    "confidence": 0.5
-                }
+
+            if scene_key not in continuity_decisions:
+                raise ToolError(
+                    f"missing decision for scene {scene_key}", self.metadata.name
+                )
+
+            decision = continuity_decisions[scene_key]
+            if not isinstance(decision, dict):
+                raise ToolError(
+                    f"decision for scene {scene_key} must be an object",
+                    self.metadata.name,
+                )
+
+            strategy = decision.get("strategy")
+            if strategy not in {"new", "continue_from_previous"}:
+                raise ToolError(
+                    f"invalid strategy for scene {scene_key}", self.metadata.name
+                )
+
+            reason = decision.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ToolError(
+                    f"reason for scene {scene_key} must be non-empty",
+                    self.metadata.name,
+                )
+
+            confidence = decision.get("confidence")
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not 0.0 <= float(confidence) <= 1.0
+            ):
+                raise ToolError(
+                    f"confidence for scene {scene_key} must be between 0 and 1",
+                    self.metadata.name,
+                )
+
+            standardized_decisions[scene_key] = {
+                "strategy": strategy,
+                "reason": reason,
+                "confidence": float(confidence),
+            }
+
+        analysis_summary = analysis_result.get("analysis_summary")
+        if not isinstance(analysis_summary, str) or not analysis_summary.strip():
+            raise ToolError(
+                "analysis_summary must be non-empty", self.metadata.name
+            )
         
         return {
             "continuity_decisions": standardized_decisions,
-            "analysis_summary": analysis_result.get("analysis_summary", "Scene continuity analysis completed"),
+            "analysis_summary": analysis_summary,
             "total_scenes": len(scenes),
             "continuous_scenes": len([d for d in standardized_decisions.values() if d["strategy"] == "continue_from_previous"])
         }

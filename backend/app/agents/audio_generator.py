@@ -5,10 +5,8 @@ ReAct 版：本轮 FC 产出工具调用请求，并在同一迭代执行，失�
 import asyncio
 from typing import Dict, Any, List
 import json
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent, AgentError
-from ..models import Task, AgentType, Resource, ResourceType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
  
 from ..core.config import settings
 from .utils.artifacts import extract_tool_payload
@@ -27,7 +25,7 @@ class AudioGeneratorAgent(ReActAgent):
             timeout_seconds=600,  # 10 minutes for audio generation
             max_retries=2,
             # 明确声明所需工具：生成音乐 + 持久化 + 媒体合成/处理
-            tools=["suno_client", "file_storage_tool", "ffmpeg_tool", "audio_processor", "audio_analysis_tool"],
+            tools=["music_generation", "file_storage_tool", "ffmpeg_tool", "audio_processor", "audio_analysis_tool"],
             llms=llms,
             memory_services=memory_services,
         )
@@ -37,15 +35,13 @@ class AudioGeneratorAgent(ReActAgent):
     
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """Delegate to ReAct loop (ReActAgent)."""
-        return await super()._execute_impl(task, input_data, db)
+        return await super()._execute_impl(request)
 
 
-    async def _think_and_plan(self, current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+    async def _think_and_plan(self, current_state: Dict[str, Any], task: AgentTaskReference, iteration: int) -> Dict[str, Any]:
         """PLAN：使用模板和分区化上下文生成本轮 FC 调用请求。"""
         # current_state 已包含 orchestrator 组装的上下文（task/static/iteration 分区）；
         # Agent 内不再二次拼装/覆盖，避免双轨事实源。
@@ -69,7 +65,7 @@ class AudioGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], db: Session, iteration: int) -> Dict[str, Any]:
+    async def _execute_action(self, action_plan: Dict[str, Any], input_data: Dict[str, Any], iteration: int) -> Dict[str, Any]:
         """ACT：只执行本轮 FC 返回的 tool_calls；不在 Agent 内自组参数直接 use_tool。"""
         # 不在 Agent 内对 action 做白名单判断；
         # 执行层只关心是否存在规划的 call_tools，权限/范围由工具系统与 schema 控制。
@@ -187,7 +183,6 @@ class AudioGeneratorAgent(ReActAgent):
                 "gate_triggers": [],
                 "artifacts": [{"kind": "shared_fact", "ref": "project.background_music"}],
                 "reflection": {
-                    "completion_state": "completed" if ok else "partial",
                     "reported_gaps": [] if ok else ["background_music_generation_failed"],
                     "reported_hints": [],
                 },
@@ -196,7 +191,7 @@ class AudioGeneratorAgent(ReActAgent):
             "plan_llm": plan_llm,
         }
 
-    async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: Task, iteration: int) -> Dict[str, Any]:
+    async def _reflect_on_results(self, action_result: Dict[str, Any], current_state: Dict[str, Any], task: AgentTaskReference, iteration: int) -> Dict[str, Any]:
         ok = bool(action_result.get("success"))
         summary = "音频生成成功" if ok else "音频生成未成功"
         return {"success": ok, "reflection_summary": summary}
@@ -408,7 +403,9 @@ class AudioGeneratorAgent(ReActAgent):
             "music_mood": music_result.get("mood", ""),
             "file_format": music_result.get("file_format", "mp3"),
             "commercial_license": music_result.get("commercial_license", True),
-            "generation_model": "suno-ai",
+            "generation_provider": music_result.get("provider")
+            or music_result.get("source")
+            or "configured",
             "total_scenes_analyzed": total_scenes,
             "error": music_result.get("error"),
             "generation_time_estimate": "30-120 seconds"

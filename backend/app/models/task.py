@@ -1,7 +1,6 @@
 """
 Task model for video generation tasks
 """
-import enum
 from typing import Dict, Any, Optional
 from sqlalchemy import Column, String, Text, JSON, Enum, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
@@ -9,25 +8,9 @@ from sqlalchemy.dialects import mysql, postgresql
 from sqlalchemy import String as SQLString
 import uuid
 
+from ..domain import TaskStatus as _TaskStatus
+from ..domain import TaskType as _TaskType
 from .base import BaseModel
-
-
-class TaskStatus(str, enum.Enum):
-    PENDING = "pending"
-    QUEUED = "queued"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    PERSISTING_DATA = "persisting_data"
-
-
-class TaskType(str, enum.Enum):
-    VIDEO_GENERATION = "video_generation"
-    IMAGE_GENERATION = "image_generation"
-    SCRIPT_WRITING = "script_writing"
-    VIDEO_EDITING = "video_editing"
-    CONCEPT_PLANNING = "concept_planning"
 
 
 class Task(BaseModel):
@@ -38,12 +21,14 @@ class Task(BaseModel):
     task_id = Column(String(36), unique=True, default=lambda: str(uuid.uuid4()), index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text)
-    task_type = Column(Enum(TaskType), nullable=False)
-    status = Column(String(20), default=TaskStatus.PENDING.value, nullable=False)
+    task_type = Column(Enum(_TaskType), nullable=False)
+    status = Column(String(20), default=_TaskStatus.PENDING.value, nullable=False)
     
     # User and session information
     user_id = Column(String(100))  # For future user authentication
     session_id = Column(String(100))
+    project_id = Column(String(100), nullable=True, index=True)
+    episode_id = Column(String(100), nullable=True, index=True)
     
     # Task configuration and parameters
     input_parameters = Column(JSON, default=dict)  # User input parameters
@@ -80,11 +65,11 @@ class Task(BaseModel):
     
     @property
     def is_completed(self) -> bool:
-        return self.status == TaskStatus.COMPLETED.value
+        return self.status == _TaskStatus.COMPLETED.value
     
     @property
     def is_failed(self) -> bool:
-        return self.status == TaskStatus.FAILED.value
+        return self.status == _TaskStatus.FAILED.value
     
     @property
     def can_retry(self) -> bool:
@@ -99,12 +84,12 @@ class Task(BaseModel):
         """Add error message and increment retry count"""
         self.error_message = error_message
         self.retry_count += 1
-        self.status = TaskStatus.FAILED.value
+        self.status = _TaskStatus.FAILED.value
     
     def reset_for_retry(self):
         """Reset task for retry"""
         if self.can_retry:
-            self.status = TaskStatus.PENDING.value
+            self.status = _TaskStatus.PENDING.value
             self.progress_percentage = 0
             self.current_step = None
             self.error_message = None

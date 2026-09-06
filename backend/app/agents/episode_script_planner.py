@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentType
 
 
 class EpisodeScriptPlannerAgent(BaseAgent):
@@ -26,10 +24,9 @@ class EpisodeScriptPlannerAgent(BaseAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
+        input_data = request.input_data.to_dict()
         self._validate_input(
             input_data,
             [

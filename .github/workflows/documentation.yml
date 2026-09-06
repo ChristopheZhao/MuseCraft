@@ -1,0 +1,38 @@
+name: Documentation Governance
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "AGENTS.md"
+      - "backend/AGENTS.md"
+      - "docs/**"
+      - "scripts/check_doc_governance.py"
+      - "scripts/tests/test_doc_governance.py"
+      - ".github/workflows/documentation.yml"
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "backend/AGENTS.md"
+      - "docs/**"
+      - "scripts/check_doc_governance.py"
+      - "scripts/tests/test_doc_governance.py"
+      - ".github/workflows/documentation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  documents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check validator counterexamples
+        run: python -m unittest discover -s scripts/tests -p 'test_doc_governance.py'
+      - name: Check document ownership and links
+        run: python scripts/check_doc_governance.py

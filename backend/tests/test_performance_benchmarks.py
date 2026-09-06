@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
-from app.models import Task, TaskStatus
+from app.domain import TaskStatus
+from app.models import Task
 from app.services.monitoring_service import monitoring_service
 
 

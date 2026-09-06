@@ -1,6 +1,38 @@
+from types import SimpleNamespace
+
+import app.agents.tools.manager as tool_manager_module
 from app.agents.tools.consistency_tool import ConsistencyTool
 from app.agents.tools.manager import ToolManager, Exposure
 from app.agents.utils.tool_contracts import extract_contract_slot_writes
+from app.domain import AgentType
+
+
+def test_tool_visibility_exception_denies_all_function_calls(monkeypatch):
+    class _VisibilityFailureTool:
+        def get_fc_visibility(self):
+            raise RuntimeError("visibility policy unavailable")
+
+        def get_available_actions(self):
+            return ["unsafe_action"]
+
+    tool = _VisibilityFailureTool()
+    registry = SimpleNamespace(get_tool=lambda _name: tool)
+    monkeypatch.setattr(tool_manager_module, "get_tool_registry", lambda: registry)
+
+    plan = ToolManager(policy_path="").allocate(
+        AgentType.AUDIO_GENERATOR,
+        requested=["visibility_failure_tool"],
+    )
+
+    assert plan.exposure["visibility_failure_tool"].expose is False
+    assert plan.fc_map == {}
+    assert plan.diag["visibility_denied"] == [
+        {
+            "tool": "visibility_failure_tool",
+            "reason_code": "tool_visibility_evaluation_failed",
+            "diagnostic": "RuntimeError: visibility policy unavailable",
+        }
+    ]
 
 
 def test_contract_writes_trim_and_scope_assets():

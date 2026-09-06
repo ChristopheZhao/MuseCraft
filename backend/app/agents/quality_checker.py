@@ -4,12 +4,16 @@ Quality Checker Agent - Analyzes and validates the final video quality
 import os
 import json
 from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentType
 from .utils.media_runtime import resolve_local_public_path
 from ..services.character_identity_contract import build_default_role_continuity_expectations
+
+
+class QualityAnalysisUnavailable(AgentError):
+    """The semantic quality assessment could not be obtained from the LLM."""
+
+    error_code = "quality_ai_analysis_unavailable"
 
 
 class QualityCheckerAgent(BaseAgent):
@@ -30,12 +34,11 @@ class QualityCheckerAgent(BaseAgent):
         )
     
     async def _execute_impl(
-        self, 
-        task: Task, 
-        input_data: Dict[str, Any], 
-        db: Session
+        self,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """Perform comprehensive quality check on the final video"""
+        input_data = request.input_data.to_dict()
         
         # Validate input
         self._validate_input(input_data, ["workflow_state_id"])
@@ -57,7 +60,7 @@ class QualityCheckerAgent(BaseAgent):
         character_identity_diagnostics = quality_inputs["character_identity_diagnostics"]
         character_identity_contract_carrier = quality_inputs["character_identity_contract_carrier"]
 
-        await self._update_progress(10, "Loading final video from workflow", db)
+        await self._update_progress(10, "Loading final video from workflow")
 
         if not (final_video_path or final_video_url):
             raise AgentError(
@@ -65,52 +68,54 @@ class QualityCheckerAgent(BaseAgent):
                 f"(diagnostics={context_diagnostics})"
             )
         
-        await self._update_progress(20, "Performing technical analysis", db)
+        await self._update_progress(20, "Performing technical analysis")
         
         # Perform technical quality checks
         technical_quality = await self._analyze_technical_quality(
             final_video_path or final_video_url, video_metadata
         )
         
-        await self._update_progress(40, "Analyzing content quality", db)
+        await self._update_progress(40, "Analyzing content quality")
         
         # Perform content quality analysis
-        content_quality = await self._analyze_content_quality(
-            concept_plan,
-            composition_timeline,
-            final_video_url or final_video_path,
-            original_requirements,
-            video_metadata,
-            media_completeness=media_completeness,
-            character_identity_bible=character_identity_bible,
-            scene_character_locks=scene_character_locks,
-            quality_expectations=quality_expectations,
-            role_continuity_observation=role_continuity_observation,
-            character_identity_diagnostics=character_identity_diagnostics,
-            character_identity_contract_carrier=character_identity_contract_carrier,
-        )
+        try:
+            content_quality = await self._analyze_content_quality(
+                concept_plan,
+                composition_timeline,
+                final_video_url or final_video_path,
+                original_requirements,
+                video_metadata,
+                media_completeness=media_completeness,
+                character_identity_bible=character_identity_bible,
+                scene_character_locks=scene_character_locks,
+                quality_expectations=quality_expectations,
+                role_continuity_observation=role_continuity_observation,
+                character_identity_diagnostics=character_identity_diagnostics,
+                character_identity_contract_carrier=character_identity_contract_carrier,
+            )
+        except QualityAnalysisUnavailable as exc:
+            await self._update_progress(100, "Quality analysis unavailable")
+            return self._build_unavailable_quality_result(
+                technical_quality=technical_quality,
+                context_diagnostics=context_diagnostics,
+                diagnostic=str(exc),
+            )
         
-        await self._update_progress(60, "Checking requirement compliance", db)
+        await self._update_progress(60, "Checking requirement compliance")
         
         # Check compliance with original requirements
         compliance_check = await self._check_requirement_compliance(
-            task, concept_plan, composition_timeline, video_metadata
+            original_requirements, concept_plan, composition_timeline, video_metadata
         )
         
-        await self._update_progress(80, "Generating quality report", db)
+        await self._update_progress(80, "Generating quality report")
         
         # Generate overall quality score and recommendations
         quality_assessment = await self._generate_quality_assessment(
             technical_quality, content_quality, compliance_check
         )
         
-        await self._update_progress(95, "Finalizing quality check", db)
-        
-        # Update task with quality information
-        task.quality_score = quality_assessment["overall_score"]
-        task.quality_feedback = quality_assessment["summary"]
-        task.requires_human_review = quality_assessment["requires_human_review"]
-        db.commit()
+        await self._update_progress(95, "Finalizing quality check")
         
         output_data = {
             "success": True,
@@ -130,7 +135,6 @@ class QualityCheckerAgent(BaseAgent):
                 "gate_triggers": [],
                 "artifacts": [{"kind": "quality_report", "ref": "quality_assessment"}],
                 "reflection": {
-                    "completion_state": "completed",
                     "reported_gaps": [],
                     "reported_hints": [],
                     "summary": f"quality_score={quality_assessment['overall_score']}",
@@ -138,9 +142,50 @@ class QualityCheckerAgent(BaseAgent):
             },
         }
         
-        await self._update_progress(100, "Quality check completed", db)
+        await self._update_progress(100, "Quality check completed")
         
         return output_data
+
+    @staticmethod
+    def _build_unavailable_quality_result(
+        *,
+        technical_quality: Dict[str, Any],
+        context_diagnostics: Dict[str, Any],
+        diagnostic: str,
+    ) -> Dict[str, Any]:
+        error_code = QualityAnalysisUnavailable.error_code
+        return {
+            "success": False,
+            "quality_score": None,
+            "quality_grade": "unassessed",
+            "requires_human_review": True,
+            "technical_quality": technical_quality,
+            "content_quality": {
+                "status": "unavailable",
+                "error_code": error_code,
+                "diagnostic": diagnostic,
+            },
+            "compliance_check": {},
+            "quality_assessment": {
+                "status": "unavailable",
+                "error_code": error_code,
+                "requires_human_review": True,
+            },
+            "recommendations": [],
+            "approval_status": "unassessed",
+            "input_diagnostics": context_diagnostics,
+            "orchestration_report": {
+                "status": "partial",
+                "boundary_event": "quality_analysis_unavailable",
+                "gate_triggers": [],
+                "artifacts": [],
+                "reflection": {
+                    "reported_gaps": [error_code],
+                    "reported_hints": [],
+                    "summary": diagnostic,
+                },
+            },
+        }
 
     def _require_quality_inputs(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         static_context = input_data.get("static_context") if isinstance(input_data, dict) else {}
@@ -252,100 +297,6 @@ class QualityCheckerAgent(BaseAgent):
         characters = content_elements.get("characters") if isinstance(content_elements, dict) else None
         return isinstance(characters, list) and any(isinstance(item, dict) for item in characters)
     
-    async def _perform_image_based_quality_check(
-        self, 
-        scenes_data: List, 
-        input_data: Dict[str, Any], 
-        db: Session
-    ) -> Dict[str, Any]:
-        """对图像进行质量检查（当没有视频时的降级方案）"""
-        
-        await self._update_progress(30, "Analyzing image quality", db)
-        
-        # 收集所有可用图像（SceneSnapshot.image_url；image_path 不一定存在）
-        available_images = []
-        for scene in scenes_data:
-            if isinstance(scene, dict):
-                url = scene.get("image_url", "") or ""
-                path = scene.get("image_path", "") or ""
-                desc = scene.get("visual_description", "") or ""
-                sn = scene.get("scene_number")
-            else:
-                url = getattr(scene, "image_url", "") or ""
-                path = getattr(scene, "image_path", "") if hasattr(scene, "image_path") else ""
-                desc = getattr(scene, "visual_description", "") or ""
-                sn = getattr(scene, "scene_number", None)
-            if path or url:
-                available_images.append(
-                    {
-                        "scene_number": sn,
-                        "image_path": path,
-                        "image_url": url,
-                        "description": desc,
-                    }
-                )
-        
-        await self._update_progress(60, "Evaluating content appropriateness", db)
-        
-        # 简化的质量检查
-        quality_score = 75  # 图像质量默认分数
-        
-        # 基础检查
-        technical_issues = []
-        content_issues = []
-        
-        if len(available_images) < len(scenes_data):
-            technical_issues.append("Some scenes are missing images")
-        
-        # 内容适宜性检查（基于描述）
-        for img in available_images:
-            description = img.get("description", "").lower()
-            if any(word in description for word in ["violent", "inappropriate", "explicit"]):
-                content_issues.append(f"Scene {img['scene_number']} may contain inappropriate content")
-        
-        await self._update_progress(80, "Generating quality report", db)
-        
-        # 生成建议
-        suggestions = []
-        if technical_issues:
-            suggestions.append("Consider regenerating missing images")
-        if content_issues:
-            suggestions.append("Review content for appropriateness")
-        suggestions.append("Video generation timed out - consider trying again later")
-        
-        # 计算整体分数
-        if content_issues:
-            quality_score -= 20
-        if technical_issues:
-            quality_score -= 10
-        
-        quality_rating = "Good" if quality_score >= 70 else "Fair" if quality_score >= 50 else "Poor"
-        
-        output_data = {
-            "overall_score": quality_score,
-            "quality_rating": quality_rating,
-            "check_type": "image_fallback",
-            "total_images_checked": len(available_images),
-            "technical_analysis": {
-                "issues_found": technical_issues,
-                "images_available": len(available_images),
-                "total_scenes": len(scenes_data)
-            },
-            "content_analysis": {
-                "appropriateness_score": 85,
-                "issues_found": content_issues,
-                "safe_for_all_audiences": len(content_issues) == 0
-            },
-            "suggestions": suggestions,
-            "quality_summary": f"Image-based quality check completed. {len(available_images)} images analyzed.",
-            "workflow_state_id": input_data.get("workflow_state_id"),
-            "fallback_reason": "no_videos_available"
-        }
-        
-        await self._update_progress(100, "Quality check completed", db)
-        
-        return output_data
-    
     async def _analyze_technical_quality(
         self, 
         video_url: str, 
@@ -427,11 +378,8 @@ class QualityCheckerAgent(BaseAgent):
         """Analyze content quality and coherence"""
         
         content_analysis = {
-            "scene_continuity": True,
-            "visual_consistency": True,
-            "narrative_flow": True,
-            "message_clarity": True,
-            "target_audience_fit": True
+            "media_complete": True,
+            "scene_set_complete": True,
         }
         
         issues = []
@@ -443,8 +391,7 @@ class QualityCheckerAgent(BaseAgent):
             else []
         )
         if media_status == "incomplete" or missing_media_scenes:
-            content_analysis["scene_continuity"] = False
-            content_analysis["narrative_flow"] = False
+            content_analysis["media_complete"] = False
             issues.append(
                 "Missing scene videos: "
                 f"expected {media_completeness.get('expected_scene_count')}, "
@@ -452,30 +399,17 @@ class QualityCheckerAgent(BaseAgent):
                 f"missing scenes {missing_media_scenes}"
             )
         
-        # Check scene continuity
-        if len(composition_timeline) < 2:
-            content_analysis["scene_continuity"] = False
-            issues.append("Insufficient scenes for proper narrative flow")
-        
         # Check for missing scenes
         expected_scenes = len(concept_plan.get("scenes", []))
         actual_scenes = len(composition_timeline)
         
         if expected_scenes and actual_scenes < expected_scenes:
-            content_analysis["narrative_flow"] = False
+            content_analysis["scene_set_complete"] = False
             issues.append(f"Missing scenes: expected {expected_scenes}, got {actual_scenes}")
         
         # Analyze scene types distribution
         scene_type_evidence = self._analyze_scene_type_evidence(composition_timeline)
-        explicit_scene_types = scene_type_evidence["explicit_scene_types"]
-        intro_outro_check_applied = scene_type_evidence["label_status"] == "complete"
-
-        if intro_outro_check_applied:
-            if "intro" not in explicit_scene_types:
-                issues.append("Missing introduction scene")
-            
-            if "outro" not in explicit_scene_types and len(composition_timeline) > 2:
-                issues.append("Missing conclusion scene")
+        intro_outro_check_applied = False
 
         role_continuity = self._analyze_role_continuity_quality(
             composition_timeline=composition_timeline,
@@ -491,11 +425,8 @@ class QualityCheckerAgent(BaseAgent):
             content_analysis["role_continuity"] = bool(role_continuity.get("passed"))
             issues.extend(role_continuity.get("issues") or [])
         
-        # Calculate content score
-        passed_checks = sum(1 for check in content_analysis.values() if check)
-        content_score = int((passed_checks / len(content_analysis)) * 100)
-        
-        # Use AI to analyze content if available
+        # The LLM owns semantic quality assessment. Deterministic checks above are
+        # explicit artifact/contract gates and never synthesize a semantic score.
         ai_content_analysis = await self._ai_content_analysis(
             concept_plan,
             composition_timeline,
@@ -504,7 +435,7 @@ class QualityCheckerAgent(BaseAgent):
         )
         
         result = {
-            "score": content_score,
+            "score": ai_content_analysis["quality_score"],
             "analysis": content_analysis,
             "issues": issues,
             "scene_breakdown": self._analyze_scene_breakdown(composition_timeline),
@@ -519,7 +450,7 @@ class QualityCheckerAgent(BaseAgent):
             "visual_evidence_verified": bool(role_continuity.get("visual_evidence_verified")),
             "role_continuity_diagnostics": role_continuity.get("diagnostics", {}),
             "ai_analysis": ai_content_analysis,
-            "recommendations": self._get_content_recommendations(issues, scene_type_evidence)
+            "recommendations": list(ai_content_analysis["recommendations"]),
         }
         if role_continuity.get("fallback_reason"):
             result["fallback_reason"] = role_continuity["fallback_reason"]
@@ -1007,71 +938,97 @@ class QualityCheckerAgent(BaseAgent):
 
             content = (resp.get("content") or "").strip()
             if not content:
-                raise Exception("Empty content from quality LLM")
-            return json.loads(content)
+                raise ValueError("empty content from quality LLM")
+            parsed = json.loads(content)
+            return self._require_ai_quality_assessment(parsed)
             
         except Exception as e:
-            self.logger.warning(f"AI content analysis failed: {str(e)}")
-            return {
-                "narrative_coherence": "Unable to analyze",
-                "message_clarity": "Unable to analyze",
-                "overall_assessment": "AI analysis unavailable"
-            }
+            self.logger.error("AI content analysis failed: %s", e)
+            raise QualityAnalysisUnavailable(str(e)) from e
+
+    @staticmethod
+    def _require_ai_quality_assessment(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("quality assessment must be a JSON object")
+
+        required_fields = {
+            "quality_score",
+            "quality_grade",
+            "approval_status",
+            "requires_human_review",
+            "overall_assessment",
+            "issues",
+            "recommendations",
+        }
+        missing = sorted(required_fields.difference(value))
+        if missing:
+            raise ValueError(f"quality assessment missing fields: {missing}")
+
+        score = value["quality_score"]
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise ValueError("quality_score must be numeric")
+        score = float(score)
+        if not 0.0 <= score <= 100.0:
+            raise ValueError("quality_score must be between 0 and 100")
+
+        for field_name in ("quality_grade", "overall_assessment"):
+            field_value = value[field_name]
+            if not isinstance(field_value, str) or not field_value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+
+        approval_status = value["approval_status"]
+        if approval_status not in {
+            "approved",
+            "conditional",
+            "needs_revision",
+            "rejected",
+        }:
+            raise ValueError("approval_status is not canonical")
+        if not isinstance(value["requires_human_review"], bool):
+            raise ValueError("requires_human_review must be boolean")
+
+        normalized = dict(value)
+        normalized["quality_score"] = int(round(score))
+        for field_name in ("issues", "recommendations"):
+            items = value[field_name]
+            if not isinstance(items, list) or any(
+                not isinstance(item, str) or not item.strip() for item in items
+            ):
+                raise ValueError(f"{field_name} must be list[str]")
+            normalized[field_name] = list(items)
+        return normalized
     
     async def _check_requirement_compliance(
-        self, 
-        task: Task, 
+        self,
+        original_params: Dict[str, Any],
         concept_plan: Dict[str, Any], 
         composition_timeline: List[Dict],
         video_metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Check compliance with original requirements"""
         
-        # Get original requirements from task parameters
-        original_params = task.input_parameters or {}
-        
-        compliance_checks = {
-            "duration_compliance": True,
-            "style_compliance": True,
-            "content_compliance": True,
-            "technical_compliance": True
-        }
-        
-        issues = []
-        
-        # Check duration compliance
         requested_duration = original_params.get("duration", 30)
         actual_duration = video_metadata.get("duration", 0)
-        
-        duration_variance = abs(actual_duration - requested_duration) / requested_duration
-        if duration_variance > 0.3:  # More than 30% variance
-            compliance_checks["duration_compliance"] = False
-            issues.append(f"Duration mismatch: requested {requested_duration}s, got {actual_duration}s")
-        
-        # Check style compliance
+        duration_variance = (
+            abs(actual_duration - requested_duration) / requested_duration
+            if requested_duration
+            else None
+        )
+
+        # Style is semantic evidence for the LLM assessment, not a substring gate.
         requested_style = original_params.get("video_style", "professional")
         concept_style = concept_plan.get("visual_style", "")
         
-        if requested_style.lower() not in concept_style.lower():
-            compliance_checks["style_compliance"] = False
-            issues.append(f"Style mismatch: requested {requested_style}")
-        
-        # Check aspect ratio compliance
-        requested_aspect = original_params.get("aspect_ratio", "16:9")
-        # Note: In a full implementation, we would extract actual video dimensions
-        
-        # Calculate compliance score
-        passed_checks = sum(1 for check in compliance_checks.values() if check)
-        compliance_score = int((passed_checks / len(compliance_checks)) * 100)
-        
         return {
-            "score": compliance_score,
-            "checks": compliance_checks,
-            "issues": issues,
+            "checks": {},
+            "issues": [],
             "original_requirements": original_params,
             "variance_analysis": {
-                "duration_variance": f"{duration_variance:.1%}",
-                "style_match": requested_style in concept_style
+                "requested_duration": requested_duration,
+                "actual_duration": actual_duration,
+                "duration_variance": duration_variance,
+                "requested_style": requested_style,
+                "concept_style": concept_style,
             }
         }
     
@@ -1083,16 +1040,10 @@ class QualityCheckerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Generate overall quality assessment and recommendations"""
         
-        # Calculate weighted overall score
-        technical_weight = 0.3
-        content_weight = 0.4
-        compliance_weight = 0.3
-        
-        raw_overall_score = int(
-            technical_quality["score"] * technical_weight +
-            content_quality["score"] * content_weight +
-            compliance_check["score"] * compliance_weight
+        ai_assessment = self._require_ai_quality_assessment(
+            content_quality.get("ai_analysis")
         )
+        raw_overall_score = ai_assessment["quality_score"]
         role_gate = self._derive_role_continuity_quality_gate(content_quality)
         media_gate = self._derive_media_completeness_quality_gate(content_quality)
         score_caps = [
@@ -1103,27 +1054,9 @@ class QualityCheckerAgent(BaseAgent):
         score_cap = min(score_caps) if score_caps else None
         overall_score = min(raw_overall_score, int(score_cap)) if score_cap is not None else raw_overall_score
         
-        # Determine quality grade
-        if overall_score >= 90:
-            quality_grade = "Excellent"
-            approval_status = "approved"
-            requires_human_review = False
-        elif overall_score >= 80:
-            quality_grade = "Good"
-            approval_status = "approved"
-            requires_human_review = False
-        elif overall_score >= 70:
-            quality_grade = "Acceptable"
-            approval_status = "conditional"
-            requires_human_review = True
-        elif overall_score >= 60:
-            quality_grade = "Poor"
-            approval_status = "needs_revision"
-            requires_human_review = True
-        else:
-            quality_grade = "Unacceptable"
-            approval_status = "rejected"
-            requires_human_review = True
+        quality_grade = ai_assessment["quality_grade"]
+        approval_status = ai_assessment["approval_status"]
+        requires_human_review = ai_assessment["requires_human_review"]
 
         if role_gate.get("requires_human_review"):
             requires_human_review = True
@@ -1133,12 +1066,15 @@ class QualityCheckerAgent(BaseAgent):
             requires_human_review = True
             if approval_status in {"approved", "conditional"}:
                 approval_status = media_gate.get("approval_status") or "needs_revision"
+        if role_gate.get("requires_human_review") or media_gate.get("requires_human_review"):
+            quality_grade = "Restricted by hard gate"
         
         # Collect all issues and recommendations
         all_issues = (
             technical_quality.get("issues", []) +
             content_quality.get("issues", []) +
-            compliance_check.get("issues", [])
+            compliance_check.get("issues", []) +
+            ai_assessment["issues"]
         )
         if role_gate.get("issue"):
             all_issues.append(role_gate["issue"])
@@ -1146,20 +1082,15 @@ class QualityCheckerAgent(BaseAgent):
             all_issues.append(media_gate["issue"])
         
         all_recommendations = (
-            technical_quality.get("recommendations", []) +
-            content_quality.get("recommendations", [])
-        )
-        
-        # Generate summary
-        summary = self._generate_quality_summary(
-            overall_score, quality_grade, all_issues
+            ai_assessment["recommendations"] +
+            technical_quality.get("recommendations", [])
         )
 
         detailed_scores = {
-            "technical": technical_quality["score"],
-            "content": content_quality["score"],
-            "compliance": compliance_check["score"]
+            "llm_quality": raw_overall_score,
         }
+        if technical_quality.get("score") is not None:
+            detailed_scores["technical_diagnostic"] = technical_quality["score"]
         if isinstance(content_quality.get("contract_readiness"), dict):
             detailed_scores["contract_readiness"] = content_quality["contract_readiness"].get("score")
         if content_quality.get("role_continuity_score") is not None:
@@ -1167,18 +1098,22 @@ class QualityCheckerAgent(BaseAgent):
 
         assessment = {
             "overall_score": overall_score,
+            "raw_overall_score": raw_overall_score,
             "quality_grade": quality_grade,
             "approval_status": approval_status,
             "requires_human_review": requires_human_review,
-            "summary": summary,
+            "summary": ai_assessment["overall_assessment"],
             "detailed_scores": detailed_scores,
             "issues_found": len(all_issues),
-            "critical_issues": [issue for issue in all_issues if "missing" in issue.lower() or "failed" in issue.lower()],
+            "critical_issues": [
+                issue
+                for issue in (role_gate.get("issue"), media_gate.get("issue"))
+                if issue
+            ],
             "recommendations": all_recommendations[:10],  # Top 10 recommendations
-            "review_notes": self._generate_review_notes(all_issues, overall_score)
+            "review_notes": [ai_assessment["overall_assessment"]],
         }
         if score_cap is not None:
-            assessment["raw_overall_score"] = raw_overall_score
             assessment["quality_score_cap_applied"] = score_cap
         if content_quality.get("identity_drift_findings") is not None:
             assessment["identity_drift_findings"] = content_quality.get("identity_drift_findings") or []
@@ -1335,72 +1270,3 @@ class QualityCheckerAgent(BaseAgent):
             recommendations.append("Ensure H.264 codec compatibility")
         
         return recommendations
-    
-    def _get_content_recommendations(
-        self,
-        issues: List[str],
-        scene_type_evidence: Dict[str, Any],
-    ) -> List[str]:
-        """Generate content recommendations based on issues"""
-        
-        recommendations = []
-        label_status = str(scene_type_evidence.get("label_status") or "").strip().lower()
-        explicit_scene_types = list(scene_type_evidence.get("explicit_scene_types") or [])
-        
-        if "Missing introduction scene" in issues:
-            recommendations.append("Add an engaging introduction scene")
-        
-        if "Missing conclusion scene" in issues:
-            recommendations.append("Include a clear conclusion or call-to-action")
-        
-        if any("Missing scenes" in issue for issue in issues):
-            recommendations.append("Regenerate missing scenes to complete the narrative")
-        
-        if label_status != "complete":
-            recommendations.append(
-                "Provide explicit scene_type labels if intro/outro structure needs automated verification"
-            )
-        
-        if label_status == "complete" and len(set(explicit_scene_types)) < 2:
-            recommendations.append("Add variety in scene types for better engagement")
-        
-        return recommendations
-    
-    def _generate_quality_summary(
-        self, 
-        overall_score: int, 
-        quality_grade: str, 
-        issues: List[str]
-    ) -> str:
-        """Generate a quality summary description"""
-        
-        if overall_score >= 90:
-            return f"Excellent quality video ({overall_score}/100). Ready for delivery with minimal issues."
-        elif overall_score >= 80:
-            return f"Good quality video ({overall_score}/100). Minor issues present but acceptable for most use cases."
-        elif overall_score >= 70:
-            return f"Acceptable quality video ({overall_score}/100). Some issues found that may require attention."
-        elif overall_score >= 60:
-            return f"Poor quality video ({overall_score}/100). Multiple issues found requiring revision before delivery."
-        else:
-            return f"Unacceptable quality video ({overall_score}/100). Significant issues found requiring major revision."
-    
-    def _generate_review_notes(self, issues: List[str], overall_score: int) -> List[str]:
-        """Generate notes for human reviewers"""
-        
-        notes = []
-        
-        if overall_score < 70:
-            notes.append("Video requires human review before approval")
-        
-        if issues:
-            notes.append(f"Found {len(issues)} issues requiring attention")
-        
-        critical_issues = [issue for issue in issues if "missing" in issue.lower() or "failed" in issue.lower()]
-        if critical_issues:
-            notes.append(f"Critical issues found: {len(critical_issues)}")
-        
-        if overall_score >= 80:
-            notes.append("Video meets quality standards for automatic approval")
-        
-        return notes

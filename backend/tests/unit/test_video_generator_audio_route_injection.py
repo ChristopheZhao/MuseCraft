@@ -3,11 +3,12 @@ import json
 
 import pytest
 
+from app.agents.base import AgentError
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.plan_context import build_plan_context
 from app.agents.tools.ai_services.video_generation_tool_v2 import VideoGenerationTool
 from app.agents.video_generator import VideoGeneratorAgent
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.video_execution_contract import build_video_generation_execution_contract
 
 
@@ -97,6 +98,28 @@ def test_validate_video_generation_calls_rejects_mismatched_workflow_state_id():
         )
 
 
+def test_validate_video_generation_calls_does_not_coerce_workflow_state_id():
+    agent = object.__new__(VideoGeneratorAgent)
+    contract = build_video_generation_execution_contract(
+        workflow_state_id="123",
+        generate_audio=True,
+    )
+    tool_calls = [
+        {
+            "function": {
+                "name": "video_generation.generate_with_continuity",
+                "arguments": {"scene_number": 1, "duration": 5, "workflow_state_id": 123},
+            }
+        }
+    ]
+
+    with pytest.raises(Exception, match="workflow_state_id"):
+        agent._validate_video_generation_calls_against_contract(
+            tool_calls,
+            execution_contract=contract,
+        )
+
+
 def test_bind_execution_context_strips_runtime_fields_from_fc_arguments():
     agent = object.__new__(VideoGeneratorAgent)
     contract = build_video_generation_execution_contract(
@@ -126,8 +149,12 @@ def test_bind_execution_context_strips_runtime_fields_from_fc_arguments():
     arguments = bound_calls[0]["function"]["arguments"]
     assert "workflow_state_id" not in arguments
     assert "generate_audio" not in arguments
-    assert bound_calls[0]["execution_context"]["workflow_state_id"] == "wf-1"
-    assert bound_calls[0]["execution_context"]["execution_contract"]["constraints"]["generate_audio"] is True
+    assert "workflow_state_id" not in bound_calls[0]["execution_context"]
+    assert bound_calls[0]["execution_context"]["execution_contract"]["workflow_state_id"] == "wf-1"
+    assert (
+        bound_calls[0]["execution_context"]["execution_contract"]["constraints"]["generate_audio"]
+        is True
+    )
 
 
 def test_video_generation_tool_reads_runtime_binding_from_execution_context():
@@ -141,7 +168,6 @@ def test_video_generation_tool_reads_runtime_binding_from_execution_context():
     merged = tool._merge_execution_context_into_params(
         {"scene_number": 1, "duration": 5},
         {
-            "workflow_state_id": "wf-tool",
             "execution_contract": contract,
         },
     )
@@ -164,10 +190,37 @@ def test_resolve_execution_contract_uses_explicit_contract_without_plan_or_route
 
     resolved = agent._resolve_execution_contract(
         {"execution_contract": contract},
-        workflow_id="wf-ignored",
+        workflow_id="wf-1",
     )
-    assert resolved["storage"]["workflow_state_id"] == "wf-1"
+    assert resolved["workflow_state_id"] == "wf-1"
     assert resolved["constraints"]["generate_audio"] is False
+
+
+def test_resolve_execution_contract_rejects_missing_boundary():
+    agent = object.__new__(VideoGeneratorAgent)
+
+    with pytest.raises(ValueError, match="execution_contract"):
+        agent._resolve_execution_contract(
+            {"workflow_state_id": "wf-missing-contract"},
+            workflow_id="wf-missing-contract",
+        )
+
+
+def test_resolve_execution_contract_rejects_cross_workflow_identity():
+    agent = object.__new__(VideoGeneratorAgent)
+    contract = build_video_generation_execution_contract(
+        workflow_state_id="wf-other",
+        generate_audio=True,
+    )
+
+    with pytest.raises(ValueError, match="workflow_state_id"):
+        agent._resolve_execution_contract(
+            {
+                "workflow_state_id": "wf-current",
+                "execution_contract": contract,
+            },
+            workflow_id="wf-current",
+        )
 
 
 def test_orchestrator_builds_video_execution_contract_from_runtime_hints():
@@ -178,8 +231,20 @@ def test_orchestrator_builds_video_execution_contract_from_runtime_hints():
     )
 
     assert contract["agent"] == AgentType.VIDEO_GENERATOR.value
-    assert contract["storage"]["workflow_state_id"] == "wf-9"
+    assert contract["workflow_state_id"] == "wf-9"
+    assert "scope" not in contract
+    assert "inputs" not in contract
+    assert "storage" not in contract
     assert contract["constraints"]["generate_audio"] is True
+
+
+def test_orchestrator_rejects_non_boolean_video_runtime_hint():
+    with pytest.raises(AgentError, match="generate_audio must be boolean"):
+        OrchestratorAgent._build_agent_execution_contract(
+            agent_type=AgentType.VIDEO_GENERATOR,
+            workflow_state_id="wf-invalid-hint",
+            runtime_hints={"generate_audio": "false"},
+        )
 
 
 def test_build_plan_context_can_exclude_execution_contract_from_planner_surface():

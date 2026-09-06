@@ -7,9 +7,8 @@ def test_merge_video_execution_context_binds_workflow_and_audio_constraint():
     merged = merge_video_execution_context_into_params(
         {"scene_number": 1, "duration": 5},
         {
-            "workflow_state_id": "wf-tool",
             "execution_contract": {
-                "storage": {"workflow_state_id": "wf-tool"},
+                "workflow_state_id": "wf-tool",
                 "constraints": {"generate_audio": True},
             },
         },
@@ -24,9 +23,8 @@ def test_merge_video_execution_context_rejects_conflicting_workflow_binding():
         merge_video_execution_context_into_params(
             {"scene_number": 1, "duration": 5, "workflow_state_id": "wf-other"},
             {
-                "workflow_state_id": "wf-tool",
                 "execution_contract": {
-                    "storage": {"workflow_state_id": "wf-tool"},
+                    "workflow_state_id": "wf-tool",
                     "constraints": {"generate_audio": True},
                 },
             },
@@ -41,11 +39,37 @@ def test_merge_video_execution_context_uses_tool_error_factory():
         merge_video_execution_context_into_params(
             {"scene_number": 1, "duration": 5, "generate_audio": False},
             {
-                "workflow_state_id": "wf-tool",
                 "execution_contract": {
-                    "storage": {"workflow_state_id": "wf-tool"},
+                    "workflow_state_id": "wf-tool",
                     "constraints": {"generate_audio": True},
                 },
             },
             validation_error_factory=StubToolError,
+        )
+
+
+def test_merge_video_execution_context_rejects_duplicate_outer_workflow_identity():
+    with pytest.raises(ValueError, match="redundant workflow_state_id"):
+        merge_video_execution_context_into_params(
+            {"scene_number": 1, "duration": 5},
+            {
+                "workflow_state_id": "wf-tool",
+                "execution_contract": {
+                    "workflow_state_id": "wf-tool",
+                    "constraints": {"generate_audio": True},
+                },
+            },
+        )
+
+
+def test_merge_video_execution_context_does_not_coerce_explicit_workflow_identity():
+    with pytest.raises(ValueError, match="canonical string"):
+        merge_video_execution_context_into_params(
+            {"scene_number": 1, "duration": 5, "workflow_state_id": 123},
+            {
+                "execution_contract": {
+                    "workflow_state_id": "123",
+                    "constraints": {"generate_audio": True},
+                },
+            },
         )

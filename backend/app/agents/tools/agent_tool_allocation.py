@@ -5,7 +5,7 @@ Agent工具分配系统 - 为不同Agent提供专门的工具列表
 from typing import Dict, List, Set
 from enum import Enum
 
-from ...models import AgentType
+from ...domain import AgentType
 
 
 class ToolCategory(Enum):
@@ -64,7 +64,7 @@ class AgentToolAllocator:
             
             # 音频生成Agent - 音频创作和处理
             AgentType.AUDIO_GENERATOR: [
-                "suno_client",                 # 背景音乐生成（已注册工具名）
+                "music_generation",
                 "audio_analysis_tool",        # 音频分析（静音/截断点/能量）
                 "audio_processor",             # 音频后处理（时长/淡入淡出/循环）
                 "ffmpeg_tool",                 # 媒体组合（视频加音频）
@@ -103,8 +103,6 @@ class AgentToolAllocator:
             ],
 
             # Episode Orchestrator 复用已有工作流，不额外暴露工具
-            AgentType.EPISODE_ORCHESTRATOR: [],
-
             # Episode Script Planner - 纯文本草稿生成
             AgentType.EPISODE_SCRIPT_PLANNER: [],
         }
@@ -115,13 +113,8 @@ class AgentToolAllocator:
             "file_storage_tool"
         ]
         
-        # 定义工具依赖关系
-        # 精简依赖：仅保留已注册、稳定的依赖
-        self._tool_dependencies = {
-            # 允许 video_generation 伴随 scene_analysis（均为已注册工具）
-            "video_generation": ["scene_analysis"],
-            # 其余移除不稳定依赖，避免装载未注册工具
-        }
+        # 工具依赖只能表达执行必需条件，不能偷偷扩张 Agent 的决策能力。
+        self._tool_dependencies = {}
     
     def get_tools_for_agent(self, agent_type: AgentType) -> List[str]:
         """

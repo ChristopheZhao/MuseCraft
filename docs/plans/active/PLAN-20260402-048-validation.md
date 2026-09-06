@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260402-048
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260402-048
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate root-cause repair for the `video_generator` failure chain:
   - execution binding no longer depends on LLM-facing `workflow_state_id`

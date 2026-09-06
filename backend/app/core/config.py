@@ -52,12 +52,8 @@ class Settings(BaseSettings):
     ]
     
     # Database Settings
-    DATABASE_URL: str = config("DATABASE_URL", default="postgresql://user:password@localhost:5432/short_video_maker")
-    DATABASE_HOST: str = config("DATABASE_HOST", default="localhost")
-    DATABASE_PORT: int = config("DATABASE_PORT", default=5432, cast=int)
-    DATABASE_NAME: str = config("DATABASE_NAME", default="short_video_maker")
-    DATABASE_USER: str = config("DATABASE_USER", default="user")
-    DATABASE_PASSWORD: str = config("DATABASE_PASSWORD", default="password")
+    DATABASE_PROFILE: str = config("DATABASE_PROFILE", default="local")
+    DATABASE_URL: Optional[str] = config("DATABASE_URL", default=None)
     
     # Redis Settings
     REDIS_URL: str = config("REDIS_URL", default="redis://localhost:6379/0")
@@ -177,6 +173,7 @@ class Settings(BaseSettings):
     # Audio Generation APIs
     SUNO_API_KEY: Optional[str] = config("SUNO_API_KEY", default=None)
     SUNO_BASE_URL: str = config("SUNO_BASE_URL", default="https://api.sunoapi.org")
+    MUSIC_GENERATION_PROVIDER: str = config("MUSIC_GENERATION_PROVIDER", default="suno")
     AUDIO_SFX_REQUIRED_DEFAULT: bool = config("AUDIO_SFX_REQUIRED_DEFAULT", default=False, cast=bool)
 
     # Voice Synthesis configuration
@@ -642,7 +639,8 @@ class Settings(BaseSettings):
     
     model_config = {
         "env_file": ".env",
-        "case_sensitive": True
+        "case_sensitive": True,
+        "extra": "ignore",
     }
 
 

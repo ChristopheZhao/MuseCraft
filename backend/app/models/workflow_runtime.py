@@ -1,49 +1,16 @@
 """
 Workflow runtime models for single-episode control-plane state
 """
-import enum
-
 from sqlalchemy import Column, String, Text, JSON, Integer, ForeignKey, Boolean, DateTime
 from sqlalchemy.orm import relationship
 
+from ..domain import (
+    WorkflowAttemptStatus as _WorkflowAttemptStatus,
+    WorkflowGateStatus as _WorkflowGateStatus,
+    WorkflowNodeStatus as _WorkflowNodeStatus,
+    WorkflowSessionStatus as _WorkflowSessionStatus,
+)
 from .base import BaseModel
-
-
-class WorkflowSessionStatus(str, enum.Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    WAITING_GATE = "waiting_gate"
-    RESUMING = "resuming"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class WorkflowNodeStatus(str, enum.Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    PENDING_GATE = "pending_gate"
-    APPROVED = "approved"
-    NEEDS_REVISION = "needs_revision"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    STALE = "stale"
-
-
-class WorkflowAttemptStatus(str, enum.Enum):
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    ABORTED = "aborted"
-
-
-class WorkflowGateStatus(str, enum.Enum):
-    PENDING = "pending"
-    PASSED = "passed"
-    FAILED = "failed"
-    AWAITING_HUMAN = "awaiting_human"
-    DECIDED = "decided"
 
 
 class WorkflowSession(BaseModel):
@@ -54,7 +21,7 @@ class WorkflowSession(BaseModel):
     project_id = Column(String(100), nullable=True, index=True)
     episode_id = Column(String(100), nullable=True, index=True)
     shared_memory_id = Column(String(100), nullable=True, index=True)
-    status = Column(String(30), nullable=False, default=WorkflowSessionStatus.QUEUED.value)
+    status = Column(String(30), nullable=False, default=_WorkflowSessionStatus.QUEUED.value)
     current_node_key = Column(String(100), nullable=True)
     current_attempt_id = Column(Integer, nullable=True)
     input_payload = Column(JSON, default=dict)
@@ -83,7 +50,7 @@ class WorkflowNodeState(BaseModel):
     order_index = Column(Integer, nullable=False, default=0)
     scope_type = Column(String(30), nullable=False, default="episode")
     scope_ref = Column(String(100), nullable=True)
-    status = Column(String(30), nullable=False, default=WorkflowNodeStatus.QUEUED.value)
+    status = Column(String(30), nullable=False, default=_WorkflowNodeStatus.QUEUED.value)
     revision_index = Column(Integer, nullable=False, default=0)
     gate_required = Column(Boolean, nullable=False, default=False)
     last_gate_id = Column(Integer, nullable=True)
@@ -113,7 +80,7 @@ class WorkflowNodeAttempt(BaseModel):
     continuation_checkpoint = Column(JSON, nullable=True)
     output_artifacts = Column(JSON, default=list)
     metrics = Column(JSON, default=dict)
-    status = Column(String(20), nullable=False, default=WorkflowAttemptStatus.RUNNING.value)
+    status = Column(String(20), nullable=False, default=_WorkflowAttemptStatus.RUNNING.value)
     error_code = Column(String(100), nullable=True)
     error_message = Column(Text, nullable=True)
     lease_token = Column(String(64), nullable=True)
@@ -139,7 +106,7 @@ class WorkflowGate(BaseModel):
     attempt_id = Column(Integer, ForeignKey("workflow_node_attempts.id"), nullable=True, index=True)
     gate_name = Column(String(50), nullable=False)
     gate_type = Column(String(30), nullable=False)
-    status = Column(String(30), nullable=False, default=WorkflowGateStatus.PENDING.value)
+    status = Column(String(30), nullable=False, default=_WorkflowGateStatus.PENDING.value)
     contract_version = Column(String(20), nullable=False, default="v1")
     scope = Column(JSON, default=dict)
     artifact_refs = Column(JSON, default=list)

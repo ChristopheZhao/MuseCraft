@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260403-050
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260403-050
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate the bounded `C2` follow-on after `PLAN-20260403-049` closeout.
 - Keep runtime/control-plane authority in `RuntimeSessionService` while reducing orchestrator ownership of runtime resume/load/bootstrap choreography.

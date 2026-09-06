@@ -1,5 +1,10 @@
 # Background Note: PLAN-20260405-054
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260405-054
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Purpose
 - Preserve the evidence and governance reasoning behind the `054` successor.
 - Explain why [PLAN-20260404-053.md](/mnt/d/code/agent/opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260404-053.md) is useful history but not a safe execution baseline.

@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260328-034
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260328-034
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Plan:
   - [PLAN-20260328-034.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/plans/active/PLAN-20260328-034.md)

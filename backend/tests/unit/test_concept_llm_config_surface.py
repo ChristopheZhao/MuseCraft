@@ -14,7 +14,7 @@ def test_concept_planner_deepseek_route_is_exposed_in_env_examples():
     policy_path = backend_root / "app" / "config" / "llm_policies.yaml"
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
 
-    concept_plan_route = ((policy.get("agents.concept_planner") or {}).get("plan") or {})
+    concept_plan_route = (policy.get("agents.concept_planner") or {}).get("plan") or {}
     assert concept_plan_route, "concept_planner.plan route must be configured explicitly"
 
     if concept_plan_route.get("provider") != "deepseek":
@@ -25,15 +25,14 @@ def test_concept_planner_deepseek_route_is_exposed_in_env_examples():
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_DEFAULT_MODEL",
     ]
-    env_example_paths = [
-        repo_root / ".env.example",
-        backend_root / ".env.example",
-    ]
+    env_example_paths = [repo_root / ".env.example"]
 
     for env_path in env_example_paths:
         content = env_path.read_text(encoding="utf-8")
         for key in expected_keys:
-            assert key in content, f"{env_path} must document {key} for concept_planner DeepSeek routing"
+            assert (
+                key in content
+            ), f"{env_path} must document {key} for concept_planner DeepSeek routing"
 
 
 def test_ai_config_marks_concept_planner_mapping_as_compatibility_only():

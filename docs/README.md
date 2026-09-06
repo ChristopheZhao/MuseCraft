@@ -1,85 +1,40 @@
-# 📚 文档中心
+# 文档入口
 
-本目录包含短视频生成平台的所有技术文档，按照功能分类组织。
+本文按职责指向现行约束，不复制架构规则或计划状态。历史方案不能作为待执行队列；冲突按相同职责与适用范围核对，不按更新时间自动决定。
 
-## 📂 文档结构
+## 当前约束
 
-### 🏗️ `/architecture` - 架构设计文档
-- **[agent-design-patterns.md](architecture/agent-design-patterns.md)** - 多智能体系统设计模式
-  - Agent基类设计、工具系统、内存管理、提示词模板等核心架构
-- **[multi-agent-system-analysis.md](architecture/multi-agent-system-analysis.md)** - 多智能体系统分析报告
-  - 系统架构分析、Agent协作流程、技术实现细节
-- **[multi-agent-communication-architecture.md](architecture/multi-agent-communication-architecture.md)** - Multi-Agent通信技术文档
-  - 控制面/数据面/事件面/客户端面通信机制、时序、契约与容错策略
-- **[tools-configuration.md](architecture/tools-configuration.md)** - 工具系统配置指南
-  - Tool Registry设计、工具插件开发、配置管理
+| 领域 | 入口与适用范围 |
+| --- | --- |
+| Agent 开发原则 | [根指令](../AGENTS.md)、[后端状态边界](../backend/AGENTS.md) |
+| 单集架构与术语 | [Single-Episode Harness](architecture/single_episode_harness_architecture_20260311.md)、[术语对齐](architecture/mas_architecture_alignment_note_20260323.md) |
+| Runtime 状态与存储 | [runtime 设计](architecture/mas_runtime_control_plane_detailed_design_20260308.md)、[存储边界](architecture/runtime_control_plane_store_boundary_20260719.md) |
+| Agent / 数据库 / 应用层 | [数据库与 Agent 隔离](architecture/backend_database_agent_boundary_freeze_20260718.md)、[项目与 runtime 权威边界](architecture/project_runtime_authority_boundary_20260719.md) |
+| 场景、规划与交付 | [SceneContract v2](architecture/scene_contract_v2_freeze_20260329.md)、[规划/执行/交付/进度边界](architecture/planner_execution_output_progress_boundary_freeze_20260402.md) |
+| 报告、失败处置与最终发布 | [PLAN-069 A1–A5](plans/active/PLAN-20260808-069.md)：partial/failed 的接纳、处置、promotion 分属不同边界；旧 completed-only 协议规则按该计划的明确替代范围理解。实施与验收进度见计划索引，不能从规范推断已验收。 |
+| 记忆与上下文 | [编排/上下文/记忆边界](architecture/orchestration_context_memory_boundary_freeze_20260330.md)、[长期迁移护栏](deferred-plans/CURRENT.md) |
+| 创作与角色一致性 | [角色身份合同](architecture/character_identity_contract_v1_freeze_20260510.md)、[PLAN-065](plans/active/PLAN-20260510-065.md) |
+| 工具与合成 | [Composer 指南](agents/composer_guidelines.md)、[ReAct 提示原则](agents/react_prompting_guidelines.md) |
+| 数据库配置与部署 | [统一组装边界](architecture/database_composition_boundary_20260719.md)、[迁移](database-migrations.md)、[部署](deployment/deployment-guide.md) |
+| 测试与证据 | [测试策略](testing.md)、[后端测试入口](../backend/tests/README.md) |
 
-### 🚀 `/deployment` - 部署相关文档
-- **[deployment-guide.md](deployment/deployment-guide.md)** - 生产环境部署指南
-  - 完整部署流程、环境配置、验证测试、运维配置
-- **[windows-deployment-guide.md](deployment/windows-deployment-guide.md)** - Windows部署指南
-  - Windows环境特殊配置、IIS部署、服务管理
-- **[windows-native-setup.md](deployment/windows-native-setup.md)** - Windows原生环境设置
-  - 开发环境搭建、依赖安装、常见问题
+## 计划与文档治理
 
-### 💻 `/development` - 开发指南
-- **[claude-assistant.md](development/claude-assistant.md)** - Claude AI助手集成指南
-  - CLAUDE.md配置说明、AI辅助开发最佳实践
-- **[migration-to-uv.md](development/migration-to-uv.md)** - 迁移到UV包管理器
-  - UV工具介绍、迁移步骤、性能对比
-- **[optimization-summary.md](development/optimization-summary.md)** - 系统优化总结
-  - 性能优化记录、最佳实践、优化成果
+- [执行计划索引](plans/PLAN_INDEX.json) 是生命周期记录；计划正文状态是镜像。完成记录不能替代当前版本的运行证据。
+- [Deferred 索引](deferred-plans/DEFERRED_PLAN_INDEX.json) 独立管理延期架构护栏；CURRENT 是摘要。
+- [文档维护规则](governance.md) 定义替代关系、附件归属、证据锚点与本地/CI 检查范围。
+- [本轮治理计划](plans/active/PLAN-20260906-070.md) 记录治理执行进度，不接管业务架构或 PLAN-069 验收。
 
-### 🔌 `/api` - API文档
-- **[api-keys-guide.md](api/api-keys-guide.md)** - API密钥配置指南
-  - 各AI服务API申请流程、配置方法、费用说明
-- **[china-ai-services.md](api/china-ai-services.md)** - 中国AI服务集成
-  - 百度、阿里、智谱等国内AI服务接入
-- **[kimi-k2-update.md](api/kimi-k2-update.md)** - Kimi K2 API更新说明
-  - 新版API变更、迁移指南、功能增强
+## 使用与历史资料
 
-### 🧪 `/testing` - 测试文档
-- **[integration-test-guide.md](testing/integration-test-guide.md)** - 集成测试执行指南
-  - 测试环境搭建、测试用例说明、执行步骤
+新开发者先读 [项目 README](../README.md) 和上述职责表，再进入具体代码。部署可参考 [后端启动](../backend/README.md) 与 [Windows/WSL](deployment/windows-native-setup.md)。
 
-### 🔧 `/operations` - 运维文档
-- **[monitoring-guide.md](operations/monitoring-guide.md)** - 监控配置指南
-  - 监控指标、告警配置、日志管理
-- **[troubleshooting.md](operations/troubleshooting.md)** - 故障排查指南
-  - 常见问题、调试技巧、性能分析
+以下仅为历史研究材料，不能用于选择当前实现路径：
 
-## 📖 文档使用说明
+- [早期 Pipeline/ReAct 设计比较](architecture/agent-design-patterns.md)
+- [早期 MAS 分析](architecture/multi-agent-system-analysis.md)
+- [旧通信快照](architecture/multi-agent-communication-architecture.md)
+- [项目模式 MVP 草稿](architecture/project_mode_mvp.md)
+- [旧两段式工具调用提案](URGENT/video_agent_two_stage_migration.md)
 
-### 新手入门
-1. 先阅读项目根目录的 [README.md](../README.md) 了解项目概况
-2. 查看 [架构设计文档](architecture/agent-design-patterns.md) 理解系统设计
-3. 根据你的操作系统，参考相应的部署指南
-
-### 开发者
-1. 阅读 [开发指南](development/claude-assistant.md) 了解开发流程
-2. 查看 [API文档](api/api-keys-guide.md) 配置所需服务
-3. 参考 [测试指南](testing/integration-test-guide.md) 进行测试
-
-### 运维人员
-1. 使用 [部署清单](deployment/deployment-checklist.md) 进行部署
-2. 配置 [监控系统](operations/monitoring-guide.md)
-3. 准备 [故障排查手册](operations/troubleshooting.md)
-
-## 🔄 文档维护
-
-- 文档应保持与代码同步更新
-- 使用Markdown格式，遵循项目编码规范
-- 重要变更需要更新相关文档
-- 定期审查和更新过时内容
-
-## 📝 贡献指南
-
-欢迎贡献文档改进！请遵循以下原则：
-- 保持文档结构清晰
-- 使用简洁明了的语言
-- 包含实际的代码示例
-- 更新文档索引
-
----
-
-最后更新时间：2026-03-01
+更新日期：2026-09-06

@@ -7,6 +7,7 @@ import pytest
 
 from app.agents.base import BaseAgent
 from app.agents.image_generator import ImageGeneratorAgent
+from app.agents.utils.artifacts import issue_scene_output_acceptance_receipts
 from app.agents.utils.memory_helpers import ensure_agent_working_memory, ensure_mas_working_memory
 from app.services.memory_provider import build_memory_services
 
@@ -96,7 +97,6 @@ async def test_image_generator_does_not_block_cross_iteration_repeat_before_act(
             ],
         },
         input_data={},
-        db=None,
         iteration=1,
     )
 
@@ -109,7 +109,9 @@ async def test_image_generator_does_not_block_cross_iteration_repeat_before_act(
 
 
 @pytest.mark.asyncio
-async def test_image_generator_planner_prefers_remaining_scene_numbers_from_progress_read_model(monkeypatch):
+async def test_image_generator_planner_prefers_remaining_scene_numbers_from_progress_read_model(
+    monkeypatch,
+):
     agent = _build_agent(monkeypatch)
 
     monkeypatch.setattr(
@@ -164,3 +166,66 @@ async def test_image_generator_planner_prefers_remaining_scene_numbers_from_prog
     planned_call = action_plan["tool_calls"][0]["function"]
     assert planned_call["name"] == "image_prompt_composer.generate"
     assert planned_call["arguments"]["scene_number"] == 2
+
+
+def test_image_generator_completion_rejects_path_without_producer_receipt(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    mas = ensure_mas_working_memory(agent.workflow_state_id, service=agent.short_term_service)
+    mas.put("scene_overview", {"scenes": [{"scene_number": 1}]})
+    mas.put(
+        "scene_outputs.image",
+        {
+            1: {
+                "scene_number": 1,
+                "image_path": "/tmp/scene-1.png",
+            }
+        },
+    )
+
+    decision = agent._accept_completion_request(
+        stage="plan",
+        input_data={"workflow_state_id": agent.workflow_state_id},
+        plan_context={"progress_read_model": {"planned_scene_numbers": [1]}},
+        iteration_context=None,
+        iteration=1,
+    )
+
+    assert agent._get_plan_progress_kind() == "image"
+    assert decision["accepted"] is False
+    assert decision["missing_scene_numbers"] == [1]
+    assert decision["rejected_scene_outputs"] == [
+        {
+            "reason_code": "scene_output_acceptance_receipt_missing",
+            "scene_number": 1,
+        }
+    ]
+
+
+def test_image_generator_completion_accepts_producer_receipt(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    mas = ensure_mas_working_memory(agent.workflow_state_id, service=agent.short_term_service)
+    mas.put("scene_overview", {"scenes": [{"scene_number": 1}]})
+    artifacts, _receipts = issue_scene_output_acceptance_receipts(
+        kind="image",
+        artifacts=[
+            {
+                "success": True,
+                "scene_number": 1,
+                "image_path": "/tmp/scene-1.png",
+            }
+        ],
+        workflow_state_id=agent.workflow_state_id,
+    )
+    mas.put("scene_outputs.image", {1: artifacts[0]})
+
+    decision = agent._accept_completion_request(
+        stage="reflect",
+        input_data={"workflow_state_id": agent.workflow_state_id},
+        plan_context={"progress_read_model": {"planned_scene_numbers": [1]}},
+        iteration_context=None,
+        iteration=1,
+    )
+
+    assert decision["accepted"] is True
+    assert decision["accepted_scene_numbers"] == [1]
+    assert decision["missing_scene_numbers"] == []

@@ -10,33 +10,31 @@ Video Generator Agent - 基于 ReAct 的自主迭代实现。
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .react_agent import ReActAgent
-from .base import AgentError
-from ..models import AgentType, Task
 from ..core.config import settings
- 
 from ..core.video_config_manager import get_video_config
+from ..domain import AgentTaskReference, AgentType
+from ..services.video_execution_contract import get_video_generation_execution_contract
+from .base import AgentError
+from .memory.short_term.working_memory import WorkingMemory
+from .react_agent import ReActAgent
 from .utils import ensure_persisted_videos, make_storage_uploader
 from .utils.artifacts import (
+    evaluate_scene_output_acceptance,
+    finalize_scene_outputs,
+    issue_scene_output_acceptance_receipts,
     normalize_executed_calls_to_artifacts,
     persist_scene_outputs,
-    finalize_scene_outputs,
-    evaluate_scene_output_acceptance,
 )
-from .memory.short_term.working_memory import WorkingMemory
-from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.memory_helpers import get_mas_working_memory
-from ..services.video_execution_contract import get_video_generation_execution_contract
-
+from .utils.progress_snapshot import emit_progress_snapshot
 
 
 class VideoGeneratorAgent(ReActAgent):
     """ReAct 视频生成 Agent。"""
 
-    def __init__(self, llms=None,memory_services=None):
+    def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.VIDEO_GENERATOR,
             agent_name="video_generator",
@@ -56,14 +54,13 @@ class VideoGeneratorAgent(ReActAgent):
         # Orchestrator 负责预建；此处只读访问
         return self.wm
 
-
     # === PLAN =============================================================
     # 首轮 plan-only 已默认关闭，且不再自定义消息构造
 
     async def _think_and_plan(
         self,
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         """单段式纯 ReAct：本轮 FC 产出 tool_calls，并在紧随其后的 ACT 中执行。
@@ -97,13 +94,18 @@ class VideoGeneratorAgent(ReActAgent):
                 args = ((call or {}).get("function") or {}).get("arguments") or {}
                 if isinstance(args, str):
                     import json as _json
+
                     try:
                         args = _json.loads(args)
                     except Exception:
                         args = {}
                 if isinstance(args, dict) and args.get("scene_number") is not None:
                     try:
-                        sn = int(args.get("scene_number")) if str(args.get("scene_number")).isdigit() else None
+                        sn = (
+                            int(args.get("scene_number"))
+                            if str(args.get("scene_number")).isdigit()
+                            else None
+                        )
                         if sn is not None:
                             scene_numbers.append(sn)
                     except Exception:
@@ -209,7 +211,6 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        db,
         iteration: int,
     ) -> Dict[str, Any]:
         action = action_plan["action"]
@@ -241,7 +242,11 @@ class VideoGeneratorAgent(ReActAgent):
                 or []
             )
             if not tool_calls:
-                return {"action_performed": "observe", "generation_results": [], "executed_calls": []}
+                return {
+                    "action_performed": "observe",
+                    "generation_results": [],
+                    "executed_calls": [],
+                }
             plan_llm = action_plan.get("plan_llm") or params.get("plan_llm")
             wf_id = (
                 runtime.workflow_state_id
@@ -262,20 +267,31 @@ class VideoGeneratorAgent(ReActAgent):
             # 执行本轮 FC 产出的调用序列（顺序执行，不做阶段过滤）
             executed_calls = await self.execute_tool_calls(tool_calls)
             # 规范化为 artifacts（视频），随后最小形态映射
-            artifacts = normalize_executed_calls_to_artifacts(executed_calls, kind="video", include_prompt=True)
+            artifacts = normalize_executed_calls_to_artifacts(
+                executed_calls, kind="video", include_prompt=True
+            )
             normalized_results: List[Dict[str, Any]] = []
             for a in artifacts:
-                normalized_results.append({
-                    "success": True,
-                    "scene_number": a.get("scene_number"),
-                    "video_url": a.get("video_url", ""),
-                    "video_path": a.get("file_path") or a.get("video_path", ""),
-                    "prompt_text": a.get("prompt_text", ""),
-                    "duration": a.get("duration_sec") or 0,
-                    "metadata": {},
-                })
+                normalized_results.append(
+                    {
+                        "success": True,
+                        "scene_number": a.get("scene_number"),
+                        "video_url": a.get("video_url", ""),
+                        "video_path": a.get("file_path") or a.get("video_path", ""),
+                        "prompt_text": a.get("prompt_text", ""),
+                        "duration": a.get("duration_sec") or 0,
+                        "metadata": {},
+                    }
+                )
             normalized_results = await self._ensure_video_persistence(normalized_results)
-            shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
+            normalized_results, delivery_receipts = issue_scene_output_acceptance_receipts(
+                kind="video",
+                artifacts=normalized_results,
+                workflow_state_id=wf_id,
+            )
+            shared_wm = (
+                get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
+            )
             normalized_results = await persist_scene_outputs(
                 artifacts=normalized_results,
                 kind="video",
@@ -283,13 +299,11 @@ class VideoGeneratorAgent(ReActAgent):
                 shared_memory=shared_wm,
                 include_prompt=True,
             )
-            delivery_receipts = self._build_delivery_receipts(
-                normalized_results,
-                workflow_state_id=wf_id,
-            )
             try:
                 local_count = sum(1 for r in normalized_results if r.get("video_path"))
-                url_only = sum(1 for r in normalized_results if r.get("video_url") and not r.get("video_path"))
+                url_only = sum(
+                    1 for r in normalized_results if r.get("video_url") and not r.get("video_path")
+                )
                 self.logger.info(
                     "VIDEO_PERSISTENCE summary: total=%s local_paths=%s url_only=%s",
                     len(normalized_results),
@@ -317,19 +331,14 @@ class VideoGeneratorAgent(ReActAgent):
 
         raise AgentError(f"未知的动作：{action}")
 
-    
-
     # 旧版执行消息构造（基于 ready 子集）已废弃：改为使用 build_neutral_act_messages 注入完整 OBS
 
-
-    
-
-    async def _ensure_video_persistence(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _ensure_video_persistence(
+        self, results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         if not results:
             return results
         uploader = self._get_video_uploader()
-        if not uploader:
-            return results
         return await ensure_persisted_videos(results, uploader)
 
     def _resolve_execution_contract(
@@ -339,22 +348,16 @@ class VideoGeneratorAgent(ReActAgent):
     ) -> Dict[str, Any]:
         return get_video_generation_execution_contract(
             input_data,
-            workflow_state_id=str(workflow_id or ""),
+            workflow_state_id=workflow_id,
         )
 
     def _build_execution_context(
         self,
         execution_contract: Dict[str, Any],
     ) -> Dict[str, Any]:
-        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
-        if not isinstance(storage, dict):
-            storage = {}
-        workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
         context: Dict[str, Any] = {
             "execution_contract": dict(execution_contract or {}),
         }
-        if workflow_state_id:
-            context["workflow_state_id"] = workflow_state_id
         return context
 
     def _bind_execution_context_to_tool_calls(
@@ -408,73 +411,6 @@ class VideoGeneratorAgent(ReActAgent):
             bound_calls.append(call_copy)
         return bound_calls
 
-    def _build_delivery_receipts(
-        self,
-        results: List[Dict[str, Any]],
-        *,
-        workflow_state_id: str,
-    ) -> List[Dict[str, Any]]:
-        receipts: List[Dict[str, Any]] = []
-        accepted_at = datetime.now(timezone.utc).isoformat()
-        for item in results or []:
-            if not isinstance(item, dict) or not item.get("success"):
-                continue
-            scene_number = item.get("scene_number")
-            try:
-                scene_number = int(scene_number)
-            except Exception:
-                continue
-            video_url = str(item.get("video_url") or "").strip()
-            video_path = str(item.get("video_path") or "").strip()
-            if not video_url and not video_path:
-                continue
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            storage_diag = item.get("storage") if isinstance(item.get("storage"), dict) else {}
-            if not storage_diag and isinstance(metadata, dict):
-                storage_diag = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
-            fallback_reasons = item.get("fallback_reasons") if isinstance(item.get("fallback_reasons"), list) else []
-            if not fallback_reasons and isinstance(metadata, dict):
-                diagnostics = metadata.get("diagnostics")
-                if isinstance(diagnostics, list):
-                    fallback_reasons = [
-                        str(entry.get("fallback_reason"))
-                        for entry in diagnostics
-                        if isinstance(entry, dict) and entry.get("fallback_reason")
-                    ]
-            storage_status = str(storage_diag.get("status") or "").strip().lower() if storage_diag else ""
-            storage_fallback_reason = (
-                str(storage_diag.get("fallback_reason") or "").strip() if storage_diag else ""
-            )
-            if (
-                not video_path
-                and not storage_fallback_reason
-                and "artifact_not_persisted" not in fallback_reasons
-            ):
-                fallback_reasons = list(fallback_reasons) + ["artifact_not_persisted"]
-            if storage_fallback_reason and storage_fallback_reason not in fallback_reasons:
-                fallback_reasons = list(fallback_reasons) + [storage_fallback_reason]
-            is_accepted = bool(video_path) and storage_status != "failed"
-            receipt = {
-                "scene_number": scene_number,
-                "status": "accepted" if is_accepted else "failed",
-                "artifact_kind": "video",
-                "delivery_surface": "scene_outputs.video",
-                "delivery_ref": f"scene_outputs.video.{scene_number}",
-                "workflow_state_id": str(workflow_state_id or ""),
-            }
-            if is_accepted:
-                receipt["accepted_at"] = accepted_at
-            else:
-                receipt["failure_reason"] = storage_fallback_reason or "artifact_not_persisted"
-            if storage_diag:
-                receipt["storage_status"] = str(storage_diag.get("status") or "")
-                if storage_fallback_reason:
-                    receipt["storage_fallback_reason"] = storage_fallback_reason
-            if fallback_reasons:
-                receipt["fallback_reasons"] = sorted(set(str(reason) for reason in fallback_reasons if reason))
-            receipts.append(receipt)
-        return receipts
-
     def _collect_accepted_video_scene_numbers(
         self,
         workflow_state_id: str,
@@ -503,10 +439,9 @@ class VideoGeneratorAgent(ReActAgent):
         if not isinstance(tool_calls, list) or not tool_calls:
             return
 
-        storage = execution_contract.get("storage") if isinstance(execution_contract, dict) else {}
-        if not isinstance(storage, dict):
-            storage = {}
-        constraints = execution_contract.get("constraints") if isinstance(execution_contract, dict) else {}
+        constraints = (
+            execution_contract.get("constraints") if isinstance(execution_contract, dict) else {}
+        )
         if not isinstance(constraints, dict):
             constraints = {}
 
@@ -535,25 +470,29 @@ class VideoGeneratorAgent(ReActAgent):
             if not isinstance(args, dict):
                 raise AgentError("视频生成工具参数必须是对象")
 
-            expected_workflow_state_id = str(storage.get("workflow_state_id") or "").strip()
-            explicit_workflow_state_id = str(args.get("workflow_state_id") or "").strip()
-            if explicit_workflow_state_id and expected_workflow_state_id and explicit_workflow_state_id != expected_workflow_state_id:
-                raise AgentError(
-                    "视频生成调用提供了与 execution context 冲突的 workflow_state_id"
-                )
+            expected_workflow_state_id = execution_contract.get("workflow_state_id")
+            explicit_workflow_state_id = args.get("workflow_state_id")
+            if explicit_workflow_state_id is not None and (
+                type(explicit_workflow_state_id) is not str
+                or not explicit_workflow_state_id
+                or explicit_workflow_state_id != explicit_workflow_state_id.strip()
+            ):
+                raise AgentError("视频生成调用的 workflow_state_id 必须是规范非空字符串")
+            if (
+                explicit_workflow_state_id
+                and expected_workflow_state_id
+                and explicit_workflow_state_id != expected_workflow_state_id
+            ):
+                raise AgentError("视频生成调用提供了与 execution context 冲突的 workflow_state_id")
 
-            if isinstance(required_generate_audio, bool):
+            if type(required_generate_audio) is bool:
                 actual_generate_audio = args.get("generate_audio")
                 if actual_generate_audio is None:
                     continue
-                if not isinstance(actual_generate_audio, bool):
-                    raise AgentError(
-                        "视频生成调用的 generate_audio 必须为 boolean"
-                    )
-                if bool(actual_generate_audio) != bool(required_generate_audio):
-                    raise AgentError(
-                        "视频生成调用提供了与 execution context 冲突的 generate_audio"
-                    )
+                if type(actual_generate_audio) is not bool:
+                    raise AgentError("视频生成调用的 generate_audio 必须为 boolean")
+                if actual_generate_audio != required_generate_audio:
+                    raise AgentError("视频生成调用提供了与 execution context 冲突的 generate_audio")
 
     def _get_video_uploader(self):
         if self._video_uploader is not None:
@@ -591,7 +530,9 @@ class VideoGeneratorAgent(ReActAgent):
         reflection: Optional[Dict[str, Any]] = None,
         action_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        progress_read_model = plan_context.get("progress_read_model") if isinstance(plan_context, dict) else {}
+        progress_read_model = (
+            plan_context.get("progress_read_model") if isinstance(plan_context, dict) else {}
+        )
         if not isinstance(progress_read_model, dict):
             progress_read_model = {}
         planned_scene_numbers = _coerce_int_list(progress_read_model.get("planned_scene_numbers"))
@@ -633,15 +574,23 @@ class VideoGeneratorAgent(ReActAgent):
         self,
         action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         performed = action_result.get("action_performed")
         if performed in {"observe"}:
             return {"success": True, "reflection_summary": "本轮仅观察，未执行工具。"}
 
-        completed_now = [r for r in (action_result.get("generation_results") or []) if isinstance(r, dict) and r.get("success")]
-        failed_now = [r for r in (action_result.get("generation_results") or []) if isinstance(r, dict) and not r.get("success")]
+        completed_now = [
+            r
+            for r in (action_result.get("generation_results") or [])
+            if isinstance(r, dict) and r.get("success")
+        ]
+        failed_now = [
+            r
+            for r in (action_result.get("generation_results") or [])
+            if isinstance(r, dict) and not r.get("success")
+        ]
 
         summary_bits: List[str] = []
         if completed_now:
@@ -668,7 +617,7 @@ class VideoGeneratorAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="video",
             workflow_id=wf_id or None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
 
         result = dict(base or {})
@@ -685,7 +634,6 @@ class VideoGeneratorAgent(ReActAgent):
             "gate_triggers": ["workflow_video_audio_delivery"],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
             "reflection": {
-                "completion_state": "completed",
                 "reported_gaps": [],
                 "reported_hints": [],
                 "completed_scene_count": len(finals),
@@ -698,7 +646,7 @@ class VideoGeneratorAgent(ReActAgent):
     async def _finalize_incomplete_results(
         self,
         context: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
     ) -> Dict[str, Any]:
         base = await super()._finalize_incomplete_results(context, task)
         runtime = self.wm
@@ -711,7 +659,7 @@ class VideoGeneratorAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="video",
             workflow_id=wf_id or None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
 
         result = dict(base or {})
@@ -728,7 +676,6 @@ class VideoGeneratorAgent(ReActAgent):
             "gate_triggers": ["workflow_video_audio_delivery"],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.video"}],
             "reflection": {
-                "completion_state": str(result.get("subtask_state") or "partial"),
                 "reported_gaps": ["scene_video_generation_incomplete"],
                 "reported_hints": [],
                 "completed_scene_count": len(finals),

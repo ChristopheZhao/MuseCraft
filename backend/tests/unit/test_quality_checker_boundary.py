@@ -9,17 +9,45 @@ import pytest
 from app.agents.adapters.memory_views import build_quality_checker_context
 from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
-from app.agents.quality_checker import QualityCheckerAgent
+from app.agents.quality_checker import QualityAnalysisUnavailable, QualityCheckerAgent
 from app.agents.utils.memory_helpers import write_shared_fact
 from app.core.config import settings
-from app.models import AgentType
-from app.services.context_assembler import ContextContractAssembler
+from app.domain import AgentType
 from app.services.character_identity_contract import normalize_character_identity_contract
+from app.services.context_assembler import ContextContractAssembler
 from app.services.scene_info_reference_service import persist_scene_info_ref
+
+
+def test_quality_checker_exposes_no_fabricated_quality_fallback_helpers():
+    for method_name in (
+        "_perform_image_based_quality_check",
+        "_get_content_recommendations",
+        "_generate_quality_summary",
+        "_generate_review_notes",
+    ):
+        assert not hasattr(QualityCheckerAgent, method_name)
 
 
 def _build_service() -> WorkingMemoryService:
     return WorkingMemoryService(store_factory=lambda: InMemoryShortTermStore())
+
+
+def _quality_ai_assessment(
+    *,
+    score: int = 100,
+    grade: str = "Excellent",
+    approval_status: str = "approved",
+    requires_human_review: bool = False,
+) -> dict:
+    return {
+        "quality_score": score,
+        "quality_grade": grade,
+        "approval_status": approval_status,
+        "requires_human_review": requires_human_review,
+        "overall_assessment": "LLM quality assessment",
+        "issues": [],
+        "recommendations": [],
+    }
 
 
 def _load_intro_outro_real_sample() -> tuple[dict, dict]:
@@ -41,11 +69,16 @@ def _load_intro_outro_real_sample() -> tuple[dict, dict]:
     return published, composer
 
 
-def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypatch):
+def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(
+    monkeypatch,
+    tmp_path,
+):
     service = _build_service()
     workflow_id = "wf-quality-boundary"
+    output_root = tmp_path / "final_outputs"
+    expected_video_path = (output_root / "videos" / "final.mp4").resolve()
 
-    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", "/tmp/final_outputs")
+    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", str(output_root))
     monkeypatch.setattr(
         "app.agents.adapters.memory_views.probe_local_video_metadata_sync",
         lambda path: {
@@ -55,7 +88,7 @@ def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypat
             "file_size_mb": 16.24,
             "resolution": "1920x1080",
         }
-        if path == "/tmp/final_outputs/videos/final.mp4"
+        if Path(path) == expected_video_path
         else {},
     )
 
@@ -85,7 +118,7 @@ def test_build_quality_checker_context_normalizes_boundary_from_mas_wm(monkeypat
     context = result["context"]
     diagnostics = result["diagnostics"]
 
-    assert context["final_video"]["path"] == "/tmp/final_outputs/videos/final.mp4"
+    assert Path(context["final_video"]["path"]) == expected_video_path
     assert context["final_video"]["url"] == "/files/outputs/videos/final.mp4"
     assert context["concept_plan"]["overview"] == "original brief"
     assert context["original_requirements"]["overview"] == "original brief"
@@ -365,12 +398,14 @@ def test_real_sample_scene_type_is_absent_across_quality_checker_inputs():
     assert result["diagnostics"]["timeline_source"] == "scene_overview"
 
 
-def test_context_assembler_projects_quality_checker_static_context(monkeypatch):
+def test_context_assembler_projects_quality_checker_static_context(monkeypatch, tmp_path):
     service = _build_service()
     workflow_id = "wf-quality-assembler"
     assembler = ContextContractAssembler(memory_services=SimpleNamespace(short_term=service))
+    output_root = tmp_path / "final_outputs"
+    expected_video_path = (output_root / "videos" / "final.mp4").resolve()
 
-    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", "/tmp/final_outputs")
+    monkeypatch.setattr(settings, "FINAL_OUTPUT_ROOT", str(output_root))
     monkeypatch.setattr(
         "app.agents.adapters.memory_views.probe_local_video_metadata_sync",
         lambda _path: {"duration": 12.5, "format": "mp4"},
@@ -395,7 +430,7 @@ def test_context_assembler_projects_quality_checker_static_context(monkeypatch):
         workflow_data={},
     )
 
-    assert boundary["static_context"]["final_video"]["path"] == "/tmp/final_outputs/videos/final.mp4"
+    assert Path(boundary["static_context"]["final_video"]["path"]) == expected_video_path
     assert boundary["static_context"]["video_metadata"]["duration"] == 12.5
     assert boundary["_assembler_diagnostics"]["quality_checker_context"]["status"] == "resolved_with_fallbacks"
 
@@ -405,7 +440,7 @@ def test_content_quality_treats_unlabeled_scene_types_as_unverified_not_missing(
     agent.logger = logging.getLogger("test.quality_checker.scene_types")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
 
@@ -478,13 +513,13 @@ def test_content_quality_treats_unlabeled_scene_types_as_unverified_not_missing(
         )
     )
 
-    assert "Missing introduction scene" in labeled_result["issues"]
-    assert "Missing conclusion scene" in labeled_result["issues"]
+    assert "Missing introduction scene" not in labeled_result["issues"]
+    assert "Missing conclusion scene" not in labeled_result["issues"]
     assert labeled_result["scene_breakdown"]["scene_type_distribution"] == {
         "main_content": 3,
     }
     assert labeled_result["scene_breakdown"]["scene_type_label_status"] == "complete"
-    assert labeled_result["scene_type_diagnostics"]["intro_outro_check_applied"] is True
+    assert labeled_result["scene_type_diagnostics"]["intro_outro_check_applied"] is False
 
 
 def test_content_quality_includes_role_continuity_contract_diagnostics():
@@ -492,7 +527,7 @@ def test_content_quality_includes_role_continuity_contract_diagnostics():
     agent.logger = logging.getLogger("test.quality_checker.role_continuity")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
 
@@ -554,7 +589,7 @@ def test_content_quality_uses_passed_role_continuity_visual_observation():
     agent.logger = logging.getLogger("test.quality_checker.role_observation_passed")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
 
@@ -596,7 +631,7 @@ def test_content_quality_uses_failed_role_continuity_visual_observation():
     agent.logger = logging.getLogger("test.quality_checker.role_observation_failed")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
 
@@ -657,6 +692,7 @@ def test_quality_assessment_caps_excellent_when_role_continuity_contract_missing
             technical_quality={"score": 100, "issues": [], "recommendations": []},
             content_quality={
                 "score": 100,
+                "ai_analysis": _quality_ai_assessment(),
                 "issues": [],
                 "recommendations": [],
                 "contract_readiness": {"status": "missing_contract", "score": 0},
@@ -693,6 +729,7 @@ def test_quality_assessment_caps_excellent_when_role_continuity_visual_evidence_
             technical_quality={"score": 100, "issues": [], "recommendations": []},
             content_quality={
                 "score": 100,
+                "ai_analysis": _quality_ai_assessment(),
                 "issues": [],
                 "recommendations": [],
                 "contract_readiness": {"status": "ready", "score": 100},
@@ -732,6 +769,7 @@ def test_quality_assessment_caps_excellent_when_role_continuity_failed():
             technical_quality={"score": 100, "issues": [], "recommendations": []},
             content_quality={
                 "score": 100,
+                "ai_analysis": _quality_ai_assessment(),
                 "issues": [],
                 "recommendations": [],
                 "role_continuity_score": 40,
@@ -763,6 +801,7 @@ def test_quality_assessment_caps_when_media_completeness_incomplete():
             technical_quality={"score": 100, "issues": [], "recommendations": []},
             content_quality={
                 "score": 100,
+                "ai_analysis": _quality_ai_assessment(),
                 "issues": [],
                 "recommendations": [],
                 "media_completeness": {
@@ -824,7 +863,7 @@ def test_real_sample_does_not_raise_intro_outro_issues_when_scene_types_are_abse
     agent.logger = logging.getLogger("test.quality_checker.real_sample")
 
     async def _fake_ai_content_analysis(*_args, **_kwargs):
-        return {"overall_assessment": "stub"}
+        return _quality_ai_assessment()
 
     agent._ai_content_analysis = _fake_ai_content_analysis
 
@@ -862,7 +901,12 @@ async def test_ai_content_analysis_renders_original_requirements_and_video_metad
             "content": json.dumps(
                 {
                     "overall_assessment": "ok",
-                    "quality_score": 8.0,
+                    "quality_score": 80,
+                    "quality_grade": "Good",
+                    "approval_status": "approved",
+                    "requires_human_review": False,
+                    "issues": [],
+                    "recommendations": [],
                 },
                 ensure_ascii=False,
             )
@@ -901,3 +945,99 @@ async def test_ai_content_analysis_renders_original_requirements_and_video_metad
     assert json.loads(captured["concept_plan"])["overview"] == "effective plan"
     assert json.loads(captured["original_requirements"])["overview"] == "original brief"
     assert json.loads(captured["video_metadata"])["duration"] == 12.5
+
+
+def test_quality_assessment_uses_llm_semantic_decision_without_rule_weighting():
+    agent = object.__new__(QualityCheckerAgent)
+
+    assessment = asyncio.run(
+        agent._generate_quality_assessment(
+            technical_quality={"score": 100, "issues": [], "recommendations": []},
+            content_quality={
+                "score": 23,
+                "ai_analysis": _quality_ai_assessment(
+                    score=23,
+                    grade="Unacceptable",
+                    approval_status="rejected",
+                    requires_human_review=True,
+                ),
+                "issues": [],
+                "recommendations": [],
+            },
+            compliance_check={"score": 100, "issues": []},
+        )
+    )
+
+    assert assessment["raw_overall_score"] == 23
+    assert assessment["overall_score"] == 23
+    assert assessment["approval_status"] == "rejected"
+    assert assessment["requires_human_review"] is True
+
+
+@pytest.mark.asyncio
+async def test_quality_checker_reports_partial_when_llm_assessment_is_unavailable():
+    agent = object.__new__(QualityCheckerAgent)
+    quality_inputs = {
+        "scene_overview": {},
+        "concept_plan": {},
+        "original_requirements": {},
+        "final_video_url": "/files/final.mp4",
+        "final_video_path": "",
+        "composition_timeline": [],
+        "media_completeness": {},
+        "video_metadata": {},
+        "context_diagnostics": {},
+        "character_identity_bible": {},
+        "scene_character_locks": [],
+        "quality_expectations": {},
+        "role_continuity_observation": {},
+        "character_identity_diagnostics": [],
+        "character_identity_contract_carrier": {},
+    }
+
+    agent._validate_input = lambda *_args, **_kwargs: None
+    agent._require_quality_inputs = lambda _input: quality_inputs
+
+    async def _progress(*_args, **_kwargs):
+        return None
+
+    async def _technical(*_args, **_kwargs):
+        return {"score": 100, "issues": [], "recommendations": []}
+
+    async def _content(*_args, **_kwargs):
+        raise QualityAnalysisUnavailable("provider unavailable")
+
+    agent._update_progress = _progress
+    agent._analyze_technical_quality = _technical
+    agent._analyze_content_quality = _content
+
+    result = await agent._execute_impl(
+        SimpleNamespace(
+            input_data=SimpleNamespace(
+                to_dict=lambda: {"workflow_state_id": "wf-quality-partial"}
+            )
+        )
+    )
+
+    assert result["quality_score"] is None
+    assert result["requires_human_review"] is True
+    assert result["orchestration_report"]["status"] == "partial"
+    assert result["orchestration_report"]["reflection"]["reported_gaps"] == [
+        "quality_ai_analysis_unavailable"
+    ]
+
+
+def test_style_text_is_evidence_not_a_deterministic_compliance_gate():
+    agent = object.__new__(QualityCheckerAgent)
+
+    result = asyncio.run(
+        agent._check_requirement_compliance(
+            {"duration": 30, "video_style": "documentary"},
+            {"visual_style": "observational realism"},
+            [],
+            {"duration": 30},
+        )
+    )
+
+    assert "style_compliance" not in result["checks"]
+    assert result["issues"] == []

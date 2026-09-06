@@ -1,56 +1,40 @@
-import importlib
-import sys
-from enum import Enum
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
-from app.models.task import TaskType
-
-
-class _DummyMonitoringService:
-    async def record_metric(self, *args, **kwargs):
-        return None
-
-
-class _DummyMetricType(str, Enum):
-    COUNTER = "counter"
-    HISTOGRAM = "histogram"
-    GAUGE = "gauge"
-    TIMER = "timer"
+from app.domain import TaskType
+from app.services.memory_writer import (
+    MemoryWriteError,
+    MemoryWriter,
+    MemoryWriteReason,
+    MemoryWriteStatus,
+)
 
 
 class _FakeLongTermService:
-    def __init__(self):
+    def __init__(self, *, error: Exception | None = None):
         self.calls = []
+        self.error = error
 
     async def store_memory(self, **kwargs):
         self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
         return f"mem-{len(self.calls)}"
 
 
-@pytest.fixture
-def memory_writer_module(monkeypatch):
-    stub_module = ModuleType("app.services.monitoring_service")
-    stub_module.MonitoringService = _DummyMonitoringService
-    stub_module.MetricType = _DummyMetricType
-    monkeypatch.setitem(sys.modules, "app.services.monitoring_service", stub_module)
-    sys.modules.pop("app.services.memory_writer", None)
-    module = importlib.import_module("app.services.memory_writer")
-    return importlib.reload(module)
+def _writer(long_term, *, failure_policy="degrade"):
+    return MemoryWriter(
+        SimpleNamespace(long_term=long_term),
+        failure_policy=failure_policy,
+    )
 
 
 @pytest.mark.asyncio
-async def test_memory_writer_ignores_runtime_and_planning_fields(memory_writer_module):
+async def test_memory_writer_returns_typed_skip_for_unrecognized_runtime_fields():
     long_term = _FakeLongTermService()
-    writer = memory_writer_module.MemoryWriter(
-        SimpleNamespace(
-            global_service=object(),
-            long_term=long_term,
-        )
-    )
 
-    result = await writer.write(
+    receipt = await _writer(long_term).write(
         TaskType.VIDEO_GENERATION,
         workflow_id="wf-boundary-ignore",
         scene_number=3,
@@ -63,21 +47,17 @@ async def test_memory_writer_ignores_runtime_and_planning_fields(memory_writer_m
         },
     )
 
-    assert result is None
+    assert receipt.status is MemoryWriteStatus.SKIPPED
+    assert receipt.reason_code is MemoryWriteReason.NO_MATCHING_FACT
+    assert receipt.memory_id is None
     assert long_term.calls == []
 
 
 @pytest.mark.asyncio
-async def test_memory_writer_persists_only_generation_metadata_for_media_outputs(memory_writer_module):
+async def test_memory_writer_returns_typed_receipt_for_generation_metadata():
     long_term = _FakeLongTermService()
-    writer = memory_writer_module.MemoryWriter(
-        SimpleNamespace(
-            global_service=object(),
-            long_term=long_term,
-        )
-    )
 
-    result = await writer.write(
+    receipt = await _writer(long_term).write(
         TaskType.VIDEO_GENERATION,
         workflow_id="wf-boundary-meta",
         scene_number=7,
@@ -88,7 +68,9 @@ async def test_memory_writer_persists_only_generation_metadata_for_media_outputs
         },
     )
 
-    assert result == "mem-1"
+    assert receipt.status is MemoryWriteStatus.WRITTEN
+    assert receipt.reason_code is MemoryWriteReason.STORED
+    assert receipt.memory_id == "mem-1"
     assert len(long_term.calls) == 1
     persisted = long_term.calls[0]
     assert persisted["content"] == {
@@ -98,3 +80,31 @@ async def test_memory_writer_persists_only_generation_metadata_for_media_outputs
         "generation_metadata": {"provider": "seedance", "duration": 10},
     }
     assert persisted["metadata"]["content_type"] == "generation_metadata"
+
+
+@pytest.mark.asyncio
+async def test_optional_memory_failure_degrades_with_typed_reason():
+    receipt = await _writer(_FakeLongTermService(error=RuntimeError("memory unavailable"))).write(
+        TaskType.VIDEO_GENERATION,
+        workflow_id="wf-memory-degrade",
+        output={"metadata": {"provider": "configured-provider"}},
+    )
+
+    assert receipt.status is MemoryWriteStatus.DEGRADED
+    assert receipt.reason_code is MemoryWriteReason.OPTIONAL_WRITE_FAILED
+    assert "memory unavailable" in str(receipt.diagnostic)
+
+
+@pytest.mark.asyncio
+async def test_required_memory_failure_raises_typed_error():
+    with pytest.raises(MemoryWriteError) as caught:
+        await _writer(
+            _FakeLongTermService(error=RuntimeError("memory unavailable")),
+            failure_policy="fail",
+        ).write(
+            TaskType.VIDEO_GENERATION,
+            workflow_id="wf-memory-fail",
+            output={"metadata": {"provider": "configured-provider"}},
+        )
+
+    assert caught.value.reason_code is MemoryWriteReason.OPTIONAL_WRITE_FAILED

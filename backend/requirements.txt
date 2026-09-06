@@ -2,7 +2,6 @@
 #    uv export --project backend --frozen --format requirements-txt --no-hashes --no-emit-project --output-file backend/requirements.txt
 aiofiles==23.2.1
 aiohttp==3.9.1
-aiomysql==0.2.0
 aiosignal==1.4.0
 alembic==1.13.0
 aliyun-python-sdk-core==2.16.0
@@ -80,7 +79,6 @@ pydantic==2.5.0
 pydantic-core==2.14.1
 pydantic-settings==2.1.0
 pygments==2.17.2
-pymysql==1.1.1
 python-dateutil==2.9.0.post0
 python-decouple==3.8
 python-dotenv==1.1.1

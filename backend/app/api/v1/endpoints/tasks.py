@@ -5,21 +5,33 @@ import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ....core.database import get_db
-from ....models import Task, TaskStatus, TaskType, Scene, Resource, WorkflowSession, WorkflowSessionStatus
-from ....services.task_queue import TaskQueueService, cancel_celery_task
-from ....services.runtime_session_service import RuntimeSessionService
-from ....services.task_execution_policy import (
-    is_terminal_task_status,
-    is_terminal_runtime_status,
-)
 from ....core.config import settings
-
+from ....core.database import get_db
+from ....domain import (
+    JsonObjectPayload,
+    RuntimeSessionRecord,
+    RuntimeStoreError,
+    RuntimeStoreReason,
+    TaskStatus,
+    TaskType,
+)
+from ....infrastructure import SqlAlchemyRuntimeAttemptStore
+from ....models import Resource, Scene, Task
+from ....services.runtime_read_model_service import (
+    RuntimeReadModelPresenter,
+    RuntimeReadModelService,
+)
+from ....services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
+from ....services.runtime_session_control_plane import RuntimeSessionControlPlane
+from ....services.script_gate_decision_control_plane import ScriptGateDecisionControlPlane
+from ....services.task_execution_policy import is_terminal_runtime_status, is_terminal_task_status
+from ....services.task_queue import TaskQueueService, cancel_celery_task
 
 router = APIRouter()
 
@@ -30,32 +42,69 @@ def _val(x):
     return getattr(x, "value", x)
 
 
-def _schedule_task_execution(background_tasks: BackgroundTasks, task_db_id: int) -> None:
+def _schedule_task_execution(background_tasks: BackgroundTasks, task_id: str) -> None:
     """Queue tasks by default; allow local in-process execution only via explicit debug switch."""
     logger = logging.getLogger("tasks_api")
     if not bool(getattr(settings, "TASKS_API_ENABLE_IN_PROCESS_RUNNER", False)):
         task_queue = TaskQueueService()
-        background_tasks.add_task(task_queue.queue_task, task_db_id)
-        logger.info("Task %s queued through background worker", task_db_id)
+        background_tasks.add_task(task_queue.queue_task, task_id)
+        logger.info("Task %s queued through background worker", task_id)
         return
 
     try:
         from ....services.task_queue import sync_process_video_task
     except Exception as exc:
-        logger.warning("Debug in-process runner unavailable for task %s: %s", task_db_id, exc, exc_info=True)
+        logger.warning("Debug in-process runner unavailable for task %s: %s", task_id, exc, exc_info=True)
         task_queue = TaskQueueService()
-        background_tasks.add_task(task_queue.queue_task, task_db_id)
+        background_tasks.add_task(task_queue.queue_task, task_id)
         return
 
     def run_task() -> None:
         try:
-            result = sync_process_video_task(task_db_id)
-            logger.info("Direct runtime execution result for task %s: %s", task_db_id, result)
+            result = sync_process_video_task(task_id)
+            logger.info("Direct runtime execution result for task %s: %s", task_id, result)
         except Exception as exc:
-            logger.error("Direct runtime execution failed for task %s: %s", task_db_id, exc, exc_info=True)
+            logger.error("Direct runtime execution failed for task %s: %s", task_id, exc, exc_info=True)
 
     threading.Thread(target=run_task, daemon=True).start()
-    logger.info("Task %s started in background thread (debug in-process runner enabled)", task_db_id)
+    logger.info("Task %s started in background thread (debug in-process runner enabled)", task_id)
+
+
+async def _load_latest_runtime_session_id(
+    db: AsyncSession,
+    task_id: str,
+) -> Optional[int]:
+    def _load(sync_db):
+        record = SqlAlchemyRuntimeAttemptStore(sync_db).load_latest_session_for_task(
+            task_id
+        )
+        return record.session_id if record is not None else None
+
+    return await db.run_sync(_load)
+
+
+async def _create_quick_runtime_session(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    expected_task_status: TaskStatus,
+    expected_latest_session_id: Optional[int],
+    input_payload: Dict[str, Any],
+) -> RuntimeSessionRecord:
+    def _create(sync_db):
+        return RuntimeSessionBootstrapControlPlane(
+            SqlAlchemyRuntimeAttemptStore(sync_db)
+        ).create_quick_session(
+            task_id=task_id,
+            expected_task_status=expected_task_status,
+            expected_latest_session_id=expected_latest_session_id,
+            input_payload=JsonObjectPayload.from_mapping(
+                input_payload,
+                field_path="tasks_api.runtime_input_payload",
+            ),
+        )
+
+    return await db.run_sync(_create)
 
 
 # Pydantic models for request/response
@@ -193,6 +242,22 @@ def _serialize_quick_run_summary(task: Task) -> QuickRunSummaryResponse:
     )
 
 
+def _load_runtime_model_sync(sync_db, task_id: str):
+    return RuntimeReadModelService(
+        SqlAlchemyRuntimeAttemptStore(sync_db)
+    ).load_for_task(task_id)
+
+
+async def _load_runtime_view(
+    db: AsyncSession,
+    task_id: str,
+) -> Optional[Dict[str, Any]]:
+    model = await db.run_sync(lambda sync_db: _load_runtime_model_sync(sync_db, task_id))
+    if model is None:
+        return None
+    return RuntimeReadModelPresenter.to_payload(model).to_dict()
+
+
 async def _find_current_quick_run_for_session(
     db: AsyncSession,
     session_id: str,
@@ -208,8 +273,8 @@ async def _find_current_quick_run_for_session(
 
     for task in candidate_tasks:
         try:
-            runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-        except ValueError as exc:
+            runtime_view = await _load_runtime_view(db, str(task.task_id))
+        except RuntimeStoreError as exc:
             logger.error(
                 "Aborting quick run discovery after runtime projection integrity error: task_id=%s session_id=%s detail=%s",
                 getattr(task, "task_id", None),
@@ -255,7 +320,24 @@ async def _cancel_task_for_replacement(
             )
 
     _set_task_queue_handle(task, None)
-    await RuntimeSessionService.mark_session_cancelled_for_task(db, task)
+
+    def _cancel_runtime(sync_db):
+        store = SqlAlchemyRuntimeAttemptStore(sync_db)
+        model = RuntimeReadModelService(store).load_for_task(str(task.task_id))
+        if model is None:
+            sync_task = sync_db.query(Task).filter(Task.task_id == str(task.task_id)).first()
+            if sync_task is None:
+                raise RuntimeStoreError(
+                    reason_code=RuntimeStoreReason.RECORD_NOT_FOUND,
+                    operation="cancel_task_runtime",
+                    message=f"Task {task.task_id} was not found during cancellation",
+                )
+            sync_task.status = TaskStatus.CANCELLED.value
+        else:
+            RuntimeSessionControlPlane(store).mark_cancelled(model.session.session_id)
+        sync_db.commit()
+
+    await db.run_sync(_cancel_runtime)
 
 
 @router.post("/", response_model=TaskResponse)
@@ -265,10 +347,10 @@ async def create_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new video generation task"""
-    
+
     logger = logging.getLogger("tasks_api")
     logger.info(f"Creating task with request: {request}")
-    
+
     try:
         if request.session_id:
             existing_task, _existing_runtime = await _find_current_quick_run_for_session(db, request.session_id)
@@ -302,22 +384,30 @@ async def create_task(
             },
             estimated_duration=request.duration * 10  # Rough estimate: 10 seconds processing per 1 second video
         )
-        
+
         db.add(task)
-        await db.commit()
+        await db.flush()
         await db.refresh(task)
         logger.info(f"Task created with ID: {task.id}")
 
-        runtime_session = await RuntimeSessionService.create_session_for_task(
+        runtime_session = await _create_quick_runtime_session(
             db,
-            task,
-            mode="quick",
+            task_id=str(task.task_id),
+            expected_task_status=TaskStatus.PENDING,
+            expected_latest_session_id=None,
+            input_payload=dict(task.input_parameters or {}),
         )
-        logger.info(f"Runtime session created with ID: {runtime_session.id} for task {task.id}")
-        
+        await db.commit()
+        await db.refresh(task)
+        logger.info(
+            "Runtime session created with ID: %s for task %s",
+            runtime_session.session_id,
+            task.id,
+        )
+
         logger.info("Dispatching task execution for task %s", task.id)
-        _schedule_task_execution(background_tasks, task.id)
-        
+        _schedule_task_execution(background_tasks, str(task.task_id))
+
         response = TaskResponse(
             id=task.id,
             task_id=str(task.task_id),
@@ -333,11 +423,13 @@ async def create_task(
         logger.info("Returning response")
         return response
     except ValueError as e:
+        await db.rollback()
         logger.error(f"Error creating task: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
+        await db.rollback()
         logger.error(f"Error creating task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}") from e
 
 
 @router.get("/quick/current", response_model=Optional[QuickCurrentRunResponse])
@@ -350,7 +442,7 @@ async def get_current_quick_run(
     logger = logging.getLogger("tasks_api")
     try:
         task, runtime_view = await _find_current_quick_run_for_session(db, session_id)
-    except ValueError as exc:
+    except RuntimeStoreError as exc:
         logger.error(
             "Current quick run discovery failed after runtime projection integrity error: session_id=%s detail=%s",
             session_id,
@@ -377,20 +469,20 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db)
 ):
     """List tasks with optional filtering"""
-    
+
     query = select(Task).order_by(desc(Task.created_at))
-    
+
     if status:
         query = query.where(Task.status == status)
-    
+
     if session_id:
         query = query.where(Task.session_id == session_id)
-    
+
     query = query.offset(skip).limit(limit)
-    
+
     result = await db.execute(query)
     tasks = result.scalars().all()
-    
+
     return [
         TaskResponse(
             id=task.id,
@@ -414,25 +506,25 @@ async def get_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Get detailed information about a specific task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Count related records
     from sqlalchemy import func
     scenes_count = await db.scalar(
         select(func.count(Scene.id)).where(Scene.task_id == task.id)
     ) or 0
-    
+
     resources_count = await db.scalar(
         select(func.count(Resource.id)).where(Resource.task_id == task.id)
     ) or 0
-    
+
     return TaskDetailResponse(
         id=task.id,
         task_id=str(task.task_id),
@@ -459,20 +551,20 @@ async def get_task_scenes(
     db: AsyncSession = Depends(get_db)
 ):
     """Get all scenes for a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Get scenes
     scenes_query = select(Scene).where(Scene.task_id == task.id).order_by(Scene.scene_number)
     scenes_result = await db.execute(scenes_query)
     scenes = scenes_result.scalars().all()
-    
+
     return [
         SceneResponse(
             id=scene.id,
@@ -495,25 +587,25 @@ async def get_task_resources(
     db: AsyncSession = Depends(get_db)
 ):
     """Get all resources for a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Get resources
     resources_query = select(Resource).where(Resource.task_id == task.id)
-    
+
     if resource_type:
         resources_query = resources_query.where(Resource.resource_type == resource_type)
-    
+
     resources_query = resources_query.order_by(desc(Resource.created_at))
     resources_result = await db.execute(resources_query)
     resources = resources_result.scalars().all()
-    
+
     return [
         ResourceResponse(
             id=resource.id,
@@ -543,8 +635,8 @@ async def get_task_runtime(
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
-    except ValueError as exc:
+        runtime_view = await _load_runtime_view(db, str(task.task_id))
+    except RuntimeStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if runtime_view is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
@@ -567,23 +659,18 @@ async def resume_task_runtime(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
-    if runtime_session is None:
+    runtime_model = await db.run_sync(
+        lambda sync_db: _load_runtime_model_sync(sync_db, str(task.task_id))
+    )
+    if runtime_model is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
-    if runtime_session.mode != "quick":
+    if runtime_model.session.mode != "quick":
         raise HTTPException(status_code=400, detail="Runtime resume is only supported for quick mode")
-
-    def _load_resume_control(sync_db):
-        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
-        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
-        if sync_task is None or sync_session is None:
-            raise ValueError("Runtime session not found")
-        return RuntimeSessionService.get_resume_control_sync(sync_db, sync_task, sync_session)
-
-    try:
-        resume_control = await db.run_sync(_load_resume_control)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    resume_control = (
+        runtime_model.resume_control.to_dict()
+        if runtime_model.resume_control is not None
+        else None
+    )
 
     if not resume_control or not bool(resume_control.get("can_resume")):
         state = str((resume_control or {}).get("state") or "unavailable")
@@ -594,27 +681,18 @@ async def resume_task_runtime(
         )
 
     def _mark_runtime_resuming(sync_db):
-        sync_task = sync_db.query(Task).filter(Task.id == task.id).first()
-        sync_session = RuntimeSessionService.get_latest_session_for_task_sync(sync_db, task.id)
-        if sync_task is None or sync_session is None:
-            raise ValueError("Runtime session not found")
-        RuntimeSessionService.load_active_continuation_sync(
-            sync_db,
-            sync_session,
-            expected_anchor_type="runtime_checkpoint",
-            require_decision_id=False,
-            require_resuming=False,
-        )
-        RuntimeSessionService.mark_session_resuming_sync(sync_db, sync_session, task=sync_task)
+        RuntimeSessionControlPlane(
+            SqlAlchemyRuntimeAttemptStore(sync_db)
+        ).mark_resuming(runtime_model.session.session_id)
+        sync_db.commit()
 
     try:
         await db.run_sync(_mark_runtime_resuming)
-    except ValueError as exc:
+    except RuntimeStoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    await db.refresh(task)
-    _schedule_task_execution(background_tasks, task.id)
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    _schedule_task_execution(background_tasks, str(task.task_id))
+    runtime_view = await _load_runtime_view(db, str(task.task_id))
     if runtime_view is None:
         raise HTTPException(
             status_code=500,
@@ -635,32 +713,49 @@ async def retry_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Retry a failed task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     if task.status != TaskStatus.FAILED.value:
         raise HTTPException(status_code=400, detail="Task is not in failed state")
-    
+
     if not task.can_retry:
         raise HTTPException(status_code=400, detail="Task has exceeded maximum retry attempts")
-    
-    # Reset task for retry
-    task.reset_for_retry()
-    await RuntimeSessionService.create_session_for_task(
-        db,
-        task,
-        mode="quick",
-    )
+
+    latest_session_id = await _load_latest_runtime_session_id(db, str(task.task_id))
+    if latest_session_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative runtime session is missing for failed task",
+        )
+
+    try:
+        task.reset_for_retry()
+        await _create_quick_runtime_session(
+            db,
+            task_id=str(task.task_id),
+            expected_task_status=TaskStatus.PENDING,
+            expected_latest_session_id=latest_session_id,
+            input_payload=dict(task.input_parameters or {}),
+        )
+        await db.commit()
+        await db.refresh(task)
+    except RuntimeStoreError as exc:
+        await db.rollback()
+        status_code = (
+            409 if exc.reason_code is RuntimeStoreReason.STATE_CONFLICT else 500
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     # Queue task for processing
-    _schedule_task_execution(background_tasks, task.id)
-    
+    _schedule_task_execution(background_tasks, str(task.task_id))
+
     return {"message": "Task queued for retry", "task_id": str(task.task_id)}
 
 
@@ -670,20 +765,20 @@ async def cancel_task(
     db: AsyncSession = Depends(get_db)
 ):
     """Cancel a task"""
-    
+
     # Get task
     query = select(Task).where(Task.task_id == task_id)
     result = await db.execute(query)
     task = result.scalar_one_or_none()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     if task.is_completed:
         raise HTTPException(status_code=400, detail="Cannot cancel completed task")
 
     await _cancel_task_for_replacement(db, task, reason="cancelled_by_user")
-    
+
     return {"message": "Task cancelled", "task_id": str(task.task_id)}
 
 
@@ -702,28 +797,41 @@ async def submit_script_gate_decision(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    runtime_session = await RuntimeSessionService.get_latest_session_for_task(db, task.id)
-    if runtime_session is None:
+    runtime_model = await db.run_sync(
+        lambda sync_db: _load_runtime_model_sync(sync_db, str(task.task_id))
+    )
+    if runtime_model is None:
         raise HTTPException(status_code=404, detail="Runtime session not found")
 
     try:
-        await db.run_sync(
-            lambda sync_db: RuntimeSessionService.submit_gate_decision_sync(
-                sync_db,
-                runtime_session.id,
+        expected_task_status = runtime_model.session.task_status
+
+        def _submit_decision(sync_db):
+            decision = ScriptGateDecisionControlPlane(
+                SqlAlchemyRuntimeAttemptStore(sync_db)
+            ).submit(
+                session_id=runtime_model.session.session_id,
                 node_key="script",
                 action=request.action,
                 feedback_text=request.feedback_text,
-                structured_constraints=request.structured_constraints,
+                structured_constraints=JsonObjectPayload.from_mapping(
+                    request.structured_constraints or {},
+                    field_path="script_gate_decision.structured_constraints",
+                ),
                 actor_type="human",
                 actor_id=request.actor_id,
+                task_id=str(task.task_id),
+                expected_task_status=expected_task_status,
             )
-        )
-    except ValueError as exc:
+            sync_db.commit()
+            return decision
+
+        await db.run_sync(_submit_decision)
+    except (RuntimeStoreError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _schedule_task_execution(background_tasks, task.id)
-    runtime_view = await RuntimeSessionService.build_runtime_view_for_task(db, task)
+    _schedule_task_execution(background_tasks, str(task.task_id))
+    runtime_view = await _load_runtime_view(db, str(task.task_id))
     if runtime_view is None:
         raise HTTPException(
             status_code=500,

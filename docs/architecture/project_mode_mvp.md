@@ -1,5 +1,12 @@
 # 项目模式 MVP 技术方案草稿
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 早期 MVP 草稿；Agent 直接保存项目、ProjectState 混存运行状态与生成资产、EpisodeOrchestratorAgent 身份均已被替代。
+- Replacement: [项目/runtime 权威边界](project_runtime_authority_boundary_20260719.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 ## 目标
 
 在保留现有「≤60 秒快速创作」流程的前提下，引入多 Episode 长片项目模式（≥3 分钟），实现以下能力：

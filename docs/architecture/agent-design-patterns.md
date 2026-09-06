@@ -1,5 +1,12 @@
 # Agent设计范式说明
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 早期模式比较，固定 Pipeline、按复杂度切换模式及向 Agent 传 db 的示例均不适用于现行生产架构。
+- Replacement: [Agent/数据库边界](backend_database_agent_boundary_freeze_20260718.md)、[单集架构](single_episode_harness_architecture_20260311.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 ## 📋 当前系统的Agent架构分析
 
 ### 🏗️ 现有架构：Pipeline-Based Sequential Execution

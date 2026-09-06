@@ -359,17 +359,10 @@ class OpenAIClientTool(AsyncTool):
             )
             
             content = response.choices[0].message.content
-            
-            try:
-                parsed_json = json.loads(content)
-            except json.JSONDecodeError:
-                # Fallback: try to extract JSON from response
-                import re
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    parsed_json = json.loads(json_match.group())
-                else:
-                    raise ToolError("Failed to parse JSON response", self.metadata.name)
+
+            parsed_json = json.loads(content)
+            if not isinstance(parsed_json, dict):
+                raise ToolError("JSON response must be an object", self.metadata.name)
             
             return {
                 "json_result": parsed_json,

@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import logging
 
-from .workflow_state import SceneData
-
-
 @dataclass
 class ContinuityMapping:
     """连续性映射信息"""

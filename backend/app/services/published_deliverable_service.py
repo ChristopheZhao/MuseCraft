@@ -4,22 +4,51 @@ Published stage-deliverable helpers for gate/resume/downstream stable references
 from __future__ import annotations
 
 import json
+import os
+from enum import Enum
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Optional
-
-from sqlalchemy.orm import Session
+from uuid import uuid4
 
 from ..core.config import settings
-from ..models import (
-    WorkflowNodeState,
-    WorkflowPublishedDeliverable,
-    WorkflowSession,
-)
-
+from ..domain import JsonObjectPayload, RuntimePublishedDeliverableRecord
 
 PUBLISHED_DELIVERABLES_PAYLOAD_KEY = "published_deliverables"
 PUBLISHED_DELIVERABLE_REF_TYPE = "published_deliverable"
+PUBLISHED_DELIVERABLE_REF_FIELDS = frozenset(
+    {
+        "type",
+        "deliverable_id",
+        "deliverable_type",
+        "scope_type",
+        "scope_id",
+        "attempt_id",
+        "revision_no",
+        "payload_ref",
+        "summary",
+        "is_candidate",
+        "is_approved",
+    }
+)
+
+
+class PublishedDeliverablePayloadReason(str, Enum):
+    REF_INVALID = "published_payload_ref_invalid"
+    MISSING = "published_payload_missing"
+    JSON_INVALID = "published_payload_json_invalid"
+    READ_FAILED = "published_payload_read_failed"
+    DELETE_FAILED = "published_payload_delete_failed"
+    CONTRACT_INVALID = "published_payload_contract_invalid"
+
+
+class PublishedDeliverableContractReason(str, Enum):
+    PAYLOAD_INVALID = "published_deliverables_payload_invalid"
+    COLLECTION_INVALID = "published_deliverables_collection_invalid"
+    NODE_KEY_INVALID = "published_deliverables_node_key_invalid"
+    REF_INVALID = "published_deliverable_ref_invalid"
+    REF_UNKNOWN_KEYS = "published_deliverable_ref_unknown_keys"
+    REF_MISSING_KEYS = "published_deliverable_ref_missing_keys"
 
 
 class PublishedDeliverablePayloadError(ValueError):
@@ -27,14 +56,26 @@ class PublishedDeliverablePayloadError(ValueError):
 
     def __init__(
         self,
-        reason_code: str,
+        reason_code: PublishedDeliverablePayloadReason,
         message: str,
         *,
         payload_ref: Optional[str] = None,
     ) -> None:
-        self.reason_code = str(reason_code or "published_payload_error")
+        self.reason_code = reason_code
         self.payload_ref = str(payload_ref or "")
-        super().__init__(f"{self.reason_code}: {message}")
+        super().__init__(f"{self.reason_code.value}: {message}")
+
+
+class PublishedDeliverableContractError(ValueError):
+    """Raised when a published deliverable reference violates its contract."""
+
+    def __init__(
+        self,
+        reason_code: PublishedDeliverableContractReason,
+        message: str,
+    ) -> None:
+        self.reason_code = reason_code
+        super().__init__(f"{reason_code.value}: {message}")
 
 
 def _backend_root() -> Path:
@@ -63,7 +104,7 @@ def _resolve_payload_path(payload_ref: str) -> Path:
     return (_backend_root() / ref_path).resolve()
 
 
-def _persist_payload(
+def persist_published_payload(
     *,
     workflow_id: str,
     deliverable_type: str,
@@ -73,14 +114,44 @@ def _persist_payload(
 ) -> str:
     base_dir = _published_deliverable_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{deliverable_type}_{workflow_id}_attempt{attempt_id}_rev{revision_no}.json"
+    filename = (
+        f"{deliverable_type}_{workflow_id}_attempt{attempt_id}_rev{revision_no}_"
+        f"{uuid4().hex}.json"
+    )
     target_path = (base_dir / filename).resolve()
-    with open(target_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False)
+    temporary_path = target_path.with_suffix(".tmp")
+    try:
+        with open(temporary_path, "x", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(temporary_path, target_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return str(target_path)
 
 
-def load_published_payload(payload_ref: Optional[str]) -> Optional[Dict[str, Any]]:
+def discard_published_payload(payload_ref: str) -> None:
+    payload_path = _resolve_payload_path(payload_ref)
+    owned_root = _published_deliverable_dir().resolve()
+    try:
+        payload_path.relative_to(owned_root)
+    except ValueError as exc:
+        raise PublishedDeliverablePayloadError(
+            PublishedDeliverablePayloadReason.REF_INVALID,
+            "Refusing to delete a payload outside the published deliverable directory",
+            payload_ref=payload_ref,
+        ) from exc
+    try:
+        payload_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise PublishedDeliverablePayloadError(
+            PublishedDeliverablePayloadReason.DELETE_FAILED,
+            f"Payload file cannot be deleted: {type(exc).__name__}",
+            payload_ref=payload_ref,
+        ) from exc
+
+
+def load_published_payload(payload_ref: Optional[str]) -> Optional[JsonObjectPayload]:
     if not payload_ref:
         return None
     payload_ref_value = str(payload_ref)
@@ -88,13 +159,13 @@ def load_published_payload(payload_ref: Optional[str]) -> Optional[Dict[str, Any
         payload_path = _resolve_payload_path(payload_ref_value)
     except Exception as exc:
         raise PublishedDeliverablePayloadError(
-            "published_payload_ref_invalid",
+            PublishedDeliverablePayloadReason.REF_INVALID,
             f"Cannot resolve payload_ref: {type(exc).__name__}",
             payload_ref=payload_ref_value,
         ) from exc
     if not payload_path.exists():
         raise PublishedDeliverablePayloadError(
-            "published_payload_missing",
+            PublishedDeliverablePayloadReason.MISSING,
             f"Payload file does not exist: {payload_path}",
             payload_ref=payload_ref_value,
         )
@@ -103,51 +174,144 @@ def load_published_payload(payload_ref: Optional[str]) -> Optional[Dict[str, Any
             payload = json.load(fh)
     except JSONDecodeError as exc:
         raise PublishedDeliverablePayloadError(
-            "published_payload_json_invalid",
+            PublishedDeliverablePayloadReason.JSON_INVALID,
             f"Payload JSON is invalid: {exc.msg}",
             payload_ref=payload_ref_value,
         ) from exc
     except OSError as exc:
         raise PublishedDeliverablePayloadError(
-            "published_payload_read_failed",
+            PublishedDeliverablePayloadReason.READ_FAILED,
             f"Payload file cannot be read: {type(exc).__name__}",
             payload_ref=payload_ref_value,
         ) from exc
     if not isinstance(payload, dict):
         raise PublishedDeliverablePayloadError(
-            "published_payload_contract_invalid",
+            PublishedDeliverablePayloadReason.CONTRACT_INVALID,
             f"Payload root must be dict, got {type(payload).__name__}",
             payload_ref=payload_ref_value,
         )
-    return payload
+    try:
+        return JsonObjectPayload.from_mapping(
+            payload,
+            field_path="published_deliverable.payload",
+        )
+    except (TypeError, ValueError) as exc:
+        raise PublishedDeliverablePayloadError(
+            PublishedDeliverablePayloadReason.CONTRACT_INVALID,
+            "Payload contains values outside the JSON object contract",
+            payload_ref=payload_ref_value,
+        ) from exc
 
 
-def build_deliverable_ref(deliverable: WorkflowPublishedDeliverable) -> Dict[str, Any]:
+def build_deliverable_ref(deliverable: RuntimePublishedDeliverableRecord) -> Dict[str, Any]:
     return {
         "type": PUBLISHED_DELIVERABLE_REF_TYPE,
-        "deliverable_id": deliverable.id,
+        "deliverable_id": deliverable.deliverable_id,
         "deliverable_type": deliverable.deliverable_type,
         "scope_type": deliverable.scope_type,
         "scope_id": deliverable.scope_id,
         "attempt_id": deliverable.attempt_id,
         "revision_no": deliverable.revision_no,
         "payload_ref": deliverable.payload_ref,
-        "summary": deliverable.summary or {},
-        "is_candidate": bool(deliverable.is_candidate),
-        "is_approved": bool(deliverable.is_approved),
+        "summary": deliverable.summary.to_dict(),
+        "is_candidate": deliverable.is_candidate,
+        "is_approved": deliverable.is_approved,
     }
 
 
+def normalize_published_deliverable_ref(ref: object) -> Dict[str, Any]:
+    if not isinstance(ref, dict):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "published deliverable reference must be an object",
+        )
+    unknown_keys = set(ref) - PUBLISHED_DELIVERABLE_REF_FIELDS
+    if unknown_keys:
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_UNKNOWN_KEYS,
+            "unknown keys: " + ",".join(sorted(str(key) for key in unknown_keys)),
+        )
+    missing_keys = PUBLISHED_DELIVERABLE_REF_FIELDS - set(ref)
+    if missing_keys:
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_MISSING_KEYS,
+            "missing keys: " + ",".join(sorted(missing_keys)),
+        )
+    if ref["type"] != PUBLISHED_DELIVERABLE_REF_TYPE:
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "reference type must be published_deliverable",
+        )
+    for field_name in ("deliverable_id", "attempt_id"):
+        value = ref[field_name]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise PublishedDeliverableContractError(
+                PublishedDeliverableContractReason.REF_INVALID,
+                f"{field_name} must be a positive integer",
+            )
+    revision_no = ref["revision_no"]
+    if not isinstance(revision_no, int) or isinstance(revision_no, bool) or revision_no < 0:
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "revision_no must be a non-negative integer",
+        )
+    for field_name in ("deliverable_type", "scope_type", "payload_ref"):
+        value = ref[field_name]
+        if not isinstance(value, str) or not value.strip():
+            raise PublishedDeliverableContractError(
+                PublishedDeliverableContractReason.REF_INVALID,
+                f"{field_name} must be a non-empty string",
+            )
+    scope_id = ref["scope_id"]
+    if scope_id is not None and not isinstance(scope_id, str):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "scope_id must be a string or null",
+        )
+    if not isinstance(ref["is_candidate"], bool) or not isinstance(ref["is_approved"], bool):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "candidate and approval flags must be booleans",
+        )
+    try:
+        summary = JsonObjectPayload.from_mapping(
+            ref["summary"],
+            field_path="published_deliverable_ref.summary",
+        ).to_dict()
+    except (TypeError, ValueError) as exc:
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.REF_INVALID,
+            "summary must satisfy the JSON object contract",
+        ) from exc
+    normalized = dict(ref)
+    normalized["summary"] = summary
+    return normalized
+
+
 def get_published_deliverables(payload: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    if payload is None:
+        return {}
     if not isinstance(payload, dict):
-        return {}
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.PAYLOAD_INVALID,
+            "runtime payload must be an object",
+        )
     deliverables = payload.get(PUBLISHED_DELIVERABLES_PAYLOAD_KEY)
-    if not isinstance(deliverables, dict):
+    if deliverables is None:
         return {}
+    if not isinstance(deliverables, dict):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.COLLECTION_INVALID,
+            "published_deliverables must be an object",
+        )
     normalized: Dict[str, Dict[str, Any]] = {}
     for node_key, ref in deliverables.items():
-        if isinstance(node_key, str) and isinstance(ref, dict):
-            normalized[node_key] = dict(ref)
+        if not isinstance(node_key, str) or not node_key.strip():
+            raise PublishedDeliverableContractError(
+                PublishedDeliverableContractReason.NODE_KEY_INVALID,
+                "published deliverable node keys must be non-empty strings",
+            )
+        normalized[node_key] = normalize_published_deliverable_ref(ref)
     return normalized
 
 
@@ -167,9 +331,19 @@ def set_published_deliverable_ref(
     node_key: str,
     ref: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if not isinstance(node_key, str) or not node_key.strip():
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.NODE_KEY_INVALID,
+            "published deliverable node key must be a non-empty string",
+        )
+    if payload is not None and not isinstance(payload, dict):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.PAYLOAD_INVALID,
+            "runtime payload must be an object",
+        )
     merged = dict(payload or {})
-    deliverables = dict(merged.get(PUBLISHED_DELIVERABLES_PAYLOAD_KEY) or {})
-    deliverables[str(node_key)] = dict(ref)
+    deliverables = get_published_deliverables(merged)
+    deliverables[node_key] = normalize_published_deliverable_ref(ref)
     merged[PUBLISHED_DELIVERABLES_PAYLOAD_KEY] = deliverables
     return merged
 
@@ -179,146 +353,21 @@ def clear_published_deliverable_ref(
     *,
     node_key: str,
 ) -> Dict[str, Any]:
+    if not isinstance(node_key, str) or not node_key.strip():
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.NODE_KEY_INVALID,
+            "published deliverable node key must be a non-empty string",
+        )
+    if payload is not None and not isinstance(payload, dict):
+        raise PublishedDeliverableContractError(
+            PublishedDeliverableContractReason.PAYLOAD_INVALID,
+            "runtime payload must be an object",
+        )
     merged = dict(payload or {})
-    deliverables = dict(merged.get(PUBLISHED_DELIVERABLES_PAYLOAD_KEY) or {})
-    deliverables.pop(str(node_key), None)
+    deliverables = get_published_deliverables(merged)
+    deliverables.pop(node_key, None)
     if deliverables:
         merged[PUBLISHED_DELIVERABLES_PAYLOAD_KEY] = deliverables
     else:
         merged.pop(PUBLISHED_DELIVERABLES_PAYLOAD_KEY, None)
     return merged
-
-
-class PublishedDeliverableService:
-    """Publishes non-artifact stage outputs as stable, referenced deliverables."""
-
-    @staticmethod
-    def publish_script_deliverable_sync(
-        db: Session,
-        *,
-        session: WorkflowSession,
-        workflow_id: str,
-        attempt_id: int,
-        payload: Dict[str, Any],
-        summary: Optional[Dict[str, Any]] = None,
-    ) -> WorkflowPublishedDeliverable:
-        node = (
-            db.query(WorkflowNodeState)
-            .filter(
-                WorkflowNodeState.session_id == session.id,
-                WorkflowNodeState.node_key == "script",
-            )
-            .first()
-        )
-        if node is None:
-            raise ValueError(f"Workflow node script not found for session {session.id}")
-
-        revision_no = int(node.revision_index or 0)
-        persisted_payload = {
-            "deliverable_type": "script",
-            "workflow_state_id": str(workflow_id),
-            "scope_type": node.scope_type,
-            "scope_id": node.scope_ref,
-            "revision_no": revision_no,
-            "attempt_id": attempt_id,
-            **dict(payload or {}),
-        }
-        payload_ref = _persist_payload(
-            workflow_id=str(workflow_id),
-            deliverable_type="script",
-            attempt_id=attempt_id,
-            revision_no=revision_no,
-            payload=persisted_payload,
-        )
-
-        deliverable = WorkflowPublishedDeliverable(
-            session_id=session.id,
-            node_id=node.id,
-            attempt_id=attempt_id,
-            deliverable_type="script",
-            scope_type=node.scope_type,
-            scope_id=node.scope_ref,
-            revision_no=revision_no,
-            payload_ref=payload_ref,
-            summary=summary or {},
-            is_candidate=True,
-            is_approved=False,
-        )
-        db.add(deliverable)
-        db.flush()
-        db.refresh(deliverable)
-        return deliverable
-
-    @staticmethod
-    def get_node_deliverable_ref_sync(
-        db: Session,
-        *,
-        session: WorkflowSession,
-        node_key: str,
-        attempt_id: Optional[int],
-    ) -> Optional[Dict[str, Any]]:
-        if attempt_id is None:
-            return None
-        node = (
-            db.query(WorkflowNodeState)
-            .filter(
-                WorkflowNodeState.session_id == session.id,
-                WorkflowNodeState.node_key == node_key,
-            )
-            .first()
-        )
-        if node is None:
-            return None
-        deliverable = (
-            db.query(WorkflowPublishedDeliverable)
-            .filter(
-                WorkflowPublishedDeliverable.session_id == session.id,
-                WorkflowPublishedDeliverable.node_id == node.id,
-                WorkflowPublishedDeliverable.attempt_id == attempt_id,
-            )
-            .order_by(WorkflowPublishedDeliverable.id.desc())
-            .first()
-        )
-        return build_deliverable_ref(deliverable) if deliverable is not None else None
-
-    @staticmethod
-    def mark_node_deliverable_approved_sync(
-        db: Session,
-        *,
-        session: WorkflowSession,
-        node_key: str,
-        attempt_id: Optional[int],
-    ) -> WorkflowPublishedDeliverable:
-        node = (
-            db.query(WorkflowNodeState)
-            .filter(
-                WorkflowNodeState.session_id == session.id,
-                WorkflowNodeState.node_key == node_key,
-            )
-            .first()
-        )
-        if node is None:
-            raise ValueError(f"Workflow node {node_key} not found for session {session.id}")
-        if attempt_id is None:
-            raise ValueError(f"Cannot approve deliverable for node {node_key} without attempt_id")
-
-        deliverable = (
-            db.query(WorkflowPublishedDeliverable)
-            .filter(
-                WorkflowPublishedDeliverable.session_id == session.id,
-                WorkflowPublishedDeliverable.node_id == node.id,
-                WorkflowPublishedDeliverable.attempt_id == attempt_id,
-            )
-            .order_by(WorkflowPublishedDeliverable.id.desc())
-            .first()
-        )
-        if deliverable is None:
-            raise ValueError(
-                f"No published deliverable found for node {node_key} attempt {attempt_id} in session {session.id}"
-            )
-
-        deliverable.is_candidate = False
-        deliverable.is_approved = True
-        db.flush()
-        db.refresh(deliverable)
-        return deliverable

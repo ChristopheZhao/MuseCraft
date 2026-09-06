@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, TYPE_CHECKING, Union
 
 from ...utils.memory_helpers import get_mas_working_memory
-from ....models import AgentType
+from ....domain import AgentType
 
 if TYPE_CHECKING:
     from ...memory.short_term.service import WorkingMemoryService

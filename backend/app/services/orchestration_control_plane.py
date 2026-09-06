@@ -5,13 +5,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..models import AgentType
+from ..domain import AgentType
 from .audio_delivery_gate_evaluator import AudioDeliveryGateEvaluator
 from .memory_provider import MemoryServices
 from .orchestration_observation_adapter import OrchestrationObservationAdapter
 from .orchestration_protocol import OrchestrationProtocol
 from .orchestration_queue_policy import OrchestrationQueuePolicy
 from .orchestration_runtime_controller import OrchestrationRuntimeController
+from .orchestration_runtime_decision import RuntimeAction, RuntimeDecision
 from .orchestration_state_adapter import OrchestrationStateAdapter
 
 
@@ -122,9 +123,7 @@ class OrchestrationControlPlane:
             decision_basis="boundary_trigger",
             execution_id=execution_id,
         )
-        gate_result = self._audio_delivery_gate.evaluate_workflow_video_audio(
-            workflow_state_id
-        )
+        gate_result = self._audio_delivery_gate.evaluate_workflow_video_audio(workflow_state_id)
         self._observation_adapter.persist_audio_gate_observation(
             workflow_state_id=workflow_state_id,
             route_payload=route_payload,
@@ -156,6 +155,13 @@ class OrchestrationControlPlane:
         max_replans: int,
         execution_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        report_status = report.get("status") if isinstance(report, dict) else None
+        if report_status not in {"completed", "partial", "failed"}:
+            raise OrchestrationControlPlaneError("runtime report must contain a canonical status")
+        if type(replan_count) is not int or replan_count < 0:
+            raise OrchestrationControlPlaneError("replan_count must be a non-negative integer")
+        if type(max_replans) is not int or max_replans < 0:
+            raise OrchestrationControlPlaneError("max_replans must be a non-negative integer")
         gate_events = self._collect_boundary_gate_events(
             workflow_state_id=workflow_state_id,
             current_agent=current_agent,
@@ -163,14 +169,14 @@ class OrchestrationControlPlane:
             audio_contract=audio_contract,
             execution_id=execution_id,
         )
-        if not gate_events:
+        if report_status == "completed" and not gate_events:
             return {
                 "status": "no_gate",
                 "reason": "no_boundary_gate_event",
                 "apply_result": {
                     "status": "continue",
                     "reason": "no_boundary_gate_event",
-                    "replan_count": int(replan_count),
+                    "replan_count": replan_count,
                 },
                 "decision_ack": {},
             }
@@ -190,7 +196,7 @@ class OrchestrationControlPlane:
     def _build_apply_payload(
         self,
         *,
-        runtime_decision: Dict[str, Any],
+        runtime_decision: RuntimeDecision,
         conditional_task_specs: Dict[str, Dict[str, Any]],
         current_index: int,
         execution_queue: List[AgentType],
@@ -199,33 +205,27 @@ class OrchestrationControlPlane:
         standby_agents: List[AgentType],
         replan_count: int,
     ) -> Dict[str, Any]:
-        if not isinstance(runtime_decision, dict):
-            raise OrchestrationControlPlaneError("runtime_decision must be a dict")
+        if not isinstance(runtime_decision, RuntimeDecision):
+            raise OrchestrationControlPlaneError("apply requires a canonical runtime decision")
+        if type(replan_count) is not int or replan_count < 0:
+            raise OrchestrationControlPlaneError("replan_count must be a non-negative integer")
 
-        action_raw = runtime_decision.get("action")
-        if not isinstance(action_raw, str) or not action_raw.strip():
-            raise OrchestrationControlPlaneError("runtime_decision missing action")
-        action = action_raw.strip()
-        reason = str(runtime_decision.get("reason") or "none").strip()
-        facts = runtime_decision.get("facts")
+        action = runtime_decision.action
         apply_payload: Dict[str, Any] = {
             "action": action,
-            "reason": reason,
-            "facts": facts if isinstance(facts, dict) else {},
-            "replan_count": int(replan_count),
+            "reason": runtime_decision.reason,
+            "facts": dict(runtime_decision.facts),
+            "replan_count": replan_count,
         }
 
-        if action not in {"continue", "activate_from_standby", "abort"}:
-            raise OrchestrationControlPlaneError(f"Unsupported runtime action: {action}")
+        if action is RuntimeAction.RETRY_CURRENT:
+            apply_payload["replan_count"] = replan_count + 1
 
-        if action != "activate_from_standby":
+        if action is not RuntimeAction.ACTIVATE_FROM_STANDBY:
             return apply_payload
 
-        target_agent = runtime_decision.get("target_agent")
-        if not isinstance(target_agent, AgentType):
-            raise OrchestrationControlPlaneError(
-                "activate_from_standby requires target_agent as AgentType"
-            )
+        target_agent = runtime_decision.target_agent
+        assert isinstance(target_agent, AgentType)
 
         current_spec = task_specs.get(target_agent)
         if not isinstance(current_spec, dict):
@@ -278,7 +278,7 @@ class OrchestrationControlPlane:
                 "execution_queue": updated_queue,
                 "standby_agents": updated_standby_agents,
                 "queue_changed": bool(queue_changed),
-                "replan_count": int(replan_count) + 1,
+                "replan_count": replan_count + 1,
             }
         )
         return apply_payload
@@ -287,24 +287,13 @@ class OrchestrationControlPlane:
         self,
         *,
         target_agent: AgentType,
-        runtime_decision: Dict[str, Any],
+        runtime_decision: RuntimeDecision,
         conditional_task_specs: Dict[str, Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(conditional_task_specs, dict) or not conditional_task_specs:
             return None
 
-        requested_task_id = runtime_decision.get("task_id")
-        if not isinstance(requested_task_id, str) or not requested_task_id.strip():
-            facts = runtime_decision.get("facts")
-            if isinstance(facts, dict):
-                llm_output = facts.get("llm_output")
-                if isinstance(llm_output, dict):
-                    requested_task_id = llm_output.get("task_id")
-        selected_task_id = (
-            str(requested_task_id).strip()
-            if isinstance(requested_task_id, str) and requested_task_id.strip()
-            else ""
-        )
+        selected_task_id = runtime_decision.task_id or ""
 
         if selected_task_id:
             selected_spec = conditional_task_specs.get(selected_task_id)
@@ -312,7 +301,7 @@ class OrchestrationControlPlane:
                 raise OrchestrationControlPlaneError(
                     f"Conditional task {selected_task_id} not found for runtime activation"
                 )
-            selected_agent = str(selected_spec.get("agent") or "").strip().lower()
+            selected_agent = selected_spec.get("agent")
             if selected_agent != target_agent.value:
                 raise OrchestrationControlPlaneError(
                     "Conditional task agent mismatch: "
@@ -327,10 +316,10 @@ class OrchestrationControlPlane:
         for task_id, spec in conditional_task_specs.items():
             if not isinstance(spec, dict):
                 continue
-            if str(spec.get("agent") or "").strip().lower() != target_agent.value:
+            if spec.get("agent") != target_agent.value:
                 continue
             merged = dict(spec)
-            merged["task_id"] = str(task_id)
+            merged["task_id"] = task_id
             matching_specs.append(merged)
 
         if not matching_specs:
@@ -348,7 +337,7 @@ class OrchestrationControlPlane:
         workflow_state_id: str,
         current_agent: AgentType,
         current_index: int,
-        runtime_decision: Dict[str, Any],
+        runtime_decision: RuntimeDecision,
         execution_queue: List[AgentType],
         task_specs: Dict[AgentType, Dict[str, Any]],
         candidate_agents: Optional[List[AgentType]],

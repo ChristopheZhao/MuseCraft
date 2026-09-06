@@ -185,14 +185,21 @@ def run_quick_runtime_reconcile_once():
     """Run the explicit control-plane reconcile entrypoint once."""
 
     from .core.database import SessionLocal
-    from .services.runtime_session_service import RuntimeSessionService
+    from .infrastructure import SqlAlchemyRuntimeAttemptStore
+    from .services.runtime_reconciler import RuntimeReconciler
 
     db = SessionLocal()
     try:
-        return RuntimeSessionService.reconcile_irrecoverable_quick_runtimes_sync(
-            db,
+        summary = RuntimeReconciler(
+            SqlAlchemyRuntimeAttemptStore(db)
+        ).reconcile_irrecoverable_quick_runtimes(
             limit=settings.QUICK_RUNTIME_RECONCILER_BATCH_LIMIT,
         )
+        db.commit()
+        return summary.to_dict()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

@@ -11,13 +11,21 @@ from app.agents.memory.short_term.service import WorkingMemoryService
 from app.agents.memory.storage.in_memory import InMemoryShortTermStore
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.utils.memory_helpers import write_shared_fact
-from app.models import AgentType
+from app.domain import AgentType
 from app.services.context_assembler import ContextContractAssembler
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
 
 def _build_service() -> WorkingMemoryService:
     return WorkingMemoryService(store_factory=lambda: InMemoryShortTermStore())
+
+
+class _SceneInfoReferencePort:
+    def __init__(self, ref: str):
+        self.ref = ref
+
+    def prepare(self, **_kwargs) -> str:
+        return self.ref
 
 
 def _seed_stale_script_facts(service: WorkingMemoryService, workflow_id: str) -> None:
@@ -103,8 +111,8 @@ def test_image_generator_context_uses_published_deliverable_as_single_stage_sour
     agent._context_contract_assembler = ContextContractAssembler(
         memory_services=SimpleNamespace(short_term=service)
     )
-    agent._context_contract_assembler._persist_scene_info_ref = (
-        lambda **kwargs: "/tmp/scene_info_ref.json"
+    agent._scene_info_reference_port = _SceneInfoReferencePort(
+        "/tmp/scene_info_ref.json"
     )
 
     agent_input = asyncio.run(
@@ -136,8 +144,8 @@ def test_prepare_agent_context_prefers_runtime_input_published_deliverable_witho
     agent._context_contract_assembler = ContextContractAssembler(
         memory_services=SimpleNamespace(short_term=service)
     )
-    agent._context_contract_assembler._persist_scene_info_ref = (
-        lambda **kwargs: "/tmp/runtime_input_scene_info_ref.json"
+    agent._scene_info_reference_port = _SceneInfoReferencePort(
+        "/tmp/runtime_input_scene_info_ref.json"
     )
 
     agent_input = asyncio.run(
@@ -179,8 +187,8 @@ def test_image_generator_context_does_not_rewrite_membership_from_scene_outputs(
     agent._context_contract_assembler = ContextContractAssembler(
         memory_services=SimpleNamespace(short_term=service)
     )
-    agent._context_contract_assembler._persist_scene_info_ref = (
-        lambda **kwargs: "/tmp/image-membership-scene-info.json"
+    agent._scene_info_reference_port = _SceneInfoReferencePort(
+        "/tmp/image-membership-scene-info.json"
     )
 
     agent_input = asyncio.run(
@@ -257,6 +265,9 @@ def test_prepare_agent_context_requires_runtime_input_published_deliverable(tmp_
     agent._context_contract_assembler = ContextContractAssembler(
         memory_services=SimpleNamespace(short_term=service)
     )
+    agent._scene_info_reference_port = _SceneInfoReferencePort(
+        "/tmp/missing-runtime-scene-info.json"
+    )
 
     with pytest.raises(AgentError, match="missing_runtime_input_ref"):
         asyncio.run(
@@ -302,8 +313,8 @@ def test_prepare_agent_context_pins_boundary_reads_to_runtime_input_payload(tmp_
     agent._context_contract_assembler = ContextContractAssembler(
         memory_services=SimpleNamespace(short_term=service)
     )
-    agent._context_contract_assembler._persist_scene_info_ref = (
-        lambda **kwargs: "/tmp/runtime_payload_pinned_scene_info_ref.json"
+    agent._scene_info_reference_port = _SceneInfoReferencePort(
+        "/tmp/runtime_payload_pinned_scene_info_ref.json"
     )
 
     agent_input = asyncio.run(

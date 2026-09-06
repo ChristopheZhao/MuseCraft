@@ -256,7 +256,14 @@ def test_video_composer_context_does_not_promote_legacy_nested_scene_outputs():
     )
 
     with pytest.raises(ValueError, match="missing scene_videos"):
-        build_video_composer_context(workflow_id, service=service)
+        build_video_composer_context(
+            workflow_id,
+            service=service,
+            execution_contract=build_video_composer_execution_contract(
+                workflow_state_id=workflow_id,
+                compose_mode="compose",
+            ),
+        )
 
 
 def test_video_composer_context_compose_contract_keeps_scene_inputs_even_when_final_video_exists():
@@ -552,7 +559,6 @@ def test_finalize_scene_outputs_does_not_read_failed_scenes_from_legacy_video_me
     completed, failed = finalize_scene_outputs(
         kind="video",
         workflow_id=workflow_id,
-        agent_memory=None,
         service=service,
     )
 

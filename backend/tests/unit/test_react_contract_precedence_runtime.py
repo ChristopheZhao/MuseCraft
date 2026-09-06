@@ -1,10 +1,13 @@
-from types import SimpleNamespace
-
 import pytest
 
 from app.agents.base import BaseAgent
 from app.agents.react_agent import ReActAgent
-from app.models import AgentType
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from app.services.memory_provider import build_memory_services
 
 
@@ -38,7 +41,7 @@ class _ConflictReactAgent(ReActAgent):
             "plan_llm": {"content": "任务已经完成，不需要继续生成。"},
         }
 
-    async def _execute_action(self, action_plan, input_data, db, iteration):
+    async def _execute_action(self, action_plan, input_data, iteration):
         self.executed = True
         return {"executed_calls": []}
 
@@ -65,7 +68,7 @@ class _CompletionGateReactAgent(ReActAgent):
             "plan_llm": {"content": "任务已完成。"},
         }
 
-    async def _execute_action(self, action_plan, input_data, db, iteration):
+    async def _execute_action(self, action_plan, input_data, iteration):
         raise AssertionError("ACT must not run when no tool calls are planned")
 
     def _accept_completion_request(
@@ -103,15 +106,116 @@ async def test_react_contract_conflict_stops_before_act(monkeypatch):
     monkeypatch.setattr(agent, "_normalize_plan_contract_from_text", _fake_normalize)
 
     result = await agent._execute_impl(
-        task=SimpleNamespace(),
-        input_data={"workflow_state_id": "wf-react-conflict"},
-        db=None,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-conflict",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-conflict"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-conflict",
+        )
     )
 
     assert agent.executed is False
     assert result["subtask_state"] == "error"
     assert result["loop_end_reason"] == "plan_contract_conflict"
     assert result["completed_reason"] == "all_scenes_complete"
+
+
+@pytest.mark.asyncio
+async def test_react_contract_evaluator_failure_halts_with_typed_diagnostic(monkeypatch):
+    monkeypatch.setattr(
+        BaseAgent,
+        "_load_tools",
+        lambda self, names: setattr(self, "_available_tools", {}),
+    )
+    agent = _ConflictReactAgent(memory_services=build_memory_services())
+
+    async def _fake_normalize(_raw_text):
+        return {
+            "task_complete": False,
+            "completed_reason": "generation_required",
+            "plan_summary": "execute the requested tool",
+        }
+
+    def _raise_contract_error(*_args, **_kwargs):
+        raise RuntimeError("contract parser unavailable")
+
+    monkeypatch.setattr(agent, "_normalize_plan_contract_from_text", _fake_normalize)
+    monkeypatch.setattr(
+        "app.agents.utils.tool_contracts.plan_contract_conflicts_with_actions",
+        _raise_contract_error,
+    )
+
+    result = await agent._execute_impl(
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-contract-evaluator-failure",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-contract-evaluator-failure"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-contract-evaluator-failure",
+        )
+    )
+
+    assert agent.executed is False
+    assert result["subtask_state"] == "error"
+    assert result["reason_code"] == "plan_contract_evaluation_failed"
+    assert "contract parser unavailable" in result["diagnostic"]
+
+
+@pytest.mark.asyncio
+async def test_react_contract_overlay_failure_halts_with_typed_diagnostic(monkeypatch):
+    monkeypatch.setattr(
+        BaseAgent,
+        "_load_tools",
+        lambda self, names: setattr(self, "_available_tools", {}),
+    )
+    agent = _ConflictReactAgent(memory_services=build_memory_services())
+
+    async def _fake_normalize(_raw_text):
+        return {
+            "task_complete": False,
+            "completed_reason": "generation_required",
+            "plan_summary": "execute the requested tool",
+        }
+
+    def _raise_overlay_error(*_args, **_kwargs):
+        raise RuntimeError("reflection contract unavailable")
+
+    monkeypatch.setattr(agent, "_normalize_plan_contract_from_text", _fake_normalize)
+    monkeypatch.setattr(
+        "app.agents.utils.tool_contracts.overlay_contract_on_reflection",
+        _raise_overlay_error,
+    )
+
+    result = await agent._execute_impl(
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-contract-overlay-failure",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-contract-overlay-failure"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-contract-overlay-failure",
+        )
+    )
+
+    assert agent.executed is True
+    assert result["subtask_state"] == "error"
+    assert result["reason_code"] == "reflection_contract_overlay_failed"
+    assert "reflection contract unavailable" in result["diagnostic"]
 
 
 @pytest.mark.asyncio
@@ -124,9 +228,18 @@ async def test_react_completion_gate_rejects_plan_only_completion(monkeypatch):
     agent = _CompletionGateReactAgent(memory_services=build_memory_services())
 
     result = await agent._execute_impl(
-        task=SimpleNamespace(),
-        input_data={"workflow_state_id": "wf-react-gate"},
-        db=None,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-react-gate",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.IMAGE_GENERATOR.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {"workflow_state_id": "wf-react-gate"},
+                field_path="test.input_data",
+            ),
+            workflow_state_id="wf-react-gate",
+        )
     )
 
     assert agent.gate_calls == 2

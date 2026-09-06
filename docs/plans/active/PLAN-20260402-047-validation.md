@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260402-047
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260402-047
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Validate explicit diagnostics for missing accepted owner fields at the image composer boundary.
 - Confirm the new diagnostics do not reopen `PLAN-20260402-046` owner decisions or reintroduce placeholder/heuristic repair.

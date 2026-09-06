@@ -1,0 +1,125 @@
+{
+  "plan_id": "PLAN-20260808-069",
+  "checkpoint": "CHK-a3-a4-mainline-closure",
+  "title": "A3/A4 current MAS mainline closure",
+  "profile": "default",
+  "verdict": "pass",
+  "summary": "Validation passed without remediation.",
+  "updated_at": "2026-08-16T02:28:53Z",
+  "checklist_path": "docs/checkpoints/PLAN-20260808-069/CHK-a3-a4-mainline-closure-checklist.md",
+  "attempts": [
+    {
+      "attempt": 1,
+      "started_at": "2026-08-16T02:09:30Z",
+      "finished_at": "2026-08-16T02:17:37Z",
+      "validation_results": [
+        {
+          "commands": [
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/e2e/test_quick_mas_runtime.py",
+              "started_at": "2026-08-16T02:09:30Z",
+              "finished_at": "2026-08-16T02:10:49Z",
+              "returncode": 0,
+              "stdout": ".                                                                        [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 2 warnings in 26.81s\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/unit",
+              "started_at": "2026-08-16T02:10:49Z",
+              "finished_at": "2026-08-16T02:13:49Z",
+              "returncode": 0,
+              "stdout": "........................................................................ [ 10%]\n........................................................................ [ 20%]\n........................................................................ [ 30%]\n........................................................................ [ 41%]\n........................................................................ [ 51%]\n........................................................................ [ 61%]\n........................................................................ [ 72%]\n........................................................................ [ 82%]\n........................................................................ [ 92%]\n....................................................                     [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n700 passed, 2 warnings in 135.91s (0:02:15)\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/architecture",
+              "started_at": "2026-08-16T02:13:49Z",
+              "finished_at": "2026-08-16T02:15:34Z",
+              "returncode": 0,
+              "stdout": "................................                                         [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n32 passed, 2 warnings in 54.86s\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/integration/test_video_composer_react_flow.py backend/tests/integration/test_video_composer_voiceover_flow.py",
+              "started_at": "2026-08-16T02:15:34Z",
+              "finished_at": "2026-08-16T02:16:41Z",
+              "returncode": 0,
+              "stdout": "..                                                                       [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n2 passed, 2 warnings in 17.57s\n",
+              "stderr": ""
+            },
+            {
+              "command": "git diff --check",
+              "started_at": "2026-08-16T02:16:41Z",
+              "finished_at": "2026-08-16T02:17:37Z",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "warning: in the working copy of 'backend/app/agents/base.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'backend/app/core/config.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'backend/tests/test_ai_service_integration.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/checkpoints/PLAN-20260718-068/CHK-gate-c-transport-only-checklist.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/PLAN_INDEX.json', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260705-066.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260711-067.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260718-068.md', CRLF will be replaced by LF the next time Git touches it\n"
+            }
+          ],
+          "passed": true,
+          "matched_user_confirmation_triggers": [],
+          "round": 0
+        }
+      ],
+      "auto_fix_rounds": [],
+      "matched_user_confirmation_triggers": []
+    },
+    {
+      "attempt": 2,
+      "started_at": "2026-08-16T02:21:11Z",
+      "finished_at": "2026-08-16T02:28:53Z",
+      "validation_results": [
+        {
+          "commands": [
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/e2e/test_quick_mas_runtime.py",
+              "started_at": "2026-08-16T02:21:11Z",
+              "finished_at": "2026-08-16T02:22:28Z",
+              "returncode": 0,
+              "stdout": ".                                                                        [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 2 warnings in 29.56s\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/unit",
+              "started_at": "2026-08-16T02:22:28Z",
+              "finished_at": "2026-08-16T02:25:28Z",
+              "returncode": 0,
+              "stdout": "........................................................................ [ 10%]\n........................................................................ [ 20%]\n........................................................................ [ 30%]\n........................................................................ [ 41%]\n........................................................................ [ 51%]\n........................................................................ [ 61%]\n........................................................................ [ 72%]\n........................................................................ [ 82%]\n........................................................................ [ 92%]\n....................................................                     [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n700 passed, 2 warnings in 135.89s (0:02:15)\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/architecture",
+              "started_at": "2026-08-16T02:25:28Z",
+              "finished_at": "2026-08-16T02:27:06Z",
+              "returncode": 0,
+              "stdout": "................................                                         [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n32 passed, 2 warnings in 52.73s\n",
+              "stderr": ""
+            },
+            {
+              "command": "backend/.venv/bin/python -m pytest -q backend/tests/integration/test_video_composer_react_flow.py backend/tests/integration/test_video_composer_voiceover_flow.py",
+              "started_at": "2026-08-16T02:27:06Z",
+              "finished_at": "2026-08-16T02:28:06Z",
+              "returncode": 0,
+              "stdout": "..                                                                       [100%]\n=============================== warnings summary ===============================\nbackend/app/models/base.py:11\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/app/models/base.py:11: MovedIn20Warning: The ``as_declarative()`` function is now available as sqlalchemy.orm.as_declarative() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)\n    @as_declarative()\n\nbackend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268\n  /mnt/d/code/agent/Opensource/vertical_application/short-video-maker/backend/.venv/lib/python3.11/site-packages/pydantic/_internal/_config.py:268: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.5/migration/\n    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n2 passed, 2 warnings in 17.87s\n",
+              "stderr": ""
+            },
+            {
+              "command": "git diff --check",
+              "started_at": "2026-08-16T02:28:06Z",
+              "finished_at": "2026-08-16T02:28:53Z",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "warning: in the working copy of 'backend/app/agents/base.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'backend/app/core/config.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'backend/tests/test_ai_service_integration.py', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/checkpoints/PLAN-20260718-068/CHK-gate-c-transport-only-checklist.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/PLAN_INDEX.json', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260705-066.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260711-067.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of 'docs/plans/active/PLAN-20260718-068.md', CRLF will be replaced by LF the next time Git touches it\n"
+            }
+          ],
+          "passed": true,
+          "matched_user_confirmation_triggers": [],
+          "round": 0
+        }
+      ],
+      "auto_fix_rounds": [],
+      "matched_user_confirmation_triggers": []
+    }
+  ],
+  "waiver": null
+}

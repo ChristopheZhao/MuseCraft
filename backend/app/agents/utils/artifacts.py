@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
-from ..memory.short_term.working_memory import WorkingMemory
+from ..adapters.memory_views import extract_failed_scenes, load_scene_overview
 from ..memory.config.scene_output_schema import load_scene_output_schema
-from ..adapters.memory_views import load_scene_overview, extract_failed_scenes
+from ..memory.short_term.working_memory import WorkingMemory
 from .memory_helpers import get_mas_working_memory
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ def coerce_scene_number(val: Any) -> Optional[int]:
 
 async def ensure_persisted_videos(
     results: List[Dict[str, Any]],
-    uploader: Callable[[str, Any], Any],
+    uploader: Optional[Callable[[str, Any], Any]],
 ) -> List[Dict[str, Any]]:
     """确保成功的视频结果具有稳定的 file_path。
 
@@ -85,6 +86,23 @@ async def ensure_persisted_videos(
         updated["fallback_reasons"] = fallback_reasons
         return updated
 
+    def _attach_persisted_storage(
+        item: Dict[str, Any],
+        *,
+        source: str,
+        storage_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        updated = dict(item or {})
+        storage = dict(storage_payload or {})
+        storage["status"] = "persisted"
+        storage["source"] = str(source or "producer")
+        storage.pop("fallback_reason", None)
+        metadata = dict(updated.get("metadata") or {})
+        metadata["storage"] = dict(storage)
+        updated["metadata"] = metadata
+        updated["storage"] = storage
+        return updated
+
     updated: List[Dict[str, Any]] = []
     for r in results:
         try:
@@ -92,28 +110,65 @@ async def ensure_persisted_videos(
                 updated.append(r)
                 continue
             if r.get("video_path"):
-                updated.append(r)
+                storage = _extract_storage_diagnostic(r)
+                if str(storage.get("status") or "").strip().lower() == "failed":
+                    updated.append(dict(r))
+                    continue
+                updated.append(
+                    _attach_persisted_storage(
+                        r,
+                        source="producer_local_path",
+                        storage_payload=storage,
+                    )
+                )
                 continue
             video_url = r.get("video_url")
             scene_num = r.get("scene_number")
             if video_url:
+                if not callable(uploader):
+                    updated.append(
+                        _attach_storage_diagnostic(
+                            dict(r),
+                            status="failed",
+                            fallback_reason="artifact_uploader_unavailable",
+                            scene_number=scene_num,
+                        )
+                    )
+                    continue
                 storage_result = await uploader(video_url, scene_num)
                 file_path = ""
+                storage_failed = False
                 if isinstance(storage_result, dict):
-                    file_path = storage_result.get("file_path") or storage_result.get("local_path") or ""
+                    file_path = (
+                        storage_result.get("file_path") or storage_result.get("local_path") or ""
+                    )
                     storage_diag = storage_result.get("storage")
                     if isinstance(storage_diag, dict) and storage_diag.get("status") == "failed":
+                        storage_failed = True
                         r = _attach_storage_diagnostic(
                             dict(r),
                             status="failed",
-                            fallback_reason=str(storage_diag.get("fallback_reason") or "artifact_upload_failed"),
+                            fallback_reason=str(
+                                storage_diag.get("fallback_reason") or "artifact_upload_failed"
+                            ),
                             error_type=storage_diag.get("error_type"),
                             error=storage_diag.get("error"),
                             scene_number=scene_num,
                         )
                 r = dict(r)
                 r["video_path"] = file_path or r.get("video_path", "")
-                if not file_path:
+                if file_path and not storage_failed:
+                    r = _attach_persisted_storage(
+                        r,
+                        source="storage_tool",
+                        storage_payload=(
+                            storage_result.get("storage")
+                            if isinstance(storage_result, dict)
+                            and isinstance(storage_result.get("storage"), dict)
+                            else None
+                        ),
+                    )
+                elif not file_path:
                     r = _attach_storage_diagnostic(
                         r,
                         status="failed",
@@ -243,6 +298,187 @@ def _extract_storage_diagnostic(record: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+_SCENE_OUTPUT_ACCEPTANCE_CONTRACT_VERSION = "v1"
+_SCENE_OUTPUT_ACCEPTANCE_REQUIRED_KEYS = {
+    "contract_version",
+    "scene_number",
+    "status",
+    "artifact_kind",
+    "delivery_surface",
+    "delivery_ref",
+    "workflow_state_id",
+    "artifact_ref",
+    "accepted_at",
+}
+_SCENE_OUTPUT_ACCEPTANCE_OPTIONAL_KEYS = {
+    "producer_status",
+    "storage_status",
+    "failure_reason",
+}
+
+
+class _SceneOutputAcceptanceReceiptError(ValueError):
+    def __init__(self, *, reason_code: str, field_path: str) -> None:
+        self.reason_code = reason_code
+        self.field_path = field_path
+        super().__init__(f"{reason_code}: {field_path}")
+
+
+class SceneOutputAuthorityError(ValueError):
+    def __init__(self, *, reason_code: str, detail: str) -> None:
+        self.reason_code = reason_code
+        self.detail = detail
+        super().__init__(f"{reason_code}: {detail}")
+
+
+def _parse_scene_output_acceptance_receipt(receipt: Any) -> Dict[str, Any]:
+    if not isinstance(receipt, dict):
+        raise _SceneOutputAcceptanceReceiptError(
+            reason_code="scene_output_acceptance_receipt_missing",
+            field_path="acceptance_receipt",
+        )
+    unknown_keys = sorted(
+        set(receipt)
+        - _SCENE_OUTPUT_ACCEPTANCE_REQUIRED_KEYS
+        - _SCENE_OUTPUT_ACCEPTANCE_OPTIONAL_KEYS
+    )
+    if unknown_keys:
+        raise _SceneOutputAcceptanceReceiptError(
+            reason_code="scene_output_acceptance_receipt_unknown_keys",
+            field_path=",".join(unknown_keys),
+        )
+    missing_keys = sorted(
+        key for key in _SCENE_OUTPUT_ACCEPTANCE_REQUIRED_KEYS if key not in receipt
+    )
+    if missing_keys:
+        raise _SceneOutputAcceptanceReceiptError(
+            reason_code="scene_output_acceptance_receipt_incomplete",
+            field_path=",".join(missing_keys),
+        )
+
+    parsed = dict(receipt)
+    if parsed.get("contract_version") != _SCENE_OUTPUT_ACCEPTANCE_CONTRACT_VERSION:
+        raise _SceneOutputAcceptanceReceiptError(
+            reason_code="scene_output_acceptance_receipt_invalid",
+            field_path="acceptance_receipt.contract_version",
+        )
+    if type(parsed.get("scene_number")) is not int:
+        raise _SceneOutputAcceptanceReceiptError(
+            reason_code="scene_output_acceptance_receipt_invalid",
+            field_path="acceptance_receipt.scene_number",
+        )
+    enum_fields = {
+        "status": {"accepted", "failed"},
+        "artifact_kind": {"image", "video"},
+        "producer_status": {"succeeded", "failed"},
+        "storage_status": {"", "persisted", "failed"},
+    }
+    for field_name, allowed_values in enum_fields.items():
+        if field_name not in parsed:
+            continue
+        field_value = parsed.get(field_name)
+        if type(field_value) is not str or field_value not in allowed_values:
+            raise _SceneOutputAcceptanceReceiptError(
+                reason_code="scene_output_acceptance_receipt_invalid",
+                field_path=f"acceptance_receipt.{field_name}",
+            )
+    for field_name in (
+        "delivery_surface",
+        "delivery_ref",
+        "workflow_state_id",
+        "artifact_ref",
+        "accepted_at",
+    ):
+        if not isinstance(parsed.get(field_name), str):
+            raise _SceneOutputAcceptanceReceiptError(
+                reason_code="scene_output_acceptance_receipt_invalid",
+                field_path=f"acceptance_receipt.{field_name}",
+            )
+    for field_name in _SCENE_OUTPUT_ACCEPTANCE_OPTIONAL_KEYS:
+        if field_name in parsed and not isinstance(parsed.get(field_name), str):
+            raise _SceneOutputAcceptanceReceiptError(
+                reason_code="scene_output_acceptance_receipt_invalid",
+                field_path=f"acceptance_receipt.{field_name}",
+            )
+    return parsed
+
+
+def issue_scene_output_acceptance_receipts(
+    *,
+    kind: str,
+    artifacts: Iterable[Dict[str, Any]],
+    workflow_state_id: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Issue producer-side acceptance receipts and attach them to scene artifacts."""
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"image", "video"}:
+        raise ValueError(f"Unsupported scene acceptance artifact kind: {kind!r}")
+
+    accepted_at = datetime.now(timezone.utc).isoformat()
+    issued_artifacts: List[Dict[str, Any]] = []
+    receipts: List[Dict[str, Any]] = []
+    for raw_item in artifacts or []:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        raw_scene_number = item.get("scene_number")
+        if type(raw_scene_number) is not int:
+            issued_artifacts.append(item)
+            continue
+        scene_number = raw_scene_number
+
+        artifact_path = str(
+            item.get(f"{normalized_kind}_path")
+            or item.get("file_path")
+            or item.get("output_path")
+            or item.get("local_path")
+            or ""
+        ).strip()
+        artifact_url = str(item.get(f"{normalized_kind}_url") or "").strip()
+        artifact_ref = artifact_path or artifact_url
+        storage = _extract_storage_diagnostic(item)
+        raw_storage_status = storage.get("status")
+        storage_status = raw_storage_status if isinstance(raw_storage_status, str) else ""
+        producer_succeeded = item.get("success") is True
+
+        receipt: Dict[str, Any] = {
+            "contract_version": _SCENE_OUTPUT_ACCEPTANCE_CONTRACT_VERSION,
+            "scene_number": scene_number,
+            "status": "failed",
+            "artifact_kind": normalized_kind,
+            "delivery_surface": f"scene_outputs.{normalized_kind}",
+            "delivery_ref": f"scene_outputs.{normalized_kind}.{scene_number}",
+            "workflow_state_id": str(workflow_state_id or "").strip(),
+            "artifact_ref": artifact_ref,
+            "producer_status": "succeeded" if producer_succeeded else "failed",
+            "accepted_at": "",
+        }
+        failure_reason = ""
+        if not producer_succeeded:
+            failure_reason = "producer_result_failed"
+        elif not artifact_ref:
+            failure_reason = "artifact_ref_missing"
+        elif normalized_kind == "video" and storage_status == "failed":
+            failure_reason = str(storage.get("fallback_reason") or "").strip() or "storage_failed"
+        elif normalized_kind == "video" and not artifact_path:
+            failure_reason = "artifact_not_persisted"
+        elif normalized_kind == "video" and storage_status != "persisted":
+            failure_reason = "storage_not_persisted"
+
+        if normalized_kind == "video":
+            receipt["storage_status"] = storage_status
+        if failure_reason:
+            receipt["failure_reason"] = failure_reason
+        else:
+            receipt["status"] = "accepted"
+            receipt["accepted_at"] = accepted_at
+
+        item["acceptance_receipt"] = dict(receipt)
+        issued_artifacts.append(item)
+        receipts.append(receipt)
+    return issued_artifacts, receipts
+
+
 def _reject_scene_output(
     *,
     scene_number: Optional[int],
@@ -261,34 +497,107 @@ def _accept_scene_output_record(
     *,
     kind: str,
     record: Dict[str, Any],
+    expected_workflow_id: Optional[str],
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    scene_number = coerce_scene_number(record.get("scene_number"))
-    if scene_number is None:
+    raw_scene_number = record.get("scene_number")
+    if type(raw_scene_number) is not int:
         return None, _reject_scene_output(
             scene_number=None,
-            reason_code="scene_output_scene_number_missing",
+            reason_code=(
+                "scene_output_scene_number_missing"
+                if raw_scene_number is None
+                else "scene_output_scene_number_invalid"
+            ),
         )
+    scene_number = raw_scene_number
 
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    status = str(record.get("status") or metadata.get("status") or "").strip().lower()
-    if status in {"failed", "error", "rejected", "blocked"}:
+    try:
+        receipt = _parse_scene_output_acceptance_receipt(record.get("acceptance_receipt"))
+    except _SceneOutputAcceptanceReceiptError as exc:
         return None, _reject_scene_output(
             scene_number=scene_number,
-            reason_code="scene_output_status_failed",
-            detail=status,
+            reason_code=exc.reason_code,
+            detail=exc.field_path
+            if exc.reason_code.endswith(("invalid", "unknown_keys", "incomplete"))
+            else "",
+        )
+
+    receipt_status = receipt.get("status")
+    if receipt_status != "accepted":
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_status_not_accepted",
+            detail=(
+                str(receipt.get("failure_reason") or "").strip() or str(receipt_status or "missing")
+            ),
+        )
+    receipt_scene_number = receipt.get("scene_number")
+    if receipt_scene_number != scene_number:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_scene_mismatch",
+            detail=str(receipt.get("scene_number") or ""),
+        )
+    if receipt.get("artifact_kind") != kind:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_kind_mismatch",
+            detail=str(receipt.get("artifact_kind") or ""),
+        )
+    expected_surface = f"scene_outputs.{kind}"
+    if receipt.get("delivery_surface") != expected_surface:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_surface_mismatch",
+            detail=str(receipt.get("delivery_surface") or ""),
+        )
+    expected_delivery_ref = f"{expected_surface}.{scene_number}"
+    if receipt.get("delivery_ref") != expected_delivery_ref:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_ref_mismatch",
+            detail=str(receipt.get("delivery_ref") or ""),
+        )
+    expected_wf_id = str(expected_workflow_id or "").strip()
+    receipt_wf_id = receipt.get("workflow_state_id")
+    if expected_wf_id and receipt_wf_id != expected_wf_id:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_workflow_mismatch",
+            detail=receipt_wf_id or "missing",
+        )
+    accepted_at = receipt.get("accepted_at")
+    if not isinstance(accepted_at, str) or not accepted_at:
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_timestamp_missing",
+        )
+    try:
+        parsed_accepted_at = datetime.fromisoformat(accepted_at)
+    except ValueError:
+        parsed_accepted_at = None
+    if (
+        parsed_accepted_at is None
+        or accepted_at != accepted_at.strip()
+        or parsed_accepted_at.tzinfo is None
+        or parsed_accepted_at.utcoffset() is None
+    ):
+        return None, _reject_scene_output(
+            scene_number=scene_number,
+            reason_code="scene_output_acceptance_timestamp_invalid",
+            detail=accepted_at,
         )
 
     artifact_url = str(record.get(f"{kind}_url") or "").strip()
     artifact_path = str(record.get(f"{kind}_path") or "").strip()
-    storage = _extract_storage_diagnostic(record)
-    storage_status = str(storage.get("status") or "").strip().lower() if storage else ""
-    if storage_status == "failed":
+    artifact_ref = artifact_path or artifact_url
+    if receipt.get("artifact_ref") != artifact_ref:
         return None, _reject_scene_output(
             scene_number=scene_number,
-            reason_code="scene_output_storage_failed",
-            detail=str(storage.get("fallback_reason") or "storage_failed"),
+            reason_code="scene_output_acceptance_artifact_ref_mismatch",
+            detail=str(receipt.get("artifact_ref") or ""),
         )
-    if kind == "video" and artifact_url and not artifact_path:
+    if kind == "video" and not artifact_path:
         return None, _reject_scene_output(
             scene_number=scene_number,
             reason_code="scene_output_missing_local_path",
@@ -299,24 +608,7 @@ def _accept_scene_output_record(
             reason_code="scene_output_artifact_ref_missing",
         )
 
-    receipt: Dict[str, Any] = {
-        "scene_number": scene_number,
-        "status": "accepted",
-        "artifact_kind": kind,
-        "delivery_surface": f"scene_outputs.{kind}",
-        "delivery_ref": f"scene_outputs.{kind}.{scene_number}",
-    }
-    accepted_at = ""
-    if metadata:
-        accepted_at = str(
-            metadata.get("accepted_at")
-            or metadata.get("created_at")
-            or metadata.get("updated_at")
-            or ""
-        ).strip()
-    if accepted_at:
-        receipt["accepted_at"] = accepted_at
-    return receipt, None
+    return dict(receipt), None
 
 
 def evaluate_scene_output_acceptance(
@@ -350,7 +642,9 @@ def evaluate_scene_output_acceptance(
                 "accepted_receipts": [],
             }
 
-    overview = load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
+    overview = (
+        load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
+    )
     expected_numbers = _sorted_scene_numbers(expected_scene_numbers)
     if not expected_numbers:
         expected_numbers = _scene_numbers_from_overview(overview)
@@ -359,7 +653,11 @@ def evaluate_scene_output_acceptance(
     accepted_receipts: List[Dict[str, Any]] = []
     rejected_outputs: List[Dict[str, Any]] = []
     for record in completed:
-        receipt, rejection = _accept_scene_output_record(kind=kind, record=record)
+        receipt, rejection = _accept_scene_output_record(
+            kind=kind,
+            record=record,
+            expected_workflow_id=wf_id,
+        )
         if receipt is not None:
             accepted_receipts.append(receipt)
         if rejection is not None:
@@ -382,7 +680,8 @@ def evaluate_scene_output_acceptance(
             scene_number for scene_number in failed_scene_numbers if scene_number in expected_set
         ]
     unexpected_scene_numbers = [
-        scene_number for scene_number in accepted_scene_numbers
+        scene_number
+        for scene_number in accepted_scene_numbers
         if expected_set and scene_number not in expected_set
     ]
 
@@ -426,20 +725,47 @@ def finalize_scene_outputs(
     *,
     kind: str,
     workflow_id: Optional[str],
-    agent_memory: Optional[WorkingMemory],
     shared_memory: Optional[WorkingMemory] = None,
     service: Optional["WorkingMemoryService"] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Collect completion/failure payloads for a given scene output kind."""
-    wf_id = str(workflow_id) if workflow_id else None
+    """Collect accepted scene outputs from the shared MAS authority only."""
+    if (
+        not isinstance(workflow_id, str)
+        or not workflow_id
+        or workflow_id != workflow_id.strip()
+    ):
+        raise SceneOutputAuthorityError(
+            reason_code="scene_output_authority_unbound",
+            detail="canonical workflow_id is required",
+        )
+    wf_id = workflow_id
     shared = shared_memory
-    if shared is None and wf_id and service is not None:
+    if shared is None and service is not None:
         try:
             shared = get_mas_working_memory(wf_id, service=service)
-        except Exception:
-            shared = None
-    completed = collect_scene_outputs(kind=kind, memory=shared or agent_memory)
-    overview = load_scene_overview(wf_id, service=service) if wf_id and service is not None else None
+        except Exception as exc:
+            raise SceneOutputAuthorityError(
+                reason_code="scene_output_authority_load_failed",
+                detail=type(exc).__name__,
+            ) from exc
+    if shared is None:
+        raise SceneOutputAuthorityError(
+            reason_code="scene_output_authority_unbound",
+            detail="shared_memory or service binding is required",
+        )
+    completed_records = collect_scene_outputs(kind=kind, memory=shared)
+    completed: List[Dict[str, Any]] = []
+    for record in completed_records:
+        receipt, _rejection = _accept_scene_output_record(
+            kind=kind,
+            record=record,
+            expected_workflow_id=wf_id,
+        )
+        if receipt is not None:
+            completed.append(record)
+    overview = (
+        load_scene_overview(wf_id, service=service) if service is not None else None
+    )
     failed = extract_failed_scenes(overview)
     return completed, failed
 
@@ -469,9 +795,7 @@ def make_storage_uploader(
             return {}
         scene_idx = coerce_scene_number(scene_number)
         filename_core = (
-            f"scene_{scene_idx}"
-            if scene_idx is not None
-            else f"artifact_{int(time.time() * 1000)}"
+            f"scene_{scene_idx}" if scene_idx is not None else f"artifact_{int(time.time() * 1000)}"
         )
         destination_key = f"{prefix}/{filename_core}.{ext}"
         metadata: Dict[str, Any] = {
@@ -514,6 +838,7 @@ def make_storage_uploader(
 
 # --------- Unified artifact selection (shared) ---------
 
+
 def _exts_for_kind(kind: str) -> List[str]:
     k = (kind or "").lower()
     if k == "video":
@@ -545,11 +870,23 @@ def _pick_from_payload(payload: Dict[str, Any], kind: str, require_local: bool) 
             return fp
     # Fallback to URLs when本地非必需
     if not require_local:
-        if kind == "video" and isinstance(payload.get("video_url"), str) and payload.get("video_url"):
+        if (
+            kind == "video"
+            and isinstance(payload.get("video_url"), str)
+            and payload.get("video_url")
+        ):
             return payload.get("video_url")
-        if kind == "audio" and isinstance(payload.get("audio_url"), str) and payload.get("audio_url"):
+        if (
+            kind == "audio"
+            and isinstance(payload.get("audio_url"), str)
+            and payload.get("audio_url")
+        ):
             return payload.get("audio_url")
-        if kind == "image" and isinstance(payload.get("image_url"), str) and payload.get("image_url"):
+        if (
+            kind == "image"
+            and isinstance(payload.get("image_url"), str)
+            and payload.get("image_url")
+        ):
             return payload.get("image_url")
     return None
 
@@ -577,7 +914,9 @@ def pick_artifact_path_from_results(
         if cand:
             return cand
         # executed_calls 风格：result 可能为对象或字典
-        payload = extract_tool_payload(item.get("result")) if item.get("result") is not None else None
+        payload = (
+            extract_tool_payload(item.get("result")) if item.get("result") is not None else None
+        )
         if isinstance(payload, dict):
             cand = _pick_from_payload(payload, kind=kind, require_local=require_local)
             if cand:
@@ -597,6 +936,7 @@ def normalize_executed_calls_to_artifacts(
     - kind: 限定 'image' | 'video' | 'audio'；为 None 时不过滤。
     - scene_number 来自 args.scene_number（优先）。
     """
+
     def _coerce_int(value: Any) -> Optional[int]:
         try:
             if value is None:
@@ -615,7 +955,9 @@ def normalize_executed_calls_to_artifacts(
         # - scene-1-xxx / scene1_xxx
         import re as _re
 
-        m = _re.search(r"(?:^|[^0-9])scene[_-]?(?P<num>[0-9]{1,4})(?:[^0-9]|$)", reference_id.lower())
+        m = _re.search(
+            r"(?:^|[^0-9])scene[_-]?(?P<num>[0-9]{1,4})(?:[^0-9]|$)", reference_id.lower()
+        )
         if not m:
             return None
         return _coerce_int(m.group("num"))
@@ -625,7 +967,9 @@ def normalize_executed_calls_to_artifacts(
         if not isinstance(call, dict) or not call.get("success"):
             continue
         args = call.get("args") or {}
-        payload = extract_tool_payload(call.get("result")) if call.get("result") is not None else None
+        payload = (
+            extract_tool_payload(call.get("result")) if call.get("result") is not None else None
+        )
         if not isinstance(payload, dict):
             continue
         # 选择路径与URL
@@ -695,12 +1039,16 @@ def normalize_executed_calls_to_artifacts(
         if duration is not None:
             item["duration_sec"] = duration
         if include_prompt:
-            item["prompt_text"] = args.get("prompt") or payload.get("prompt_text") or payload.get("prompt") or ""
+            item["prompt_text"] = (
+                args.get("prompt") or payload.get("prompt_text") or payload.get("prompt") or ""
+            )
         out.append(item)
     return out
 
 
-def _map_scene_output(fields: Dict[str, Dict[str, Any]], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _map_scene_output(
+    fields: Dict[str, Dict[str, Any]], payload: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     if not fields:
         return {}
     result: Dict[str, Any] = {}

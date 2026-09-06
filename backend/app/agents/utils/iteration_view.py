@@ -136,7 +136,7 @@ def _resolve_generation_tool_prefixes(agent_name: str) -> Set[str]:
     if name == "voice_synthesizer":
         return {"voice_synth_tool."}
     if name == "audio_generator":
-        return {"suno_client."}
+        return {"music_generation."}
     return set()
 
 

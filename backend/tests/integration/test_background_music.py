@@ -67,7 +67,7 @@ async def test_audio_generator_agent():
     
     try:
         from app.agents.audio_generator import AudioGeneratorAgent
-        from app.models.agent import AgentType
+        from app.domain import AgentType
         from app.models.task import Task
         from app.agents.memory.short_term import get_working_memory_service
         from app.agents.memory.short_term import SceneSnapshot
@@ -176,11 +176,11 @@ async def test_complete_workflow():
     print("\n🎵 测试 4: 完整工作流集成")
     
     try:
-        from app.agents.orchestrator import OrchestratorAgent
-        from app.models.agent import AgentType
+        from app.infrastructure.orchestrator_composition import build_orchestrator_agent
+        from app.domain import AgentType
         from app.services.orchestration_state_adapter import OrchestrationStateAdapter
         
-        orchestrator = OrchestratorAgent()
+        orchestrator = build_orchestrator_agent()
         print("✅ OrchestratorAgent 创建成功")
 
         registered_agents = {agent_type.value for agent_type in orchestrator.agents.keys()}

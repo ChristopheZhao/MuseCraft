@@ -4,10 +4,8 @@ Script Writer Agent - 简化版批量脚本生成
 """
 import json
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
 from .adapters.video.models import SceneSnapshot
 from ..core.consistency_policy import get_consistency_policy
 from ..services.style_taxonomy import match_style_taxonomy
@@ -175,11 +173,11 @@ class ScriptWriterAgent(BaseAgent):
         
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
         """批量脚本生成 - 实现在 _execute_impl，使用 BaseAgent.execute 统一包装"""
+        task = request.task
+        input_data = request.input_data.to_dict()
         try:
             from ..core.config import settings
 
@@ -269,12 +267,10 @@ class ScriptWriterAgent(BaseAgent):
             failed_scenes = []
         generated_count = int(result.get("scenes_generated") or 0) if isinstance(result, dict) else 0
         total_scenes = int(result.get("total_scenes") or generated_count or 0) if isinstance(result, dict) else 0
-        completion_state = "completed" if success else "partial"
         reported_gaps: List[str] = []
         if not success:
             reported_gaps.append("scene_script_generation_incomplete")
         reflection: Dict[str, Any] = {
-            "completion_state": completion_state,
             "reported_gaps": reported_gaps,
             "reported_hints": [self.EXECUTION_BOUNDARY_REASON_CODE],
             "summary": f"generated_scene_scripts={generated_count}/{total_scenes}",
@@ -309,7 +305,7 @@ class ScriptWriterAgent(BaseAgent):
         scenes: List[SceneSnapshot],
         concept_plan: Dict[str, Any],
         workflow_state_id: str,
-        task: Task,
+        task: AgentTaskReference,
         *,
         episode_context: Optional[Dict[str, Any]] = None,
         project_context: Optional[Dict[str, Any]] = None,
@@ -435,14 +431,6 @@ class ScriptWriterAgent(BaseAgent):
                     enriched_style = dict(intelligent_style)
                     enriched_style['taxonomy'] = taxonomy_match
                     intelligent_style = enriched_style
-                    if isinstance(concept_plan, dict):
-                        concept_plan['intelligent_style_design'] = enriched_style
-                        try:
-                            write_shared_fact(workflow_state_id, "project.concept_plan", concept_plan, service=self.short_term_service)
-                        except Exception as slot_err:
-                            raise AgentError(
-                                f"Failed to persist enriched concept_plan: {slot_err}"
-                            ) from slot_err
             # 读取脚本写作模型与token预算（来自ai_config）
             try:
                 from ..core.ai_config import get_ai_config
@@ -1194,9 +1182,9 @@ class ScriptWriterAgent(BaseAgent):
                     wf_id = str(workflow_state_id or "")
                     if wf_id:
                         from ..services.memory_writer import MemoryWriter
-                        from ..models.task import TaskType
+                        from ..domain import TaskType
                         writer = MemoryWriter(self._memory_services)
-                        await writer.write(
+                        receipt = await writer.write(
                             TaskType.SCRIPT_WRITING,
                             workflow_id=str(wf_id),
                             scene_number=None,
@@ -1205,7 +1193,19 @@ class ScriptWriterAgent(BaseAgent):
                                 "per_scene_roles": per_scene
                             }
                         )
-                        self.logger.info("🧠 角色一致性快照已存入EPISODIC记忆（roles_snapshot）")
+                        if receipt.status.value == "written":
+                            self.logger.info(
+                                "Role consistency snapshot stored: memory_id=%s",
+                                receipt.memory_id,
+                            )
+                        else:
+                            self.logger.warning(
+                                "Role consistency memory write did not persist: "
+                                "status=%s reason_code=%s diagnostic=%s",
+                                receipt.status.value,
+                                receipt.reason_code.value,
+                                receipt.diagnostic,
+                            )
                 except Exception as _mw:
                     self.logger.warning(f"角色一致性快照写入记忆失败（跳过）：{_mw}")
             except Exception as re:

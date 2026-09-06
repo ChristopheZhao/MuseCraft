@@ -4,11 +4,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
-
 from .react_agent import ReActAgent, AgentError
 from .utils.progress_snapshot import emit_progress_snapshot
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentTaskReference, AgentType
 from ..core.config import settings
 from .utils.artifacts import (
     normalize_executed_calls_to_artifacts,
@@ -48,7 +46,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         *,
         status: str,
-        completion_state: str,
         completed_count: int,
         failed_count: int,
         reported_gaps: Optional[List[str]] = None,
@@ -59,7 +56,6 @@ class VoiceSynthesizerAgent(ReActAgent):
             "gate_triggers": [],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.voice"}],
             "reflection": {
-                "completion_state": completion_state,
                 "reported_gaps": list(reported_gaps or []),
                 "reported_hints": [],
                 "completed_scene_count": int(completed_count),
@@ -69,11 +65,9 @@ class VoiceSynthesizerAgent(ReActAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session = None,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
-        return await super()._execute_impl(task, input_data, db)
+        return await super()._execute_impl(request)
 
 
     def _resolve_voice_settings(
@@ -222,7 +216,7 @@ class VoiceSynthesizerAgent(ReActAgent):
     async def _think_and_plan(
         self,
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         plan_ctx = current_state or {}
@@ -285,7 +279,6 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         action_plan: Dict[str, Any],
         input_data: Dict[str, Any],
-        db: Session,
         iteration: int,
     ) -> Dict[str, Any]:
         action = action_plan.get("action")
@@ -397,7 +390,7 @@ class VoiceSynthesizerAgent(ReActAgent):
         self,
         action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
         iteration: int,
     ) -> Dict[str, Any]:
         artifacts = action_result.get("voice_artifacts") or []
@@ -415,14 +408,13 @@ class VoiceSynthesizerAgent(ReActAgent):
         finals, failed = finalize_scene_outputs(
             kind="voice",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
         result = dict(base or {})
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
         result["orchestration_report"] = self._build_voice_orchestration_report(
             status="completed",
-            completion_state="completed",
             completed_count=len(finals),
             failed_count=len(failed),
         )
@@ -431,20 +423,19 @@ class VoiceSynthesizerAgent(ReActAgent):
     async def _finalize_incomplete_results(
         self,
         context: Dict[str, Any],
-        task: Task,
+        task: AgentTaskReference,
     ) -> Dict[str, Any]:
         result = await super()._finalize_incomplete_results(context, task)
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
         finals, failed = finalize_scene_outputs(
             kind="voice",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
+            service=self.short_term_service,
         )
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = failed
         result["orchestration_report"] = self._build_voice_orchestration_report(
             status="partial",
-            completion_state=str(result.get("subtask_state") or "partial"),
             completed_count=len(finals),
             failed_count=len(failed),
             reported_gaps=["scene_voice_generation_incomplete"],

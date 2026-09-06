@@ -23,9 +23,13 @@ class VideoFrameExtractor:
     def convert_windows_path_to_wsl(self, windows_path: str) -> str:
         """将Windows路径转换为WSL路径"""
         # 处理类似 C:\\Users\\... 的路径
-        if windows_path[1:3] == ':\\\':
+        if (
+            len(windows_path) >= 3
+            and windows_path[1] == ":"
+            and windows_path[2] in ("\\", "/")
+        ):
             drive = windows_path[0].lower()
-            path = windows_path[3:].replace('\\\\', '/')
+            path = windows_path[3:].replace("\\", "/")
             return f"/mnt/{drive}/{path}"
         return windows_path
     
@@ -194,4 +198,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

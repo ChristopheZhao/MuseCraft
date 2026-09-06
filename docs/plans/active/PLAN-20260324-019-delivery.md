@@ -1,4 +1,9 @@
 # Delivery: PLAN-20260324-019
+
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260324-019
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
 - Plan ID: PLAN-20260324-019
 - Source Request Baseline: [docs/session-handoff/SHO-20260325-0006.md](/mnt/d/code/agent/Opensource/vertical_application/short-video-maker/docs/session-handoff/SHO-20260325-0006.md)
 - Updated At: 2026-03-25T06:15:26Z

@@ -1,5 +1,12 @@
 # 迁移护栏（不逆自主化 / 不逆规范 / 不逆 Temporal 迁移）
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 旧迁移护栏；Temporal 不构成当前必做任务，artifacts + 快照不构成充分恢复条件。通用工具与传输隔离原则仍有效。
+- Replacement: [单集架构](../architecture/single_episode_harness_architecture_20260311.md)、[runtime 存储](../architecture/runtime_control_plane_store_boundary_20260719.md)、[延期护栏](../deferred-plans/CURRENT.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 目标
 - 确保短期用 Celery 稳住流程的同时，不引入任何将来迁移 Temporal 会推倒重来的改造。
 

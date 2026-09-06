@@ -1,5 +1,12 @@
 # Temporal POC（必须）
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 历史 POC 提案，标题中的“必须”和日程不再是执行指令。采用 Temporal 需要独立立项；最新产物即真不能替代当前恢复、发布与终态合同。
+- Replacement: [runtime 边界](../architecture/runtime_control_plane_store_boundary_20260719.md)、[发布合同](../plans/active/PLAN-20260808-069.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 目的
 - 将 Temporal 作为“可持久化工作流引擎”引入，验证长时运行、断点续跑、信号/查询与可观测性；不改现有 Agent/Tools 业务逻辑。
 

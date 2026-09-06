@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...core.config import settings
-from ...models import AgentType
+from ...domain import AgentType
 from ...services.character_identity_contract import normalize_character_identity_contract
 from ...services.role_continuity_observation_contract import (
     normalize_role_continuity_observation,
@@ -1037,12 +1037,6 @@ def build_video_generation_context(
     )
     scripts = _normalize_scene_dict(published_payload.get("scene_scripts") or {})
 
-    try:
-        wm = _get_mas_working_memory(workflow_id, service=service)
-    except Exception:
-        wm = None
-    video_bucket = wm.get("scene_outputs.video", {}) if wm is not None else {}
-
     concept_scene_index: Dict[int, Dict[str, Any]] = {}
     for scene in (concept_plan.get("scenes") or []):
         if not isinstance(scene, dict):
@@ -1058,8 +1052,6 @@ def build_video_generation_context(
         scenes_source = concept_plan.get("scenes") or []
 
     scenes_to_generate: List[Dict[str, Any]] = []
-    scenes_completed: List[Dict[str, Any]] = []
-    scenes_blocked: List[Dict[str, Any]] = []
     for scene in scenes_source or []:
         if not isinstance(scene, dict):
             continue
@@ -1069,33 +1061,6 @@ def build_video_generation_context(
         script_entry = scripts.get(sn) if isinstance(scripts, dict) else {}
         concept_entry = concept_scene_index.get(sn, {})
         image_url = scene.get("image_url") or concept_entry.get("image_url") or ""
-
-        video_rec = {}
-        if isinstance(video_bucket, dict):
-            video_rec = video_bucket.get(sn) or video_bucket.get(str(sn)) or {}
-        if not isinstance(video_rec, dict):
-            video_rec = {}
-        video_url = video_rec.get("video_url") or video_rec.get("url") or ""
-        video_path = video_rec.get("video_path") or video_rec.get("path") or video_rec.get("file_path") or ""
-
-        if video_url or video_path:
-            scenes_completed.append(
-                {
-                    "scene_number": sn,
-                    "video_url": video_url,
-                    "video_path": video_path,
-                }
-            )
-            continue
-
-        if not image_url:
-            scenes_blocked.append(
-                {
-                    "scene_number": sn,
-                    "reason": "missing_reference_image",
-                }
-            )
-            continue
 
         depends_on_scene = (
             concept_entry.get("depends_on_scene")

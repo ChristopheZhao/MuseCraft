@@ -1,5 +1,10 @@
 # PLAN-20260404-052 Stage B Claim Inventory
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260404-052
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Purpose
 - Inventory unresolved memory-only claims after the Stage A freeze.
 - Separate already-guarded or already-understood memory boundaries from genuinely open governance/config/support questions.

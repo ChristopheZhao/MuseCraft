@@ -2,18 +2,20 @@
 Image Generator ReAct Agent - 正确的批量处理迭代逻辑
 """
 import json
-from typing import Dict, Any, List
-from sqlalchemy.orm import Session
+from typing import Any, Dict, List
 
+from ..core.config import settings
+from ..domain import AgentTaskReference, AgentType
 from .react_agent import ReActAgent
-from .utils.progress_snapshot import emit_progress_snapshot
 from .utils.artifacts import (
-    persist_scene_outputs,
+    evaluate_scene_output_acceptance,
     finalize_scene_outputs,
+    issue_scene_output_acceptance_receipts,
+    normalize_executed_calls_to_artifacts,
+    persist_scene_outputs,
 )
 from .utils.memory_helpers import get_mas_working_memory
-from ..models import Task, AgentType
-from ..core.config import settings
+from .utils.progress_snapshot import emit_progress_snapshot
 
 
 class ImageGeneratorAgent(ReActAgent):
@@ -26,7 +28,7 @@ class ImageGeneratorAgent(ReActAgent):
     3. ACT: 执行 FC 返回的工具调用（若有），写回产物；
     4. REFLECT: 合并执行结果，判断是否继续迭代。
     """
-    
+
     def __init__(self, llms=None, memory_services=None):
         super().__init__(
             agent_type=AgentType.IMAGE_GENERATOR,
@@ -41,7 +43,6 @@ class ImageGeneratorAgent(ReActAgent):
         self,
         *,
         status: str,
-        completion_state: str,
         completed_count: int,
         failed_count: int,
         reported_gaps: List[str] | None = None,
@@ -52,13 +53,13 @@ class ImageGeneratorAgent(ReActAgent):
             "gate_triggers": [],
             "artifacts": [{"kind": "shared_fact", "ref": "scene_outputs.image"}],
             "reflection": {
-                "completion_state": completion_state,
                 "reported_gaps": list(reported_gaps or []),
                 "reported_hints": [],
                 "completed_scene_count": int(completed_count),
                 "failed_scene_count": int(failed_count),
             },
         }
+
     # 覆盖基类的上下文注入：本 Agent 交给通用 FC 逻辑处理上下文提示
     def build_react_context_messages(self) -> List[Dict[str, Any]]:
         return []
@@ -68,16 +69,62 @@ class ImageGeneratorAgent(ReActAgent):
         if isinstance(observation, dict):
             observation["aug_meta"] = {"used": False, "reason": "disabled"}
         return observation
-    
-    async def _execute_action(
-        self, 
-        action_plan: Dict[str, Any], 
+
+    def _get_plan_progress_kind(self) -> str:
+        return "image"
+
+    def _accept_completion_request(
+        self,
+        *,
+        stage: str,
         input_data: Dict[str, Any],
-        db: Session,
-        iteration: int
+        plan_context: Dict[str, Any],
+        iteration_context: Dict[str, Any] | None,
+        iteration: int,
+        plan_contract: Dict[str, Any] | None = None,
+        reflection: Dict[str, Any] | None = None,
+        action_result: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        progress_read_model = (
+            plan_context.get("progress_read_model") if isinstance(plan_context, dict) else {}
+        )
+        if not isinstance(progress_read_model, dict):
+            progress_read_model = {}
+        planned_scene_numbers = progress_read_model.get("planned_scene_numbers")
+        if not isinstance(planned_scene_numbers, list):
+            planned_scene_numbers = []
+
+        workflow_state_id = str(
+            input_data.get("workflow_state_id") or self.workflow_state_id or ""
+        ).strip()
+        try:
+            agent_memory = self.wm
+        except Exception:
+            agent_memory = None
+        contract = evaluate_scene_output_acceptance(
+            kind="image",
+            workflow_id=workflow_state_id or None,
+            agent_memory=agent_memory,
+            service=self.short_term_service,
+            expected_scene_numbers=planned_scene_numbers,
+            require_expected_scenes=True,
+        )
+        return {
+            "accepted": contract.get("accepted") is True,
+            "reason": contract.get("reason_code"),
+            "planned_scene_numbers": contract.get("expected_scene_numbers") or [],
+            "accepted_scene_numbers": contract.get("accepted_scene_numbers") or [],
+            "missing_scene_numbers": contract.get("missing_scene_numbers") or [],
+            "failed_scene_numbers": contract.get("failed_scene_numbers") or [],
+            "rejected_scene_outputs": contract.get("rejected_scene_outputs") or [],
+            "stage": stage,
+        }
+
+    async def _execute_action(
+        self, action_plan: Dict[str, Any], input_data: Dict[str, Any], iteration: int
     ) -> Dict[str, Any]:
         """ACT: 执行批量图像生成"""
-        
+
         action_label = action_plan.get("action") or "noop"
         plan_llm = action_plan.get("plan_llm")
         tool_calls = list(action_plan.get("tool_calls") or [])
@@ -85,7 +132,8 @@ class ImageGeneratorAgent(ReActAgent):
             summary = {
                 "action": action_label,
                 "plan_llm": plan_llm,
-                "reason": action_plan.get("reason") or ("no_tool_calls" if action_label == "noop" else "empty_plan"),
+                "reason": action_plan.get("reason")
+                or ("no_tool_calls" if action_label == "noop" else "empty_plan"),
                 "executed_calls": 0,
                 "success": 0,
             }
@@ -119,7 +167,9 @@ class ImageGeneratorAgent(ReActAgent):
             except Exception:
                 pass
 
-        exec_scenes = [c.get("args", {}).get("scene_number") for c in executed_calls if isinstance(c, dict)]
+        exec_scenes = [
+            c.get("args", {}).get("scene_number") for c in executed_calls if isinstance(c, dict)
+        ]
         parsed_scenes = [r.get("scene_number") for r in results if isinstance(r, dict)]
         successes = sum(1 for call in executed_calls if call.get("success"))
         executed_tools: List[str] = []
@@ -156,6 +206,7 @@ class ImageGeneratorAgent(ReActAgent):
         # 构造本轮 obs 事件摘要，暂挂在结果中供后续情景记忆/调试使用
         try:
             from .utils.obs_events import build_obs_events_from_executed_calls
+
             obs_event = build_obs_events_from_executed_calls(executed_calls, iteration)
         except Exception:
             obs_event = None
@@ -165,39 +216,52 @@ class ImageGeneratorAgent(ReActAgent):
             "action_performed": action_label,
             "batch_size": len(batch_scene_ids),
             "executed_calls": executed_calls,
+            "delivery_receipts": [
+                dict(result["acceptance_receipt"])
+                for result in results
+                if isinstance(result, dict) and isinstance(result.get("acceptance_receipt"), dict)
+            ],
             "act_log": act_log,
             "react_metrics": react_metrics,
             "plan_llm": plan_llm,
             "obs_event": obs_event,
         }
 
-    async def _persist_executed_results(self, executed_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _persist_executed_results(
+        self, executed_calls: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         wf_id = str(self.workflow_state_id or "")
-        shared_wm = get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
+        shared_wm = (
+            get_mas_working_memory(wf_id, service=self.short_term_service) if wf_id else None
+        )
+        artifacts = normalize_executed_calls_to_artifacts(
+            executed_calls,
+            kind="image",
+            include_prompt=True,
+        )
+        artifacts, _receipts = issue_scene_output_acceptance_receipts(
+            kind="image",
+            artifacts=artifacts,
+            workflow_state_id=wf_id,
+        )
         return await persist_scene_outputs(
-            executed_calls=executed_calls,
+            artifacts=artifacts,
             kind="image",
             agent_memory=None,
             shared_memory=shared_wm,
             include_prompt=True,
         )
 
-    async def _finalize_success_results(self, final_action_result: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _finalize_success_results(
+        self, final_action_result: Dict[str, Any], context: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """打包最终产出：从 Shared WM 聚合（单一事实源），构造 orchestrator 所需结构。
         返回字段：final_completed_scenes / final_failed_scenes
         """
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        shared = None
-        try:
-            if wf_id:
-                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-        except Exception:
-            shared = None
         finals, finals_failed = finalize_scene_outputs(
             kind="image",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
-            shared_memory=shared,
             service=self.short_term_service,
         )
 
@@ -206,7 +270,6 @@ class ImageGeneratorAgent(ReActAgent):
         result["final_failed_scenes"] = finals_failed
         result["orchestration_report"] = self._build_image_orchestration_report(
             status="completed",
-            completion_state="completed",
             completed_count=len(finals),
             failed_count=len(finals_failed),
         )
@@ -215,40 +278,33 @@ class ImageGeneratorAgent(ReActAgent):
         result.setdefault("loop_end_reason", "task_complete")
         return result
 
-    async def _finalize_incomplete_results(self, context: Dict[str, Any], task: Task) -> Dict[str, Any]:
+    async def _finalize_incomplete_results(
+        self, context: Dict[str, Any], task: AgentTaskReference
+    ) -> Dict[str, Any]:
         result = await super()._finalize_incomplete_results(context, task)
         wf_id = context.get("workflow_state_id") or self.workflow_state_id
-        shared = None
-        try:
-            if wf_id:
-                shared = get_mas_working_memory(str(wf_id), service=self.short_term_service)
-        except Exception:
-            shared = None
         finals, finals_failed = finalize_scene_outputs(
             kind="image",
             workflow_id=str(wf_id) if wf_id else None,
-            agent_memory=self.wm,
-            shared_memory=shared,
             service=self.short_term_service,
         )
         result["final_completed_scenes"] = finals
         result["final_failed_scenes"] = finals_failed
         result["orchestration_report"] = self._build_image_orchestration_report(
             status="partial",
-            completion_state=str(result.get("subtask_state") or "partial"),
             completed_count=len(finals),
             failed_count=len(finals_failed),
             reported_gaps=["scene_image_generation_incomplete"],
         )
         return result
-    
+
     @emit_progress_snapshot
     async def _reflect_on_results(
-        self, 
-        action_result: Dict[str, Any], 
+        self,
+        action_result: Dict[str, Any],
         current_state: Dict[str, Any],
-        task: Task,
-        iteration: int
+        task: AgentTaskReference,
+        iteration: int,
     ) -> Dict[str, Any]:
         """REFLECT：领域规约与轻量摘要（不做完成判定）。
 
@@ -270,10 +326,7 @@ class ImageGeneratorAgent(ReActAgent):
 
     # ReActAgent兼容性方法
     async def _think_and_plan(
-        self,
-        current_state: Dict[str, Any],
-        task: Task,
-        iteration: int
+        self, current_state: Dict[str, Any], task: AgentTaskReference, iteration: int
     ) -> Dict[str, Any]:
         """PLAN：通过 FC 产出本轮 tool_calls，ACT 在同一迭代执行。"""
         messages = self.build_plan_messages(current_state or {})

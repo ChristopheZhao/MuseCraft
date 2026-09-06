@@ -30,13 +30,14 @@ _LAZY_IMPORTS = {
     "KimiClientTool": (".ai_services.kimi_client", "KimiClientTool"),
     "ZhipuClientTool": (".ai_services.zhipu_client", "ZhipuClientTool"),
     "SunoClientTool": (".ai_services.suno_client", "SunoClientTool"),
+    "MusicGenerationTool": (
+        ".ai_services.music_generation_tool",
+        "MusicGenerationTool",
+    ),
     "ImageGenerationClientTool": (".ai_services.image_generation_client", "ImageGenerationClientTool"),
     "JimengImageTool": (".ai_services.jimeng_image_tool", "JimengImageTool"),
     "VideoGenerationTool": (".ai_services.video_generation_tool_v2", "VideoGenerationTool"),
     "VoiceSynthesisTool": (".ai_services.voice_synth_tool", "VoiceSynthesisTool"),
-    "SceneAnalysisTool": (".ai_services.scene_analysis_tool", "SceneAnalysisTool"),
-    "ParameterOptimizationTool": (".ai_services.parameter_optimization_tool", "ParameterOptimizationTool"),
-    "IntelligentScenePlanningTool": (".ai_services.intelligent_scene_planning_tool", "IntelligentScenePlanningTool"),
     "ScriptGenerationTool": (".ai_services.script_generation_tool", "ScriptGenerationTool"),
     "ImageGenerationTool": (".ai_services.image_generation_tool", "ImageGenerationTool"),
     "QualityAnalysisTool": (".ai_services.quality_analysis_tool", "QualityAnalysisTool"),
@@ -82,7 +83,7 @@ def register_default_tools() -> None:
     from .ai_services.openai_client import OpenAIClientTool
     from .ai_services.kimi_client import KimiClientTool
     from .ai_services.zhipu_client import ZhipuClientTool
-    from .ai_services.suno_client import SunoClientTool
+    from .ai_services.music_generation_tool import MusicGenerationTool
     from .ai_services.voice_synth_tool import VoiceSynthesisTool
     from .ai_services.image_generation_client import ImageGenerationClientTool
     from .ai_services.jimeng_image_tool import JimengImageTool
@@ -100,9 +101,6 @@ def register_default_tools() -> None:
     from .video_processing.scene_continuity_preparation_tool import SceneContinuityPreparationTool
 
     from .ai_services.video_generation_tool_v2 import VideoGenerationTool
-    from .ai_services.scene_analysis_tool import SceneAnalysisTool
-    from .ai_services.parameter_optimization_tool import ParameterOptimizationTool
-    from .ai_services.intelligent_scene_planning_tool import IntelligentScenePlanningTool
     from .ai_services.script_generation_tool import ScriptGenerationTool
     from .ai_services.image_generation_tool import ImageGenerationTool
     from .ai_services.quality_analysis_tool import QualityAnalysisTool
@@ -117,7 +115,7 @@ def register_default_tools() -> None:
     registry.register_tool(OpenAIClientTool)
     registry.register_tool(KimiClientTool)
     registry.register_tool(ZhipuClientTool)
-    registry.register_tool(SunoClientTool)
+    registry.register_tool(MusicGenerationTool)
     registry.register_tool(VoiceSynthesisTool)
     registry.register_tool(ImageGenerationClientTool)
     registry.register_tool(JimengImageTool)
@@ -135,9 +133,6 @@ def register_default_tools() -> None:
     registry.register_tool(SceneContinuityPreparationTool)
 
     registry.register_tool(VideoGenerationTool)
-    registry.register_tool(SceneAnalysisTool)
-    registry.register_tool(ParameterOptimizationTool)
-    registry.register_tool(IntelligentScenePlanningTool)
     registry.register_tool(ScriptGenerationTool)
     registry.register_tool(ImageGenerationTool)
     registry.register_tool(QualityAnalysisTool)

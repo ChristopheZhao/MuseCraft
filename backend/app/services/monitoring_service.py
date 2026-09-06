@@ -6,23 +6,24 @@ Comprehensive Monitoring and Analytics Service
 - Advanced analytics and insights
 - Performance bottleneck detection
 """
-import asyncio
-import os
-import logging
-import time
-import psutil
 import json
-from typing import Dict, Any, List, Optional, Callable
+import logging
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-import redis.asyncio as redis
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from typing import Any, Callable, Dict, List, Optional
 
-from ..models import Task, AgentType, TaskStatus, AgentStatus
+import psutil
+import redis.asyncio as redis
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from ..core.config import settings
-from .enhanced_ai_client import enhanced_ai_client, AIServiceProvider
+from ..domain import AgentStatus, AgentType, TaskStatus
+from ..models import Task
+from .enhanced_ai_client import AIServiceProvider, enhanced_ai_client
 
 
 class MetricType(str, Enum):
@@ -81,24 +82,15 @@ class MonitoringService:
     def __init__(self):
         self.logger = logging.getLogger("monitoring_service")
         
-        # Initialize Redis for metrics storage
-        self.redis_client = None
-        # Safely initialize async Redis from a sync context
+        # Construct a lazy client without performing external I/O in the constructor.
         try:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = None
-            if loop and loop.is_running():
-                loop.create_task(self._init_redis())
-            else:
-                asyncio.run(self._init_redis())
-        except Exception as _e:
-            self.logger.warning(f"Redis async init deferred: {_e}")
-            try:
-                self.redis_client = redis.from_url(settings.REDIS_URL)
-            except Exception:
-                self.redis_client = None
+            self.redis_client = redis.from_url(settings.REDIS_URL)
+        except Exception as exc:
+            self.logger.info(
+                "Optional Redis monitoring client unavailable error_type=%s",
+                type(exc).__name__,
+            )
+            self.redis_client = None
         
         # Metrics collection
         self.metrics_buffer: List[Metric] = []
@@ -126,16 +118,6 @@ class MonitoringService:
         
         # Start background monitoring tasks
         self._start_background_tasks()
-    
-    async def _init_redis(self):
-        """Initialize Redis connection"""
-        try:
-            self.redis_client = redis.from_url(settings.REDIS_URL)
-            await self.redis_client.ping()
-            self.logger.info("Redis connection established for monitoring")
-        except Exception as e:
-            self.logger.warning(f"Redis connection failed: {e}")
-            self.redis_client = None
     
     def _initialize_alert_rules(self):
         """Initialize alert rules"""

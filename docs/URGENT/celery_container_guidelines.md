@@ -1,5 +1,12 @@
 # Celery 执行容器使用指南（不逆自主化/不逆迁移）
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 旧容器使用快照；artifacts.latest / 最新即真及旧开关不是当前发布、幂等或恢复合同。Celery 仅作 transport 的原则仍有效。
+- Replacement: [当前后端启动](../../backend/README.md)、[Agent/数据库边界](../architecture/backend_database_agent_boundary_freeze_20260718.md)、[发布与失败处置](../plans/active/PLAN-20260808-069.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 边界与职责
 - 仅作为“执行容器”：排队 + 独立进程执行 `OrchestratorAgent.execute(...)`。
 - 禁止用 Canvas/Chord 编排子阶段；ReAct 决策与重试在 Orchestrator/Agents 内部完成。

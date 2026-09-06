@@ -1,5 +1,12 @@
 # VideoAgent 两段式 ReAct 改造计划（评估稿）
 
+- Document Status: historical
+- Reviewed At: 2026-09-06
+- Superseded Scope: 历史评估提案，不再作为待执行迁移。拆分 FC 规划/执行并持有 planned_tool_calls 的方向与现行同轮执行约束冲突。
+- Replacement: [根指令](../../AGENTS.md)、[Composer 指南](../agents/composer_guidelines.md)
+
+以下正文保留为历史证据；其中“当前”“目标”“必须”和验收清单均属于原始记录，不产生新的执行授权。
+
 > 状态：评估已完成；暂不改代码，仅记录明确的改造路径、边界与灰度方案。
 
 ## 背景与现状

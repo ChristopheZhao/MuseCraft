@@ -1,987 +1,569 @@
-import asyncio
-import threading
-import time
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-import app.core.database as core_database
-from app.core.constants import GenerationMode
 from app.core.database import Base
-from app.models import Task, TaskStatus, TaskType, WorkflowSessionStatus
-from app.services import execution_host_lease
-from app.services import queued_task_execution_host
-from app.services import task_queue
-from app.services.runtime_session_service import RuntimeSessionService
+from app.domain import (
+    AgentExecutionResult,
+    AgentType,
+    JsonObjectPayload,
+    QueuedExecutionCommand,
+    QueuedExecutionContractError,
+    QueuedExecutionContractReason,
+    QueuedExecutionKind,
+    TaskStatus,
+    TaskType,
+    WorkflowSessionStatus,
+)
+from app.infrastructure import SqlAlchemyRuntimeAttemptStore
+from app.models import Task
+from app.services import execution_host_lease, queued_task_execution_host, task_queue
+from app.services.agent_execution_boundary import build_agent_execution_request
+from app.services.queued_execution_use_case import (
+    QueuedExecutionApplicationError,
+    QueuedExecutionUseCase,
+)
+from app.services.runtime_session_bootstrap_control_plane import RuntimeSessionBootstrapControlPlane
+from app.services.runtime_session_control_plane import RuntimeSessionControlPlane
 
 
 @pytest.fixture
 def session_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     try:
-        yield SessionLocal
+        yield factory
     finally:
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
 
 
-def _create_task(session_factory, *, input_parameters):
+def _create_task(
+    session_factory,
+    *,
+    input_parameters,
+    status=TaskStatus.PENDING.value,
+    runtime_input_payload=None,
+    create_runtime=True,
+):
     db = session_factory()
     try:
         task = Task(
             title="Queue Test",
             description="queue test",
             task_type=TaskType.VIDEO_GENERATION,
-            status=TaskStatus.PENDING.value,
+            status=status,
             input_parameters=input_parameters,
         )
         db.add(task)
-        db.commit()
+        db.flush()
         db.refresh(task)
-        task_id = task.id
+        if create_runtime:
+            RuntimeSessionBootstrapControlPlane(
+                SqlAlchemyRuntimeAttemptStore(db)
+            ).create_quick_session(
+                task_id=str(task.task_id),
+                expected_task_status=TaskStatus(status),
+                expected_latest_session_id=None,
+                input_payload=JsonObjectPayload.from_mapping(
+                    runtime_input_payload or input_parameters,
+                    field_path="test.runtime_input_payload",
+                ),
+            )
+        db.commit()
+        return str(task.task_id)
     finally:
         db.close()
-    return task_id
 
 
-def _find_published_diagnostic(published, *, code: str, reason_code: str | None = None):
-    for event in published:
-        diagnostic = event.get("diagnostic") if isinstance(event, dict) else None
-        if not isinstance(diagnostic, dict):
-            continue
-        if diagnostic.get("code") != code:
-            continue
-        if reason_code is not None and diagnostic.get("reason_code") != reason_code:
-            continue
-        return event
-    return None
+def _load_task(session_factory, task_id):
+    db = session_factory()
+    try:
+        return db.query(Task).filter(Task.task_id == task_id).first()
+    finally:
+        db.close()
 
 
-def _build_threaded_sqlite_session_factory(tmp_path, name: str):
-    engine = create_engine(
-        f"sqlite:///{(tmp_path / name).as_posix()}",
-        connect_args={"check_same_thread": False},
+def _execution_result(payload):
+    return AgentExecutionResult(
+        output_data=JsonObjectPayload.from_mapping(
+            payload,
+            field_path="test.output_data",
+        )
     )
-    Base.metadata.create_all(bind=engine)
-    return engine, sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
-def test_run_generation_in_host_initializes_worker_host_and_routes_quick_to_orchestrator(
-    monkeypatch, session_factory
-):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={
-            "user_prompt": "test prompt",
-            "voice_settings": {"voice_id": "narrator_a"},
-        },
+def test_queued_execution_command_rejects_database_integer_identity():
+    with pytest.raises(QueuedExecutionContractError) as exc_info:
+        QueuedExecutionCommand(42, QueuedExecutionKind.VIDEO_GENERATION)
+
+    assert exc_info.value.reason_code == QueuedExecutionContractReason.INVALID_TASK_ID
+
+
+def test_execution_host_runs_typed_request_without_persistence_or_routing(monkeypatch):
+    calls = {}
+
+    class _Executor:
+        async def execute(self, request):
+            calls["request"] = request
+            return _execution_result({"status": "completed"})
+
+    request = build_agent_execution_request(
+        task=SimpleNamespace(
+            task_id="stable-task-1",
+            task_type=TaskType.VIDEO_GENERATION,
+            user_id=None,
+            session_id=None,
+        ),
+        agent_type=AgentType.ORCHESTRATOR,
+        input_data={"user_prompt": "test"},
+        execution_order=1,
     )
-    orchestrator_calls = {}
-
-    class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            orchestrator_calls["task_id"] = task.id
-            orchestrator_calls["input_data"] = dict(input_data)
-            orchestrator_calls["execution_order"] = execution_order
-            task.status = TaskStatus.COMPLETED.value
-            db.commit()
-            return {"status": "completed", "final_video_url": "https://example.com/final.mp4"}
-
     reset_calls = []
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(
-        queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True)
-    )
-    monkeypatch.setattr(
-        "app.agents.orchestrator.OrchestratorAgent.create_default",
-        classmethod(lambda cls: _FakeOrchestrator()),
+        queued_task_execution_host,
+        "reset_event_bus",
+        lambda: reset_calls.append(True),
     )
 
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        result = queued_task_execution_host.run_generation_in_host(
-            GenerationMode.QUICK,
-            task=task,
-            input_data={"user_prompt": "test prompt", "voice_settings": {"voice_id": "narrator_a"}},
-            db=db,
-            route="orchestrator_mainline",
-            execution_order=1,
-        )
-    finally:
-        db.close()
+    result = queued_task_execution_host.run_agent_execution_in_host(
+        request=request,
+        executor=_Executor(),
+    )
 
     assert reset_calls == [True]
-    assert result["route"] == "orchestrator_mainline"
-    assert result["mode"] == "quick"
-    assert result["status"] == "completed"
-    assert orchestrator_calls["task_id"] == task_id
-    assert orchestrator_calls["input_data"]["voice_settings"] == {"voice_id": "narrator_a"}
+    assert result.output_data.to_dict() == {"status": "completed"}
+    assert calls["request"] is request
 
 
-def test_run_generation_in_host_exposes_execution_host_lease_context(monkeypatch, session_factory):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
+def test_execution_host_exposes_injected_keepalive_context(monkeypatch):
     seen = {}
 
-    class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            context = execution_host_lease.get_current_execution_host_lease_context()
-            seen["has_context"] = context is not None
-            seen["has_keepalive"] = bool(context and context.attempt_lease_keepalive is not None)
-            return {"status": "completed"}
+    class _Keepalive:
+        def close(self):
+            seen["closed"] = True
 
+    class _Executor:
+        async def execute(self, request):
+            context = execution_host_lease.get_current_execution_host_lease_context()
+            seen["controller"] = context.attempt_lease_keepalive
+            return _execution_result({"status": "completed"})
+
+    controller = _Keepalive()
+    request = build_agent_execution_request(
+        task=SimpleNamespace(
+            task_id="stable-task-2",
+            task_type=TaskType.VIDEO_GENERATION,
+            user_id=None,
+            session_id=None,
+        ),
+        agent_type=AgentType.ORCHESTRATOR,
+        input_data={},
+        execution_order=1,
+    )
     monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
     monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
-    monkeypatch.setattr(
-        "app.agents.orchestrator.OrchestratorAgent.create_default",
-        classmethod(lambda cls: _FakeOrchestrator()),
+
+    queued_task_execution_host.run_agent_execution_in_host(
+        request=request,
+        executor=_Executor(),
+        attempt_lease_keepalive=controller,
     )
 
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        queued_task_execution_host.run_generation_in_host(
-            GenerationMode.QUICK,
-            task=task,
-            input_data={"user_prompt": "test prompt"},
-            db=db,
-            route="orchestrator_mainline",
-            execution_order=1,
-        )
-    finally:
-        db.close()
-
-    assert seen == {"has_context": True, "has_keepalive": True}
+    assert seen == {"controller": controller, "closed": True}
     assert execution_host_lease.get_current_execution_host_lease_context() is None
 
 
-def test_run_generation_in_host_renews_leased_attempt_and_emits_lifecycle_receipts(
-    monkeypatch, tmp_path
-):
-    engine, session_factory = _build_threaded_sqlite_session_factory(
-        tmp_path,
-        "queued_host_keepalive.sqlite",
+def test_execution_host_closes_keepalive_when_process_bootstrap_fails(monkeypatch):
+    events = {}
+
+    class _Keepalive:
+        def close(self):
+            events["closed"] = True
+
+    request = build_agent_execution_request(
+        task=SimpleNamespace(
+            task_id="stable-task-bootstrap-failure",
+            task_type=TaskType.VIDEO_GENERATION,
+            user_id=None,
+            session_id=None,
+        ),
+        agent_type=AgentType.ORCHESTRATOR,
+        input_data={},
+        execution_order=1,
     )
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
+    monkeypatch.setattr(
+        queued_task_execution_host,
+        "prepare_queued_execution_host",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bootstrap failed")),
     )
-    probe = {}
 
-    class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
-                db,
-                task,
-                mode="quick",
-            )
-            attempt = RuntimeSessionService.start_node_attempt_sync(
-                db,
-                runtime_session,
-                node_key="video",
-                task=task,
-            )
-            leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
-                db,
-                runtime_session,
-                attempt_id=attempt.id,
-                lease_owner="queued-host-test",
-                lease_timeout_seconds=2,
-            )
-            activated = execution_host_lease.activate_current_attempt_keepalive(
-                runtime_session_id=runtime_session.id,
-                attempt_id=attempt.id,
-                lease_token=str(leased_attempt.lease_token),
-            )
+    with pytest.raises(RuntimeError, match="bootstrap failed"):
+        queued_task_execution_host.run_agent_execution_in_host(
+            request=request,
+            executor=object(),
+            attempt_lease_keepalive=_Keepalive(),
+        )
 
-            deadline = time.time() + 2.0
-            advanced = False
-            while time.time() < deadline:
-                probe_db = session_factory()
-                try:
-                    fresh_attempt = RuntimeSessionService.get_attempt_by_id_sync(
-                        probe_db,
-                        runtime_session.id,
-                        attempt.id,
-                    )
-                    if (
-                        fresh_attempt is not None
-                        and fresh_attempt.last_heartbeat_at is not None
-                        and fresh_attempt.lease_expires_at is not None
-                        and fresh_attempt.last_heartbeat_at > leased_attempt.last_heartbeat_at
-                        and fresh_attempt.lease_expires_at > leased_attempt.lease_expires_at
-                    ):
-                        advanced = True
-                        break
-                finally:
-                    probe_db.close()
-                time.sleep(0.02)
+    assert events == {"closed": True}
 
-            ack_seen = False
-            deadline = time.time() + 2.0
-            while time.time() < deadline:
-                probe_db = session_factory()
-                try:
-                    node = RuntimeSessionService.get_node_by_key_sync(
-                        probe_db,
-                        runtime_session.id,
-                        "video",
-                    )
-                    receipt_codes = [
-                        item.get("code")
-                        for item in (getattr(node, "diagnostics", None) or [])
-                        if isinstance(item, dict)
-                    ]
-                    if "execution_host_keepalive_first_heartbeat_ack" in receipt_codes:
-                        ack_seen = True
-                        break
-                finally:
-                    probe_db.close()
-                time.sleep(0.02)
 
-            execution_host_lease.deactivate_current_attempt_keepalive(reason="test_done")
-            probe.update(
-                {
-                    "activated": activated,
-                    "runtime_session_id": runtime_session.id,
-                    "attempt_id": attempt.id,
-                    "initial_last_heartbeat_at": leased_attempt.last_heartbeat_at,
-                    "initial_lease_expires_at": leased_attempt.lease_expires_at,
-                    "advanced": advanced,
-                    "ack_seen": ack_seen,
-                }
-            )
+def test_video_queue_adapter_dispatches_stable_id_through_use_case(monkeypatch):
+    events = {}
+
+    class _UseCase:
+        def enqueue(self, command, *, dispatch):
+            events["command"] = command
+            events["receipt"] = dispatch(command.task_id)
+            return events["receipt"]
+
+    monkeypatch.setattr(
+        "app.services.celery_app.process_video_task",
+        SimpleNamespace(delay=lambda task_id: SimpleNamespace(id=f"celery-{task_id}")),
+    )
+
+    receipt = task_queue.TaskQueueService(execution_use_case=_UseCase()).queue_task(
+        "stable-video-task"
+    )
+
+    assert receipt == "celery-stable-video-task"
+    assert events["command"] == QueuedExecutionCommand(
+        task_id="stable-video-task",
+        execution_kind=QueuedExecutionKind.VIDEO_GENERATION,
+    )
+
+
+def test_worker_entrypoint_invokes_same_application_command(monkeypatch):
+    events = {}
+
+    class _UseCase:
+        def execute(self, command):
+            events["command"] = command
             return {"status": "completed"}
 
-    monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
-    monkeypatch.setattr(
-        queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05
-    )
-    monkeypatch.setattr(core_database, "SessionLocal", session_factory)
-    monkeypatch.setattr(
-        "app.agents.orchestrator.OrchestratorAgent.create_default",
-        classmethod(lambda cls: _FakeOrchestrator()),
+    monkeypatch.setattr(task_queue, "QueuedExecutionUseCase", _UseCase)
+
+    result = task_queue.sync_process_video_task("stable-worker-task")
+
+    assert result == {"status": "completed"}
+    assert events["command"].task_id == "stable-worker-task"
+    assert events["command"].execution_kind == QueuedExecutionKind.VIDEO_GENERATION
+
+
+def test_use_case_enqueue_owns_eligibility_and_transport_receipt_persistence(session_factory):
+    task_id = _create_task(session_factory, input_parameters={"user_prompt": "test"})
+    dispatched = []
+    use_case = QueuedExecutionUseCase(session_factory=session_factory)
+
+    receipt = use_case.enqueue(
+        QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION),
+        dispatch=lambda stable_id: dispatched.append(stable_id) or "transport-1",
     )
 
     db = session_factory()
     try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        result = queued_task_execution_host.run_generation_in_host(
-            GenerationMode.QUICK,
-            task=task,
-            input_data={"user_prompt": "test prompt"},
-            db=db,
-            route="orchestrator_mainline",
-            execution_order=1,
-        )
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        assert task.status == TaskStatus.QUEUED.value
+        assert task.output_metadata["celery_task_id"] == "transport-1"
     finally:
         db.close()
-
-    verify_db = session_factory()
-    try:
-        refreshed_attempt = RuntimeSessionService.get_attempt_by_id_sync(
-            verify_db,
-            probe["runtime_session_id"],
-            probe["attempt_id"],
-        )
-        node = RuntimeSessionService.get_node_by_key_sync(
-            verify_db,
-            probe["runtime_session_id"],
-            "video",
-        )
-    finally:
-        verify_db.close()
-        Base.metadata.drop_all(bind=engine)
-        engine.dispose()
-
-    assert result["status"] == "completed"
-    assert probe["activated"] is True
-    assert probe["advanced"] is True
-    assert probe["ack_seen"] is True
-    assert refreshed_attempt is not None
-    assert refreshed_attempt.last_heartbeat_at > probe["initial_last_heartbeat_at"]
-    assert refreshed_attempt.lease_expires_at > probe["initial_lease_expires_at"]
-
-    receipt_codes = [
-        item.get("code")
-        for item in (getattr(node, "diagnostics", None) or [])
-        if isinstance(item, dict)
-    ]
-    assert "execution_host_keepalive_activation_requested" in receipt_codes
-    assert "execution_host_keepalive_heartbeat_begin" in receipt_codes
-    assert "execution_host_keepalive_first_heartbeat_ack" in receipt_codes
-    assert "execution_host_keepalive_deactivated" in receipt_codes
+    assert receipt == "transport-1"
+    assert dispatched == [task_id]
 
 
-def test_run_generation_in_host_can_silently_expire_when_heartbeat_blocks(monkeypatch, tmp_path):
-    engine, session_factory = _build_threaded_sqlite_session_factory(
-        tmp_path,
-        "queued_host_keepalive_blocked.sqlite",
-    )
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
-    entered_heartbeat = threading.Event()
-    release_heartbeat = threading.Event()
-    original_heartbeat = RuntimeSessionService.heartbeat_attempt_lease_sync
-    probe = {}
+def test_use_case_rejects_non_string_transport_receipt(session_factory):
+    task_id = _create_task(session_factory, input_parameters={"user_prompt": "test"})
+    use_case = QueuedExecutionUseCase(session_factory=session_factory)
 
-    def _blocked_heartbeat(
-        db, runtime_session, *, attempt_id, lease_token, lease_timeout_seconds=None
-    ):
-        entered_heartbeat.set()
-        if not release_heartbeat.wait(timeout=5.0):
-            raise RuntimeError("test heartbeat release timeout")
-        return original_heartbeat(
-            db,
-            runtime_session,
-            attempt_id=attempt_id,
-            lease_token=lease_token,
-            lease_timeout_seconds=lease_timeout_seconds,
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.enqueue(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION),
+            dispatch=lambda _stable_id: 42,
         )
 
-    class _FakeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            runtime_session = RuntimeSessionService.get_or_create_session_for_task_sync(
-                db,
-                task,
-                mode="quick",
-            )
-            attempt = RuntimeSessionService.start_node_attempt_sync(
-                db,
-                runtime_session,
-                node_key="video",
-                task=task,
-            )
-            leased_attempt = RuntimeSessionService.grant_attempt_lease_sync(
-                db,
-                runtime_session,
-                attempt_id=attempt.id,
-                lease_owner="queued-host-test",
-                lease_timeout_seconds=1,
-            )
-            activated = execution_host_lease.activate_current_attempt_keepalive(
-                runtime_session_id=runtime_session.id,
-                attempt_id=attempt.id,
-                lease_token=str(leased_attempt.lease_token),
-            )
-            assert entered_heartbeat.wait(timeout=1.0)
-            time.sleep(1.2)
-
-            mid_db = session_factory()
-            try:
-                mid_session = RuntimeSessionService.get_session_by_id_sync(
-                    mid_db,
-                    runtime_session.id,
-                )
-                mid_node = RuntimeSessionService.get_node_by_key_sync(
-                    mid_db,
-                    runtime_session.id,
-                    "video",
-                )
-                expired = False
-                try:
-                    RuntimeSessionService.assert_attempt_lease_sync(
-                        mid_db,
-                        mid_session,
-                        attempt_id=attempt.id,
-                        lease_token=str(leased_attempt.lease_token),
-                    )
-                except ValueError as exc:
-                    expired = "execution lease expired" in str(exc)
-
-                try:
-                    execution_host_lease.assert_current_execution_host_keepalive_healthy()
-                    mid_unhealthy = False
-                except execution_host_lease.ExecutionHostKeepaliveLostError:
-                    mid_unhealthy = True
-
-                probe.update(
-                    {
-                        "activated": activated,
-                        "runtime_session_id": runtime_session.id,
-                        "attempt_id": attempt.id,
-                        "mid_expired": expired,
-                        "mid_unhealthy": mid_unhealthy,
-                        "mid_diagnostics": list(getattr(mid_node, "diagnostics", None) or []),
-                    }
-                )
-            finally:
-                mid_db.close()
-
-            release_heartbeat.set()
-            deadline = time.time() + 2.0
-            late_unhealthy = False
-            while time.time() < deadline:
-                try:
-                    execution_host_lease.assert_current_execution_host_keepalive_healthy()
-                except execution_host_lease.ExecutionHostKeepaliveLostError:
-                    late_unhealthy = True
-                    break
-                time.sleep(0.02)
-
-            execution_host_lease.deactivate_current_attempt_keepalive(reason="test_done")
-            probe["late_unhealthy"] = late_unhealthy
-            return {"status": "completed"}
-
-    monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
-    monkeypatch.setattr(queued_task_execution_host, "reset_event_bus", lambda: None)
-    monkeypatch.setattr(
-        queued_task_execution_host, "execution_host_lease_heartbeat_interval_seconds", lambda: 0.05
-    )
-    monkeypatch.setattr(core_database, "SessionLocal", session_factory)
-    monkeypatch.setattr(
-        RuntimeSessionService,
-        "heartbeat_attempt_lease_sync",
-        staticmethod(_blocked_heartbeat),
-    )
-    monkeypatch.setattr(
-        "app.agents.orchestrator.OrchestratorAgent.create_default",
-        classmethod(lambda cls: _FakeOrchestrator()),
-    )
-
+    assert exc_info.value.reason_code == "transport_receipt_missing"
     db = session_factory()
     try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        result = queued_task_execution_host.run_generation_in_host(
-            GenerationMode.QUICK,
-            task=task,
-            input_data={"user_prompt": "test prompt"},
-            db=db,
-            route="orchestrator_mainline",
-            execution_order=1,
-        )
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        assert task.status == TaskStatus.PENDING.value
+        assert not (task.output_metadata or {}).get("celery_task_id")
     finally:
         db.close()
 
-    verify_db = session_factory()
-    try:
-        node = RuntimeSessionService.get_node_by_key_sync(
-            verify_db,
-            probe["runtime_session_id"],
-            "video",
-        )
-    finally:
-        verify_db.close()
-        Base.metadata.drop_all(bind=engine)
-        engine.dispose()
 
-    keepalive_diagnostics = [
-        item
-        for item in (getattr(node, "diagnostics", None) or [])
-        if isinstance(item, dict) and item.get("code") == "execution_host_keepalive"
-    ]
-    mid_keepalive_diagnostics = [
-        item
-        for item in (probe["mid_diagnostics"] or [])
-        if isinstance(item, dict) and item.get("code") == "execution_host_keepalive"
-    ]
-
-    assert result["status"] == "completed"
-    assert probe["activated"] is True
-    assert probe["mid_expired"] is True
-    assert probe["mid_unhealthy"] is False
-    assert mid_keepalive_diagnostics == []
-    assert probe["late_unhealthy"] is True
-    assert len(keepalive_diagnostics) == 1
-    assert keepalive_diagnostics[0]["reason_code"] == "heartbeat_validation_failed"
-
-
-def test_attempt_lease_keepalive_controller_heartbeats_with_host_owned_session():
-    events = []
-
-    class _FakeDb:
-        def close(self):
-            events.append(("close",))
-
-    fake_session = SimpleNamespace(id=77)
-
-    def _session_factory():
-        events.append(("open",))
-        return _FakeDb()
-
-    def _load_session(db, session_id):
-        events.append(("load", session_id))
-        return fake_session
-
-    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
-        events.append(("heartbeat", runtime_session.id, attempt_id, lease_token))
-
-    controller = execution_host_lease.AttemptLeaseKeepaliveController(
-        session_factory=_session_factory,
-        load_session=_load_session,
-        heartbeat_attempt=_heartbeat_attempt,
-        interval_seconds=0.05,
+def test_use_case_fails_closed_when_quick_runtime_is_missing(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        create_runtime=False,
+    )
+    dispatched = []
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: pytest.fail("host must not run"),
     )
 
-    try:
-        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            if any(event[0] == "heartbeat" for event in events):
-                break
-            time.sleep(0.02)
-    finally:
-        controller.close()
-
-    assert ("heartbeat", 77, 11, "lease-11") in events
-    assert ("open",) in events
-    assert ("load", 77) in events
-    assert ("close",) in events
-
-
-def test_attempt_lease_keepalive_controller_marks_unhealthy_on_heartbeat_error():
-    published = []
-
-    class _FakeDb:
-        def close(self):
-            return None
-
-    fake_session = SimpleNamespace(id=77)
-
-    def _session_factory():
-        return _FakeDb()
-
-    def _load_session(db, session_id):
-        return fake_session
-
-    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
-        raise RuntimeError("db write failed")
-
-    controller = execution_host_lease.AttemptLeaseKeepaliveController(
-        session_factory=_session_factory,
-        load_session=_load_session,
-        heartbeat_attempt=_heartbeat_attempt,
-        interval_seconds=0.05,
-        publish_diagnostic=lambda **payload: published.append(payload),
+    receipt = use_case.enqueue(
+        QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION),
+        dispatch=lambda stable_id: dispatched.append(stable_id) or "transport-1",
     )
+    result = use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
 
-    try:
-        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
-        deadline = time.time() + 1.0
-        caught = None
-        while time.time() < deadline:
-            try:
-                controller.assert_healthy()
-            except execution_host_lease.ExecutionHostKeepaliveLostError as exc:
-                caught = exc
-                break
-            time.sleep(0.02)
-    finally:
-        controller.close()
-
-    assert caught is not None
-    event = _find_published_diagnostic(
-        published,
-        code="execution_host_keepalive",
-        reason_code="heartbeat_error",
-    )
-    assert event is not None
-    diagnostic = event["diagnostic"]
-    assert diagnostic["reason_code"] == "heartbeat_error"
-    assert caught.diagnostic["reason_code"] == "heartbeat_error"
-
-
-def test_attempt_lease_keepalive_controller_publishes_diagnostic_when_validation_stops():
-    events = []
-    published = []
-
-    class _FakeDb:
-        def close(self):
-            events.append(("close",))
-
-    fake_session = SimpleNamespace(id=77)
-
-    def _session_factory():
-        events.append(("open",))
-        return _FakeDb()
-
-    def _load_session(db, session_id):
-        events.append(("load", session_id))
-        return fake_session
-
-    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
-        raise ValueError("lease expired")
-
-    controller = execution_host_lease.AttemptLeaseKeepaliveController(
-        session_factory=_session_factory,
-        load_session=_load_session,
-        heartbeat_attempt=_heartbeat_attempt,
-        interval_seconds=0.05,
-        publish_diagnostic=lambda **payload: published.append(payload),
-    )
-
-    try:
-        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            if _find_published_diagnostic(
-                published,
-                code="execution_host_keepalive",
-                reason_code="heartbeat_validation_failed",
-            ):
-                break
-            time.sleep(0.02)
-    finally:
-        controller.close()
-
-    event = _find_published_diagnostic(
-        published,
-        code="execution_host_keepalive",
-        reason_code="heartbeat_validation_failed",
-    )
-    assert event is not None
-    assert ("open",) in events
-    assert ("load", 77) in events
-    diagnostic = event["diagnostic"]
-    assert event["runtime_session_id"] == 77
-    assert event["attempt_id"] == 11
-    assert diagnostic["code"] == "execution_host_keepalive"
-    assert diagnostic["state"] == "stopped"
-    assert diagnostic["reason_code"] == "heartbeat_validation_failed"
-    assert diagnostic["message"] == "lease expired"
-
-
-def test_attempt_lease_keepalive_controller_publishes_lifecycle_receipts():
-    published = []
-    heartbeat_state = {
-        "count": 0,
-        "started_at": datetime(2026, 4, 3, 2, 20, tzinfo=timezone.utc),
+    assert receipt is None
+    assert dispatched == []
+    assert result == {
+        "status": "skipped",
+        "skip_reason": "runtime_missing",
+        "route": "orchestrator_mainline",
+        "mode": "quick",
     }
 
-    class _FakeDb:
-        def close(self):
-            return None
 
-    fake_session = SimpleNamespace(id=77)
-
-    def _session_factory():
-        return _FakeDb()
-
-    def _load_session(db, session_id):
-        return fake_session
-
-    def _heartbeat_attempt(db, runtime_session, *, attempt_id, lease_token):
-        heartbeat_state["count"] += 1
-        heartbeat_at = heartbeat_state["started_at"] + timedelta(seconds=heartbeat_state["count"])
-        return SimpleNamespace(
-            last_heartbeat_at=heartbeat_at,
-            lease_expires_at=heartbeat_at + timedelta(seconds=60),
-        )
-
-    controller = execution_host_lease.AttemptLeaseKeepaliveController(
-        session_factory=_session_factory,
-        load_session=_load_session,
-        heartbeat_attempt=_heartbeat_attempt,
-        interval_seconds=0.05,
-        publish_diagnostic=lambda **payload: published.append(payload),
-    )
-
-    try:
-        controller.activate(runtime_session_id=77, attempt_id=11, lease_token="lease-11")
-        deadline = time.time() + 1.0
-        required_codes = {
-            "execution_host_keepalive_activation_requested",
-            "execution_host_keepalive_heartbeat_begin",
-            "execution_host_keepalive_first_heartbeat_ack",
-            "execution_host_keepalive_heartbeat_end",
-        }
-        while time.time() < deadline:
-            seen_codes = {item["diagnostic"]["code"] for item in published}
-            if required_codes.issubset(seen_codes):
-                break
-            time.sleep(0.02)
-        controller.deactivate(reason="test_scope_exit")
-    finally:
-        controller.close()
-
-    diagnostics_by_code = {item["diagnostic"]["code"]: item["diagnostic"] for item in published}
-
-    assert diagnostics_by_code["execution_host_keepalive_activation_requested"]["attempt_id"] == 11
-    assert (
-        diagnostics_by_code["execution_host_keepalive_first_heartbeat_ack"]["last_heartbeat_at"]
-        is not None
-    )
-    assert (
-        diagnostics_by_code["execution_host_keepalive_heartbeat_end"]["lease_expires_at"]
-        is not None
-    )
-    assert (
-        diagnostics_by_code["execution_host_keepalive_deactivated"]["reason_code"]
-        == "test_scope_exit"
-    )
-
-
-def test_run_generation_in_host_routes_project_mode_to_episode_orchestrator(
-    monkeypatch, session_factory
-):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"project_id": "project-1", "user_prompt": "test prompt"},
-    )
-    orchestrator_calls = {}
-
-    class _FakeEpisodeOrchestrator:
-        async def execute(self, *, task, input_data, db, execution_order=1):
-            orchestrator_calls["task_id"] = task.id
-            orchestrator_calls["input_data"] = dict(input_data)
-            orchestrator_calls["execution_order"] = execution_order
-            return {"status": "completed", "final_video_url": "https://example.com/project.mp4"}
-
-    reset_calls = []
-    monkeypatch.setattr("app.agents.tools.register_default_tools", lambda: None)
-    monkeypatch.setattr(
-        queued_task_execution_host, "reset_event_bus", lambda: reset_calls.append(True)
-    )
-    monkeypatch.setattr(
-        "app.agents.episode_orchestrator.EpisodeOrchestratorAgent.create_default",
-        classmethod(lambda cls: _FakeEpisodeOrchestrator()),
-    )
-
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        result = queued_task_execution_host.run_generation_in_host(
-            GenerationMode.PROJECT,
-            task=task,
-            input_data={"project_id": "project-1", "user_prompt": "test prompt"},
-            db=db,
-            route="project_orchestrator_mainline",
-            execution_order=2,
-        )
-    finally:
-        db.close()
-
-    assert reset_calls == [True]
-    assert result["route"] == "project_orchestrator_mainline"
-    assert result["mode"] == "project"
-    assert result["status"] == "completed"
-    assert orchestrator_calls["task_id"] == task_id
-    assert orchestrator_calls["input_data"]["project_id"] == "project-1"
-    assert orchestrator_calls["execution_order"] == 2
-
-
-def test_sync_process_video_task_routes_silent_quick_payload_to_orchestrator_mainline(
-    monkeypatch, session_factory
-):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
-    dispatch_calls = {}
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-    monkeypatch.setattr(
-        task_queue,
-        "run_generation_in_host",
-        lambda mode, *, task, input_data, db, route, execution_order=1: dispatch_calls.update(
-            {
-                "mode": mode.value,
-                "task_id": task.id,
-                "input_data": dict(input_data),
-                "execution_order": execution_order,
-                "route": route,
-            }
-        )
-        or {
-            "status": "completed",
-            "result": {"status": "completed", "final_video_url": "https://example.com/final.mp4"},
-            "route": route,
-            "mode": mode.value,
-        },
-    )
-
-    result = task_queue.sync_process_video_task(task_id)
-
-    assert result["route"] == "orchestrator_mainline"
-    assert result["mode"] == "quick"
-    assert result["status"] == "completed"
-    assert dispatch_calls["mode"] == "quick"
-    assert dispatch_calls["task_id"] == task_id
-    assert dispatch_calls["input_data"]["user_prompt"] == "test prompt"
-
-
-def test_sync_process_video_task_prefers_runtime_session_payload_for_quick_dispatch(
-    monkeypatch, session_factory
-):
+def test_use_case_prefers_runtime_payload_and_builds_persistence_free_request(session_factory):
     task_id = _create_task(
         session_factory,
         input_parameters={"user_prompt": "task payload"},
-    )
-    dispatch_calls = {}
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-    monkeypatch.setattr(
-        task_queue,
-        "run_generation_in_host",
-        lambda mode, *, task, input_data, db, route, execution_order=1: dispatch_calls.update(
-            {"input_data": dict(input_data)}
-        )
-        or {
-            "status": "completed",
-            "result": {"status": "completed"},
-            "route": route,
-            "mode": mode.value,
+        status=TaskStatus.QUEUED.value,
+        runtime_input_payload={
+            "user_prompt": "runtime payload",
+            "runtime_contracts": {"script_review": {"action": "approve"}},
         },
     )
 
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        session = task_queue.RuntimeSessionService.get_or_create_session_for_task_sync(
-            db, task, mode="quick"
-        )
-        session.input_payload = {
-            "user_prompt": "runtime payload",
-            "runtime_contracts": {"script_review": {"action": "approve"}},
-        }
-        db.commit()
-    finally:
-        db.close()
+    calls = {}
 
-    result = task_queue.sync_process_video_task(task_id)
+    def _host(**kwargs):
+        calls.update(kwargs)
+        return _execution_result({"status": "completed"})
 
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=_host,
+        agent_factory=lambda agent_type: calls.setdefault("agent_type", agent_type) or object(),
+        keepalive_factory=lambda **kwargs: calls.setdefault("keepalive", object()),
+    )
+
+    result = use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
+
+    request = calls["request"]
     assert result["route"] == "orchestrator_mainline"
-    assert dispatch_calls["input_data"]["user_prompt"] == "runtime payload"
-    assert dispatch_calls["input_data"]["runtime_contracts"] == {
-        "script_review": {"action": "approve"}
-    }
-
-
-def test_queue_task_persists_celery_handle_and_sets_queued(monkeypatch, session_factory):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
-
-    monkeypatch.setattr(
-        "app.services.celery_app.process_video_task",
-        SimpleNamespace(
-            delay=lambda queued_task_id: SimpleNamespace(id=f"celery-{queued_task_id}")
-        ),
-    )
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-
-    celery_task_id = asyncio.run(task_queue.TaskQueueService().queue_task(task_id))
-
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        assert celery_task_id == f"celery-{task_id}"
-        assert task.status == TaskStatus.QUEUED.value
-        assert (task.output_metadata or {}).get("celery_task_id") == f"celery-{task_id}"
-    finally:
-        db.close()
-
-
-def test_queue_task_skips_waiting_gate_runtime_session(monkeypatch, session_factory):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
-    delay_calls = {}
-
-    def _unexpected_delay(_queued_task_id):
-        delay_calls["called"] = True
-        return SimpleNamespace(id="unexpected")
-
-    monkeypatch.setattr(
-        "app.services.celery_app.process_video_task",
-        SimpleNamespace(delay=_unexpected_delay),
-    )
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(db, task, mode="quick")
-        session.status = WorkflowSessionStatus.WAITING_GATE.value
-        task.status = TaskStatus.IN_PROGRESS.value
-        db.commit()
-    finally:
-        db.close()
-
-    celery_task_id = asyncio.run(task_queue.TaskQueueService().queue_task(task_id))
-
-    assert celery_task_id is None
-    assert delay_calls == {}
-
-
-def test_sync_process_video_task_skips_terminal_quick_runtime(monkeypatch, session_factory):
-    task_id = _create_task(
-        session_factory,
-        input_parameters={"user_prompt": "test prompt"},
-    )
-    dispatch_calls = {}
-
-    def _fake_host(mode, *, task, input_data, db, route, execution_order=1):
-        dispatch_calls["called"] = True
-        return {
-            "status": "completed",
-            "result": {"status": "completed"},
-            "route": route,
-            "mode": mode.value,
-        }
-
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-    monkeypatch.setattr(task_queue, "run_generation_in_host", _fake_host)
-
-    db = session_factory()
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        session = RuntimeSessionService.get_or_create_session_for_task_sync(db, task, mode="quick")
-        RuntimeSessionService.mark_session_failed_sync(
-            db,
-            session,
-            error_message="boom",
-            task=task,
-        )
-    finally:
-        db.close()
-
-    result = task_queue.sync_process_video_task(task_id)
-
-    assert result["status"] == "skipped"
-    assert result["skip_reason"] == "runtime_terminal:failed"
     assert result["mode"] == "quick"
-    assert result["route"] == "orchestrator_mainline"
-    assert dispatch_calls == {}
+    assert request.task.task_id == task_id
+    assert request.input_data.to_dict()["user_prompt"] == "runtime payload"
+    assert calls["agent_type"] == AgentType.ORCHESTRATOR
+    assert "attempt_lease_keepalive" in calls
 
 
-def test_sync_process_video_task_marks_runtime_failure_via_runtime_service(
-    monkeypatch, session_factory
+@pytest.mark.parametrize(
+    "output_payload",
+    [
+        {},
+        {"status": ""},
+        {"status": " completed "},
+        {"status": "success"},
+        {"status": 42},
+    ],
+)
+def test_use_case_rejects_missing_or_noncanonical_host_status(
+    session_factory,
+    output_payload,
 ):
     task_id = _create_task(
         session_factory,
-        input_parameters={"user_prompt": "test prompt"},
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: _execution_result(output_payload),
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
     )
 
-    def _raise_host_error(mode, *, task, input_data, db, route, execution_order=1):
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    db = session_factory()
+    try:
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        runtime_session = SqlAlchemyRuntimeAttemptStore(db).load_latest_session_for_task(
+            task_id
+        )
+        assert task.status == TaskStatus.FAILED.value
+        assert runtime_session is not None
+        assert runtime_session.status is WorkflowSessionStatus.FAILED
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("status", ["waiting_gate", "completed"])
+def test_use_case_preserves_explicit_canonical_host_status(session_factory, status):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: _execution_result({"status": status}),
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
+    )
+
+    result = use_case.execute(
+        QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+    )
+
+    assert result["status"] == status
+
+
+def test_use_case_rejects_episode_coordination_without_canonical_status(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"mode": "project", "project_id": "project-1"},
+        status=TaskStatus.QUEUED.value,
+        create_runtime=False,
+    )
+
+    class _Coordinator:
+        async def execute(self, **kwargs):
+            return {}
+
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        episode_coordinator_factory=lambda: _Coordinator(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    task = _load_task(session_factory, task_id)
+    assert task.status == TaskStatus.FAILED.value
+
+
+def test_use_case_rejects_nonterminal_episode_coordination_status(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"mode": "project", "project_id": "project-1"},
+        status=TaskStatus.QUEUED.value,
+        create_runtime=False,
+    )
+
+    class _Coordinator:
+        async def execute(self, **kwargs):
+            return {"status": "waiting_gate", "episodes": []}
+
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        episode_coordinator_factory=lambda: _Coordinator(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(
+            QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION)
+        )
+
+    assert exc_info.value.reason_code == "execution_status_invalid"
+    task = _load_task(session_factory, task_id)
+    assert task.status == TaskStatus.FAILED.value
+
+
+def test_use_case_terminal_runtime_fails_closed_before_host(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    db = session_factory()
+    try:
+        store = SqlAlchemyRuntimeAttemptStore(db)
+        runtime_session = store.load_latest_session_for_task(task_id)
+        assert runtime_session is not None
+        RuntimeSessionControlPlane(store).mark_failed(
+            runtime_session.session_id,
+            error_message="already failed",
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: pytest.fail("host must not run"),
+    )
+    result = use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
+
+    assert result == {
+        "status": "skipped",
+        "skip_reason": "runtime_terminal:failed",
+        "route": "orchestrator_mainline",
+        "mode": "quick",
+    }
+
+
+def test_use_case_persists_runtime_failure_and_re_raises_host_error(session_factory):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+
+    def _raise_host(**kwargs):
         raise RuntimeError("host failed")
 
-    monkeypatch.setattr(task_queue, "SyncSessionLocal", session_factory)
-    monkeypatch.setattr(task_queue, "run_generation_in_host", _raise_host_error)
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=_raise_host,
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
+    )
 
-    result = task_queue.sync_process_video_task(task_id)
-
-    assert result == {"error": "host failed"}
+    with pytest.raises(RuntimeError, match="host failed"):
+        use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
 
     db = session_factory()
     try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        runtime_session = RuntimeSessionService.get_latest_session_for_task_sync(db, task_id)
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        runtime_session = SqlAlchemyRuntimeAttemptStore(db).load_latest_session_for_task(task_id)
+        assert runtime_session is not None
         assert task.status == TaskStatus.FAILED.value
         assert task.error_message == "host failed"
-        assert runtime_session is not None
-        assert runtime_session.status == WorkflowSessionStatus.FAILED.value
-        assert runtime_session.error_message == "host failed"
+        assert runtime_session.status is WorkflowSessionStatus.FAILED
     finally:
         db.close()
+
+
+def test_use_case_surfaces_failed_failure_transition(session_factory, monkeypatch):
+    task_id = _create_task(
+        session_factory,
+        input_parameters={"user_prompt": "test"},
+        status=TaskStatus.QUEUED.value,
+    )
+    monkeypatch.setattr(
+        RuntimeSessionControlPlane,
+        "mark_failed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("transition failed")),
+    )
+    use_case = QueuedExecutionUseCase(
+        session_factory=session_factory,
+        host_runner=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("host failed")),
+        agent_factory=lambda _agent_type: object(),
+        keepalive_factory=lambda **kwargs: object(),
+    )
+
+    with pytest.raises(QueuedExecutionApplicationError) as exc_info:
+        use_case.execute(QueuedExecutionCommand(task_id, QueuedExecutionKind.VIDEO_GENERATION))
+
+    assert exc_info.value.reason_code == "failure_transition_failed"
+    assert "host failed" in str(exc_info.value)
+    assert "transition failed" in str(exc_info.value)

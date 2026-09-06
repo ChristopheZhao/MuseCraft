@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import redis.asyncio as redis
 
-from app.models import Task, Scene, Resource, TaskStatus
+from app.domain import TaskStatus
+from app.models import Resource, Scene, Task
 from app.core.database import get_db
 from app.services.websocket import websocket_manager
 from app.services.file_storage import FileStorageService

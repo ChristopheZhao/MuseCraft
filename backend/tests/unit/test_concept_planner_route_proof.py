@@ -2,29 +2,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
+from app.agents.base import AgentError
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.tools.ai_services.service_interfaces import LLMServiceInterface, ServiceProvider
 from app.agents.utils import llm_policy as llm_policy_module
-
-
-class _StubTask:
-    def __init__(self, task_id: str):
-        self.task_id = task_id
-        self.status = "pending"
-
-    def update_progress(self, *_args, **_kwargs):
-        return None
-
-
-class _StubDB:
-    def add(self, *_args, **_kwargs):
-        return None
-
-    def commit(self, *_args, **_kwargs):
-        return None
-
-    def refresh(self, *_args, **_kwargs):
-        return None
+from app.domain import AgentExecutionRequest, AgentTaskReference, JsonObjectPayload
 
 
 class _ProviderConfig:
@@ -183,6 +167,7 @@ def _make_memory_services():
 
 def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(monkeypatch):
     selected_providers = []
+    shared_writes = []
     plan_service = _RecordingPlanService()
 
     monkeypatch.setattr(
@@ -192,7 +177,10 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
     )
     monkeypatch.setattr("app.core.video_config_manager.get_video_config", lambda: _VideoConfigStub())
     monkeypatch.setattr("app.agents.concept_planner.read_shared_fact", lambda *args, **kwargs: {})
-    monkeypatch.setattr("app.agents.concept_planner.write_shared_fact", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.agents.concept_planner.write_shared_fact",
+        lambda _workflow_id, key, _value, **_kwargs: shared_writes.append(key),
+    )
 
     agent = ConceptPlannerAgent(memory_services=_make_memory_services())
     log_messages = []
@@ -205,23 +193,30 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
     async def _noop_progress(*_args, **_kwargs):
         return None
 
-    async def _noop_store(*_args, **_kwargs):
-        return False
-
     agent._update_progress = _noop_progress  # type: ignore[attr-defined]
-    agent.store_creative_guidance = _noop_store  # type: ignore[attr-defined]
+    assert not hasattr(agent, "store_creative_guidance")
+    assert not hasattr(agent, "retrieve_creative_guidance")
 
     result = asyncio.run(
         agent._execute_impl(
-            _StubTask("concept-proof-task"),
-            {
-                "user_prompt": "制作猴子捞月动画短片",
-                "duration": 10,
-                "aspect_ratio": "16:9",
-                "workflow_state_id": "wf-proof",
-                "concept_mode": "episode",
-            },
-            _StubDB(),
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id="concept-proof-task",
+                    task_type="video_generation",
+                ),
+                agent_type="concept_planner",
+                workflow_state_id="wf-proof",
+                input_data=JsonObjectPayload.from_mapping(
+                    {
+                        "user_prompt": "制作猴子捞月动画短片",
+                        "duration": 10,
+                        "aspect_ratio": "16:9",
+                        "workflow_state_id": "wf-proof",
+                        "concept_mode": "episode",
+                    },
+                    field_path="input_data",
+                ),
+            )
         )
     )
 
@@ -231,6 +226,11 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
     assert all(call["model"] == "deepseek-chat" for call in plan_service.calls)
     assert result["concept_plan"]["intelligent_style_design"]["style_name"] == "Ink Moon"
     assert result["concept_plan"]["scenes"][0]["scene_number"] == 1
+    assert shared_writes == [
+        "project.concept_plan",
+        "project.voice_plan",
+        "scene_overview",
+    ]
 
     assert any(
         "CONCEPT_PLAN_ROUTE provider=deepseek model=deepseek-chat fallback_model=deepseek-reasoner"
@@ -245,3 +245,18 @@ def test_concept_planner_execute_proves_deepseek_route_and_budget_diagnostics(mo
         "TIME_BUDGET stage=scene_batch" in message
         for message in log_messages
     )
+
+
+def test_concept_planner_authoritative_write_failure_is_not_silently_accepted(monkeypatch):
+    agent = ConceptPlannerAgent(memory_services=_make_memory_services())
+
+    def _fail_write(*_args, **_kwargs):
+        raise RuntimeError("working memory unavailable")
+
+    monkeypatch.setattr("app.agents.concept_planner.write_shared_fact", _fail_write)
+
+    with pytest.raises(
+        AgentError,
+        match="failed to persist authoritative shared fact: project.concept_plan",
+    ):
+        agent._write_authoritative_fact("wf-proof", "project.concept_plan", {"overview": "x"})

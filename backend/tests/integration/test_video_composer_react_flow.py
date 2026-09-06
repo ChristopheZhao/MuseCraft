@@ -29,7 +29,12 @@ from app.agents.utils.memory_helpers import (
     write_shared_fact,
 )
 from app.agents.video_composer import VideoComposerAgent
-from app.models import Task, TaskType
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 from app.services.memory_provider import build_memory_services
 from app.services.video_composer_execution_contract import build_video_composer_execution_contract
 
@@ -156,12 +161,6 @@ async def test_video_composer_react_flow() -> None:
         execution_contract=execution_contract,
     )
 
-    task = Task(
-        title="composer-react-flow",
-        description="minimal flow regression",
-        task_type=TaskType.VIDEO_EDITING,
-    )
-
     agent = VideoComposerAgent(memory_services=memory_services)
     if not use_real_llm:
         await _apply_stub_llm(agent, video_path, audio_path)
@@ -173,7 +172,22 @@ async def test_video_composer_react_flow() -> None:
         "static_context": static_context,
     }
 
-    result = await agent.execute(task, input_data)
+    result = (
+        await agent.execute(
+            AgentExecutionRequest(
+                task=AgentTaskReference(
+                    task_id=f"composer-react-{uuid.uuid4()}",
+                    task_type="video_editing",
+                ),
+                agent_type=AgentType.VIDEO_COMPOSER.value,
+                input_data=JsonObjectPayload.from_mapping(
+                    input_data,
+                    field_path="test.input_data",
+                ),
+                workflow_state_id=wf_id,
+            )
+        )
+    ).output_data.to_dict()
 
     final_path = result.get("final_video_path") or ""
     mix_receipt = result.get("mix_receipt") or {}

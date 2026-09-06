@@ -6,18 +6,15 @@ import math
 import json
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
-
 from .base import BaseAgent, AgentError
-from ..models import Task, AgentType
+from ..domain import AgentExecutionRequest, AgentType
 from ..core.story_plan import (
     CharacterProfile,
     EpisodePlan,
     EpisodeEditorialStatus,
-    ProjectState,
+    ProjectDefinition,
     StoryPlan,
     normalize_character_bible,
-    project_state_repository,
 )
 from ..services.memory_provider import MemoryServices, build_memory_services
 
@@ -44,10 +41,9 @@ class SeriesPlannerAgent(BaseAgent):
 
     async def _execute_impl(
         self,
-        task: Task,
-        input_data: Dict[str, Any],
-        db: Session,
+        request: AgentExecutionRequest,
     ) -> Dict[str, Any]:
+        input_data = request.input_data.to_dict()
         self._validate_input(input_data, ["project_id", "user_prompt", "target_duration_seconds"])
 
         project_id = input_data["project_id"]
@@ -120,12 +116,7 @@ class SeriesPlannerAgent(BaseAgent):
             merged_style.update(story_plan.visual_style or {})
             story_plan.visual_style = merged_style
 
-        existing_state = project_state_repository.get(project_id)
-        existing_settings = {}
-        if existing_state and isinstance(getattr(existing_state, "global_settings", None), dict):
-            existing_settings = dict(existing_state.global_settings)
-
-        project_state = ProjectState(
+        project_definition = ProjectDefinition(
             project_id=project_id,
             mode=mode,
             story_plan=story_plan,
@@ -137,31 +128,30 @@ class SeriesPlannerAgent(BaseAgent):
             },
             cost_budget=input_data.get("cost_budget"),
         )
-        if existing_settings:
-            merged_settings = dict(existing_settings)
-            merged_settings.update(project_state.global_settings or {})
-            project_state.global_settings = merged_settings
 
         for episode in story_plan.episodes:
-            runtime = project_state.ensure_runtime_state(episode.episode_id)
             if episode.status == EpisodeEditorialStatus.DRAFT:
                 episode.status = EpisodeEditorialStatus.PENDING_APPROVAL
 
         if input_data.get("auto_generate_scripts", True):
             await self._populate_episode_scripts(
-                project_state=project_state,
+                project_definition=project_definition,
                 user_prompt=user_prompt,
             )
 
-        project_state = project_state_repository.save(project_state)
-
         return {
+            "status": "completed",
             "project_id": project_id,
-            "story_plan": project_state.story_plan.to_dict(),
+            "project_definition": project_definition.to_dict(),
+            "story_plan": project_definition.story_plan.to_dict(),
         }
 
-    async def _populate_episode_scripts(self, project_state: ProjectState, user_prompt: str) -> None:
-        story_plan = project_state.story_plan
+    async def _populate_episode_scripts(
+        self,
+        project_definition: ProjectDefinition,
+        user_prompt: str,
+    ) -> None:
+        story_plan = project_definition.story_plan
         episodes = story_plan.episodes
         if not episodes:
             return

@@ -1,5 +1,10 @@
 # Validation Ledger: PLAN-20260404-051
 
+- Document Type: plan-attachment
+- Parent Plan: PLAN-20260404-051
+
+> 本文件为父计划附件。下文状态、检查清单与统计属于原记录时点；当前生命周期只由 PLAN_INDEX.json 管理。
+
 ## Scope
 - Open an independent SQL governance/design plan after `PLAN-20260403-050` completed its bounded seam and moved to `awaiting_user_confirmation`.
 - Freeze the boundary between:

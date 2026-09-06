@@ -3,18 +3,23 @@
 System validation script to check project readiness
 """
 
-import os
-import sys
 import asyncio
 import logging
+import os
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Tuple
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from app.core.config import settings
+from app.infrastructure.database_runtime import (
+    DatabaseRuntimeContractError,
+    preflight_database_runtime,
+    resolve_database_runtime,
+)
 
 
 class SystemValidator:
@@ -87,17 +92,22 @@ class SystemValidator:
         status = "PASS"
         
         # Check required environment variables
-        required_vars = [
-            "DATABASE_URL",
-            "REDIS_URL",
-            "SECRET_KEY"
-        ]
+        required_vars = ["DATABASE_PROFILE", "REDIS_URL", "SECRET_KEY"]
         
         for var in required_vars:
             value = getattr(settings, var, None)
             if not value or value in ["your-secret-key-here", "change-me"]:
                 issues.append(f"Missing or default value for {var}")
                 status = "CRITICAL"
+
+        try:
+            resolve_database_runtime(
+                profile=settings.DATABASE_PROFILE,
+                database_url=settings.DATABASE_URL,
+            )
+        except DatabaseRuntimeContractError as exc:
+            issues.append(f"Database runtime rejected: {exc.reason_code.value}")
+            status = "CRITICAL"
         
         # Check AI API keys (warnings only)
         ai_keys = [
@@ -194,25 +204,38 @@ class SystemValidator:
         """Validate database setup"""
         issues = []
         status = "PASS"
-        
+
         try:
-            from app.core.database import engine, SessionLocal
-            
-            # Try to create a session
-            with SessionLocal() as session:
-                # Try a simple query
-                result = session.execute("SELECT 1")
-                if not result:
-                    issues.append("Database connection test failed")
-                    status = "CRITICAL"
-                    
+            preflight = preflight_database_runtime(
+                profile=settings.DATABASE_PROFILE,
+                database_url=settings.DATABASE_URL,
+            )
         except Exception as e:
-            issues.append(f"Database connection failed: {str(e)}")
+            issues.append(
+                f"Database preflight failed unexpectedly: error_type={type(e).__name__}"
+            )
+            status = "CRITICAL"
+            preflight = None
+
+        if preflight is not None and not preflight.accepted:
+            reason_code = (
+                preflight.reason_code.value
+                if preflight.reason_code is not None
+                else "database_preflight_rejected"
+            )
+            diagnostic = [f"reason_code={reason_code}"]
+            if preflight.profile is not None:
+                diagnostic.append(f"profile={preflight.profile.value}")
+            if preflight.backend_name:
+                diagnostic.append(f"backend={preflight.backend_name}")
+            if preflight.error_type:
+                diagnostic.append(f"error_type={preflight.error_type}")
+            issues.append(f"Database preflight rejected: {', '.join(diagnostic)}")
             status = "CRITICAL"
         
         # Check if models are importable
         try:
-            from app.models import Task, Scene, Resource
+            from app.models import Resource, Scene, Task
         except ImportError as e:
             issues.append(f"Model import failed: {str(e)}")
             status = "CRITICAL"
@@ -221,7 +244,9 @@ class SystemValidator:
             "status": status,
             "issues": issues,
             "details": {
-                "connection_test": "PASS" if status != "CRITICAL" else "FAIL",
+                "connection_test": (
+                    "PASS" if preflight is not None and preflight.accepted else "FAIL"
+                ),
                 "models_importable": "PASS" if "Model import failed" not in str(issues) else "FAIL"
             }
         }
@@ -268,7 +293,7 @@ class SystemValidator:
         try:
             # Test base agent import
             from app.agents.base import BaseAgent
-            
+
             # Test tool registry
             from app.agents.tools.tool_registry import get_tool_registry
             registry = get_tool_registry()
@@ -305,8 +330,8 @@ class SystemValidator:
         status = "PASS"
         
         try:
+            from app.agents.tools.base_tool import AsyncTool, BaseTool
             from app.agents.tools.tool_registry import get_tool_registry
-            from app.agents.tools.base_tool import BaseTool, AsyncTool
             
             registry = get_tool_registry()
             available_tools = registry.list_tools()
@@ -347,8 +372,8 @@ class SystemValidator:
         
         try:
             from app.agents.memory.long_term.manager import LongTermMemoryManager
-            from app.agents.memory.long_term.stores import MemoryItem, MemoryType, MemoryImportance
-            
+            from app.agents.memory.long_term.stores import MemoryImportance, MemoryItem, MemoryType
+
             # Test memory manager initialization
             memory_manager = LongTermMemoryManager(config={
                 "enable_consolidation": False,  # Disable for testing
@@ -467,7 +492,7 @@ class SystemValidator:
         try:
             from app.api.v1.api import api_router
             from app.main import app
-            
+
             # Check if routes are registered
             routes = app.routes
             if not routes:

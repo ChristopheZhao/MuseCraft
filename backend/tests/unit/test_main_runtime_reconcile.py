@@ -2,13 +2,20 @@ import asyncio
 
 from app import main as main_module
 from app.core import database as database_module
-from app.services.runtime_session_service import RuntimeSessionService
+from app.domain import JsonObjectPayload
+from app.services.runtime_reconciler import RuntimeReconciler
 
 
 def test_run_quick_runtime_reconcile_once_uses_control_plane_service(monkeypatch):
     events = {}
 
     class _FakeDb:
+        def commit(self):
+            events["committed"] = True
+
+        def rollback(self):
+            events["rolled_back"] = True
+
         def close(self):
             events["closed"] = True
 
@@ -18,16 +25,18 @@ def test_run_quick_runtime_reconcile_once_uses_control_plane_service(monkeypatch
         events["opened"] = True
         return fake_db
 
-    def _fake_reconcile(db, *, limit):
-        events["db"] = db
+    def _fake_reconcile(self, *, limit):
         events["limit"] = limit
-        return {"inspected": 2, "failed": 1, "skipped": 1}
+        return JsonObjectPayload.from_mapping(
+            {"inspected": 2, "failed": 1, "skipped": 1},
+            field_path="test.reconcile_summary",
+        )
 
     monkeypatch.setattr(database_module, "SessionLocal", _fake_session_local)
     monkeypatch.setattr(
-        RuntimeSessionService,
-        "reconcile_irrecoverable_quick_runtimes_sync",
-        staticmethod(_fake_reconcile),
+        RuntimeReconciler,
+        "reconcile_irrecoverable_quick_runtimes",
+        _fake_reconcile,
     )
     monkeypatch.setattr(main_module.settings, "QUICK_RUNTIME_RECONCILER_BATCH_LIMIT", 25)
 
@@ -35,8 +44,8 @@ def test_run_quick_runtime_reconcile_once_uses_control_plane_service(monkeypatch
 
     assert summary == {"inspected": 2, "failed": 1, "skipped": 1}
     assert events["opened"] is True
-    assert events["db"] is fake_db
     assert events["limit"] == 25
+    assert events["committed"] is True
     assert events["closed"] is True
 
 

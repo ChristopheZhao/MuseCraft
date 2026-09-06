@@ -1,6 +1,4 @@
 """Tests for VoiceSynthesizerAgent orchestration without hitting external providers."""
-from types import SimpleNamespace
-
 import pytest
 
 from app.agents.voice_synthesizer import VoiceSynthesizerAgent
@@ -10,21 +8,12 @@ from app.agents.memory.short_term import get_working_memory_service
 from app.agents.memory.short_term import SceneSnapshot
 from app.agents.utils.memory_helpers import agent_scope
 from app.agents.adapters.video.memory_adapter import VideoMemoryAdapter
-
-
-class DummySession:
-    def __init__(self):
-        self._objects = []
-
-    def add(self, obj):
-        self._objects.append(obj)
-
-    def commit(self):
-        pass
-
-    def refresh(self, obj):
-        # Ensure execution objects have an ID for downstream formatting
-        setattr(obj, "id", getattr(obj, "id", 1))
+from app.domain import (
+    AgentExecutionRequest,
+    AgentTaskReference,
+    AgentType,
+    JsonObjectPayload,
+)
 
 
 @pytest.mark.asyncio
@@ -74,29 +63,33 @@ async def test_voice_synthesizer_agent_generates_voice_assets():
         ]
     })
 
-    task = SimpleNamespace(id=1, task_id="task-voice-1", update_progress=lambda *args, **kwargs: None)
-    db = DummySession()
-
     result = await agent.execute(
-        task=task,
-        input_data={
-            "workflow_state_id": wf_id,
-            "voice_settings": {
-                "voice_id": "zhiyu",
-                "language": "zh-CN",
-                "speed": 1.0,
-                "pitch": 1.0,
-            },
-            # Voice plan 也可从 Shared WM 读取，这里冗余传入以覆盖
-            "voice_plan": mas_wm.get("project.voice_plan", {}),
-        },
-        db=db,
-        execution_order=1,
+        AgentExecutionRequest(
+            task=AgentTaskReference(
+                task_id="task-voice-1",
+                task_type="video_generation",
+            ),
+            agent_type=AgentType.VOICE_SYNTHESIZER.value,
+            input_data=JsonObjectPayload.from_mapping(
+                {
+                    "workflow_state_id": wf_id,
+                    "voice_settings": {
+                        "voice_id": "zhiyu",
+                        "language": "zh-CN",
+                        "speed": 1.0,
+                        "pitch": 1.0,
+                    },
+                    "voice_plan": mas_wm.get("project.voice_plan", {}),
+                },
+                field_path="test.input_data",
+            ),
+            workflow_state_id=wf_id,
+            execution_order=1,
+        )
     )
 
-
-
-    assert result.get("success") is True or result.get("subtask_state") in {"complete", "partial"}
+    output = result.output_data.to_dict()
+    assert output.get("success") is True or output.get("subtask_state") in {"complete", "partial"}
     assets = mas_wm.get("voice_assets", {}) or {}
     print(f"[TEST] MAS WM voice_assets keys: {list(assets.keys())}")
     assert 1 in assets, "Voice assets should be registered in MAS WM"

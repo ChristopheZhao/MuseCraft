@@ -5,7 +5,7 @@
       "id": "PLAN-20260306-001",
       "title": "音频编排边界收敛与 Orchestrator 计划化修复",
       "kind": "fix",
-      "status": "archived",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260306-001.md",
@@ -45,6 +45,10 @@
         {
           "at": "2026-03-07T13:38:07Z",
           "text": "User confirmed acceptance; plan completed"
+        },
+        {
+          "at": "2026-09-06T13:18:32Z",
+          "text": "Historical record repair: 15c95fc changed 001 completed -> archived while archiving 026, without moving 001 or recording its archive. Restore the prior completed record from a2af5c0; preserve existing confirmation and dates. No new acceptance or archive is asserted. See PLAN-070 reconciliation."
         }
       ]
     },
@@ -334,7 +338,7 @@
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260310-004.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-10T14:30:00Z",
       "updated_at": "2026-03-11T03:33:36Z",
       "archived_at": null,
@@ -357,7 +361,7 @@
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260311-005.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-03-11T03:33:36Z",
       "updated_at": "2026-03-11T12:32:49Z",
       "archived_at": null,
@@ -1344,7 +1348,7 @@
       "id": "PLAN-20260326-026",
       "title": "MAS residual purity successor for runtime read-path, scene-info contract, and governance inventory cleanup",
       "kind": "fix",
-      "status": "completed",
+      "status": "archived",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/archive/2026-03/PLAN-20260326-026.md",
@@ -1408,6 +1412,10 @@
         {
           "at": "2026-03-26T14:19:04Z",
           "text": "Archived 026 on user request after completion: moved the plan and validation ledger from docs/plans/active/ to docs/plans/archive/2026-03/, updated file_path and archived_at in PLAN_INDEX.json, and left 024 as the only active retained follow-up in this area"
+        },
+        {
+          "at": "2026-09-06T13:18:32Z",
+          "text": "Historical record repair: 15c95fc added 026 at its archive path with archived_at and an explicit archive note, but left the index status completed and changed 001 instead. Restore archived to match that existing operation; no new archive or acceptance is asserted. See PLAN-070 reconciliation."
         }
       ]
     },
@@ -3057,12 +3065,241 @@
       "file_path": "docs/plans/active/PLAN-20260711-067.md",
       "confirmed_by_user": false,
       "created_at": "2026-07-11T01:03:22Z",
-      "updated_at": "2026-07-11T01:05:21Z",
+      "updated_at": "2026-07-18T06:47:35Z",
       "archived_at": null,
       "notes": [
         {
           "at": "2026-07-11T01:05:21Z",
           "text": "User requested a high-quality open-source readiness pass and local submission after blocker repair; start Sprint 1 from the audited clean baseline."
+        },
+        {
+          "at": "2026-07-15T23:59:15Z",
+          "text": "Reopened release acceptance scope to make the locked uv environment a complete, tested local runtime path alongside optional Docker startup."
+        },
+        {
+          "at": "2026-07-16T00:43:18Z",
+          "text": "P0-F expectation check passed across clean Windows/WSL uv environments and a real PostgreSQL/Redis API-worker-beat smoke; Docker is now an optional path."
+        },
+        {
+          "at": "2026-07-16T14:26:24Z",
+          "text": "User review corrected uv environment ownership: backend/.venv is the only repository-local environment; public docs removed UV_PROJECT_ENVIRONMENT and external path indirection."
+        },
+        {
+          "at": "2026-07-18T04:13:09Z",
+          "text": "Corrected uv/database boundary: launcher now rejects legacy MySQL with a typed reason before release migration; fresh PostgreSQL preflight remains green."
+        },
+        {
+          "at": "2026-07-18T06:47:35Z",
+          "text": "Architecture review reopened only the database-ownership part of P0-F: PLAN-20260718-068 now owns moving provider policy and persistence coupling out of the uv launcher, queue, and Agent layers."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260718-068",
+      "title": "Backend database and agent persistence boundary decoupling",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260718-068.md",
+      "confirmed_by_user": true,
+      "created_at": "2026-07-18T06:47:35Z",
+      "updated_at": "2026-07-27T16:20:30Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-07-18T06:47:35Z",
+          "text": "Drafted after code-level boundary review confirmed production Agent ORM/Session coupling, queue-owned persistence bootstrap, duplicated database-provider decisions, and missing PostgreSQL runtime transaction evidence; awaiting user confirmation before implementation."
+        },
+        {
+          "at": "2026-07-18T07:04:46Z",
+          "text": "User confirmed the execution contract after three checkpoint commits (01ab771, 873d5c5, a072392); begin Slice A boundary freeze only."
+        },
+        {
+          "at": "2026-07-18T07:32:27Z",
+          "text": "Gate A boundary freeze verified; 122 focused tests passed and Slice B is next."
+        },
+        {
+          "at": "2026-07-19T08:58:53+08:00",
+          "text": "User approved Amendment A1 after review found transitive Agent-to-SQL composition and SQL-backed global project repository coupling. P0-D/P0-F and Gate B/Gate D are narrowly reopened; P0-I/Gate A1 now govern operational Agent/SQL closure before Gate E/F release completion."
+        },
+        {
+          "at": "2026-07-19T12:36:08+08:00",
+          "text": "Amendment A2 drafted after architecture review corrected A1's mixed ProjectStateStore, unresolved transition caller, deterministic episode-Agent escape clause, and missing project CAS/UoW. Gate A2 now freezes authority/identity/transparency contracts; implementation awaits user confirmation."
+        },
+        {
+          "at": "2026-07-19T12:48:48+08:00",
+          "text": "User confirmed Amendment A2 and requested execution. Begin A2.0 authority/identity/guard freeze before production implementation."
+        },
+        {
+          "at": "2026-07-21T10:14:29+08:00",
+          "text": "Gate A2 completed: project authority is versioned and runtime-free, reads use an immutable projection, episode coordination is application-owned, MAS runtime ports are injected, context/contract/tool/memory boundaries are explicit, and music allocation is supplier-neutral. Full unit suite passed 549 tests."
+        },
+        {
+          "at": "2026-07-21T10:14:29+08:00",
+          "text": "PLAN-068 remains in_progress because Gate E/F still require a clean PostgreSQL fixture, fresh migration/preflight and uv smoke, plus PostgreSQL lease/gate/continuation transaction evidence."
+        },
+        {
+          "at": "2026-07-22T00:05:53+08:00",
+          "text": "User corrected Gate E scope: Docker is optional and not a blocker. Canonical backend/.venv and frozen uv checks pass; the remaining local blocker is PostgreSQL credentials/database configuration, while legacy MySQL data stays untouched."
+        },
+        {
+          "at": "2026-07-23T23:45:40+08:00",
+          "text": "Gate E passed without Docker: isolated local PostgreSQL 16 plus Redis completed fresh release migration, uv --check, and Alembic schema check. A bounded JSON/JSONB defect in revision 0002 was repaired at the migration boundary; no Agent or control-plane database responsibility changed."
+        },
+        {
+          "at": "2026-07-24T00:44:09+08:00",
+          "text": "Gate F is locally green: PostgreSQL runtime transaction tests, full unit/architecture regressions, PLAN-066, backend boundary CI files, and uv API/worker/beat health/shutdown smoke passed. PLAN-050 and release/CI claims are corrected, but PLAN-068 remains in_progress until an approved push produces green hosted CI results."
+        },
+        {
+          "at": "2026-07-25T14:46:14+08:00",
+          "text": "User approved Amendment A3 after review found live ScriptWriter/retry report-and-gate bypasses, consumer-synthesized scene acceptance, permissive continuation normalization with invalid-to-missing projection, and non-atomic project deletion. Execute only these bounded control-plane and contract corrections before hosted CI closure."
+        },
+        {
+          "at": "2026-07-25T16:08:16+08:00",
+          "text": "Gate A3 is locally green: success finalization is unified, image/video completion consumes producer-issued acceptance, continuation diagnostics are strict and typed, and project deletion is atomic compare-and-delete. Focused A3 passed 171, PLAN-066/MAS passed 132 with 18 deselected, and backend boundaries passed 62; PLAN-068 remains in_progress for approved commit/push and hosted CI."
+        },
+        {
+          "at": "2026-07-25T16:49:26+08:00",
+          "text": "Amendment A4 opened after expectation review invalidated Gate A3 closure for report/attempt success semantics, empty standby consumption, authoritative scene-output projection, canonical acceptance receipts, and continuation Agent identity. P0-K, P0-L, and P1-G are reopened; P0-M is added; P1-H/A3.4 remains complete. The dirty worktree is uncommitted partial evidence and must not be published before A4 validation."
+        },
+        {
+          "at": "2026-07-25T17:44:35+08:00",
+          "text": "Gate A4 local validation passed: failed/partial/contradictory reports fail before output or attempt success with typed reasons, empty standby is authoritative, scene progress cannot override producer acceptance, receipt status/timestamps are canonical, and continuation Agent identity matches its task owner. Evidence: focused 187 passed; PLAN-066/MAS 136 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 594 passed with 2 known environment deselections. PLAN-068 remains in_progress for review, authorized commit/push, and hosted CI."
+        },
+        {
+          "at": "2026-07-26T09:27:39+08:00",
+          "text": "Amendment A5 opened after review and user correction rejected the thick-validator direction. P0-K, P0-L, and P1-G are reopened around thin module-owned schemas, single parsing, one report-owned outcome, and post-control-plane authoritative publication; P0-N is added. Empty-standby consumption and project compare-and-delete remain accepted. Gate A4 local-pass evidence is historical only and the dirty worktree remains uncommitted."
+        },
+        {
+          "at": "2026-07-26T10:03:28+08:00",
+          "text": "Gate A5 is locally green: report status is the sole orchestration outcome, authoritative publication follows runtime acceptance, task decomposition and continuation share one exact-type task-spec parser, and scene acceptance uses one exact-type receipt parser. Evidence: focused 147 passed; MAS runtime 137 passed with 18 deselected; backend boundaries 62 passed; feasible full unit 613 passed with 2 known environment deselections."
+        },
+        {
+          "at": "2026-07-26T10:22:53+08:00",
+          "text": "The reviewed A3/A4/A5 correction was committed locally as project CAS 4385e22, scene receipt/read-model 5660f4e, orchestration thin contracts 048a338, and Gate A5 governance ceffacd. The tracked worktree is clean and no push was performed. PLAN-068 remains in_progress pending authorized push and hosted CI."
+        },
+        {
+          "at": "2026-07-26T03:15:25Z",
+          "text": "Amendment A6 opened after post-commit review invalidated Gate A5 local closure for terminal attempt/publication coordination, continuation single-parse semantics, authoritative VideoGenerator finalization, and typed receipt parsing. P0-K, P0-L, P1-G, and P0-N are reopened; no push before A6 validation."
+        },
+        {
+          "at": "2026-07-26T04:45:30Z",
+          "text": "Gate A6 local validation passed: terminal publication rollback, single-parse continuation/Agent identity, authoritative scene finalization, and sole report/receipt outcomes are green; A6 remains uncommitted and hosted CI is pending."
+        },
+        {
+          "at": "2026-07-27T16:20:30Z",
+          "text": "Amendment A6 was committed locally in four responsibility-aligned layers; no push was performed and hosted CI remains pending."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260808-069",
+      "title": "Anti-agentic 审查修复：质量评估去规则化、协议放行 partial 与残留清理",
+      "kind": "fix",
+      "status": "in_progress",
+      "priority": "P0",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260808-069.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-08-08T03:03:21Z",
+      "updated_at": "2026-09-06T14:30:45Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-08-09T01:39:16Z",
+          "text": "Governance anchor committed (c7fdcdd); starting S1-3 provenance investigation"
+        },
+        {
+          "at": "2026-08-15T01:52:10Z",
+          "text": "User authorized Amendment A1 for root-owned anti-agentic, fallback, contract, and SoT closure; original execution ordering superseded."
+        },
+        {
+          "at": "2026-08-15T04:43:47Z",
+          "text": "Amendment A1 local gate passed: 670 unit, 31 architecture, and 2 offline composer integration tests passed; hosted CI and user confirmation remain pending."
+        },
+        {
+          "at": "2026-08-15T05:23:35Z",
+          "text": "Amendment A2 opened after review reproduced active capability fabrication, cross-workflow execution identity acceptance, missing-finalize-boundary success synthesis, and multi-layer runtime decision defaulting; PLAN-069 remains the single owner."
+        },
+        {
+          "at": "2026-08-15T06:01:31Z",
+          "text": "Amendment A2 local checkpoint passed without remediation: 682 unit, 31 architecture, and 2 offline VideoComposer integration tests passed; plan remains in_progress pending user review and hosted CI."
+        },
+        {
+          "at": "2026-08-15T06:12:28Z",
+          "text": "Amendment A2 post-review checkpoint attempt 2 passed without remediation after removing residual controller defaults and workflow-id coercion: 685 unit, 31 architecture, and 2 offline VideoComposer integration tests passed."
+        },
+        {
+          "at": "2026-08-15T06:21:41Z",
+          "text": "Amendment A2 final checkpoint attempt 3 passed without remediation after request-budget exactness cleanup: 686 unit, 31 architecture, and 2 offline VideoComposer integration tests passed; this is the final local code evidence."
+        },
+        {
+          "at": "2026-08-15T15:44:12Z",
+          "text": "Amendment A2 implementation and counterexample tests committed as f64113e after final MAS ownership review; governance/checkpoint evidence remains a separate commit layer and plan stays in_progress pending hosted CI and user acceptance."
+        },
+        {
+          "at": "2026-08-16T01:41:29Z",
+          "text": "Amendment A3 opened: derive E2E from current Quick/Project production composition, delete invalid legacy E2E assets, and forbid production changes made only for test convenience."
+        },
+        {
+          "at": "2026-08-16T01:48:43Z",
+          "text": "Amendment A4 opened from A3 trajectory evidence: application and Episode wrappers must reject missing/invalid execution status instead of defaulting to completed before current-mainline E2E implementation resumes."
+        },
+        {
+          "at": "2026-08-16T02:19:00Z",
+          "text": "Amendments A3/A4 local gate passed without remediation: current Quick API-to-runtime-read-model E2E 1 passed, full unit 700 passed, architecture 32 passed, offline composer integration 2 passed; hosted CI and user confirmation remain pending."
+        },
+        {
+          "at": "2026-08-16T02:29:37Z",
+          "text": "A3/A4 final local checkpoint attempt 2 passed without remediation after removing fixed Agent-order assertions from the E2E; evidence counts unchanged, hosted CI and user confirmation still pending."
+        },
+        {
+          "at": "2026-08-16T02:51:32Z",
+          "text": "Amendment A5 opened after A3/A4 review: split execution-status semantics by caller boundary and replace the specialist-agent test double in the maintained Quick E2E with real production Agents; no new plan or lifecycle transition."
+        },
+        {
+          "at": "2026-08-16T03:40:34Z",
+          "text": "Amendment A5 local gate passed: caller-specific status contracts, real production specialist-Agent Quick E2E, and text-to-video scene membership are green (focused 50, E2E 1, unit 703, architecture 32, composer integration 2); hosted CI and explicit user acceptance remain pending."
+        },
+        {
+          "at": "2026-08-16T04:03:34Z",
+          "text": "A5 final receipt-authority gate passed locally: complete published scene membership no longer depends on raw artifact paths; accepted receipts remain the sole success projection. Focused 51, hosted MAS local equivalent 154/25 deselected, E2E 1, unit 704, architecture 32, composer integration 2. Hosted CI and explicit acceptance remain pending."
+        },
+        {
+          "at": "2026-09-06T13:13:42Z",
+          "text": "Documentation governance 2026-09-06: A3-A5 implementation preserved at b612963 as WIP; historical checkpoints retain original anchors. Validation ledger refreshed without extending old coverage. Fresh baseline invocation stalled before collection; hosted CI and user acceptance remain pending."
+        },
+        {
+          "at": "2026-09-06T14:16:56Z",
+          "text": "Fresh local revalidation 2026-09-06 at 627a37d: 739 collected, 739 passed, 0 skipped (unit, architecture, Quick E2E, offline composer integration). The earlier 'stalled before collection' observation was an output-buffering/capture artifact, not a hang. Hosted CI and user acceptance remain pending; status unchanged."
+        },
+        {
+          "at": "2026-09-06T14:30:45Z",
+          "text": "Hosted CI local equivalents 2026-09-06: mas-runtime 154 passed/25 deselected, backend-boundaries 73 passed; PostgreSQL-backed jobs remain hosted-only. Push authorization still required for hosted CI; status unchanged."
+        }
+      ]
+    },
+    {
+      "id": "PLAN-20260906-070",
+      "title": "文档权威入口、历史记录与持续校验收敛",
+      "kind": "fix",
+      "status": "awaiting_user_confirmation",
+      "priority": "P1",
+      "owner": "codex",
+      "file_path": "docs/plans/active/PLAN-20260906-070.md",
+      "confirmed_by_user": false,
+      "created_at": "2026-09-06T13:14:57Z",
+      "updated_at": "2026-09-06T13:20:16Z",
+      "archived_at": null,
+      "notes": [
+        {
+          "at": "2026-09-06T13:14:57Z",
+          "text": "User authorized the four-batch documentation governance proposal; implementation baseline b612963 and evidence anchor 78ff0a4 are committed. This plan owns documentation only, not PLAN-069 acceptance."
+        },
+        {
+          "at": "2026-09-06T13:20:16Z",
+          "text": "Documentation implementation complete: scoped authority navigation, six supersession notices, DP applicability review, historical index repair and explicit attachment ownership. Local checker 0 issues; 10 counterexample tests passed; deferred doctor 0 issues. No business-plan acceptance or hosted CI claimed."
         }
       ]
     }

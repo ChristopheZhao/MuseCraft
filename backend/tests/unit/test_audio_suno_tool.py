@@ -82,15 +82,22 @@ def test_audio_sensitive_error_triggers_one_shot_rewrite(monkeypatch):
     tool._initialize()
     monkeypatch.setattr(SunoClientTool, "_poll_generation_status", fake_poll)
 
+    async def fake_download(*_args, **_kwargs):
+        return "/tmp/audio/ok.mp3"
+
+    monkeypatch.setattr(tool, "_download_audio_asset", fake_download)
+
     async def _run():
-        return await tool._generate_background_music({
-            "description": "calm ambient background",
-            "style": "ambient",
-            "duration": 30,
-            "instrumental": True,
-            "title": "Test",
-            "model": "V3_5",
-        })
+        return await tool._generate_background_music(
+            {
+                "description": "calm ambient background",
+                "style": "ambient",
+                "duration": 30,
+                "instrumental": True,
+                "title": "Test",
+                "model": "V3_5",
+            }
+        )
 
     result = asyncio.run(_run())
 

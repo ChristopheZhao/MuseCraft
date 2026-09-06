@@ -3,30 +3,53 @@ Orchestration-facing facade for post-execution runtime control-plane transitions
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, TypeVar
 
 from sqlalchemy.orm import Session
 
 from ..core.database import SessionLocal as SyncSessionLocal
-from ..models import AgentType, Task
+from ..domain import (
+    AgentType,
+    JsonObjectPayload,
+    RuntimeSessionRecord,
+    RuntimeStoreError,
+    RuntimeStoreReason,
+    RuntimeTaskTransition,
+    TaskStatus,
+    WorkflowGateStatus,
+    WorkflowNodeStatus,
+)
+from ..infrastructure import SqlAlchemyRuntimeAttemptStore
 from .context_assembler import ContextContractAssembler
 from .orchestration_state_adapter import OrchestrationStateAdapter
-from .runtime_session_service import RuntimeSessionService
+from .published_deliverable_service import (
+    build_deliverable_ref,
+    clear_published_deliverable_ref,
+    discard_published_payload,
+)
+from .runtime_attempt_control_plane import RuntimeAttemptControlPlane
+from .runtime_gate_control_plane import RuntimeGateControlPlane
+from .runtime_published_deliverable_control_plane import RuntimePublishedDeliverableControlPlane
+from .runtime_session_control_plane import RuntimeSessionControlPlane
+from .script_review_contract import get_script_review_contract, set_script_review_contract
+from .orchestration_runtime_ports import OrchestrationRuntimeTransitionError
 
 
-class OrchestrationRuntimeTransitionError(RuntimeError):
-    """Raised when orchestration-facing runtime transition contracts fail."""
+TransitionResult = TypeVar("TransitionResult")
 
 
 class OrchestrationRuntimeTransitionFacade:
     """Executes post-execution runtime transitions without making orchestrator own runtime truth."""
+
+    _PAYLOAD_COMPENSATION_INFO_KEY = "runtime_published_payload_compensation_ref"
 
     def __init__(
         self,
         *,
         context_contract_assembler: ContextContractAssembler,
         orchestration_state: OrchestrationStateAdapter,
-        session_factory=SyncSessionLocal,
+        session_factory: Callable[[], Session] = SyncSessionLocal,
     ) -> None:
         self._context_contract_assembler = context_contract_assembler
         self._orchestration_state = orchestration_state
@@ -36,29 +59,41 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: Optional[int] = None,
-        action,
-    ) -> Any:
+        task_id: Optional[str] = None,
+        action: Callable[
+            [Session, SqlAlchemyRuntimeAttemptStore, RuntimeSessionRecord],
+            TransitionResult,
+        ],
+    ) -> TransitionResult:
         runtime_db = self._session_factory()
         try:
-            fresh_runtime_session = RuntimeSessionService.get_session_by_id_sync(
-                runtime_db,
-                runtime_session_id,
-            )
+            store = SqlAlchemyRuntimeAttemptStore(runtime_db)
+            fresh_runtime_session = store.load_session(runtime_session_id)
             if fresh_runtime_session is None:
                 raise OrchestrationRuntimeTransitionError(
                     f"Runtime session {runtime_session_id} missing during control-plane transition"
                 )
+            if task_id is not None and fresh_runtime_session.task_id != str(task_id):
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} does not belong to task {task_id}"
+                )
 
-            runtime_task = None
-            if task_db_id is not None:
-                runtime_task = runtime_db.query(Task).filter(Task.id == int(task_db_id)).first()
-                if runtime_task is None:
+            result = action(runtime_db, store, fresh_runtime_session)
+            runtime_db.info.pop(self._PAYLOAD_COMPENSATION_INFO_KEY, None)
+            return result
+        except Exception as transition_error:
+            runtime_db.rollback()
+            payload_ref = runtime_db.info.pop(self._PAYLOAD_COMPENSATION_INFO_KEY, None)
+            if isinstance(payload_ref, str) and payload_ref:
+                try:
+                    discard_published_payload(payload_ref)
+                except Exception as cleanup_error:
                     raise OrchestrationRuntimeTransitionError(
-                        f"Task {task_db_id} missing during runtime control-plane transition"
-                    )
-
-            return action(runtime_db, fresh_runtime_session, runtime_task)
+                        "Runtime transition and payload cleanup both failed: "
+                        f"transition={type(transition_error).__name__}; "
+                        f"cleanup={type(cleanup_error).__name__}"
+                    ) from cleanup_error
+            raise
         finally:
             runtime_db.close()
 
@@ -71,16 +106,80 @@ class OrchestrationRuntimeTransitionFacade:
         lease_token: Optional[str],
         node_status: str,
     ) -> None:
+        try:
+            target_node_status = WorkflowNodeStatus(node_status)
+        except ValueError as exc:
+            raise OrchestrationRuntimeTransitionError(
+                f"Unsupported runtime node completion status: {node_status!r}"
+            ) from exc
+
+        def _complete(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            _runtime_session: RuntimeSessionRecord,
+        ) -> None:
+            control_plane = RuntimeAttemptControlPlane(store)
+            try:
+                control_plane.complete_attempt(
+                    session_id=runtime_session_id,
+                    node_key=node_key,
+                    attempt_id=attempt_id,
+                    expected_lease_token=lease_token,
+                    target_node_status=target_node_status,
+                )
+            except RuntimeStoreError as exc:
+                if exc.reason_code not in {
+                    RuntimeStoreReason.LEASE_CONFLICT,
+                    RuntimeStoreReason.STATE_CONFLICT,
+                }:
+                    raise
+                diagnostic = control_plane.transition_validation_diagnostic(
+                    session_id=runtime_session_id,
+                    node_key=node_key,
+                    attempt_id=attempt_id,
+                    validation_error=exc,
+                    diagnostic_code=("execution_host_keepalive_completion_validation_failed"),
+                )
+                control_plane.upsert_diagnostic(
+                    session_id=runtime_session_id,
+                    attempt_id=attempt_id,
+                    diagnostic=diagnostic,
+                )
+                runtime_db.commit()
+                raise
+            runtime_db.commit()
+
         self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            action=lambda runtime_db, fresh_runtime_session, _runtime_task: RuntimeSessionService.complete_node_attempt_sync(
-                runtime_db,
-                fresh_runtime_session,
+            action=_complete,
+        )
+
+    def abandon_runtime_attempt_for_replan(
+        self,
+        *,
+        runtime_session_id: int,
+        node_key: str,
+        attempt_id: int,
+        lease_token: str,
+        reason: str,
+    ) -> None:
+        def _abandon(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            _runtime_session: RuntimeSessionRecord,
+        ) -> None:
+            RuntimeSessionControlPlane(store).abandon_current_attempt_for_replan(
+                runtime_session_id,
                 node_key=node_key,
                 attempt_id=attempt_id,
-                lease_token=lease_token,
-                node_status=node_status,
-            ),
+                expected_lease_token=lease_token,
+                reason=reason,
+            )
+            runtime_db.commit()
+
+        self._run_with_fresh_runtime_control_plane_session(
+            runtime_session_id=runtime_session_id,
+            action=_abandon,
         )
 
     def fail_runtime_attempt(
@@ -93,17 +192,54 @@ class OrchestrationRuntimeTransitionFacade:
         lease_token: Optional[str],
         diagnostics: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
+        normalized_diagnostics = tuple(
+            JsonObjectPayload.from_mapping(
+                diagnostic,
+                field_path=f"runtime_attempt.failure_diagnostics[{index}]",
+            )
+            for index, diagnostic in enumerate(diagnostics or [])
+        )
+
+        def _fail(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            _runtime_session: RuntimeSessionRecord,
+        ) -> None:
+            control_plane = RuntimeAttemptControlPlane(store)
+            try:
+                control_plane.fail_attempt(
+                    session_id=runtime_session_id,
+                    node_key=node_key,
+                    attempt_id=attempt_id,
+                    expected_lease_token=lease_token,
+                    error_message=error_message,
+                    diagnostics=normalized_diagnostics,
+                )
+            except RuntimeStoreError as exc:
+                if exc.reason_code not in {
+                    RuntimeStoreReason.LEASE_CONFLICT,
+                    RuntimeStoreReason.STATE_CONFLICT,
+                }:
+                    raise
+                diagnostic = control_plane.transition_validation_diagnostic(
+                    session_id=runtime_session_id,
+                    node_key=node_key,
+                    attempt_id=attempt_id,
+                    validation_error=exc,
+                    diagnostic_code="execution_host_keepalive_failure_validation_failed",
+                )
+                control_plane.upsert_diagnostic(
+                    session_id=runtime_session_id,
+                    attempt_id=attempt_id,
+                    diagnostic=diagnostic,
+                )
+                runtime_db.commit()
+                raise
+            runtime_db.commit()
+
         self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            action=lambda runtime_db, fresh_runtime_session, _runtime_task: RuntimeSessionService.fail_node_attempt_sync(
-                runtime_db,
-                fresh_runtime_session,
-                node_key=node_key,
-                attempt_id=attempt_id,
-                error_message=error_message,
-                lease_token=lease_token,
-                diagnostics=diagnostics,
-            ),
+            action=_fail,
         )
 
     def upsert_runtime_attempt_diagnostic(
@@ -113,21 +249,33 @@ class OrchestrationRuntimeTransitionFacade:
         attempt_id: int,
         diagnostic: Dict[str, Any],
     ) -> None:
+        normalized_diagnostic = JsonObjectPayload.from_mapping(
+            diagnostic,
+            field_path="runtime_attempt.diagnostic",
+        )
+
+        def _upsert(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            _runtime_session: RuntimeSessionRecord,
+        ) -> None:
+            RuntimeAttemptControlPlane(store).upsert_diagnostic(
+                session_id=runtime_session_id,
+                attempt_id=attempt_id,
+                diagnostic=normalized_diagnostic,
+            )
+            runtime_db.commit()
+
         self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            action=lambda runtime_db, fresh_runtime_session, _runtime_task: RuntimeSessionService.upsert_attempt_node_diagnostic_sync(
-                runtime_db,
-                fresh_runtime_session,
-                attempt_id=attempt_id,
-                diagnostic=diagnostic,
-            ),
+            action=_upsert,
         )
 
     def open_script_review_gate(
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         workflow_id: str,
         script_attempt_id: int,
         lease_token: Optional[str],
@@ -137,14 +285,35 @@ class OrchestrationRuntimeTransitionFacade:
         conditional_task_specs: Dict[str, Dict[str, Any]],
         candidate_agents: List[AgentType],
     ) -> Dict[str, Any]:
-        def _open_gate(runtime_db: Session, runtime_session: Any, runtime_task: Optional[Task]) -> Dict[str, Any]:
-            boundary = self._context_contract_assembler.publish_script_review_boundary_sync(
-                db=runtime_db,
-                session=runtime_session,
+        def _open_gate(
+            runtime_db: Session,
+            store: SqlAlchemyRuntimeAttemptStore,
+            runtime_session: RuntimeSessionRecord,
+        ) -> Dict[str, Any]:
+            draft = self._context_contract_assembler.build_script_review_boundary_draft(
                 workflow_state_id=workflow_id,
-                attempt_id=script_attempt_id,
                 script_output=script_output,
             )
+            draft_payload = draft.get("payload")
+            draft_summary = draft.get("summary")
+            if not isinstance(draft_payload, dict) or not isinstance(draft_summary, dict):
+                raise OrchestrationRuntimeTransitionError(
+                    "Script review boundary draft is missing typed payload or summary"
+                )
+            deliverable = RuntimePublishedDeliverableControlPlane(store).publish_script(
+                session_id=runtime_session_id,
+                workflow_id=workflow_id,
+                attempt_id=script_attempt_id,
+                payload=JsonObjectPayload.from_mapping(
+                    draft_payload,
+                    field_path="script_review.deliverable_payload",
+                ),
+                summary=JsonObjectPayload.from_mapping(
+                    draft_summary,
+                    field_path="script_review.deliverable_summary",
+                ),
+            )
+            runtime_db.info[self._PAYLOAD_COMPENSATION_INFO_KEY] = deliverable.payload_ref
             continuation_checkpoint = self._orchestration_state.build_continuation_checkpoint(
                 task_specs=task_specs,
                 conditional_task_specs=conditional_task_specs,
@@ -154,29 +323,96 @@ class OrchestrationRuntimeTransitionFacade:
                 attempt_id=script_attempt_id,
                 decision_id=None,
             )
-            gate = RuntimeSessionService.complete_script_attempt_and_open_review_gate_sync(
-                runtime_db,
-                runtime_session,
-                task=runtime_task,
-                workflow_state_id=workflow_id,
-                attempt_id=script_attempt_id,
-                trigger_reason=trigger_reason,
-                script_output=script_output,
-                artifact_ref=dict(boundary.get("artifact_ref") or {}),
-                script_preview_text=str(boundary.get("script_preview_text") or ""),
-                lease_token=lease_token,
-                continuation_checkpoint=continuation_checkpoint,
+            artifact_ref = JsonObjectPayload.from_mapping(
+                build_deliverable_ref(deliverable),
+                field_path="script_review.artifact_ref",
             )
+            continuation_payload = JsonObjectPayload.from_mapping(
+                continuation_checkpoint,
+                field_path="script_review.continuation_checkpoint",
+            )
+            normalized_input_payload = runtime_session.input_payload.to_dict()
+            review_contract = get_script_review_contract(normalized_input_payload) or {}
+            target_input_payload = clear_published_deliverable_ref(
+                set_script_review_contract(normalized_input_payload, None),
+                node_key="script",
+            )
+
+            RuntimeAttemptControlPlane(store).complete_attempt(
+                session_id=runtime_session_id,
+                node_key="script",
+                attempt_id=script_attempt_id,
+                expected_lease_token=lease_token,
+                target_node_status=WorkflowNodeStatus.RUNNING,
+                output_artifacts=(artifact_ref,),
+                metrics=JsonObjectPayload.from_mapping(
+                    {
+                        "trigger_reason": trigger_reason,
+                        "scenes_generated": script_output.get("scenes_generated"),
+                        "total_scenes": script_output.get("total_scenes"),
+                        "review_contract_action": review_contract.get("action"),
+                    },
+                    field_path="script_review.attempt_metrics",
+                ),
+                continuation_checkpoint=continuation_payload,
+                node_artifact_refs=(artifact_ref,),
+                node_diagnostics=(),
+            )
+            script_preview_text = str(draft.get("script_preview_text") or "")
+            gate = RuntimeGateControlPlane(store).open_human_gate(
+                session_id=runtime_session_id,
+                node_key="script",
+                attempt_id=script_attempt_id,
+                gate_name="script_review",
+                gate_type="human_review",
+                contract_version="v1",
+                scope=JsonObjectPayload.from_mapping(
+                    {"scope_type": "episode", "scope_ref": str(workflow_id or "")},
+                    field_path="script_review.gate_scope",
+                ),
+                artifact_refs=(artifact_ref,),
+                facts=JsonObjectPayload.from_mapping(
+                    {
+                        "workflow_state_id": workflow_id,
+                        "scenes_generated": script_output.get("scenes_generated"),
+                        "total_scenes": script_output.get("total_scenes"),
+                        "script_preview_text": script_preview_text,
+                        "trigger_reason": trigger_reason,
+                    },
+                    field_path="script_review.gate_facts",
+                ),
+                allowed_actions=("approve", "revise", "replan"),
+                recommended_action="approve",
+                expected_lease_token=None,
+                result_code=WorkflowGateStatus.AWAITING_HUMAN.value,
+                reason_code=str(trigger_reason or "script_review_requested"),
+                session_input_payload=JsonObjectPayload.from_mapping(
+                    target_input_payload,
+                    field_path="script_review.target_session_input_payload",
+                ),
+                node_artifact_refs=(artifact_ref,),
+                node_diagnostics=(),
+                task_transition=RuntimeTaskTransition(
+                    task_id=runtime_session.task_id,
+                    expected_status=runtime_session.task_status,
+                    target_status=TaskStatus.IN_PROGRESS,
+                    progress_step="Waiting for script approval",
+                    progress_percentage=35,
+                    requires_human_review=True,
+                ),
+            )
+            runtime_db.commit()
+            runtime_db.info.pop(self._PAYLOAD_COMPENSATION_INFO_KEY, None)
             return {
                 "status": "waiting_gate",
-                "session_id": runtime_session.id,
-                "gate_id": gate.id,
+                "session_id": runtime_session_id,
+                "gate_id": gate.gate_id,
                 "node_key": "script",
             }
 
         return self._run_with_fresh_runtime_control_plane_session(
             runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
+            task_id=task_id,
             action=_open_gate,
         )
 
@@ -184,34 +420,62 @@ class OrchestrationRuntimeTransitionFacade:
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         summary_output: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self._run_with_fresh_runtime_control_plane_session(
-            runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
-            action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_completed_sync(
-                runtime_db,
-                fresh_runtime_session,
-                task=runtime_task,
-                summary_output=summary_output,
-            ),
+        normalized_summary = JsonObjectPayload.from_mapping(
+            summary_output or {},
+            field_path="runtime_session.completion_summary",
         )
+        runtime_db = self._session_factory()
+        try:
+            store = SqlAlchemyRuntimeAttemptStore(runtime_db)
+            session = store.load_session(runtime_session_id)
+            if session is None:
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} missing during completion"
+                )
+            if session.task_id != str(task_id):
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} does not belong to task {task_id}"
+                )
+            RuntimeSessionControlPlane(store).mark_completed(
+                runtime_session_id,
+                summary_output=normalized_summary,
+            )
+            runtime_db.commit()
+        except Exception:
+            runtime_db.rollback()
+            raise
+        finally:
+            runtime_db.close()
 
     def mark_runtime_session_failed(
         self,
         *,
         runtime_session_id: int,
-        task_db_id: int,
+        task_id: str,
         error_message: str,
     ) -> None:
-        self._run_with_fresh_runtime_control_plane_session(
-            runtime_session_id=runtime_session_id,
-            task_db_id=task_db_id,
-            action=lambda runtime_db, fresh_runtime_session, runtime_task: RuntimeSessionService.mark_session_failed_sync(
-                runtime_db,
-                fresh_runtime_session,
+        runtime_db = self._session_factory()
+        try:
+            store = SqlAlchemyRuntimeAttemptStore(runtime_db)
+            session = store.load_session(runtime_session_id)
+            if session is None:
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} missing during failure transition"
+                )
+            if session.task_id != str(task_id):
+                raise OrchestrationRuntimeTransitionError(
+                    f"Runtime session {runtime_session_id} does not belong to task {task_id}"
+                )
+            RuntimeSessionControlPlane(store).mark_failed(
+                runtime_session_id,
                 error_message=error_message,
-                task=runtime_task,
-            ),
-        )
+            )
+            runtime_db.commit()
+        except Exception:
+            runtime_db.rollback()
+            raise
+        finally:
+            runtime_db.close()
