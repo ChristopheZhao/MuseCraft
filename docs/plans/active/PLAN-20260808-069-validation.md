@@ -21,6 +21,7 @@
 - A3/A4 historical local validation: [trajectory](../../checkpoints/PLAN-20260808-069/CHK-a3-e2e-trajectory.md) and [checkpoint](../../checkpoints/PLAN-20260808-069/CHK-a3-a4-mainline-closure-gate.json), attempt 2. This evidence predates the real-Agent and caller-specific corrections in A5.
 - A5 local validation: [real-Agent mainline checkpoint](../../checkpoints/PLAN-20260808-069/CHK-a5-real-agent-mainline.md). Its original `0c81520 + uncommitted WIP` anchor and 2026-08-16 counts remain historical evidence, not a claim about later commits.
 - Current implementation is WIP checkpoint `b612963`; baseline revalidation details are recorded in the main plan's Execution Handoff. Hosted CI and explicit user acceptance remain pending; this ledger does not close the plan.
+- 2026-09-06 hosted CI on PR #1 (`0c9fdbe`, merged as `2f9976e`): 2 jobs passed, 3 failed. All three failures were reproduced locally on 2026-10-12 and traced to a CI uv-version artifact and two stale test fixtures, not production code; fixes and verification counts are recorded in the main plan's Execution Handoff. A green hosted rerun is still required.
 - 2026-09-06 fresh local revalidation at `627a37d` (documentation branch carrying `b612963`): 739 collected, 739 passed, 0 skipped across unit, architecture, Quick E2E and offline composer integration. Counts, invocation and the stall diagnosis are recorded in the main plan's Execution Handoff. Local evidence only; it does not replace hosted CI or user acceptance.
 
 ### Amendment A1 — Root-owned anti-agentic/fallback closure
@@ -101,3 +102,4 @@
 - 2026-08-08T03:03:21Z validation ledger created alongside draft plan
 - 2026-08-15 Amendment A1 superseded the prior execution ordering and removed the stale fallback-method acceptance expectation.
 - 2026-09-06 fresh local revalidation recorded (739 passed at `627a37d`); lifecycle unchanged (`in_progress`).
+- 2026-10-12 hosted CI failures diagnosed and fixed in tests/CI artifacts only; full scope 739 passed; lifecycle unchanged (`in_progress`) pending green hosted rerun and user acceptance.

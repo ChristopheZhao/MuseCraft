@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.agents.concept_planner import ConceptPlannerAgent
 from app.agents.script_writer import ScriptWriterAgent
 from app.agents.tools.base_tool import ToolOutput
+from app.agents.utils import llm_policy as llm_policy_module
 from app.agents.utils.memory_helpers import get_mas_working_memory
 from app.agents.video_composer import VideoComposerAgent
 from app.agents.video_generator import VideoGeneratorAgent
@@ -29,6 +30,38 @@ from app.services.runtime_attempt_keepalive_adapter import (
     create_runtime_attempt_keepalive_controller,
 )
 from app.services.task_queue import TaskQueueService
+
+
+class _ConstructionOnlyLLMService:
+    """Satisfies production LLM-policy resolution without vendor credentials.
+
+    Production composition resolves every configured provider while the
+    orchestrator is constructed. The maintained E2E replaces each agent's role
+    handles with deterministic doubles afterwards, so this service must never
+    be invoked; any call is a contract violation and fails loudly.
+    """
+
+    def __init__(self, provider) -> None:
+        self._provider_name = getattr(provider, "value", str(provider))
+
+    def get_provider_name(self) -> str:
+        return self._provider_name
+
+    def is_available(self) -> bool:
+        return True
+
+    def get_supported_models(self):
+        return []
+
+    async def chat_completion(self, *args, **kwargs):
+        raise AssertionError(
+            f"construction-only LLM service for {self._provider_name!r} was invoked"
+        )
+
+    async def function_call(self, *args, **kwargs):
+        raise AssertionError(
+            f"construction-only LLM service for {self._provider_name!r} was invoked"
+        )
 
 
 class _DeterministicPlanLLM:
@@ -317,6 +350,11 @@ def test_quick_api_runs_current_mas_path_through_gate_resume_and_runtime_read_mo
     monkeypatch.setattr(settings, "EPISODIC_EVENT_ENABLED", False)
     monkeypatch.setattr(settings, "TASKS_API_ENABLE_IN_PROCESS_RUNNER", False)
     monkeypatch.setenv("MEMORY_BACKEND", "dict")
+    monkeypatch.setattr(
+        llm_policy_module,
+        "get_llm_service",
+        lambda provider=None: _ConstructionOnlyLLMService(provider),
+    )
 
     async def override_get_db():
         async with async_session_factory() as db:

@@ -297,8 +297,18 @@ def _prepare_script_gate(postgres_session_factory) -> tuple[RuntimeSeed, int, in
     attempt_id = _start_attempt(postgres_session_factory, seed)
     checkpoint = OrchestrationStateAdapter.build_continuation_checkpoint(
         task_specs={
-            AgentType.SCRIPT_WRITER: {"run": True, "order": 0},
-            AgentType.IMAGE_GENERATOR: {"run": True, "order": 1},
+            AgentType.SCRIPT_WRITER: {
+                "run": True,
+                "order": 0,
+                "mission": "Write the scene scripts",
+                "deliverable": "Accepted scene scripts",
+            },
+            AgentType.IMAGE_GENERATOR: {
+                "run": True,
+                "order": 1,
+                "mission": "Render the scene reference images",
+                "deliverable": "Accepted scene reference images",
+            },
         },
         conditional_task_specs={},
         candidate_agents=[AgentType.SCRIPT_WRITER, AgentType.IMAGE_GENERATOR],
