@@ -3197,13 +3197,13 @@
       "id": "PLAN-20260808-069",
       "title": "Anti-agentic 审查修复：质量评估去规则化、协议放行 partial 与残留清理",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "awaiting_user_confirmation",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
       "confirmed_by_user": false,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-10-12T15:51:08Z",
+      "updated_at": "2026-10-12T16:02:37Z",
       "archived_at": null,
       "notes": [
         {
@@ -3281,6 +3281,10 @@
         {
           "at": "2026-10-12T15:51:08Z",
           "text": "Hosted CI (PR #1, merged 2f9976e) failed 3 of 5 jobs. 2026-10-12: all three reproduced locally and fixed without production changes (uv 0.7.20 export annotations in requirements.txt; Quick E2E injected construction-only LLM service at the existing llm_policy seam; PostgreSQL gate test specs completed with required mission/deliverable). Full scope 739 passed; green hosted rerun and user acceptance pending."
+        },
+        {
+          "at": "2026-10-12T16:02:37Z",
+          "text": "Hosted CI green 2026-10-12: PR #2 run 38274235285 (ada33f0) and post-merge main run 38274423058 (c08dc4c) passed all Backend Release Checks jobs and Documentation Governance after test/requirements fixes (77c9366) and ffmpeg CI step (ada33f0). Full local scope 739 passed. Awaiting explicit user acceptance."
         }
       ]
     },
