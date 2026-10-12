@@ -115,6 +115,12 @@ jobs:
       - name: Sync locked backend dependencies
         run: uv sync --project backend --frozen --extra test
 
+      - name: Install ffmpeg required by production tool allocation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+
       - name: Run focused control-plane and runtime tests
         run: >-
           uv run --project backend pytest -q
