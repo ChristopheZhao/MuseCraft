@@ -3197,13 +3197,13 @@
       "id": "PLAN-20260808-069",
       "title": "Anti-agentic 审查修复：质量评估去规则化、协议放行 partial 与残留清理",
       "kind": "fix",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "P0",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260808-069.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-08-08T03:03:21Z",
-      "updated_at": "2026-10-12T15:51:08Z",
+      "updated_at": "2026-10-12T16:03:36Z",
       "archived_at": null,
       "notes": [
         {
@@ -3281,6 +3281,14 @@
         {
           "at": "2026-10-12T15:51:08Z",
           "text": "Hosted CI (PR #1, merged 2f9976e) failed 3 of 5 jobs. 2026-10-12: all three reproduced locally and fixed without production changes (uv 0.7.20 export annotations in requirements.txt; Quick E2E injected construction-only LLM service at the existing llm_policy seam; PostgreSQL gate test specs completed with required mission/deliverable). Full scope 739 passed; green hosted rerun and user acceptance pending."
+        },
+        {
+          "at": "2026-10-12T16:02:37Z",
+          "text": "Hosted CI green 2026-10-12: PR #2 run 38274235285 (ada33f0) and post-merge main run 38274423058 (c08dc4c) passed all Backend Release Checks jobs and Documentation Governance after test/requirements fixes (77c9366) and ffmpeg CI step (ada33f0). Full local scope 739 passed. Awaiting explicit user acceptance."
+        },
+        {
+          "at": "2026-10-12T16:03:36Z",
+          "text": "User accepted PLAN-069 on 2026-10-12 after hosted CI green (PR #2 run 38274235285, main run 38274423058) and full local scope 739 passed."
         }
       ]
     },
@@ -3288,13 +3296,13 @@
       "id": "PLAN-20260906-070",
       "title": "文档权威入口、历史记录与持续校验收敛",
       "kind": "fix",
-      "status": "awaiting_user_confirmation",
+      "status": "completed",
       "priority": "P1",
       "owner": "codex",
       "file_path": "docs/plans/active/PLAN-20260906-070.md",
-      "confirmed_by_user": false,
+      "confirmed_by_user": true,
       "created_at": "2026-09-06T13:14:57Z",
-      "updated_at": "2026-09-06T13:20:16Z",
+      "updated_at": "2026-10-12T16:03:37Z",
       "archived_at": null,
       "notes": [
         {
@@ -3304,6 +3312,10 @@
         {
           "at": "2026-09-06T13:20:16Z",
           "text": "Documentation implementation complete: scoped authority navigation, six supersession notices, DP applicability review, historical index repair and explicit attachment ownership. Local checker 0 issues; 10 counterexample tests passed; deferred doctor 0 issues. No business-plan acceptance or hosted CI claimed."
+        },
+        {
+          "at": "2026-10-12T16:03:37Z",
+          "text": "User confirmed PLAN-070 documentation governance on 2026-10-12; content merged via PR #1, Documentation Governance workflow green on main."
         }
       ]
     }
